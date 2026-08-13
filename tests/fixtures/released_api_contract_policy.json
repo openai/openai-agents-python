@@ -334,6 +334,57 @@
       ]
     },
     {
+      "class_name": "ScriptedModel",
+      "module": "agents.testing.model",
+      "names": [
+        "calls",
+        "remaining_steps",
+        "first_call",
+        "last_call"
+      ]
+    },
+    {
+      "class_name": "ScriptedRealtimeModel",
+      "module": "agents.realtime.testing",
+      "names": [
+        "listeners",
+        "connect_calls",
+        "sent_events",
+        "remaining_steps"
+      ]
+    },
+    {
+      "factory_name": "scripted_sandbox_session",
+      "module": "agents.testing.sandbox",
+      "names": [
+        "calls",
+        "remaining_steps"
+      ]
+    },
+    {
+      "class_name": "ScriptedSTTModel",
+      "module": "agents.voice.testing",
+      "names": [
+        "calls",
+        "session_calls",
+        "created_sessions"
+      ]
+    },
+    {
+      "class_name": "ScriptedTTSModel",
+      "module": "agents.voice.testing",
+      "names": [
+        "calls"
+      ]
+    },
+    {
+      "class_name": "ScriptedVoiceWorkflow",
+      "module": "agents.voice.testing",
+      "names": [
+        "transcriptions"
+      ]
+    },
+    {
       "class_name": "RunloopPlatformClient",
       "module": "agents.extensions.sandbox",
       "names": [
@@ -357,6 +408,46 @@
       "names": [
         "mount_authority_redacted",
         "mount_authority_rebound"
+      ]
+    }
+  ],
+  "public_typed_dicts": [
+    {
+      "class_name": "ModelStepSpec",
+      "module": "agents.testing.model",
+      "names": [
+        "output",
+        "usage",
+        "response_id",
+        "request_id",
+        "raw_usage",
+        "error",
+        "responder",
+        "stream_events",
+        "retry_advice"
+      ]
+    },
+    {
+      "class_name": "SandboxStepSpec",
+      "module": "agents.testing.sandbox",
+      "names": [
+        "method",
+        "match",
+        "result",
+        "responder",
+        "error"
+      ]
+    },
+    {
+      "class_name": "RealtimeConnectCall",
+      "module": "agents.realtime.testing",
+      "names": [
+        "api_key_provided",
+        "headers_provided",
+        "url",
+        "initial_model_settings",
+        "playback_tracker",
+        "call_id"
       ]
     }
   ]

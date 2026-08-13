@@ -126,7 +126,8 @@ def main() -> int:
     print(f"Removed exports: {sorted(previous_exports - current_exports)!r}")
     print(
         "Review shipped example imports and update released_api_contract_policy.json when "
-        "the release adds canonical imports, public properties, or public modules."
+        "the release adds canonical imports, public properties, public TypedDict fields, or "
+        "public modules."
     )
     return 0
 

@@ -13,9 +13,11 @@ from copy import deepcopy
 from importlib.util import find_spec
 from pathlib import Path
 from types import FunctionType, TracebackType
-from typing import Any, cast
+from typing import Any, ForwardRef, cast, get_origin, get_type_hints
 
+import typing_extensions
 from pydantic import BaseModel
+from typing_extensions import NotRequired, Required
 
 
 @dataclasses.dataclass(frozen=True)
@@ -35,6 +37,7 @@ class SubmoduleExportPolicy:
     dependency_installations: tuple[OptionalDependencyInstallation, ...]
     canonical_imports: tuple[dict[str, str], ...] = ()
     public_properties: tuple[dict[str, Any], ...] = ()
+    public_typed_dicts: tuple[dict[str, Any], ...] = ()
 
 
 def load_api_contract(path: Path) -> dict[str, Any]:
@@ -48,7 +51,14 @@ def load_submodule_export_policy(path: Path) -> SubmoduleExportPolicy:
     if not isinstance(value, dict):
         raise ValueError("submodule export policy must be an object")
     unknown_top_level_fields = sorted(
-        set(value) - {"canonical_imports", "modules", "optional_dependencies", "public_properties"}
+        set(value)
+        - {
+            "canonical_imports",
+            "modules",
+            "optional_dependencies",
+            "public_properties",
+            "public_typed_dicts",
+        }
     )
     if unknown_top_level_fields:
         raise ValueError(
@@ -155,6 +165,7 @@ def load_submodule_export_policy(path: Path) -> SubmoduleExportPolicy:
         ),
         canonical_imports=_canonical_import_policy(value.get("canonical_imports", [])),
         public_properties=_public_property_policy(value.get("public_properties", [])),
+        public_typed_dicts=_public_typed_dict_policy(value.get("public_typed_dicts", [])),
     )
 
 
@@ -188,25 +199,29 @@ def _canonical_import_policy(value: object) -> tuple[dict[str, str], ...]:
 def _public_property_policy(value: object) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list):
         raise ValueError("submodule export policy public_properties must be a list")
-    required_fields = {"class_name", "module", "names"}
     entries: list[dict[str, Any]] = []
-    identities: set[tuple[str, str]] = set()
+    identities: set[tuple[str, str, str]] = set()
     for entry in value:
-        if not isinstance(entry, dict) or set(entry) != required_fields:
+        if not isinstance(entry, dict):
+            raise ValueError("submodule export policy public_properties entries must be objects")
+        owner_fields = {"class_name", "factory_name"} & set(entry)
+        if len(owner_fields) != 1 or set(entry) != {"module", "names", *owner_fields}:
             raise ValueError(
                 "submodule export policy public_properties entries must contain exactly "
-                "class_name, module, and names"
+                "module, names, and one of class_name or factory_name"
             )
+        owner_field = next(iter(owner_fields))
         module_name = entry["module"]
-        class_name = entry["class_name"]
+        owner_name = entry[owner_field]
         names = entry["names"]
         if type(module_name) is not str or not module_name:
             raise ValueError(
                 "submodule export policy public_properties module must be a non-empty string"
             )
-        if type(class_name) is not str or not class_name:
+        if type(owner_name) is not str or not owner_name:
             raise ValueError(
-                "submodule export policy public_properties class_name must be a non-empty string"
+                f"submodule export policy public_properties {owner_field} must be a non-empty "
+                "string"
             )
         if (
             not isinstance(names, list)
@@ -218,10 +233,54 @@ def _public_property_policy(value: object) -> tuple[dict[str, Any], ...]:
                 "submodule export policy public_properties names must be a non-empty list of "
                 "unique non-empty strings"
             )
-        identity = (module_name, class_name)
+        identity = (owner_field, module_name, owner_name)
         if identity in identities:
             raise ValueError(
                 "submodule export policy public_properties must not repeat "
+                f"{module_name}.{owner_name}"
+            )
+        identities.add(identity)
+        entries.append({owner_field: owner_name, "module": module_name, "names": list(names)})
+    return tuple(entries)
+
+
+def _public_typed_dict_policy(value: object) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise ValueError("submodule export policy public_typed_dicts must be a list")
+    required_fields = {"class_name", "module", "names"}
+    entries: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != required_fields:
+            raise ValueError(
+                "submodule export policy public_typed_dicts entries must contain exactly "
+                "class_name, module, and names"
+            )
+        module_name = entry["module"]
+        class_name = entry["class_name"]
+        names = entry["names"]
+        if type(module_name) is not str or not module_name:
+            raise ValueError(
+                "submodule export policy public_typed_dicts module must be a non-empty string"
+            )
+        if type(class_name) is not str or not class_name:
+            raise ValueError(
+                "submodule export policy public_typed_dicts class_name must be a non-empty string"
+            )
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(type(name) is str and name for name in names)
+            or len(names) != len(set(names))
+        ):
+            raise ValueError(
+                "submodule export policy public_typed_dicts names must be a non-empty list of "
+                "unique non-empty strings"
+            )
+        identity = (module_name, class_name)
+        if identity in identities:
+            raise ValueError(
+                "submodule export policy public_typed_dicts must not repeat "
                 f"{module_name}.{class_name}"
             )
         identities.add(identity)
@@ -648,10 +707,10 @@ def _merge_public_properties(
     existing: Iterable[Mapping[str, Any]], promoted: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
     result = [deepcopy(dict(entry)) for entry in existing]
-    by_identity = {(entry["module"], entry["class_name"]): entry for entry in result}
+    by_identity = {_public_property_identity(entry): entry for entry in result}
     for entry_value in promoted:
         entry = deepcopy(dict(entry_value))
-        identity = (entry["module"], entry["class_name"])
+        identity = _public_property_identity(entry)
         previous = by_identity.get(identity)
         if previous is None:
             result.append(entry)
@@ -661,6 +720,118 @@ def _merge_public_properties(
         for name in entry["names"]:
             if name not in previous_names:
                 previous_names.append(name)
+    return result
+
+
+def _public_property_identity(entry: Mapping[str, Any]) -> tuple[str, str, str]:
+    if "class_name" in entry:
+        return ("class_name", cast(str, entry["module"]), cast(str, entry["class_name"]))
+    return ("factory_name", cast(str, entry["module"]), cast(str, entry["factory_name"]))
+
+
+def _annotation_contract(annotation: object) -> str:
+    if isinstance(annotation, ForwardRef):
+        annotation_text = annotation.__forward_arg__
+    elif isinstance(annotation, str):
+        annotation_text = annotation
+    else:
+        annotation_text = inspect.formatannotation(annotation)
+    for wrapper_name in ("Required", "NotRequired"):
+        for module_name in ("typing", "typing_extensions"):
+            qualified_prefix = f"{module_name}.{wrapper_name}["
+            if annotation_text.startswith(qualified_prefix):
+                return f"{wrapper_name}[{annotation_text.removeprefix(qualified_prefix)}"
+    return annotation_text
+
+
+def _typed_dict_field_is_required(typed_dict: type, name: str, annotation: object) -> bool:
+    if isinstance(annotation, ForwardRef):
+        annotation_text = annotation.__forward_arg__
+        if annotation_text.startswith(
+            ("Required[", "typing.Required[", "typing_extensions.Required[")
+        ):
+            return True
+        if annotation_text.startswith(
+            ("NotRequired[", "typing.NotRequired[", "typing_extensions.NotRequired[")
+        ):
+            return False
+    origin = get_origin(annotation)
+    if origin is Required:
+        return True
+    if origin is NotRequired:
+        return False
+    required_keys = getattr(typed_dict, "__required_keys__", frozenset())
+    optional_keys = getattr(typed_dict, "__optional_keys__", frozenset())
+    if name in required_keys:
+        return True
+    if name in optional_keys:
+        return False
+    return bool(getattr(typed_dict, "__total__", True))
+
+
+def _typed_dict_field_contract(typed_dict: type, name: str) -> dict[str, object] | None:
+    annotation = getattr(typed_dict, "__annotations__", {}).get(name)
+    if annotation is None:
+        return None
+    return {
+        "name": name,
+        "required": _typed_dict_field_is_required(typed_dict, name, annotation),
+        "annotation": _annotation_contract(annotation),
+    }
+
+
+def _public_typed_dict_contract(
+    policy_entries: Iterable[Mapping[str, Any]],
+    agents_module: Any | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for policy_entry in policy_entries:
+        module_name = cast(str, policy_entry["module"])
+        class_name = cast(str, policy_entry["class_name"])
+        module = _import_contract_module(module_name, agents_module)
+        typed_dict = getattr(module, class_name, None)
+        if not typing_extensions.is_typeddict(typed_dict):
+            raise ValueError(
+                f"Cannot promote public TypedDict {module_name}.{class_name} because it is "
+                "missing or no longer a TypedDict"
+            )
+        fields: list[dict[str, object]] = []
+        for name in policy_entry["names"]:
+            field = _typed_dict_field_contract(typed_dict, name)
+            if field is None:
+                raise ValueError(
+                    f"Cannot promote public TypedDict field {module_name}.{class_name}.{name} "
+                    "because it is missing"
+                )
+            fields.append(field)
+        entries.append({"class_name": class_name, "fields": fields, "module": module_name})
+    return entries
+
+
+def _merge_public_typed_dicts(
+    existing: Iterable[Mapping[str, Any]], promoted: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    result = [deepcopy(dict(entry)) for entry in existing]
+    by_identity = {(entry["module"], entry["class_name"]): entry for entry in result}
+    for entry_value in promoted:
+        entry = deepcopy(dict(entry_value))
+        identity = (entry["module"], entry["class_name"])
+        previous = by_identity.get(identity)
+        if previous is None:
+            result.append(entry)
+            by_identity[identity] = entry
+            continue
+        previous_by_name = {field["name"]: field for field in previous["fields"]}
+        for field in entry["fields"]:
+            existing_field = previous_by_name.get(field["name"])
+            if existing_field is not None and existing_field != field:
+                raise ValueError(
+                    "release policy public TypedDict field conflicts with the released contract "
+                    f"for {entry['module']}.{entry['class_name']}.{field['name']}"
+                )
+            if existing_field is None:
+                previous["fields"].append(field)
+                previous_by_name[field["name"]] = field
     return result
 
 
@@ -919,6 +1090,12 @@ def build_released_api_contract(
         contract.get("public_properties", []),
         release_policy.public_properties if release_policy is not None else (),
     )
+    updated["public_typed_dicts"] = _merge_public_typed_dicts(
+        contract.get("public_typed_dicts", []),
+        _public_typed_dict_contract(release_policy.public_typed_dicts, agents_module)
+        if release_policy is not None
+        else (),
+    )
     if release_policy is not None:
         updated["optional_dependency_unsupported_platforms"] = {
             dependency_module: list(platforms)
@@ -1044,6 +1221,7 @@ def build_released_api_contract(
         "optional_dependency_unsupported_platforms",
         "platform_import_errors",
         "public_properties",
+        "public_typed_dicts",
         "public_modules",
         "required_submodule_exports",
         "required_top_level_exports",
@@ -1139,6 +1317,60 @@ def _validate_public_property_contract(
     unsupported_platforms = unsupported_platforms or {}
     for entry in contract.get("public_properties", []):
         module_name = entry["module"]
+        owner_name = entry.get("class_name", entry.get("factory_name"))
+        optional_dependency = _optional_dependency_for_binding(contract, module_name, owner_name)
+        if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
+            optional_dependency, unsupported_platforms
+        ):
+            continue
+        try:
+            module = _import_contract_module(module_name, agents_module)
+        except Exception as error:
+            errors.append(f"Failed to import released module {module_name}: {error!r}")
+            continue
+        if "class_name" in entry:
+            class_value = getattr(module, owner_name, None)
+            if not isinstance(class_value, type):
+                errors.append(f"Missing released public class {module_name}.{owner_name}")
+                continue
+        else:
+            factory = getattr(module, owner_name, None)
+            if not callable(factory):
+                errors.append(f"Missing released public factory {module_name}.{owner_name}")
+                continue
+            try:
+                class_value = get_type_hints(factory)["return"]
+            except (KeyError, NameError, TypeError) as error:
+                errors.append(
+                    f"Unable to resolve released public factory return type "
+                    f"{module_name}.{owner_name}: {error!r}"
+                )
+                continue
+            if not isinstance(class_value, type):
+                errors.append(
+                    f"Released public factory {module_name}.{owner_name} no longer returns a class"
+                )
+                continue
+        for property_name in entry["names"]:
+            descriptor = inspect.getattr_static(class_value, property_name, None)
+            if not isinstance(descriptor, property):
+                errors.append(
+                    f"{module_name}.{owner_name}.{property_name} "
+                    "removed or changed a released public property"
+                )
+    return errors
+
+
+def _validate_public_typed_dict_contract(
+    contract: dict[str, Any],
+    agents_module: Any | None,
+    *,
+    unsupported_platforms: Mapping[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    unsupported_platforms = unsupported_platforms or {}
+    for entry in contract.get("public_typed_dicts", []):
+        module_name = entry["module"]
         class_name = entry["class_name"]
         optional_dependency = _optional_dependency_for_binding(contract, module_name, class_name)
         if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
@@ -1150,16 +1382,17 @@ def _validate_public_property_contract(
         except Exception as error:
             errors.append(f"Failed to import released module {module_name}: {error!r}")
             continue
-        class_value = getattr(module, class_name, None)
-        if not isinstance(class_value, type):
-            errors.append(f"Missing released public class {module_name}.{class_name}")
+        typed_dict = getattr(module, class_name, None)
+        if not typing_extensions.is_typeddict(typed_dict):
+            errors.append(f"Missing released public TypedDict {module_name}.{class_name}")
             continue
-        for property_name in entry["names"]:
-            descriptor = inspect.getattr_static(class_value, property_name, None)
-            if not isinstance(descriptor, property):
+        for released_field in entry["fields"]:
+            current_field = _typed_dict_field_contract(typed_dict, released_field["name"])
+            if current_field != released_field:
                 errors.append(
-                    f"{module_name}.{class_name}.{property_name} "
-                    "removed or changed a released public property"
+                    f"{module_name}.{class_name}.{released_field['name']} changed its released "
+                    f"TypedDict field contract: expected {released_field!r}, got "
+                    f"{current_field!r}"
                 )
     return errors
 
@@ -1264,6 +1497,13 @@ def validate_released_api_contract(
 
     errors.extend(
         _validate_public_property_contract(
+            contract,
+            agents_module,
+            unsupported_platforms=unsupported_platforms,
+        )
+    )
+    errors.extend(
+        _validate_public_typed_dict_contract(
             contract,
             agents_module,
             unsupported_platforms=unsupported_platforms,
