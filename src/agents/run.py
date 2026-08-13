@@ -80,10 +80,7 @@ from .run_internal.approvals import approvals_from_step
 from .run_internal.error_handlers import (
     attach_generic_agent_error,
     build_run_error_data,
-    create_message_output_item,
-    format_final_output_text,
     resolve_run_error_handler_result,
-    validate_handler_final_output,
 )
 from .run_internal.items import (
     copy_input_items,
@@ -96,11 +93,11 @@ from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _retained_items_for_blocked_output,
     cleanup_models_after_run,
+    finalize_max_turns_handler_output,
     get_all_tools,
     get_output_schema,
     initialize_computer_tools,
     resolve_interrupted_turn,
-    run_final_output_hooks,
     run_input_guardrails,
     run_output_guardrails,
     run_single_turn,
@@ -285,7 +282,7 @@ class Runner:
         """
 
         runner = DEFAULT_AGENT_RUNNER
-        redacted_error: AgentsException | None = None
+        redacted_error: BaseException | None = None
         try:
             return await runner.run(
                 starting_agent,
@@ -300,7 +297,7 @@ class Runner:
                 conversation_id=conversation_id,
                 session=session,
             )
-        except AgentsException as error:
+        except BaseException as error:
             if not _is_error_data_redacted(error):
                 raise
             _detach_data_redacted_error_traceback(error)
@@ -388,7 +385,7 @@ class Runner:
         """
 
         runner = DEFAULT_AGENT_RUNNER
-        redacted_error: AgentsException | None = None
+        redacted_error: BaseException | None = None
         try:
             return runner.run_sync(
                 starting_agent,
@@ -403,7 +400,7 @@ class Runner:
                 session=session,
                 auto_previous_response_id=auto_previous_response_id,
             )
-        except AgentsException as error:
+        except BaseException as error:
             if not _is_error_data_redacted(error):
                 raise
             _detach_data_redacted_error_traceback(error)
@@ -1278,29 +1275,54 @@ class AgentRunner:
                         if handler_result is None:
                             raise max_turns_error
 
-                        validated_output = validate_handler_final_output(
-                            current_agent, handler_result.final_output
-                        )
-                        output_text = format_final_output_text(current_agent, validated_output)
-                        synthesized_item = create_message_output_item(current_agent, output_text)
                         include_in_history = handler_result.include_in_history
-                        if include_in_history:
+                        handler_output_recorded = False
+
+                        async def _save_items_after_max_turn_guardrails(
+                            items: list[RunItem],
+                            *,
+                            run_state=run_state,
+                            store_setting=store_setting,
+                            generated_items=generated_items,
+                            session_items=session_items,
+                            context_wrapper=context_wrapper,
+                        ) -> None:
+                            nonlocal handler_output_recorded
+                            await save_final_turn_items_after_guardrails(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=_attempt_input_guardrail_results(),
+                                items=items,
+                                response_id=None,
+                                store=store_setting,
+                                wrapper=context_wrapper,
+                            )
+                            if items:
+                                generated_items.extend(items)
+                                session_items.extend(items)
+                                handler_output_recorded = True
+                                if run_state is not None:
+                                    run_state._generated_items = list(generated_items)
+                                    run_state._session_items = list(session_items)
+                                    run_state._clear_generated_items_last_processed_marker()
+
+                        (
+                            validated_output,
+                            synthesized_item,
+                        ) = await finalize_max_turns_handler_output(
+                            agent=current_agent,
+                            hooks=hooks,
+                            run_config=run_config,
+                            output=handler_result.final_output,
+                            context_wrapper=context_wrapper,
+                            output_guardrail_results=output_guardrail_results,
+                            save_items_after_guardrails=_save_items_after_max_turn_guardrails,
+                            include_in_history=include_in_history,
+                        )
+                        if include_in_history and not handler_output_recorded:
                             generated_items.append(synthesized_item)
                             session_items.append(synthesized_item)
-
-                        await run_final_output_hooks(
-                            current_agent,
-                            hooks,
-                            context_wrapper,
-                            validated_output,
-                        )
-                        await run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            validated_output,
-                            context_wrapper,
-                            output_guardrail_results,
-                        )
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
