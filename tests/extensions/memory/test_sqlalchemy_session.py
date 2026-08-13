@@ -990,3 +990,44 @@ async def test_runner_with_session_settings_override(agent: Agent):
     history_items = [item for item in last_input if item.get("content") != "New question"]
     # Should have 2 history items (last two from the 10 we added)
     assert len(history_items) == 2
+
+
+async def test_pop_item_concurrency(tmp_path):
+    """Test that concurrent pop_item calls do not return duplicate items."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'concurrency_pop.db'}"
+    session = SQLAlchemySession.from_url(
+        "concurrency_pop_test",
+        url=db_url,
+        create_tables=True,
+    )
+    # Add a set of items
+    items: list[TResponseInputItem] = [{"role": "user", "content": f"msg-{i}"} for i in range(10)]
+    await session.add_items(items)
+
+    # Let's perform concurrent pop_item operations
+    async def worker() -> list[str]:
+        res = []
+        for _ in range(5):
+            val = await session.pop_item()
+            if val is not None:
+                content = val.get("content")
+                if isinstance(content, str):
+                    res.append(content)
+        return res
+
+    results = await asyncio.gather(
+        worker(),
+        worker(),
+        worker(),
+    )
+
+    # Flatten results
+    popped_contents = [content for res in results for content in res]
+
+    # Verify that we popped exactly 10 items (or all unique items)
+    assert len(popped_contents) == 10
+    # Verify that all popped contents are unique
+    assert len(set(popped_contents)) == 10
+    # Clean up
+    await session.engine.dispose()
+
