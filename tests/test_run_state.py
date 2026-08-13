@@ -1614,6 +1614,25 @@ class TestRunState:
         assert len(interruptions) == 1
         assert interruptions[0] == approval_item
 
+    def test_get_interruptions_returns_a_snapshot(self):
+        """Mutating returned interruptions must not change pending approvals."""
+        agent = Agent(name="SnapshotAgent")
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-snapshot",
+                status="completed",
+                arguments="{}",
+            ),
+        )
+        state = make_state_with_interruptions(agent, [approval_item])
+
+        state.get_interruptions().clear()
+
+        assert state.get_interruptions() == [approval_item]
+
     async def test_serializes_and_restores_approvals(self):
         """Test that approval state is preserved through serialization."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})

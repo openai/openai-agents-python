@@ -458,7 +458,7 @@ class RunState(Generic[TContext, TAgent]):
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
-        return self._current_step.interruptions
+        return list(self._current_step.interruptions)
 
     @staticmethod
     def _approval_items_match(
