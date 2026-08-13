@@ -568,3 +568,15 @@ def scripted_sandbox_session(
     """
     normalized = [_normalize_step(step, index) for index, step in enumerate(steps)]
     return _ScriptedSandboxSession(normalized, manifest=manifest)
+
+
+__all__ = [
+    "InvalidSandboxStep",
+    "SandboxCall",
+    "SandboxCallMatcherError",
+    "SandboxScriptError",
+    "SandboxStepSpec",
+    "UnconsumedSandboxSteps",
+    "UnexpectedSandboxCall",
+    "scripted_sandbox_session",
+]

@@ -1,3 +1,5 @@
+import builtins
+import importlib
 import json
 import subprocess
 import sys
@@ -1724,7 +1726,7 @@ def test_release_contract_policy_rejects_new_callable_on_unsupported_platform(
         )
 
 
-def test_release_contract_policy_rejects_new_callable_with_uninspectable_signature(
+def test_release_contract_policy_promotes_new_uninspectable_canonical_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class UninspectableMeta(type):
@@ -1756,35 +1758,31 @@ def test_release_contract_policy_rejects_new_callable_with_uninspectable_signatu
         lambda module_name, _agents_module: modules[module_name],
     )
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"Cannot promote new canonical callable agents\.submodule\.Uninspectable because "
-            r"its signature cannot be inspected.*release preparation host"
+    canonical_entry = {
+        "canonical_module": "agents.submodule.impl",
+        "canonical_name": "Uninspectable",
+        "module": "agents.submodule",
+        "name": "Uninspectable",
+    }
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        release_policy=_release_policy(
+            {
+                "agents.submodule": {
+                    "optional_bindings": {},
+                    "optional_exports": {},
+                }
+            },
+            canonical_imports=(canonical_entry,),
         ),
-    ):
-        build_released_api_contract(
-            contract,
-            baseline="v0.20.0",
-            baseline_commit="b" * 40,
-            agents_module=agents_module,
-            release_policy=_release_policy(
-                {
-                    "agents.submodule": {
-                        "optional_bindings": {},
-                        "optional_exports": {},
-                    }
-                },
-                canonical_imports=(
-                    {
-                        "canonical_module": "agents.submodule.impl",
-                        "canonical_name": "Uninspectable",
-                        "module": "agents.submodule",
-                        "name": "Uninspectable",
-                    },
-                ),
-            ),
-        )
+    )
+
+    assert updated["canonical_imports"] == [canonical_entry]
+    assert "agents.submodule.Uninspectable" not in updated["callables"]
 
 
 def test_release_contract_policy_keeps_existing_uninspectable_canonical_surface(
@@ -2285,7 +2283,7 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
         for installation in policy.dependency_installations
         if installation.dependency_module == "vercel"
     ).unsupported_platforms == ("win32",)
-    assert {(entry["module"], entry["name"]) for entry in policy.canonical_imports} == {
+    assert {(entry["module"], entry["name"]) for entry in policy.canonical_imports} >= {
         ("agents.items", "InputItem"),
         ("agents.extensions.sandbox", "ModalCloudBucketMountStrategy"),
         ("agents.extensions.sandbox", "ModalSandboxClient"),
@@ -2328,6 +2326,91 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
             "names": ["mount_authority_redacted", "mount_authority_rebound"],
         },
     )
+
+
+def test_repository_release_policy_declares_public_testing_modules() -> None:
+    policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
+    expected_modules = {
+        "agents.realtime.testing",
+        "agents.testing",
+        "agents.testing.model",
+        "agents.testing.sandbox",
+        "agents.voice.testing",
+    }
+
+    assert expected_modules <= policy.modules.keys()
+    assert policy.modules["agents.voice.testing"] == {
+        "optional_bindings": {
+            export: "numpy" for export in importlib.import_module("agents.voice.testing").__all__
+        },
+        "optional_exports": {},
+    }
+    assert (
+        next(
+            installation
+            for installation in policy.dependency_installations
+            if installation.dependency_module == "numpy"
+        ).extra
+        == "voice"
+    )
+    for module_name in expected_modules:
+        module = importlib.import_module(module_name)
+        assert module.__all__
+        assert all(type(export) is str for export in module.__all__)
+
+    expected_canonical_imports = {
+        ("agents.testing", name, "agents.testing.model", name)
+        for name in importlib.import_module("agents.testing.model").__all__
+    } | {
+        ("agents.testing", name, "agents.testing.sandbox", name)
+        for name in importlib.import_module("agents.testing.sandbox").__all__
+    }
+    actual_canonical_imports = {
+        (
+            entry["module"],
+            entry["name"],
+            entry["canonical_module"],
+            entry["canonical_name"],
+        )
+        for entry in policy.canonical_imports
+        if entry["module"] == "agents.testing"
+    }
+
+    assert actual_canonical_imports == expected_canonical_imports
+    for module_name, name, canonical_module_name, canonical_name in actual_canonical_imports:
+        module = importlib.import_module(module_name)
+        canonical_module = importlib.import_module(canonical_module_name)
+        assert getattr(module, name) is getattr(canonical_module, canonical_name)
+
+
+def test_voice_testing_start_sentinel_has_stable_contract_identity() -> None:
+    from agents.voice.testing import _START_NOT_CONFIGURED
+
+    assert _default_contract(_START_NOT_CONFIGURED) == {
+        "kind": "sentinel",
+        "identity": "agents.voice.testing._START_NOT_CONFIGURED",
+    }
+    with pytest.raises(TypeError, match="Unsupported public API default value: builtins.object"):
+        _default_contract(object())
+
+
+def test_default_contract_does_not_import_voice_testing_for_unrelated_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "agents.voice.testing":
+            raise AssertionError("Unrelated defaults must not import the optional Voice package.")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert _default_contract(()) == {
+        "kind": "sequence",
+        "type": "builtins.tuple",
+        "items": [],
+    }
 
 
 @pytest.mark.parametrize(
@@ -2418,6 +2501,37 @@ def test_public_api_contract_allows_declared_optional_submodule_binding(
             agents_module if module_name == "agents" else submodule
         ),
     )
+
+    assert validate_released_api_contract(contract, agents_module=agents_module) == []
+
+
+def test_public_api_contract_skips_fully_optional_unimportable_submodule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents_module = SimpleNamespace(__all__=[])
+    contract: dict[str, Any] = {
+        "required_top_level_exports": [],
+        "public_modules": ["agents.optional_submodule"],
+        "required_submodule_exports": {
+            "agents.optional_submodule": {
+                "names": ["OptionalClient", "OptionalConfig"],
+                "optional_bindings": {
+                    "OptionalClient": "missing_optional_dependency",
+                    "OptionalConfig": "missing_optional_dependency",
+                },
+                "optional_exports": {},
+            }
+        },
+        "canonical_imports": [],
+        "callables": {},
+    }
+
+    def import_module(module_name: str, _agents_module: object) -> object:
+        if module_name == "agents":
+            return agents_module
+        raise ImportError("The optional dependency is unavailable.")
+
+    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
 

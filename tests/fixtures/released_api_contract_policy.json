@@ -7,6 +7,114 @@
       "name": "InputItem"
     },
     {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "InvalidModelStep",
+      "module": "agents.testing",
+      "name": "InvalidModelStep"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelCall",
+      "module": "agents.testing",
+      "name": "ModelCall"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelScriptError",
+      "module": "agents.testing",
+      "name": "ModelScriptError"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelStep",
+      "module": "agents.testing",
+      "name": "ModelStep"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelStepSpec",
+      "module": "agents.testing",
+      "name": "ModelStepSpec"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ScriptedModel",
+      "module": "agents.testing",
+      "name": "ScriptedModel"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "UnconsumedModelSteps",
+      "module": "agents.testing",
+      "name": "UnconsumedModelSteps"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "UnexpectedModelCall",
+      "module": "agents.testing",
+      "name": "UnexpectedModelCall"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "assistant_message",
+      "module": "agents.testing",
+      "name": "assistant_message"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "function_call",
+      "module": "agents.testing",
+      "name": "function_call"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "InvalidSandboxStep",
+      "module": "agents.testing",
+      "name": "InvalidSandboxStep"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxCall",
+      "module": "agents.testing",
+      "name": "SandboxCall"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxCallMatcherError",
+      "module": "agents.testing",
+      "name": "SandboxCallMatcherError"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxScriptError",
+      "module": "agents.testing",
+      "name": "SandboxScriptError"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxStepSpec",
+      "module": "agents.testing",
+      "name": "SandboxStepSpec"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "UnconsumedSandboxSteps",
+      "module": "agents.testing",
+      "name": "UnconsumedSandboxSteps"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "UnexpectedSandboxCall",
+      "module": "agents.testing",
+      "name": "UnexpectedSandboxCall"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "scripted_sandbox_session",
+      "module": "agents.testing",
+      "name": "scripted_sandbox_session"
+    },
+    {
       "canonical_module": "agents.extensions.sandbox.modal",
       "canonical_name": "ModalCloudBucketMountStrategy",
       "module": "agents.extensions.sandbox",
@@ -101,6 +209,9 @@
     "modal": {
       "extra": "modal"
     },
+    "numpy": {
+      "extra": "voice"
+    },
     "pymongo": {
       "extra": "mongodb"
     },
@@ -170,6 +281,39 @@
         "VercelSandboxSession": "vercel",
         "VercelSandboxSessionState": "vercel"
       }
+    },
+    "agents.realtime.testing": {
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.testing": {
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.testing.model": {
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.testing.sandbox": {
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.voice.testing": {
+      "optional_bindings": {
+        "STTCall": "numpy",
+        "STTSessionCall": "numpy",
+        "ScriptedSTTModel": "numpy",
+        "ScriptedTTSModel": "numpy",
+        "ScriptedTranscriptionSession": "numpy",
+        "ScriptedVoiceWorkflow": "numpy",
+        "TTSCall": "numpy",
+        "TTSResult": "numpy",
+        "UnconsumedVoiceSteps": "numpy",
+        "UnexpectedVoiceCall": "numpy",
+        "VoiceScriptError": "numpy",
+        "pcm16_samples": "numpy"
+      },
+      "optional_exports": {}
     }
   },
   "public_properties": [

@@ -1196,3 +1196,17 @@ def _response_usage_for_usage(usage: Any) -> ResponseUsage:
             reasoning_tokens=getattr(usage.output_tokens_details, "reasoning_tokens", 0)
         ),
     )
+
+
+__all__ = [
+    "InvalidModelStep",
+    "ModelCall",
+    "ModelScriptError",
+    "ModelStep",
+    "ModelStepSpec",
+    "ScriptedModel",
+    "UnconsumedModelSteps",
+    "UnexpectedModelCall",
+    "assistant_message",
+    "function_call",
+]
