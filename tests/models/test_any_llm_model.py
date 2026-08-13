@@ -714,6 +714,44 @@ async def test_any_llm_responses_path_is_used_when_supported(monkeypatch) -> Non
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_tool_calls", [True, False, None])
+@pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
+async def test_any_llm_responses_parallel_tool_calls_follow_converted_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    parallel_tool_calls: bool | None,
+    tool_source: str,
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=_response("Hello"))
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openai/gpt-5.4-mini", api="responses")
+    tools: list[Tool] = (
+        [function_tool(lambda: "ok", name_override="test_tool")]
+        if tool_source == "function"
+        else []
+    )
+    handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    params = provider.private_responses_calls[0]["params"]
+    expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
+    assert params.parallel_tool_calls is expected_parallel_tool_calls
+    assert bool(params.tools) is (tool_source != "none")
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload_type", ["dict", "basemodel"])
 async def test_any_llm_responses_path_defaults_missing_cache_write_tokens(
     monkeypatch: pytest.MonkeyPatch, payload_type: str

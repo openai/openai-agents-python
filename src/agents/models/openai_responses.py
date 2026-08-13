@@ -790,13 +790,6 @@ class OpenAIResponsesModel(Model):
         list_input = _to_dump_compatible(list_input)
         list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
 
-        if model_settings.parallel_tool_calls and tools:
-            parallel_tool_calls: bool | Omit = True
-        elif model_settings.parallel_tool_calls is False:
-            parallel_tool_calls = False
-        else:
-            parallel_tool_calls = omit
-
         should_omit_model = prompt is not None and not self._model_is_explicit
         effective_request_model: str | ChatModel | None = None if should_omit_model else self.model
         effective_computer_tool_model = Converter.resolve_computer_tool_model(
@@ -825,6 +818,11 @@ class OpenAIResponsesModel(Model):
                 tool_choice=model_settings.tool_choice,
             )
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
+        parallel_tool_calls: bool | Omit = (
+            self._non_null_or_omit(model_settings.parallel_tool_calls)
+            if prompt is not None or converted_tools_payload
+            else omit
+        )
         response_format = Converter.get_response_format(output_schema)
         model_param: str | ChatModel | Omit = (
             effective_request_model if effective_request_model is not None else omit

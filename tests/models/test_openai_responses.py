@@ -21,8 +21,11 @@ from agents import (
     ModelSettings,
     ModelTracing,
     Runner,
+    Tool,
     ToolSearchTool,
     __version__,
+    function_tool,
+    handoff,
     trace,
 )
 from agents.exceptions import ModelBehaviorError, UserError
@@ -178,6 +181,63 @@ def _connection_closed_error(message: str) -> Exception:
 
     ConnectionClosedError.__module__ = "websockets.client"
     return ConnectionClosedError(message)
+
+
+@pytest.mark.parametrize("parallel_tool_calls", [True, False, None])
+@pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
+def test_parallel_tool_calls_follow_converted_responses_tools(
+    parallel_tool_calls: bool | None,
+    tool_source: str,
+) -> None:
+    tools: list[Tool] = (
+        [function_tool(lambda: "ok", name_override="test_tool")]
+        if tool_source == "function"
+        else []
+    )
+    handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(Any, object()),
+    )
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=tools,
+        output_schema=None,
+        handoffs=handoffs,
+    )
+
+    expected_parallel_tool_calls = (
+        parallel_tool_calls if tool_source != "none" and parallel_tool_calls is not None else omit
+    )
+    assert kwargs["parallel_tool_calls"] is expected_parallel_tool_calls
+    assert bool(kwargs["tools"]) is (tool_source != "none")
+
+
+@pytest.mark.parametrize("parallel_tool_calls", [True, False, None])
+def test_parallel_tool_calls_preserve_stored_prompt_overrides(
+    parallel_tool_calls: bool | None,
+) -> None:
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=cast(Any, object()),
+    )
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        prompt={"id": "pmpt_123"},
+    )
+
+    expected_parallel_tool_calls = parallel_tool_calls if parallel_tool_calls is not None else omit
+    assert kwargs["parallel_tool_calls"] is expected_parallel_tool_calls
+    assert kwargs["tools"] is omit
 
 
 @pytest.mark.allow_call_model_methods
@@ -985,7 +1045,7 @@ async def test_responses_requests_normalize_dictionary_agent_settings(use_dictio
     assert kwargs["top_p"] == 1.0
     assert kwargs["max_output_tokens"] == 64
     assert "max_tokens" not in kwargs
-    assert kwargs["parallel_tool_calls"] is False
+    assert kwargs["parallel_tool_calls"] is omit
     assert kwargs["extra_headers"]["x-model-settings-parity"] == "preserved"
     assert kwargs["extra_query"] == {"model_settings_parity": "verified"}
     assert kwargs["extra_body"] == {"prompt_cache_key": "extra-body-cache-key"}
