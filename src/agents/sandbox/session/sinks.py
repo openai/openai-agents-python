@@ -290,7 +290,7 @@ class HttpProxySink(EventSink):
         payload_policy: EventPayloadPolicy | None = None,
     ) -> None:
         self.endpoint = endpoint
-        self.headers = headers or {}
+        self.headers = dict(headers or {})
         self.timeout_s = timeout_s
         self.spool_path = spool_path
         self.mode = mode

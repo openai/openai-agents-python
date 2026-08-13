@@ -6,7 +6,7 @@ import json
 import tarfile
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from inline_snapshot import snapshot
@@ -443,6 +443,20 @@ async def test_http_proxy_sink_spools_direct_timeout(tmp_path: Path) -> None:
     lines = spool_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["seq"] == 1
+
+
+def test_http_proxy_sink_snapshots_headers() -> None:
+    headers = {"authorization": "Bearer original"}
+    sink = HttpProxySink("https://example.test/events", headers=headers)
+    headers["authorization"] = "Bearer changed"
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b""
+
+    with patch("agents.sandbox.session.sinks.urlopen", return_value=response) as urlopen:
+        sink._post(b"{}", None)
+
+    request = urlopen.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer original"
 
 
 @pytest.mark.asyncio
