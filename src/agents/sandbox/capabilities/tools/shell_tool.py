@@ -5,7 +5,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
@@ -73,7 +72,7 @@ def _resolve_workdir_command(
     if workdir is None or workdir.strip() == "":
         return command
 
-    resolved_workdir = session.normalize_path(Path(workdir))
+    resolved_workdir = session.normalize_path(workdir)
     return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
 
 

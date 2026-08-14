@@ -102,7 +102,7 @@ class ViewImageTool(FunctionTool):
         return await self.run(self.args_model.model_validate_json(raw_input))
 
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
-        input_path = Path(args.path)
+        input_path = args.path
         path_policy = self.session._workspace_path_policy()
         resolved_path = path_policy.absolute_workspace_path(input_path)
         display_path = path_policy.relative_path(input_path).as_posix()
