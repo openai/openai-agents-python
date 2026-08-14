@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,9 +50,12 @@ from ..errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
 )
-from ..manifest import Manifest
+from ..manifest import Manifest, _process_environment_error
 from ..session import SandboxSession, SandboxSessionState
-from ..session.base_sandbox_session import BaseSandboxSession
+from ..session.base_sandbox_session import (
+    BaseSandboxSession,
+    _register_sdk_process_environment_session_type,
+)
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
 from ..session.pty_output import collect_pty_output
@@ -68,7 +71,7 @@ from ..session.pty_types import (
 from ..session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ..session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ..session.workspace_payloads import coerce_write_payload
-from ..snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
+from ..snapshot import NoopSnapshot, SnapshotBase, SnapshotSpec, resolve_snapshot
 from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.iterator_io import IteratorIO
 from ..util.retry import (
@@ -273,6 +276,7 @@ class _DockerExecSocket:
                     pass
 
 
+@_register_sdk_process_environment_session_type
 class DockerSandboxSession(BaseSandboxSession):
     _docker_client: DockerSDKClient
     _container: Container
@@ -282,6 +286,7 @@ class DockerSandboxSession(BaseSandboxSession):
     _pty_processes: dict[int, _DockerPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
     _cleanup_tasks: set[asyncio.Task[None]]
+    _process_environment_resume_start: Callable[[], Awaitable[None]] | None
 
     state: DockerSandboxSessionState
     _ARCHIVE_STAGING_DIR: Path = posix_path_as_path(
@@ -304,6 +309,16 @@ class DockerSandboxSession(BaseSandboxSession):
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
         self._cleanup_tasks = set()
+        self._process_environment_start_lock = asyncio.Lock()
+        self._process_environment_resume_started = False
+        self._process_environment_resume_start = None
+        self._process_environment_resume_previous_container_id: str | None = None
+        self._process_environment_resume_previous_container_loader: Any = None
+        self._process_environment_resume_previous_session_id: uuid.UUID | None = None
+        self._process_environment_resume_previous_volume_names: tuple[str, ...] = ()
+        self._process_environment_failed_candidate_container: Container | None = None
+        self._process_environment_failed_candidate_container_id: str | None = None
+        self._process_environment_failed_candidate_volume_names: tuple[str, ...] = ()
 
     @classmethod
     def from_state(
@@ -319,6 +334,105 @@ class DockerSandboxSession(BaseSandboxSession):
         """Docker attaches volume-driver mounts when creating the container."""
 
         return True
+
+    @redact_mount_error_data
+    async def start(self) -> None:
+        async with self._process_environment_start_lock:
+            self._cleanup_process_environment_failed_candidate()
+            if self._process_environment_resume_started:
+                if not await self.running():
+                    self._set_start_state_preserved(True)
+                    await super().start()
+                self._retire_process_environment_previous_resources()
+                return
+            deferred_start = getattr(self, "_process_environment_resume_start", None)
+            if deferred_start is None:
+                await super().start()
+                return
+            await deferred_start()
+            self._process_environment_resume_start = None
+            self._process_environment_resume_started = True
+
+    def _cleanup_process_environment_failed_candidate(self) -> None:
+        container_id = self._process_environment_failed_candidate_container_id
+        container = self._process_environment_failed_candidate_container
+        if container is None and container_id is not None:
+            try:
+                container = self._docker_client.containers.get(container_id)
+            except docker.errors.NotFound:
+                self._process_environment_failed_candidate_container_id = None
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except docker.errors.NotFound:
+                self._process_environment_failed_candidate_container_id = None
+            else:
+                self._process_environment_failed_candidate_container_id = None
+            if self._process_environment_failed_candidate_container_id is None:
+                self._process_environment_failed_candidate_container = None
+
+        remaining_volume_names: list[str] = []
+        for volume_name in self._process_environment_failed_candidate_volume_names:
+            try:
+                self._docker_client.volumes.get(volume_name).remove()
+            except docker.errors.NotFound:
+                continue
+            except Exception:
+                remaining_volume_names.append(volume_name)
+        self._process_environment_failed_candidate_volume_names = tuple(remaining_volume_names)
+        if (
+            self._process_environment_failed_candidate_container is not None
+            or self._process_environment_failed_candidate_container_id is not None
+            or remaining_volume_names
+        ):
+            raise RuntimeError("Docker failed to clean up a process environment replacement")
+
+    def _retire_process_environment_previous_resources(
+        self,
+        *,
+        previous_container: Container | None = None,
+    ) -> None:
+        previous_container_id = self._process_environment_resume_previous_container_id
+        if previous_container_id is not None:
+            if previous_container is None:
+                loader = self._process_environment_resume_previous_container_loader
+                try:
+                    previous_container = loader(previous_container_id)
+                except docker.errors.NotFound:
+                    self._process_environment_resume_previous_container_id = None
+            if previous_container is not None:
+                try:
+                    previous_container.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                self._process_environment_resume_previous_container_id = None
+
+        for volume_name in self._process_environment_resume_previous_volume_names:
+            try:
+                self._docker_client.volumes.get(volume_name).remove()
+            except docker.errors.NotFound:
+                continue
+        self._process_environment_resume_previous_volume_names = ()
+
+    def _capture_process_environment_previous_volume_names(
+        self,
+        container: Container,
+    ) -> None:
+        previous_session_id = self._process_environment_resume_previous_session_id
+        if previous_session_id is None:
+            return
+        captured_names = _docker_owned_volume_names_for_container(
+            container,
+            session_id=previous_session_id,
+        )
+        self._process_environment_resume_previous_volume_names = tuple(
+            dict.fromkeys(
+                (
+                    *self._process_environment_resume_previous_volume_names,
+                    *captured_names,
+                )
+            )
+        )
 
     def supports_pty(self) -> bool:
         return True
@@ -633,6 +747,7 @@ class DockerSandboxSession(BaseSandboxSession):
             return user.name
         return user
 
+    @redact_mount_error_data
     async def exec(
         self,
         *command: str | Path,
@@ -913,27 +1028,63 @@ class DockerSandboxSession(BaseSandboxSession):
         await self._rm_best_effort(staging_path)
 
     async def running(self) -> bool:
+        container = self._container
+        if container is None:
+            deferred_container_id = self._process_environment_resume_previous_container_id
+            if deferred_container_id is None:
+                return False
+            loader = self._process_environment_resume_previous_container_loader
+            try:
+                container = loader(deferred_container_id)
+            except docker.errors.NotFound:
+                return False
+            if container is None:
+                return False
         # docker-py caches container attributes; refresh to avoid stale status,
         # especially right after start/stop.
         try:
-            self._container.reload()
+            container.reload()
         except docker.errors.APIError:
             # Best-effort: if we can't reload, fall back to last known status.
             pass
-        return cast(str, self._container.status) == "running"
+        return cast(str, container.status) == "running"
 
     async def _shutdown_backend(self) -> None:
+        cleanup_error: BaseException | None = None
+        try:
+            self._cleanup_process_environment_failed_candidate()
+        except BaseException as exc:
+            cleanup_error = exc
+        deferred_container_id = self._process_environment_resume_previous_container_id
+        if self._container is None and deferred_container_id is not None:
+            loader = self._process_environment_resume_previous_container_loader
+            try:
+                self._container = loader(deferred_container_id)
+            except docker.errors.NotFound:
+                self._process_environment_resume_previous_container_id = None
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         # Best-effort: stop the container if it exists.
-        try:
-            self._container.reload()
-        except Exception:
-            pass
-        try:
-            if await self.running():
-                self._container.stop()
-        except Exception:
-            # If the container is already gone/stopped, ignore.
-            pass
+        if self._container is not None:
+            try:
+                self._container.reload()
+            except Exception:
+                pass
+            try:
+                if await self.running():
+                    self._container.stop()
+            except Exception:
+                # If the container is already gone/stopped, ignore.
+                pass
+        if deferred_container_id is not None and self.state.container_id != deferred_container_id:
+            try:
+                self._retire_process_environment_previous_resources()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error from None
 
     @staticmethod
     def _start_exec_socket(*, api: Any, exec_id: str, tty: bool = False) -> _DockerExecSocket:
@@ -954,6 +1105,7 @@ class DockerSandboxSession(BaseSandboxSession):
         raw_sock = getattr(sock, "_sock", sock)
         return _DockerExecSocket(sock=sock, raw_sock=raw_sock, response=response)
 
+    @redact_mount_error_data
     async def pty_exec_start(
         self,
         *command: str | Path,
@@ -1088,6 +1240,7 @@ class DockerSandboxSession(BaseSandboxSession):
             original_token_count=original_token_count,
         )
 
+    @redact_mount_error_data
     async def pty_write_stdin(
         self,
         *,
@@ -1505,8 +1658,14 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         *,
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
+        allowed_process_environment_keys: Iterable[str] = (),
+        process_environment_bindings: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
+        self._configure_process_environment_bindings(
+            allowed_process_environment_keys=allowed_process_environment_keys,
+            process_environment_bindings=process_environment_bindings,
+        )
         self.docker_client = docker_client
         self._instrumentation = (
             instrumentation if instrumentation is not None else Instrumentation()
@@ -1524,7 +1683,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         image = options.image
         session_id = uuid.uuid4()
         manifest = manifest if manifest is not None else Manifest()
-        self._validate_manifest_for_create(manifest)
+        manifest = self._validate_manifest_for_create(manifest)
         _validate_docker_path_grants(manifest)
         volume_names = _docker_volume_names_for_manifest(manifest, session_id=session_id)
         container: Container | None = None
@@ -1560,6 +1719,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             self._cleanup_failed_create_resources(
                 container=container,
                 volume_names=volume_names,
+                surface_cleanup_failure=manifest._has_process_environment_values(),
             )
             raise
 
@@ -1568,58 +1728,110 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         *,
         container: Container | None,
         volume_names: Iterable[str],
+        surface_cleanup_failure: bool = False,
     ) -> None:
         """Best-effort cleanup when Docker resource acquisition does not return a session."""
 
+        cleanup_failed = False
+        container_id = getattr(container, "id", None)
         if container is not None:
             try:
                 container.remove(force=True)
-            except Exception:
+            except docker.errors.NotFound:
                 pass
+            except Exception:
+                cleanup_failed = True
+        failed_volume_names: list[str] = []
         for volume_name in volume_names:
             try:
                 self.docker_client.volumes.get(volume_name).remove()
+            except docker.errors.NotFound:
+                continue
             except Exception:
-                pass
+                cleanup_failed = True
+                failed_volume_names.append(volume_name)
+        if surface_cleanup_failure and cleanup_failed:
+            raise _process_environment_error(
+                "Docker failed to clean up protected create resources; "
+                f"container_id={container_id!r}, volume_names={failed_volume_names!r}"
+            ) from None
 
     @redact_mount_error_data
     async def delete(self, session: SandboxSession) -> SandboxSession:
         inner = session._inner
         if not isinstance(inner, DockerSandboxSession):
             raise TypeError("DockerSandboxClient.delete expects a DockerSandboxSession")
-        volume_names = _docker_volume_names_for_manifest(
-            inner.state.manifest,
-            session_id=inner.state.session_id,
-        )
         cleanup_error: BaseException | None = None
         try:
             await inner.shutdown()
         except BaseException as exc:
             cleanup_error = exc
 
-        try:
-            container = self.docker_client.containers.get(inner.state.container_id)
-        except docker.errors.NotFound:
-            container = None
-        except BaseException as exc:
-            container = None
-            if cleanup_error is None:
-                cleanup_error = exc
-        else:
+        retained_container_id = inner._process_environment_resume_previous_container_id
+        failed_candidate_container_id = inner._process_environment_failed_candidate_container_id
+        container_ids = tuple(
+            dict.fromkeys(
+                container_id
+                for container_id in (
+                    inner.state.container_id,
+                    retained_container_id,
+                    failed_candidate_container_id,
+                )
+                if container_id is not None
+            )
+        )
+        for container_id in container_ids:
             try:
-                container.remove()
+                container = self.docker_client.containers.get(container_id)
             except docker.errors.NotFound:
-                pass
+                if container_id == retained_container_id:
+                    inner._process_environment_resume_previous_container_id = None
+                if container_id == failed_candidate_container_id:
+                    inner._process_environment_failed_candidate_container_id = None
+                    inner._process_environment_failed_candidate_container = None
+                continue
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                continue
+            if container_id == retained_container_id:
+                inner._capture_process_environment_previous_volume_names(container)
+            try:
+                if container_id in {retained_container_id, failed_candidate_container_id}:
+                    container.remove(force=True)
+                    if container_id == retained_container_id:
+                        inner._process_environment_resume_previous_container_id = None
+                    if container_id == failed_candidate_container_id:
+                        inner._process_environment_failed_candidate_container_id = None
+                        inner._process_environment_failed_candidate_container = None
+                else:
+                    container.remove()
+            except docker.errors.NotFound:
+                if container_id == retained_container_id:
+                    inner._process_environment_resume_previous_container_id = None
+                if container_id == failed_candidate_container_id:
+                    inner._process_environment_failed_candidate_container_id = None
+                    inner._process_environment_failed_candidate_container = None
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
 
+        volume_names = (
+            *_docker_volume_names_for_manifest(
+                inner.state.manifest,
+                session_id=inner.state.session_id,
+            ),
+            *inner._process_environment_resume_previous_volume_names,
+            *inner._process_environment_failed_candidate_volume_names,
+        )
+        retained_volumes_removed = True
         for volume_name in volume_names:
             try:
                 volume = self.docker_client.volumes.get(volume_name)
             except docker.errors.NotFound:
                 continue
             except BaseException as exc:
+                retained_volumes_removed = False
                 if cleanup_error is None:
                     cleanup_error = exc
                 continue
@@ -1628,8 +1840,12 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             except docker.errors.NotFound:
                 continue
             except BaseException as exc:
+                retained_volumes_removed = False
                 if cleanup_error is None:
                     cleanup_error = exc
+        if retained_volumes_removed:
+            inner._process_environment_resume_previous_volume_names = ()
+            inner._process_environment_failed_candidate_volume_names = ()
         if cleanup_error is not None:
             raise cleanup_error from None
         return session
@@ -1641,10 +1857,151 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
+        state.manifest = self._bind_process_environment_manifest(state.manifest)
+        state.manifest._validate_process_environment_access()
         state.assert_path_grants_rebound()
         _validate_docker_path_grants(state.manifest)
+        if state.manifest._has_process_environment_values():
+            original_container_id = state.container_id
+            original_session_id = state.session_id
+            original_workspace_root_ready = state.workspace_root_ready
+            inner = DockerSandboxSession(
+                container=cast(Container, None),
+                docker_client=self.docker_client,
+                state=state,
+            )
+            inner._process_environment_resume_previous_container_id = original_container_id
+            inner._process_environment_resume_previous_container_loader = self.get_container
+            inner._process_environment_resume_previous_session_id = original_session_id
+            previous_manifest = state.resume_persisted_manifest or state.manifest
+            inner._process_environment_resume_previous_volume_names = tuple(
+                _docker_volume_names_for_manifest(
+                    previous_manifest,
+                    session_id=original_session_id,
+                )
+            )
+            previous_container_reusable = True
+
+            async def start_replacement() -> None:
+                nonlocal previous_container_reusable
+                if isinstance(state.snapshot, NoopSnapshot):
+                    raise _process_environment_error(
+                        "Docker cannot resume ProcessEnvValue without a live workspace or "
+                        "restorable snapshot; use a restorable snapshot to preserve the "
+                        "workspace"
+                    )
+                process_environment = state.manifest._snapshot_process_environment_values()
+                if previous_container_reusable:
+                    try:
+                        previous_container = self.get_container(original_container_id)
+                    except docker.errors.NotFound:
+                        previous_container = None
+                else:
+                    previous_container = None
+                if previous_container is not None:
+                    inner._capture_process_environment_previous_volume_names(previous_container)
+                    previous_state = state.model_copy(update={"manifest": previous_manifest})
+                    previous_session = DockerSandboxSession(
+                        container=previous_container,
+                        docker_client=self.docker_client,
+                        state=previous_state,
+                    )
+                    previous_session.set_dependencies(inner._dependencies)
+                    previous_was_running = await previous_session.running()
+                    try:
+                        if not previous_was_running:
+                            previous_container.start()
+                        await previous_session._persist_snapshot()
+                    finally:
+                        if not previous_was_running:
+                            try:
+                                previous_container.stop()
+                            except BaseException:
+                                previous_container_reusable = False
+                                previous_container_retired = False
+                                try:
+                                    previous_container.remove(force=True)
+                                    previous_container_retired = True
+                                except BaseException:
+                                    kill = getattr(previous_container, "kill", None)
+                                    if not callable(kill):
+                                        raise _process_environment_error(
+                                            "Docker could not make the previous protected "
+                                            "container inactive after workspace persistence"
+                                        ) from None
+                                    try:
+                                        kill()
+                                    except BaseException:
+                                        raise _process_environment_error(
+                                            "Docker could not make the previous protected "
+                                            "container inactive after workspace persistence"
+                                        ) from None
+                                if previous_container_retired:
+                                    inner._process_environment_resume_previous_container_id = None
+                                raise
+                if not await state.snapshot.restorable(dependencies=inner._dependencies):
+                    raise _process_environment_error(
+                        "Docker cannot resume ProcessEnvValue without a live workspace or "
+                        "restorable snapshot; use a restorable snapshot to preserve the workspace"
+                    )
+                resolved_environment = {
+                    **await state.manifest._resolve_environment_without_process_values(),
+                    **process_environment,
+                }
+                replacement_session_id = uuid.uuid4()
+                replacement_volume_names = _docker_volume_names_for_manifest(
+                    state.manifest,
+                    session_id=replacement_session_id,
+                )
+                container: Container | None = None
+                try:
+                    state.session_id = replacement_session_id
+                    container = await self._create_container(
+                        state.image,
+                        manifest=state.manifest,
+                        exposed_ports=state.exposed_ports,
+                        network_mode=state.network_mode,
+                        session_id=replacement_session_id,
+                        resolved_environment=resolved_environment,
+                    )
+                    container_id = container.id
+                    assert container_id is not None
+                    state.container_id = container_id
+                    state.workspace_root_ready = False
+                    inner._container = container
+                    inner._resume_workspace_probe_pending = True
+                    inner._set_start_state_preserved(False)
+                    await BaseSandboxSession.start(inner)
+                except BaseException:
+                    if container is not None:
+                        inner._process_environment_failed_candidate_container = container
+                        inner._process_environment_failed_candidate_container_id = container.id
+                    inner._process_environment_failed_candidate_volume_names = tuple(
+                        replacement_volume_names
+                    )
+                    state.container_id = original_container_id
+                    state.session_id = original_session_id
+                    state.workspace_root_ready = original_workspace_root_ready
+                    inner._container = previous_container
+                    try:
+                        inner._cleanup_process_environment_failed_candidate()
+                    except Exception:
+                        pass
+                    raise
+                inner._process_environment_resume_start = None
+                inner._process_environment_resume_started = True
+                inner._retire_process_environment_previous_resources(
+                    previous_container=previous_container
+                )
+
+            inner._process_environment_resume_start = start_replacement
+            return self._wrap_session(inner, instrumentation=self._instrumentation)
         configured_authority = _manifest_has_configured_mount_authority(state.manifest)
-        requires_fresh_resource = state.mount_authority_rebound or configured_authority
+        requires_fresh_resource = (
+            state.mount_authority_rebound
+            or state.manifest._has_process_environment_values()
+            or configured_authority
+        )
         container = None if requires_fresh_resource else self.get_container(state.container_id)
         reused_existing_container = container is not None
         if container is not None:
@@ -1715,18 +2072,19 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         exposed_ports: tuple[int, ...] = (),
         network_mode: Literal["none"] | None = None,
         session_id: uuid.UUID | None = None,
+        resolved_environment: dict[str, str] | None = None,
     ) -> Container:
+        environment = resolved_environment
         if manifest is not None:
             _validate_docker_path_grants(manifest)
+        if manifest is not None and environment is None:
+            environment = await manifest.resolve_environment()
         # create image if it does not exist
         if not self.image_exists(image):
             repo, tag = parse_repository_tag(image)
             self.docker_client.images.pull(repo, tag=tag or None, all_tags=False)
 
         assert self.image_exists(image)
-        environment: dict[str, str] | None = None
-        if manifest is not None:
-            environment = await manifest.environment.resolve()
         create_kwargs: dict[str, object] = {
             "entrypoint": ["tail"],
             "image": image,
@@ -1955,6 +2313,25 @@ def _docker_volume_names_for_manifest(
     return [
         _docker_volume_name(session_id=session_id, mount_path=mount_path)
         for _artifact, mount_path in _docker_volume_mounts_for_manifest(manifest)
+    ]
+
+
+def _docker_owned_volume_names_for_container(
+    container: Container,
+    *,
+    session_id: uuid.UUID,
+) -> list[str]:
+    container.reload()
+    raw_mounts = container.attrs.get("Mounts")
+    mounts = raw_mounts if isinstance(raw_mounts, list) else []
+    prefix = f"sandbox_{session_id.hex}_"
+    return [
+        name
+        for mount in mounts
+        if isinstance(mount, dict)
+        and mount.get("Type") == "volume"
+        and isinstance((name := mount.get("Name")), str)
+        and name.startswith(prefix)
     ]
 
 

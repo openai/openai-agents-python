@@ -42,6 +42,7 @@ class SandboxSessionState(BaseModel):
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
     _mount_authority_redacted: bool = PrivateAttr(default=False)
     _mount_authority_rebound: bool = PrivateAttr(default=False)
+    _resume_persisted_manifest: Manifest | None = PrivateAttr(default=None)
 
     @property
     def path_grants_require_rebind(self) -> tuple[str, ...]:
@@ -56,6 +57,12 @@ class SandboxSessionState(BaseModel):
         """Whether persisted mount topology was rebound from current trusted configuration."""
 
         return self._mount_authority_rebound
+
+    @property
+    def resume_persisted_manifest(self) -> Manifest | None:
+        """Return the pre-capability manifest for runtime-only resume cleanup."""
+
+        return self._resume_persisted_manifest
 
     def _sanitize_persisted_provider_identity(
         self,

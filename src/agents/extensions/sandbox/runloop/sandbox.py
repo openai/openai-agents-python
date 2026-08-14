@@ -1599,6 +1599,10 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
             if manifest is not None
             else Manifest(root=_default_runloop_manifest_root(user_parameters))
         )
+        manifest._reject_process_environment_values(
+            backend_id="runloop",
+            supported_alternative="use DockerSandboxClient",
+        )
         _validate_runloop_manifest_root(manifest, user_parameters=user_parameters)
         self._validate_manifest_for_create(manifest)
 
@@ -1697,6 +1701,10 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
         if not isinstance(state, RunloopSandboxSessionState):
             raise TypeError("RunloopSandboxClient.resume expects a RunloopSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="runloop",
+            supported_alternative="use DockerSandboxClient instead",
+        )
 
         devbox = None
         reconnected = False

@@ -1071,6 +1071,10 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
     ) -> SandboxSession:
         if manifest is None:
             manifest = Manifest(root=DEFAULT_BLAXEL_WORKSPACE_ROOT)
+        manifest._reject_process_environment_values(
+            backend_id="blaxel",
+            supported_alternative="use DockerSandboxClient",
+        )
         self._validate_manifest_for_create(manifest)
 
         timeouts_in = options.timeouts
@@ -1154,6 +1158,10 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         if not isinstance(state, BlaxelSandboxSessionState):
             raise TypeError("BlaxelSandboxClient.resume expects a BlaxelSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="blaxel",
+            supported_alternative="use DockerSandboxClient instead",
+        )
         SandboxInstance = _import_blaxel_sdk()
         blaxel_sandbox = None
         reconnected = False

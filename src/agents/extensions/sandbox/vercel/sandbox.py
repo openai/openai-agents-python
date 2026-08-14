@@ -1564,6 +1564,10 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
             _resolve_manifest_root(manifest),
             options.allow_s3_credential_exposure,
         )
+        resolved_manifest._reject_process_environment_values(
+            backend_id="vercel",
+            supported_alternative="use DockerSandboxClient",
+        )
         try:
             self._validate_manifest_for_create(resolved_manifest)
             trusted_s3_mounts = _vercel_s3_mount_map(resolved_manifest)
@@ -1623,6 +1627,10 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         if not isinstance(state, VercelSandboxSessionState):
             raise TypeError("VercelSandboxClient.resume expects a VercelSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="vercel",
+            supported_alternative="use DockerSandboxClient instead",
+        )
         if state.s3_mounts_non_resumable or _vercel_s3_mounts(state.manifest):
             raise MountConfigError(
                 message=(

@@ -1259,6 +1259,12 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
     ) -> SandboxSession:
         if manifest is None:
             manifest = Manifest(root=DEFAULT_DAYTONA_WORKSPACE_ROOT)
+        manifest._reject_process_environment_values(
+            backend_id="daytona",
+            supported_alternative=(
+                "use DockerSandboxClient for protected process environment transport"
+            ),
+        )
         self._validate_manifest_for_create(manifest)
 
         timeouts_in = options.timeouts
@@ -1332,6 +1338,12 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, DaytonaSandboxSessionState):
             raise TypeError("DaytonaSandboxClient.resume expects a DaytonaSandboxSessionState")
+        state.manifest._reject_process_environment_values(
+            backend_id="daytona",
+            supported_alternative=(
+                "use DockerSandboxClient for protected process environment transport"
+            ),
+        )
         state.assert_path_grants_rebound()
 
         daytona_sandbox = None

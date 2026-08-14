@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, model_serializer
@@ -11,7 +11,7 @@ from .._mount_security import (
     redact_mount_error_data_sync,
 )
 from ..errors import MountConfigError
-from ..manifest import Manifest
+from ..manifest import Manifest, _normalize_process_environment_bindings
 from ..snapshot import SnapshotBase, SnapshotSpec
 from .base_sandbox_session import BaseSandboxSession
 from .dependencies import Dependencies
@@ -110,6 +110,21 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     backend_id: str
     supports_default_options: bool = False
     _dependencies: Dependencies | None = None
+    _process_environment_bindings: frozenset[tuple[str, str]] = frozenset()
+
+    def _configure_process_environment_bindings(
+        self,
+        *,
+        allowed_process_environment_keys: Iterable[str] = (),
+        process_environment_bindings: Mapping[str, str] | None = None,
+    ) -> None:
+        self._process_environment_bindings = _normalize_process_environment_bindings(
+            allowed_process_environment_keys=allowed_process_environment_keys,
+            process_environment_bindings=process_environment_bindings,
+        )
+
+    def _bind_process_environment_manifest(self, manifest: Manifest) -> Manifest:
+        return manifest._with_process_environment_access(self._process_environment_bindings)
 
     def _resolve_dependencies(self) -> Dependencies | None:
         if self._dependencies is None:
@@ -138,11 +153,13 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     ) -> Manifest:
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        trusted_manifest = self._bind_process_environment_manifest(manifest)
         validate_manifest_mount_credential_boundaries(
-            manifest,
+            trusted_manifest,
             provider_backend_id=self.backend_id,
         )
-        return manifest
+        trusted_manifest._validate_process_environment_access()
+        return trusted_manifest
 
     @abc.abstractmethod
     async def create(

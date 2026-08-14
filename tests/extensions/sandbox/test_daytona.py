@@ -37,7 +37,7 @@ from agents.sandbox.entries import (
 from agents.sandbox.entries.mounts.base import InContainerMountAdapter
 from agents.sandbox.errors import ExecTimeoutError, ExecTransportError, MountConfigError
 from agents.sandbox.files import EntryKind
-from agents.sandbox.manifest import Environment
+from agents.sandbox.manifest import Environment, ProcessEnvValue
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import (
     _MKDIR_ACCESS_CHECK_SCRIPT,
@@ -529,6 +529,41 @@ class _FailingUnmountMount(_RecordingMount):
 
 
 class TestDaytonaSandbox:
+    @pytest.mark.asyncio
+    async def test_create_rejects_process_environment_before_provider_create(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        manifest = Manifest(environment=Environment(value={"TOKEN": ProcessEnvValue()}))
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            with pytest.raises(ValueError, match="daytona does not support ProcessEnvValue"):
+                await client.create(
+                    manifest=manifest,
+                    options=daytona_module.DaytonaSandboxClientOptions(),
+                )
+
+        assert _FakeAsyncDaytona.create_calls == []
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_process_environment_before_provider_lookup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(environment=Environment(value={"TOKEN": ProcessEnvValue()})),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id="existing",
+        )
+
+        async with daytona_module.DaytonaSandboxClient() as client:
+            with pytest.raises(ValueError, match="daytona does not support ProcessEnvValue"):
+                await client.resume(state)
+
+        assert _FakeAsyncDaytona.get_calls == []
+
     @pytest.mark.asyncio
     async def test_create_uses_daytona_safe_default_workspace_root(
         self,

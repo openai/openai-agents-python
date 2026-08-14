@@ -23,7 +23,6 @@ from ._mount_security import (
     _replace_protected_mount_error,
     _validate_manifest_mount_provenance,
     redact_mount_error_data,
-    validate_manifest_mount_credential_boundaries,
 )
 from .capabilities import Capability
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
@@ -55,6 +54,8 @@ class _SandboxSessionResources:
         self._client = client
         self._owns_session = owns_session
         self._cleanup_lock = asyncio.Lock()
+        self._cleanup_requests = 0
+        self._cleanup_started = False
         self._cleaned = False
         self._started = False
 
@@ -67,54 +68,62 @@ class _SandboxSessionResources:
         return self._session.state
 
     async def ensure_started(self) -> None:
-        if self._started and await self._session.running():
-            return
-        if not self._owns_session and await self._session.running():
+        async with self._cleanup_lock:
+            if self._cleanup_started or self._cleanup_requests > 0:
+                raise RuntimeError("Sandbox session resource cleanup has already started")
+            if self._started and await self._session.running():
+                return
+            if not self._owns_session and await self._session.running():
+                self._started = True
+                return
+            await self._session.start()
             self._started = True
-            return
-        await self._session.start()
-        self._started = True
 
     @redact_mount_error_data
     async def cleanup(self) -> None:
         if not self._owns_session:
             return
-        async with self._cleanup_lock:
-            if self._cleaned:
-                return
-            self._cleaned = True
+        self._cleanup_requests += 1
+        try:
+            async with self._cleanup_lock:
+                self._cleanup_started = True
+                if self._cleaned:
+                    return
 
-            cleanup_error: BaseException | None = None
-            try:
-                await self._session.run_pre_stop_hooks()
-            except BaseException as exc:  # pragma: no cover
-                cleanup_error = exc
-            if cleanup_error is None and not self._session._pre_stop_hooks_failed:
+                cleanup_error: BaseException | None = None
                 try:
-                    await self._session.stop()
+                    await self._session.run_pre_stop_hooks()
                 except BaseException as exc:  # pragma: no cover
-                    if cleanup_error is None:
-                        cleanup_error = exc
-            try:
-                await self._session.shutdown()
-            except BaseException as exc:  # pragma: no cover
-                if cleanup_error is None:
                     cleanup_error = exc
-            finally:
+                if cleanup_error is None and not self._session._pre_stop_hooks_failed:
+                    try:
+                        await self._session.stop()
+                    except BaseException as exc:  # pragma: no cover
+                        if cleanup_error is None:
+                            cleanup_error = exc
                 try:
-                    if self._client is not None and isinstance(self._session, SandboxSession):
-                        await self._client.delete(self._session)
+                    await self._session.shutdown()
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:
                         cleanup_error = exc
                 finally:
                     try:
-                        await self._session._aclose_dependencies()
+                        if self._client is not None and isinstance(self._session, SandboxSession):
+                            await self._client.delete(self._session)
                     except BaseException as exc:  # pragma: no cover
                         if cleanup_error is None:
                             cleanup_error = exc
-            if cleanup_error is not None:
-                raise cleanup_error
+                    finally:
+                        try:
+                            await self._session._aclose_dependencies()
+                        except BaseException as exc:  # pragma: no cover
+                            if cleanup_error is None:
+                                cleanup_error = exc
+                if cleanup_error is not None:
+                    raise cleanup_error
+                self._cleaned = True
+        finally:
+            self._cleanup_requests -= 1
 
 
 @dataclass
@@ -280,7 +289,8 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 if cleanup_error is None:
                     resume_state = self.serialize_resume_state()
             finally:
-                self._resources_by_agent.clear()
+                if cleanup_error is None:
+                    self._resources_by_agent.clear()
                 self._current_agent_id = None
                 self._release_agents()
             if cleanup_error is not None:
@@ -596,10 +606,16 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             current_manifest,
             run_as_user=cls._agent_run_as_user(agent),
         )
+        if current_manifest._has_process_environment_values() or (
+            processed_manifest is not None and processed_manifest._has_process_environment_values()
+        ):
+            raise ValueError(
+                "Injected sandbox sessions cannot use ProcessEnvValue bindings; "
+                "use a client-owned fresh session or resume path instead"
+            )
         if processed_manifest is None or processed_manifest == current_manifest:
-            validate_manifest_mount_credential_boundaries(
-                current_manifest,
-                provider_backend_id=session.state.type,
+            await session._validate_manifest_before_provider_probe(
+                manifest=current_manifest,
             )
             running = await session.running()
             await session._validate_manifest_application(
@@ -612,9 +628,8 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             current_manifest=current_manifest,
             processed_manifest=processed_manifest,
         )
-        validate_manifest_mount_credential_boundaries(
-            processed_manifest,
-            provider_backend_id=session.state.type,
+        await session._validate_manifest_before_provider_probe(
+            manifest=processed_manifest,
         )
         running = await session.running()
         await session._validate_manifest_application(
@@ -837,10 +852,26 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             resume_manifest,
             run_as_user=cls._agent_run_as_user(agent),
         )
+        persisted_process_environment_bindings = (
+            resume_manifest._declared_process_environment_bindings()
+        )
+        processed_process_environment_bindings = (
+            frozenset()
+            if processed_manifest is None
+            else processed_manifest._declared_process_environment_bindings()
+        )
+        if not persisted_process_environment_bindings.issubset(
+            processed_process_environment_bindings
+        ):
+            raise ValueError(
+                "Resumed sandbox sessions cannot remove or change ProcessEnvValue bindings; "
+                "create a fresh sandbox session instead"
+            )
         if processed_manifest is None:
             return session_state
         processed_state = session_state.model_copy(update={"manifest": processed_manifest})
         processed_state = processed_state.rebind_persisted_path_grants(processed_manifest)
+        processed_state._resume_persisted_manifest = resume_manifest
         if not processed_state.mount_authority_redacted:
             return processed_state
         processed_trusted_manifest = cls._process_manifest(
@@ -848,10 +879,12 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             trusted_manifest,
             run_as_user=cls._agent_run_as_user(agent),
         )
-        return processed_state.rebind_persisted_mount_authority(
+        rebound_state = processed_state.rebind_persisted_mount_authority(
             processed_trusted_manifest,
             provider_backend_id=provider_backend_id,
         )
+        rebound_state._resume_persisted_manifest = resume_manifest
+        return rebound_state
 
     @staticmethod
     def _agent_run_as_user(agent: SandboxAgent[Any]) -> User | None:

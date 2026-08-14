@@ -264,6 +264,13 @@ class SandboxSession(BaseSandboxSession):
     def _runtime_has_protected_mount_authority(self) -> bool:
         return self._inner._runtime_has_protected_mount_authority()
 
+    def _validate_process_environment_compatibility(
+        self,
+        *,
+        manifest: Manifest | None = None,
+    ) -> None:
+        self._inner._validate_process_environment_compatibility(manifest=manifest)
+
     @property
     def dependencies(self) -> Dependencies:
         return self._inner.dependencies
@@ -550,6 +557,13 @@ class SandboxSession(BaseSandboxSession):
             session_running=session_running,
         )
 
+    async def _validate_manifest_before_provider_probe(
+        self,
+        *,
+        manifest: Manifest | None = None,
+    ) -> None:
+        await self._inner._validate_manifest_before_provider_probe(manifest=manifest)
+
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
         return await super().apply_manifest(only_ephemeral=only_ephemeral)
 
@@ -583,6 +597,7 @@ class SandboxSession(BaseSandboxSession):
         _ = port
         raise NotImplementedError("this should never be invoked")
 
+    @redact_mount_error_data
     async def pty_exec_start(
         self,
         *command: str | Path,

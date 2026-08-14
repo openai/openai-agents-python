@@ -3,8 +3,9 @@ import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from functools import wraps
 from pathlib import Path, PurePath
-from typing import Literal, NoReturn, TypeVar
+from typing import Any, Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
 
@@ -55,6 +56,26 @@ _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
+_PROCESS_ENVIRONMENT_OPERATION_GUARD = "_process_environment_operation_guard"
+_PROCESS_ENVIRONMENT_VALIDATED_OPERATIONS = (
+    "apply_manifest",
+    "exec",
+    "extract",
+    "hydrate_workspace",
+    "ls",
+    "mkdir",
+    "persist_workspace",
+    "provision_manifest_accounts",
+    "pty_exec_start",
+    "pty_terminate_all",
+    "pty_write_stdin",
+    "read",
+    "resolve_exposed_port",
+    "rm",
+    "running",
+    "start",
+    "write",
+)
 _READ_PATH_PROBE_SCRIPT = """
 # READ_PATH_PROBE_V3
 LC_ALL=C
@@ -196,6 +217,52 @@ _RM_ACCESS_CHECK_SCRIPT = (
 )
 
 
+@redact_mount_error_data
+async def _run_redacted_process_environment_operation(
+    operation: Any,
+    self: "BaseSandboxSession",
+    *args: object,
+    **kwargs: object,
+) -> object:
+    return await operation(self, *args, **kwargs)
+
+
+def _guard_process_environment_operation(operation: Any) -> Any:
+    @wraps(operation)
+    async def guarded(
+        self: "BaseSandboxSession",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        self._validate_process_environment_compatibility()
+        if self.state.manifest._has_process_environment_values():
+            return await _run_redacted_process_environment_operation(
+                operation,
+                self,
+                *args,
+                **kwargs,
+            )
+        return await operation(self, *args, **kwargs)
+
+    setattr(guarded, _PROCESS_ENVIRONMENT_OPERATION_GUARD, True)
+    return guarded
+
+
+_SDK_PROCESS_ENVIRONMENT_SESSION_TYPES: set[type["BaseSandboxSession"]] = set()
+_SessionClassT = TypeVar("_SessionClassT", bound=type["BaseSandboxSession"])
+
+
+def _register_sdk_process_environment_session_type(
+    session_type: _SessionClassT,
+) -> _SessionClassT:
+    _SDK_PROCESS_ENVIRONMENT_SESSION_TYPES.add(session_type)
+    return session_type
+
+
+def _is_sdk_process_environment_session(session: "BaseSandboxSession") -> bool:
+    return type(session) in _SDK_PROCESS_ENVIRONMENT_SESSION_TYPES
+
+
 class BaseSandboxSession(abc.ABC):
     state: SandboxSessionState
     _dependencies: Dependencies | None = None
@@ -224,6 +291,31 @@ class BaseSandboxSession(abc.ABC):
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        for name in _PROCESS_ENVIRONMENT_VALIDATED_OPERATIONS:
+            operation = getattr(cls, name, None)
+            if operation is None or getattr(operation, _PROCESS_ENVIRONMENT_OPERATION_GUARD, False):
+                continue
+            setattr(cls, name, _guard_process_environment_operation(operation))
+
+    def _validate_process_environment_compatibility(
+        self,
+        *,
+        manifest: Manifest | None = None,
+    ) -> None:
+        current_manifest = manifest or self.state.manifest
+        if not current_manifest._has_process_environment_values():
+            return
+        if _is_sdk_process_environment_session(self):
+            return
+        current_manifest._reject_process_environment_values(
+            backend_id=getattr(self.state, "type", type(self).__name__),
+            supported_alternative=(
+                "use DockerSandboxClient for protected process environment transport"
+            ),
+        )
+
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
 
@@ -233,6 +325,7 @@ class BaseSandboxSession(abc.ABC):
     async def start(self) -> None:
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        self._validate_process_environment_compatibility()
         validate_manifest_mount_credential_boundaries(
             self.state.manifest,
             provider_backend_id=self.state.type,
@@ -496,11 +589,15 @@ class BaseSandboxSession(abc.ABC):
             cleanup_error = exc
         try:
             if cleanup_error is None and not self._pre_stop_hooks_failed:
-                await self.stop()
-            await self.shutdown()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
+                try:
+                    await self.stop()
+                except BaseException as exc:
+                    cleanup_error = exc
+            try:
+                await self.shutdown()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         finally:
             try:
                 await self._aclose_dependencies()
@@ -1276,8 +1373,18 @@ class BaseSandboxSession(abc.ABC):
         session_running: bool | None = None,
     ) -> None:
         _ = (only_ephemeral, session_running)
+        await self._validate_manifest_before_provider_probe(
+            manifest=manifest,
+        )
+
+    async def _validate_manifest_before_provider_probe(
+        self,
+        *,
+        manifest: Manifest | None = None,
+    ) -> None:
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        self._validate_process_environment_compatibility(manifest=manifest)
         validate_manifest_mount_credential_boundaries(
             manifest or self.state.manifest,
             provider_backend_id=self.state.type,
