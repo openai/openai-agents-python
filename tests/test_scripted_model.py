@@ -1987,7 +1987,9 @@ async def test_scripted_model_automatic_stream_emits_text_annotation_events() ->
     assert isinstance(added_part.part, ResponseOutputText)
     assert added_part.part.annotations == []
     assert [event.annotation_index for event in annotation_events] == [0, 1]
-    assert [event.annotation for event in annotation_events] == annotations
+    assert [event.model_dump()["annotation"] for event in annotation_events] == [
+        annotation.model_dump() for annotation in annotations
+    ]
     assert all(event.item_id == "message_1" for event in annotation_events)
     assert all(event.output_index == 0 for event in annotation_events)
     assert all(event.content_index == 0 for event in annotation_events)

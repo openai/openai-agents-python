@@ -1007,14 +1007,16 @@ def _stream_events_for_step(
                         events.append(
                             cast(
                                 TResponseStreamEvent,
-                                ResponseOutputTextAnnotationAddedEvent(
-                                    type="response.output_text.annotation.added",
-                                    item_id=output_item.id,
-                                    output_index=output_index,
-                                    content_index=content_index,
-                                    annotation_index=annotation_index,
-                                    annotation=copy.deepcopy(annotation),
-                                    sequence_number=sequence_number,
+                                ResponseOutputTextAnnotationAddedEvent.model_validate(
+                                    {
+                                        "type": "response.output_text.annotation.added",
+                                        "item_id": output_item.id,
+                                        "output_index": output_index,
+                                        "content_index": content_index,
+                                        "annotation_index": annotation_index,
+                                        "annotation": annotation.model_dump(),
+                                        "sequence_number": sequence_number,
+                                    }
                                 ),
                             )
                         )
