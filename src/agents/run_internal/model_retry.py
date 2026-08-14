@@ -166,6 +166,16 @@ async def _call_retry_policy(
     return _coerce_retry_decision(decision)
 
 
+def _explicit_max_delay(backoff: ModelRetryBackoffInput | None) -> float | None:
+    """Return the caller's configured retry ceiling, or `None` when they did not set one.
+
+    The default ceiling exists to bound the SDK's own exponential growth. It is deliberately not
+    substituted here, so an unconfigured caller keeps honoring a provider's retry-after in full.
+    """
+    settings = _coerce_backoff_settings(backoff)
+    return settings.max_delay if settings is not None else None
+
+
 def _default_retry_delay(
     attempt: int,
     backoff: ModelRetryBackoffInput | None,
@@ -196,6 +206,17 @@ def _default_retry_delay(
     if not use_jitter:
         return base
     return min(max(base * (0.875 + random.random() * 0.25), 0.0), max_delay)
+
+
+def _capped_provider_delay(
+    retry_after: float,
+    backoff: ModelRetryBackoffInput | None,
+) -> float:
+    """Bound a provider-supplied retry-after by the caller's configured ceiling."""
+    max_delay = _explicit_max_delay(backoff)
+    if max_delay is None:
+        return retry_after
+    return min(retry_after, max_delay)
 
 
 async def _sleep_for_retry(delay: float) -> None:
@@ -372,8 +393,14 @@ async def _evaluate_retry(
         delay=(
             decision.delay
             if decision.delay is not None
+            # The policy did not name a delay, so the provider's retry-after is used on its
+            # behalf. That substitution still respects an explicitly configured ceiling;
+            # otherwise a single `Retry-After` header decides how long the run blocks, and
+            # `max_delay` silently stops being a maximum. A caller who configured no ceiling
+            # keeps honoring the provider in full, and a policy that returns its own delay
+            # keeps that delay.
             else (
-                normalized.retry_after
+                _capped_provider_delay(normalized.retry_after, retry_backoff)
                 if normalized.retry_after is not None
                 else _default_retry_delay(attempt, retry_backoff)
             )

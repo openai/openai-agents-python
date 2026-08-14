@@ -3004,3 +3004,97 @@ async def test_unsafe_replay_approval_does_not_lift_a_stateful_request_with_unkn
         )
 
     assert calls == 1
+
+
+async def _run_once_with_retry_after(
+    *,
+    retry_after: float,
+    backoff: ModelRetryBackoffSettings,
+    policy: Any = None,
+) -> list[float]:
+    """Fail once, then succeed, returning the delays the runner slept for."""
+    sleeps: list[float] = []
+    calls = 0
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async def rewind() -> None:
+        return None
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _connection_error()
+        return ModelResponse(
+            output=[get_text_message("ok")],
+            usage=Usage(requests=0),
+            response_id="resp_retry_after_cap",
+        )
+
+    original_sleep = asyncio.sleep
+    asyncio.sleep = fake_sleep  # type: ignore[assignment]
+    try:
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff=backoff,
+                policy=policy or retry_policies.network_error(),
+            ),
+            get_retry_advice=lambda _request: ModelRetryAdvice(
+                suggested=True, retry_after=retry_after
+            ),
+            previous_response_id=None,
+            conversation_id=None,
+        )
+    finally:
+        asyncio.sleep = original_sleep  # type: ignore[assignment]
+    return sleeps
+
+
+@pytest.mark.asyncio
+async def test_provider_retry_after_is_capped_by_configured_max_delay() -> None:
+    """A configured `max_delay` bounds a provider retry-after the policy did not ask for."""
+    sleeps = await _run_once_with_retry_after(
+        retry_after=3600.0,
+        backoff=ModelRetryBackoffSettings(initial_delay=1.0, max_delay=5.0, jitter=False),
+    )
+    assert sleeps == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_provider_retry_after_below_max_delay_is_unchanged() -> None:
+    """Capping must not round a provider retry-after up to the ceiling."""
+    sleeps = await _run_once_with_retry_after(
+        retry_after=1.5,
+        backoff=ModelRetryBackoffSettings(initial_delay=1.0, max_delay=5.0, jitter=False),
+    )
+    assert sleeps == [1.5]
+
+
+@pytest.mark.asyncio
+async def test_provider_retry_after_is_honored_without_a_configured_max_delay() -> None:
+    """Without an explicit ceiling the provider's retry-after is still honored in full.
+
+    The default ceiling bounds the SDK's own backoff growth. Substituting it here would shrink a
+    server's rate-limit instruction to the 2.0s default and retry far sooner than it asked.
+    """
+    sleeps = await _run_once_with_retry_after(
+        retry_after=45.0,
+        backoff=ModelRetryBackoffSettings(initial_delay=1.0, jitter=False),
+    )
+    assert sleeps == [45.0]
+
+
+@pytest.mark.asyncio
+async def test_policy_supplied_delay_is_not_capped_by_max_delay() -> None:
+    """An explicit `RetryDecision.delay` is the application's own number and is left alone."""
+    sleeps = await _run_once_with_retry_after(
+        retry_after=3600.0,
+        backoff=ModelRetryBackoffSettings(initial_delay=1.0, max_delay=5.0, jitter=False),
+        policy=lambda _context: RetryDecision(retry=True, delay=30.0),
+    )
+    assert sleeps == [30.0]
