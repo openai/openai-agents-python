@@ -15,7 +15,7 @@ from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..result import RunResult
-from ..run_config import RunConfig
+from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
 from ..run_state import RunState
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
@@ -536,14 +536,15 @@ async def save_final_turn_items_after_guardrails(
     input_guardrail_results: list[InputGuardrailResult],
     items: list[RunItem],
     response_id: str | None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
-) -> None:
+) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
     if not session_persistence_enabled or not items:
-        return
+        return 0
     if input_guardrails_triggered(input_guardrail_results):
-        return
+        return 0
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
@@ -554,13 +555,14 @@ async def save_final_turn_items_after_guardrails(
             store=store,
             wrapper=wrapper,
         )
-        return
-    await save_result_to_session(
+        return run_state._current_turn_persisted_item_count
+    return await save_result_to_session(
         session,
         [],
         list(items),
         run_state,
         response_id=response_id,
+        reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
     )

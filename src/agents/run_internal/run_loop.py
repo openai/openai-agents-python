@@ -30,17 +30,22 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
     _DATA_REDACTED_ERROR_MESSAGE,
     AgentsException,
+    BaseExceptionGroup,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
+    _base_exception_group_exceptions,
     _clear_data_redacted_error_traceback,
+    _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _mark_error_data_redacted,
+    _prepare_data_redacted_error,
 )
+from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
 from ..items import (
     InputItem,
@@ -251,6 +256,7 @@ __all__ = [
     "get_model_tracing_impl",
     "validate_run_hooks",
     "cleanup_models_after_run",
+    "finalize_max_turns_handler_output",
     "maybe_filter_model_input",
     "run_input_guardrails_with_queue",
     "start_streaming",
@@ -522,6 +528,7 @@ async def _finalize_streamed_final_output(
     response_id: str | None,
     store_setting: bool | None,
     persist_before_output_guardrails: bool,
+    on_persisted_after_guardrails: Callable[[bool], None] | None = None,
 ) -> None:
     redacted_persistence_error: BaseException | None = None
     if persist_before_output_guardrails:
@@ -560,15 +567,9 @@ async def _finalize_streamed_final_output(
         if not persist_before_output_guardrails:
             try:
                 await save_items(items, response_id, store_setting)
-            except (Exception, asyncio.CancelledError) as persistence_error:
+            except BaseException as persistence_error:
                 if guardrail_error_is_redacted:
-                    if isinstance(persistence_error, asyncio.CancelledError):
-                        safe_persistence_error: BaseException = asyncio.CancelledError(
-                            _DATA_REDACTED_ERROR_MESSAGE
-                        )
-                    else:
-                        safe_persistence_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
-                    _mark_error_data_redacted(safe_persistence_error)
+                    safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
                     if (
                         isinstance(safe_persistence_error, asyncio.CancelledError)
                         and streamed_result._cancel_mode != "immediate"
@@ -596,23 +597,212 @@ async def _finalize_streamed_final_output(
                     streamed_result._stored_exception = persistence_error
                 if redacted_persistence_error is None:
                     raise
+            else:
+                if on_persisted_after_guardrails is not None:
+                    on_persisted_after_guardrails(False)
         if redacted_persistence_error is None:
             raise
 
     if redacted_persistence_error is not None:
         raise redacted_persistence_error from None
 
-    streamed_result.output_guardrail_results = output_guardrail_results
-    streamed_result.final_output = output
-    streamed_result.is_complete = True
+    streamed_result.output_guardrail_results.extend(output_guardrail_results)
 
     if not persist_before_output_guardrails:
         # Saved as one ordered batch so the session mirrors the model response. Doing it in two
         # halves would both reorder the turn and, because the first save advances the turn's
         # persisted-item count, make the second one a no-op.
-        await save_items(items, response_id, store_setting)
+        if on_persisted_after_guardrails is None:
+            await save_items(items, response_id, store_setting)
+        else:
+            try:
+                await save_items(items, response_id, store_setting)
+            except asyncio.CancelledError as persistence_error:
+                if streamed_result._cancel_mode == "immediate":
+                    raise
+                streamed_result._stored_exception = persistence_error
+                streamed_result.is_complete = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                return
+
+    streamed_result.final_output = output
+    if on_persisted_after_guardrails is not None:
+        on_persisted_after_guardrails(True)
+    streamed_result.is_complete = True
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+
+
+def _safe_redacted_persistence_leaf_error(error: BaseException) -> BaseException:
+    """Snapshot a payload-free non-group replacement without mutating the source."""
+    safe_error = _copy_data_redacted_process_control_error(error)
+    if isinstance(safe_error, asyncio.CancelledError):
+        safe_error.args = (_DATA_REDACTED_ERROR_MESSAGE,)
+        _mark_error_data_redacted(safe_error)
+        return safe_error
+    if isinstance(safe_error, GeneratorExit | KeyboardInterrupt | SystemExit):
+        return safe_error
+
+    if issubclass(type(error), Exception):
+        safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
+        _mark_error_data_redacted(safe_error)
+        return safe_error
+
+    safe_error = BaseException()
+    _mark_error_data_redacted(safe_error)
+    return safe_error
+
+
+class _RedactedBaseExceptionGroup(BaseExceptionGroup):
+    """Payload-free group that remains outside the Exception hierarchy."""
+
+
+def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
+    """Return a payload-free persistence failure without swallowing control flow."""
+    if _base_exception_group_exceptions(error) is None:
+        safe_error = _safe_redacted_persistence_leaf_error(error)
+        _prepare_data_redacted_error(error)
+        return safe_error
+
+    group_children: dict[int, tuple[BaseException, ...]] = {}
+    group_is_exception: dict[int, bool] = {}
+    leaf_errors: dict[int, BaseException] = {}
+    safe_errors: dict[int, BaseException] = {}
+    group_postorder: list[BaseException] = []
+    pending: list[tuple[BaseException, bool]] = [(error, False)]
+    try:
+        while pending:
+            current, expanded = pending.pop()
+            current_id = id(current)
+            children = _base_exception_group_exceptions(current)
+            if children is None:
+                leaf_errors.setdefault(current_id, current)
+                continue
+            if expanded:
+                group_postorder.append(current)
+                continue
+            if current_id in group_children:
+                continue
+            group_children[current_id] = children
+            group_is_exception[current_id] = issubclass(type(current), Exception)
+            pending.append((current, True))
+            pending.extend((child, False) for child in reversed(children))
+
+        # Snapshot the full group topology before clearing any source exception. On Python 3.10,
+        # the exceptiongroup backport stores children in the instance dictionary, so sanitizing a
+        # linked leaf can otherwise erase a group that has not been converted yet.
+        for current_id, current in leaf_errors.items():
+            safe_errors[current_id] = _safe_redacted_persistence_leaf_error(current)
+
+        # Clear the complete provider-owned graph before constructing replacement groups. Group
+        # messages are read-only, so the source objects must never cross the public boundary.
+        _prepare_data_redacted_error(error)
+
+        for group in group_postorder:
+            children = group_children[id(group)]
+            safe_children = [safe_errors[id(child)] for child in children]
+            if not safe_children:
+                safe_children = [BaseException()]
+            if group_is_exception[id(group)]:
+                safe_group: BaseException = BaseExceptionGroup(
+                    _DATA_REDACTED_ERROR_MESSAGE,
+                    safe_children,
+                )
+            else:
+                safe_group = _RedactedBaseExceptionGroup(
+                    _DATA_REDACTED_ERROR_MESSAGE,
+                    safe_children,
+                )
+            _mark_error_data_redacted(safe_group)
+            safe_errors[id(group)] = safe_group
+        return safe_errors[id(error)]
+    except BaseException as conversion_error:
+        # Fail closed if traversal or reconstruction itself fails. Preparing the conversion error
+        # also clears its implicit context, including any source group still referenced there.
+        _prepare_data_redacted_error(error)
+        safe_error = _safe_redacted_persistence_leaf_error(conversion_error)
+        _prepare_data_redacted_error(conversion_error)
+        return safe_error
+
+
+async def finalize_max_turns_handler_output(
+    *,
+    agent: Agent[TContext],
+    hooks: RunHooks[TContext],
+    run_config: RunConfig,
+    output: Any,
+    context_wrapper: RunContextWrapper[TContext],
+    output_guardrail_results: list[OutputGuardrailResult],
+    save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
+    include_in_history: bool,
+) -> tuple[Any, RunItem]:
+    """Validate and finalize one synthesized max-turn handler output."""
+    validated_output = validate_handler_final_output(agent, output)
+    output_text = format_final_output_text(agent, validated_output)
+    synthesized_item = create_message_output_item(agent, output_text)
+
+    await run_final_output_hooks(agent, hooks, context_wrapper, validated_output)
+
+    redacted_persistence_error: BaseException | None = None
+    try:
+        await run_output_guardrails(
+            agent.output_guardrails + (run_config.output_guardrails or []),
+            agent,
+            validated_output,
+            context_wrapper,
+            output_guardrail_results,
+        )
+    except OutputGuardrailTripwireTriggered:
+        raise
+    except Exception as guardrail_error:
+        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
+        if guardrail_error_is_redacted:
+            _detach_data_redacted_error_traceback(guardrail_error)
+        try:
+            await save_items_after_guardrails([synthesized_item] if include_in_history else [])
+        except BaseException as persistence_error:
+            if not guardrail_error_is_redacted:
+                raise
+            redacted_persistence_error = _safe_redacted_persistence_error(persistence_error)
+        if redacted_persistence_error is None:
+            raise
+
+    if redacted_persistence_error is not None:
+        raise redacted_persistence_error from None
+    return validated_output, synthesized_item
+
+
+async def _persist_stream_input_if_needed(
+    *,
+    streamed_result: RunResultStreaming,
+    session: Session | None,
+    server_conversation_tracker: OpenAIServerConversationTracker | None,
+    context_wrapper: RunContextWrapper[TContext],
+) -> None:
+    if (
+        streamed_result._stream_input_persisted
+        or session is None
+        or server_conversation_tracker is not None
+        or streamed_result._original_input_for_persistence is None
+        or len(streamed_result._original_input_for_persistence) == 0
+    ):
+        return
+
+    input_items_to_save = [
+        ensure_input_item_format(item)
+        for item in ItemHelpers.input_to_new_input_list(
+            streamed_result._original_input_for_persistence
+        )
+    ]
+    if input_items_to_save:
+        await save_result_to_session(
+            session,
+            input_items_to_save,
+            [],
+            streamed_result._state,
+            wrapper=context_wrapper,
+        )
+    streamed_result._stream_input_persisted = True
 
 
 def _accumulate_tool_guardrail_results(
@@ -919,6 +1109,27 @@ async def start_streaming(
                 update_persisted_count=False,
                 store=store_setting,
             )
+
+        async def _save_max_turns_items(
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
+        ) -> None:
+            if not await _should_persist_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+            ):
+                return
+            saved_count = await save_result_to_session(
+                session,
+                [],
+                list(items),
+                None,
+                response_id=response_id,
+                reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
+                store=store_setting,
+                wrapper=streamed_result.context_wrapper,
+            )
+            streamed_result._current_turn_persisted_item_count += saved_count
     except BaseException:
         if current_task_span is not None:
             attach_usage_to_span(
@@ -1280,48 +1491,61 @@ async def start_streaming(
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     break
 
+                await _persist_stream_input_if_needed(
+                    streamed_result=streamed_result,
+                    session=session,
+                    server_conversation_tracker=server_conversation_tracker,
+                    context_wrapper=context_wrapper,
+                )
+
                 validated_output = validate_handler_final_output(
                     current_agent, handler_result.final_output
                 )
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
                 include_in_history = handler_result.include_in_history
-                if include_in_history:
-                    streamed_result._model_input_items.append(synthesized_item)
-                    streamed_result.new_items.append(synthesized_item)
-                    if run_state is not None:
-                        run_state._generated_items = list(streamed_result._model_input_items)
-                        run_state._clear_generated_items_last_processed_marker()
-                        run_state._session_items = list(streamed_result.new_items)
-                    stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
-                    store_setting = current_agent.model_settings.resolve(
-                        run_config.model_settings
-                    ).store
-                    if is_resumed_state:
-                        await _save_resumed_items([synthesized_item], None, store_setting)
-                    else:
-                        await _save_stream_items_with_count([synthesized_item], None, store_setting)
+                store_setting = current_agent.model_settings.resolve(
+                    run_config.model_settings
+                ).store
 
                 await run_final_output_hooks(
                     current_agent, hooks, context_wrapper, validated_output
                 )
-                output_guardrail_results = await _run_output_guardrails_for_stream(
+
+                def _record_max_turns_handler_output(
+                    publish_events: bool,
+                    include_in_history: bool = include_in_history,
+                    synthesized_item: RunItem = synthesized_item,
+                ) -> None:
+                    if not include_in_history:
+                        return
+                    streamed_result._model_input_items.append(synthesized_item)
+                    streamed_result.new_items.append(synthesized_item)
+                    if run_state is not None and not is_resumed_state:
+                        run_state._generated_items = list(streamed_result._model_input_items)
+                        run_state._clear_generated_items_last_processed_marker()
+                        run_state._session_items = list(streamed_result.new_items)
+                    if publish_events:
+                        stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
+
+                await _finalize_streamed_final_output(
+                    streamed_result=streamed_result,
                     agent=current_agent,
                     run_config=run_config,
                     output=validated_output,
                     context_wrapper=context_wrapper,
-                    streamed_result=streamed_result,
+                    save_items=_save_max_turns_items,
+                    items=[synthesized_item] if include_in_history else [],
+                    response_id=None,
+                    store_setting=store_setting,
+                    persist_before_output_guardrails=False,
+                    on_persisted_after_guardrails=_record_max_turns_handler_output,
                 )
-                streamed_result.output_guardrail_results = output_guardrail_results
-                streamed_result.final_output = validated_output
-                streamed_result.is_complete = True
-                streamed_result._stored_exception = None
                 streamed_result._max_turns_handled = True
                 streamed_result.current_turn = max_turns
-                if run_state is not None:
+                if run_state is not None and not is_resumed_state:
                     run_state._current_turn = max_turns
                     run_state._current_step = None
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                 break
 
             if current_turn == 1:
@@ -1585,13 +1809,20 @@ async def start_streaming(
             )
         raise
     except Exception as e:
-        attach_generic_agent_error(
-            current_span,
-            e,
-            trace_include_sensitive_data=run_config.trace_include_sensitive_data,
-        )
+        if _is_error_data_redacted(e):
+            _detach_data_redacted_error_traceback(e)
+        else:
+            attach_generic_agent_error(
+                current_span,
+                e,
+                trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+            )
         streamed_result.is_complete = True
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+        raise
+    except BaseException as error:
+        if _is_error_data_redacted(error):
+            _detach_data_redacted_error_traceback(error)
         raise
     else:
         streamed_result.is_complete = True
@@ -1788,28 +2019,12 @@ async def run_single_turn_streamed(
         ),
     )
 
-    if (
-        not streamed_result._stream_input_persisted
-        and session is not None
-        and server_conversation_tracker is None
-        and streamed_result._original_input_for_persistence is not None
-        and len(streamed_result._original_input_for_persistence) > 0
-    ):
-        streamed_result._stream_input_persisted = True
-        input_items_to_save = [
-            ensure_input_item_format(item)
-            for item in ItemHelpers.input_to_new_input_list(
-                streamed_result._original_input_for_persistence
-            )
-        ]
-        if input_items_to_save:
-            await save_result_to_session(
-                session,
-                input_items_to_save,
-                [],
-                streamed_result._state,
-                wrapper=context_wrapper,
-            )
+    await _persist_stream_input_if_needed(
+        streamed_result=streamed_result,
+        session=session,
+        server_conversation_tracker=server_conversation_tracker,
+        context_wrapper=context_wrapper,
+    )
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id

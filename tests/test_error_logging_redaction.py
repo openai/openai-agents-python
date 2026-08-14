@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import pickle
+import sys
 import threading
 import traceback
 import warnings
@@ -41,12 +42,18 @@ from agents import (
     RunErrorHandlerInput,
     RunErrorHandlerResult,
     Runner,
+    RunResultStreaming,
     UserError,
     function_tool,
     handoff,
     trace,
 )
 from agents.agent_output import AgentOutputSchema
+from agents.exceptions import (
+    BaseExceptionGroup,
+    _detach_data_redacted_error_traceback,
+    _mark_error_data_redacted,
+)
 from agents.logger import (
     log_model_action_debug,
     log_model_action_error,
@@ -60,6 +67,8 @@ from agents.logger import (
     log_tool_action_warning,
 )
 from agents.realtime import RealtimeAgent, realtime_handoff
+from agents.run import AgentRunner
+from agents.run_internal.run_loop import _safe_redacted_persistence_error
 from agents.run_internal.tool_execution import (
     log_tool_action_error,
     resolve_approval_rejection_message,
@@ -103,6 +112,20 @@ class _HostileException(Exception):
 class _HostileAttributeWriteException(Exception):
     def __setattr__(self, name: str, value: Any) -> None:
         raise RuntimeError("redacted handling mutated the handler exception")
+
+
+class _DirectBaseException(BaseException):
+    pass
+
+
+class _HostileClassBaseException(BaseException):
+    @property
+    def __class__(self) -> type[object]:
+        raise RuntimeError("hostile class descriptor secret")
+
+
+class _HybridCancelledError(asyncio.CancelledError, Exception):
+    pass
 
 
 class _TruthinessException(Exception):
@@ -1327,6 +1350,30 @@ def test_run_sync_surfaces_redacted_output_validation_error_without_runner_data(
     assert all(session is not value for frame in frame_locals for value in frame.values())
 
 
+def test_run_sync_preserves_redacted_hybrid_cancellation_catchability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hybrid_error = _HybridCancelledError("RUN_SYNC_HYBRID_SECRET")
+    _mark_error_data_redacted(hybrid_error)
+
+    async def raise_hybrid_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise hybrid_error
+
+    monkeypatch.setattr(AgentRunner, "run", raise_hybrid_error)
+
+    with pytest.raises(Exception) as exc_info:
+        AgentRunner().run_sync(Agent(name="A"), "RUN_SYNC_INPUT_SECRET")
+
+    error = exc_info.value
+    assert isinstance(error, asyncio.CancelledError)
+    assert isinstance(error, Exception)
+    assert str(error) == ""
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, "RUN_SYNC_HYBRID_SECRET")
+    _assert_secret_absent_from_agents_traceback(error, "RUN_SYNC_INPUT_SECRET")
+
+
 @pytest.mark.asyncio
 async def test_run_preserves_diagnostic_wrapper_traceback_locals(
     monkeypatch: pytest.MonkeyPatch,
@@ -1345,6 +1392,31 @@ async def test_run_preserves_diagnostic_wrapper_traceback_locals(
     frame_locals = _agents_traceback_frame_locals(error)
     assert any(frame.get("input") == diagnostic_input for frame in frame_locals)
     assert any(frame.get("session") is session for frame in frame_locals)
+
+
+@pytest.mark.asyncio
+async def test_streaming_redaction_boundary_defers_inner_coroutine_until_task_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_streaming_called = False
+
+    async def inner_streaming() -> None:
+        return None
+
+    def start_streaming_factory(**_kwargs: Any) -> Any:
+        nonlocal start_streaming_called
+        start_streaming_called = True
+        return inner_streaming()
+
+    monkeypatch.setattr("agents.run.start_streaming", start_streaming_factory)
+    result = AgentRunner().run_streamed(Agent(name="A", model=ScriptedModel()), "go")
+    assert result.run_loop_task is not None
+
+    result.run_loop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await result.run_loop_task
+
+    assert not start_streaming_called
 
 
 def test_run_sync_preserves_diagnostic_wrapper_traceback_locals(
@@ -1612,6 +1684,748 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
     assert persistence_secret not in str(error)
     _assert_secret_absent_from_agents_traceback(error, persistence_secret)
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+
+
+def _persistence_failure(
+    kind: Literal["exception", "cancelled", "direct_base", "exception_group", "group"],
+    secret: str,
+) -> BaseException:
+    if kind == "exception":
+        return LookupError(f"session save failed: {secret}")
+    if kind == "cancelled":
+        return asyncio.CancelledError(f"session save cancelled: {secret}")
+    if kind == "direct_base":
+        return _DirectBaseException(f"session save aborted: {secret}")
+    if kind == "exception_group":
+        return BaseExceptionGroup(
+            f"session save exception group: {secret}",
+            [RuntimeError(f"session save child: {secret}")],
+        )
+    return BaseExceptionGroup(
+        f"session save group: {secret}",
+        [
+            RuntimeError(f"session save child: {secret}"),
+            asyncio.CancelledError(f"session save cancelled child: {secret}"),
+        ],
+    )
+
+
+def _exception_graph(error: BaseException) -> list[BaseException]:
+    graph: list[BaseException] = []
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        graph.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return graph
+
+
+def _assert_secret_absent_from_value_graph(value: Any, secret: str) -> None:
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+
+        if isinstance(current, str):
+            assert secret not in current
+        elif isinstance(current, bytes):
+            assert secret.encode() not in current
+        elif isinstance(current, BaseExceptionGroup):
+            assert secret not in current.message
+            pending.extend(current.exceptions)
+            pending.extend(current.args)
+        elif isinstance(current, BaseException):
+            assert secret not in str(current)
+            assert secret not in repr(current)
+            pending.extend(current.args)
+        elif type(current) is dict:
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif type(current) in {list, tuple, set, frozenset}:
+            pending.extend(current)
+        else:
+            assert secret not in repr(current)
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["exception", "cancelled", "direct_base", "exception_group", "base_group"],
+)
+@pytest.mark.asyncio
+async def test_sandbox_cleanup_wrapper_preserves_redaction_boundary(
+    redacted: bool,
+    failure_kind: Literal["exception", "cancelled", "direct_base", "exception_group", "base_group"],
+) -> None:
+    secret = f"SANDBOX_WRAPPER_SECRET_{failure_kind}"
+    if failure_kind == "exception":
+        error: BaseException = RuntimeError()
+    elif failure_kind == "cancelled":
+        error = asyncio.CancelledError()
+    elif failure_kind == "direct_base":
+        error = _DirectBaseException()
+    elif failure_kind == "exception_group":
+        error = BaseExceptionGroup("Error details are redacted.", [RuntimeError()])
+    else:
+        error = BaseExceptionGroup(
+            "Error details are redacted.",
+            [asyncio.CancelledError()],
+        )
+
+    async def original_task() -> None:
+        payload = secret
+        assert payload
+        try:
+            raise error
+        except BaseException as caught:
+            if redacted:
+                _mark_error_data_redacted(caught)
+                _detach_data_redacted_error_traceback(caught)
+                payload = None
+            raise
+
+    async def cleanup() -> None:
+        return None
+
+    result = RunResultStreaming(
+        input=secret,
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="test"),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+    result._sandbox_cleanup = cleanup
+    result.run_loop_task = asyncio.create_task(original_task())
+    result.ensure_sandbox_cleanup_on_completion()
+    assert result.run_loop_task is not None
+
+    callback_frame_locals: list[dict[str, Any]] = []
+    task_done = asyncio.Event()
+
+    def inspect_public_task(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except BaseException as caught:
+            callback_frame_locals.extend(_agents_traceback_frame_locals(caught))
+        finally:
+            task_done.set()
+
+    result.run_loop_task.add_done_callback(inspect_public_task)
+    await asyncio.wait_for(task_done.wait(), timeout=1)
+
+    if redacted:
+        for frame_locals in callback_frame_locals:
+            _assert_secret_absent_from_value_graph(frame_locals, secret)
+    else:
+        if failure_kind == "cancelled" and sys.version_info < (3, 11):
+            assert callback_frame_locals == []
+        else:
+            assert callback_frame_locals
+            assert any(secret in repr(frame) for frame in callback_frame_locals)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("failure_kind", ["exception", "cancelled", "direct_base", "group"])
+@pytest.mark.asyncio
+async def test_max_turns_recovery_session_failure_preserves_complete_redaction_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streamed: bool,
+    failure_kind: Literal["exception", "cancelled", "direct_base", "group"],
+) -> None:
+    persistence_secret = "MAX_TURNS_SESSION_FAILURE_SECRET"
+    fallback_secret = "MAX_TURNS_HANDLER_OUTPUT_SECRET"
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+    guardrail_failed = False
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    class FailingMaxTurnsSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                raise _persistence_failure(failure_kind, persistence_secret)
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    caplog.set_level(logging.ERROR, logger="openai.agents")
+    agent = Agent(
+        name="A",
+        model=ScriptedModel(),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = FailingMaxTurnsSession()
+
+    captured_error: BaseException | None = None
+    try:
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                "go",
+                max_turns=0,
+                session=session,
+                error_handlers={"max_turns": lambda data: fallback_secret},
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                "go",
+                max_turns=0,
+                session=session,
+                error_handlers={"max_turns": lambda data: fallback_secret},
+            )
+    except BaseException as error:
+        captured_error = error
+    else:  # pragma: no cover
+        raise AssertionError("the session failure must propagate")
+
+    assert captured_error is not None
+    error = captured_error
+    if failure_kind == "exception":
+        assert isinstance(error, UserError)
+    elif failure_kind == "cancelled":
+        assert isinstance(error, asyncio.CancelledError)
+    elif failure_kind == "direct_base":
+        assert type(error) is BaseException
+    else:
+        assert isinstance(error, BaseExceptionGroup)
+        assert not isinstance(error, Exception)
+        assert {type(child) for child in error.exceptions} == {
+            UserError,
+            asyncio.CancelledError,
+        }
+
+    error_graph = _exception_graph(error)
+    assert error_graph
+    for current in error_graph:
+        assert current.__cause__ is None
+        assert current.__context__ is None
+        assert persistence_secret not in str(current)
+        assert persistence_secret not in repr(current)
+        assert fallback_secret not in str(current)
+        assert fallback_secret not in repr(current)
+        assert _MODEL_OUTPUT_SECRET not in str(current)
+        assert _MODEL_OUTPUT_SECRET not in repr(current)
+        _assert_secret_absent_from_agents_traceback(
+            current,
+            persistence_secret,
+            require_agents_frames=False,
+        )
+        _assert_secret_absent_from_agents_traceback(
+            current,
+            fallback_secret,
+            require_agents_frames=False,
+        )
+        _assert_secret_absent_from_agents_traceback(
+            current,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
+
+    for record in caplog.records:
+        rendered_record = logging.Formatter().format(record)
+        record_state = repr(record.__dict__)
+        for secret in (persistence_secret, fallback_secret, _MODEL_OUTPUT_SECRET):
+            assert secret not in rendered_record
+            assert secret not in record_state
+        assert record.exc_info is None
+
+
+def _direct_agent_runner_redaction_case(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: Literal["cancelled", "direct_base", "exception_group", "group"],
+) -> tuple[Agent[Any], SimpleListSession, str, tuple[str, str, str, str]]:
+    persistence_secret = f"DIRECT_AGENT_RUNNER_PERSISTENCE_SECRET_{failure_kind}"
+    fallback_secret = f"DIRECT_AGENT_RUNNER_FALLBACK_SECRET_{failure_kind}"
+    input_secret = f"DIRECT_AGENT_RUNNER_INPUT_SECRET_{failure_kind}"
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+    guardrail_failed = False
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    class FailingSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                raise _persistence_failure(failure_kind, persistence_secret)
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    agent = Agent(
+        name="A",
+        model=ScriptedModel(),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    secrets = (persistence_secret, fallback_secret, input_secret, _MODEL_OUTPUT_SECRET)
+    return agent, FailingSession(), input_secret, secrets
+
+
+def _assert_direct_agent_runner_redaction_boundary(
+    error: BaseException,
+    secrets: tuple[str, str, str, str],
+) -> None:
+    for current in _exception_graph(error):
+        assert current.__cause__ is None
+        assert current.__context__ is None
+        for secret in secrets:
+            assert secret not in str(current)
+            assert secret not in repr(current)
+            for frame_locals in _agents_traceback_frame_locals(current):
+                _assert_secret_absent_from_value_graph(frame_locals, secret)
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["cancelled", "direct_base", "exception_group", "group"],
+)
+@pytest.mark.asyncio
+async def test_agent_runner_run_detaches_all_marked_recovery_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: Literal["cancelled", "direct_base", "exception_group", "group"],
+) -> None:
+    agent, session, input_secret, secrets = _direct_agent_runner_redaction_case(
+        monkeypatch, failure_kind
+    )
+
+    with pytest.raises(BaseException) as exc_info:
+        await AgentRunner().run(
+            agent,
+            input_secret,
+            max_turns=0,
+            session=session,
+            error_handlers={"max_turns": lambda data: secrets[1]},
+        )
+
+    _assert_direct_agent_runner_redaction_boundary(exc_info.value, secrets)
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["cancelled", "direct_base", "exception_group", "group"],
+)
+def test_agent_runner_run_sync_detaches_all_marked_recovery_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: Literal["cancelled", "direct_base", "exception_group", "group"],
+) -> None:
+    agent, session, input_secret, secrets = _direct_agent_runner_redaction_case(
+        monkeypatch, failure_kind
+    )
+
+    with pytest.raises(BaseException) as exc_info:
+        AgentRunner().run_sync(
+            agent,
+            input_secret,
+            max_turns=0,
+            session=session,
+            error_handlers={"max_turns": lambda data: secrets[1]},
+        )
+
+    _assert_direct_agent_runner_redaction_boundary(exc_info.value, secrets)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_max_turns_recovery_deep_exception_group_preserves_redaction_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    streamed: bool,
+) -> None:
+    persistence_secret = "DEEP_MAX_TURNS_SESSION_FAILURE_SECRET"
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+    guardrail_failed = False
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    class DeepGroupSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                error: BaseException = asyncio.CancelledError(persistence_secret)
+                for _ in range(1200):
+                    error = BaseExceptionGroup(persistence_secret, [error])
+                raise error
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    caplog.set_level(logging.ERROR, logger="openai.agents")
+    agent = Agent(
+        name="A",
+        model=ScriptedModel(),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = DeepGroupSession()
+
+    captured_error: BaseException | None = None
+    try:
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                "go",
+                max_turns=0,
+                session=session,
+                error_handlers={"max_turns": lambda data: "fallback"},
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                "go",
+                max_turns=0,
+                session=session,
+                error_handlers={"max_turns": lambda data: "fallback"},
+            )
+    except BaseException as error:
+        captured_error = error
+    else:  # pragma: no cover
+        raise AssertionError("the deep exception group must propagate")
+
+    assert isinstance(captured_error, BaseExceptionGroup)
+    error_graph = _exception_graph(captured_error)
+    assert len(error_graph) == 1201
+    for current in error_graph:
+        assert current.__cause__ is None
+        assert current.__context__ is None
+        if isinstance(current, BaseExceptionGroup):
+            assert current.message == "Error details are redacted."
+        else:
+            assert isinstance(current, asyncio.CancelledError)
+            assert persistence_secret not in str(current)
+            assert persistence_secret not in repr(current)
+        for frame_locals in _agents_traceback_frame_locals(current):
+            _assert_secret_absent_from_value_graph(frame_locals, persistence_secret)
+            _assert_secret_absent_from_value_graph(frame_locals, _MODEL_OUTPUT_SECRET)
+
+    for record in caplog.records:
+        assert persistence_secret not in logging.Formatter().format(record)
+        assert persistence_secret not in repr(record.__dict__)
+        assert _MODEL_OUTPUT_SECRET not in logging.Formatter().format(record)
+        assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)
+        assert record.exc_info is None
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.parametrize("failure_kind", ["direct_base", "group"])
+@pytest.mark.asyncio
+async def test_max_turns_run_loop_exception_follows_redaction_policy_for_base_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    redacted: bool,
+    failure_kind: Literal["direct_base", "group"],
+) -> None:
+    persistence_secret = "RUN_LOOP_EXCEPTION_PERSISTENCE_SECRET"
+    fallback_secret = "RUN_LOOP_EXCEPTION_FALLBACK_SECRET"
+    payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
+    guardrail_failed = False
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+
+    class FailingMaxTurnsSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                raise _persistence_failure(failure_kind, persistence_secret)
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        AgentOutputSchema(_RequiredOutput).validate_json(payload)
+        raise AssertionError("validation should fail")  # pragma: no cover
+
+    result = Runner.run_streamed(
+        Agent(
+            name="A",
+            model=ScriptedModel(),
+            output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+        ),
+        "go",
+        max_turns=0,
+        session=FailingMaxTurnsSession(),
+        error_handlers={"max_turns": lambda data: fallback_secret},
+    )
+    assert result.run_loop_task is not None
+    callback_frame_locals: list[dict[str, Any]] = []
+    run_loop_done = asyncio.Event()
+
+    def inspect_run_loop_task(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except BaseException as error:
+            callback_frame_locals.extend(_agents_traceback_frame_locals(error))
+        finally:
+            run_loop_done.set()
+
+    result.run_loop_task.add_done_callback(inspect_run_loop_task)
+    await asyncio.wait_for(run_loop_done.wait(), timeout=1)
+
+    error = result.run_loop_exception
+    assert error is not None
+    frame_locals = _agents_traceback_frame_locals(error)
+    if redacted:
+        for traceback_locals in callback_frame_locals + frame_locals:
+            for secret in (persistence_secret, fallback_secret, _MODEL_OUTPUT_SECRET):
+                _assert_secret_absent_from_value_graph(traceback_locals, secret)
+        for current in _exception_graph(error):
+            assert current.__cause__ is None
+            assert current.__context__ is None
+            if isinstance(current, BaseExceptionGroup):
+                assert current.message == "Error details are redacted."
+            else:
+                for secret in (persistence_secret, fallback_secret, _MODEL_OUTPUT_SECRET):
+                    assert secret not in str(current)
+                    assert secret not in repr(current)
+    else:
+        assert callback_frame_locals
+        assert any(fallback_secret in repr(frame) for frame in callback_frame_locals)
+        assert frame_locals
+        assert any(fallback_secret in repr(frame) for frame in frame_locals)
+        assert persistence_secret in str(error)
+
+    try:
+        async for _ in result.stream_events():
+            pass
+    except BaseException as streamed_error:
+        assert streamed_error is error
+    else:  # pragma: no cover
+        raise AssertionError("the session failure must propagate through the stream")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_type"),
+    [
+        (asyncio.CancelledError("secret"), asyncio.CancelledError),
+        (GeneratorExit("secret"), GeneratorExit),
+        (KeyboardInterrupt("secret"), KeyboardInterrupt),
+        (SystemExit("secret"), SystemExit),
+        (_DirectBaseException("secret"), BaseException),
+    ],
+)
+def test_safe_redacted_persistence_error_preserves_process_control_semantics(
+    source: BaseException,
+    expected_type: type[BaseException],
+) -> None:
+    safe_error = _safe_redacted_persistence_error(source)
+
+    assert type(safe_error) is expected_type
+    assert "secret" not in str(safe_error)
+    assert "secret" not in repr(safe_error)
+    assert safe_error.__cause__ is None
+    assert safe_error.__context__ is None
+    assert safe_error.__traceback__ is None
+
+
+def test_safe_redacted_persistence_error_snapshots_linked_group_topology() -> None:
+    linked_group = BaseExceptionGroup(
+        "linked group secret",
+        [KeyboardInterrupt("process-control secret")],
+    )
+    first_child = RuntimeError("first child secret")
+    first_child.__context__ = linked_group
+    source = BaseExceptionGroup("root group secret", [first_child, linked_group])
+
+    safe_error = _safe_redacted_persistence_error(source)
+
+    assert isinstance(safe_error, BaseExceptionGroup)
+    assert len(safe_error.exceptions) == 2
+    assert isinstance(safe_error.exceptions[0], UserError)
+    safe_linked_group = safe_error.exceptions[1]
+    assert isinstance(safe_linked_group, BaseExceptionGroup)
+    assert len(safe_linked_group.exceptions) == 1
+    assert type(safe_linked_group.exceptions[0]) is KeyboardInterrupt
+    assert "secret" not in repr(safe_error)
+
+
+def test_safe_redacted_persistence_error_preserves_provider_group_catch_category() -> None:
+    class ProviderBaseExceptionGroup(BaseExceptionGroup):
+        pass
+
+    direct_source = ProviderBaseExceptionGroup(
+        "direct provider secret",
+        [RuntimeError("direct leaf secret")],
+    )
+    nested_source = BaseExceptionGroup(
+        "root group secret",
+        [
+            KeyboardInterrupt("process-control secret"),
+            ProviderBaseExceptionGroup(
+                "nested provider secret",
+                [RuntimeError("nested leaf secret")],
+            ),
+        ],
+    )
+
+    direct = _safe_redacted_persistence_error(direct_source)
+    nested = _safe_redacted_persistence_error(nested_source)
+
+    assert isinstance(direct, BaseExceptionGroup)
+    assert not isinstance(direct, Exception)
+    assert len(direct.exceptions) == 1
+    assert isinstance(direct.exceptions[0], UserError)
+    assert isinstance(nested, BaseExceptionGroup)
+    assert not isinstance(nested, Exception)
+    assert len(nested.exceptions) == 2
+    nested_provider = nested.exceptions[1]
+    assert isinstance(nested_provider, BaseExceptionGroup)
+    assert not isinstance(nested_provider, Exception)
+    assert len(nested_provider.exceptions) == 1
+    assert isinstance(nested_provider.exceptions[0], UserError)
+    assert "secret" not in repr(direct)
+    assert "secret" not in repr(nested)
+
+
+def test_safe_redacted_persistence_error_snapshots_linked_system_exit_code() -> None:
+    system_exit = SystemExit(7)
+    first_child = RuntimeError("first child secret")
+    first_child.__context__ = system_exit
+    source = BaseExceptionGroup("root group secret", [first_child, system_exit])
+
+    safe_error = _safe_redacted_persistence_error(source)
+
+    assert isinstance(safe_error, BaseExceptionGroup)
+    assert isinstance(safe_error.exceptions[0], UserError)
+    safe_system_exit = safe_error.exceptions[1]
+    assert type(safe_system_exit) is SystemExit
+    assert safe_system_exit.code == 7
+    assert safe_system_exit.args == (7,)
+    assert "secret" not in repr(safe_error)
+
+
+def test_safe_redacted_persistence_error_avoids_hostile_class_descriptor() -> None:
+    source = _HostileClassBaseException("persistence secret")
+
+    safe_error = _safe_redacted_persistence_error(source)
+
+    assert type(safe_error) is BaseException
+    assert safe_error.__cause__ is None
+    assert safe_error.__context__ is None
+    assert "secret" not in str(safe_error)
+    assert "secret" not in repr(safe_error)
+
+
+def test_safe_redacted_persistence_error_preserves_hybrid_cancellation() -> None:
+    direct_source = _HybridCancelledError("direct secret")
+    grouped_source = BaseExceptionGroup("group secret", [_HybridCancelledError("child secret")])
+    direct = _safe_redacted_persistence_error(direct_source)
+    grouped = _safe_redacted_persistence_error(grouped_source)
+
+    assert isinstance(direct, asyncio.CancelledError)
+    assert isinstance(direct, Exception) is isinstance(direct_source, Exception)
+    assert str(direct) == "Error details are redacted."
+    assert isinstance(grouped, BaseExceptionGroup)
+    assert isinstance(grouped, Exception) is isinstance(grouped_source, Exception)
+    assert len(grouped.exceptions) == 1
+    assert isinstance(grouped.exceptions[0], asyncio.CancelledError)
+    assert isinstance(grouped.exceptions[0], Exception)
+    assert "secret" not in repr(grouped)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_max_turns_recovery_session_failure_preserves_diagnostic_context(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    persistence_secret = "DIAGNOSTIC_MAX_TURNS_SESSION_SECRET"
+    guardrail_secret = "DIAGNOSTIC_MAX_TURNS_GUARDRAIL_SECRET"
+    guardrail_failed = False
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+
+    class FailingMaxTurnsSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if guardrail_failed:
+                raise LookupError(persistence_secret)
+            await super().add_items(items)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _agent_output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_failed
+        guardrail_failed = True
+        raise RuntimeError(guardrail_secret)
+
+    agent = Agent(
+        name="A",
+        model=ScriptedModel(),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = FailingMaxTurnsSession()
+
+    if streamed:
+        result = Runner.run_streamed(
+            agent,
+            "go",
+            max_turns=0,
+            session=session,
+            error_handlers={"max_turns": lambda data: "fallback"},
+        )
+        with pytest.raises(LookupError, match=persistence_secret) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(LookupError, match=persistence_secret) as exc_info:
+            await Runner.run(
+                agent,
+                "go",
+                max_turns=0,
+                session=session,
+                error_handlers={"max_turns": lambda data: "fallback"},
+            )
+
+    guardrail_error = exc_info.value.__context__
+    assert isinstance(guardrail_error, RuntimeError)
+    assert guardrail_secret in str(guardrail_error)
 
 
 @pytest.mark.asyncio
