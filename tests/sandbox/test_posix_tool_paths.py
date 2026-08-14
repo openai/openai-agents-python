@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +28,32 @@ def test_shell_workdir_normalizes_backslashes_as_sandbox_separators() -> None:
     )
 
     assert command == "cd /workspace/src/project && pwd"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="UnixLocalSandbox is Unix-only")
+def test_shell_workdir_normalizes_backslashes_before_unix_local_resolution(tmp_path: Path) -> None:
+    from agents.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxSession,
+        UnixLocalSandboxSessionState,
+    )
+    from agents.sandbox.snapshot import NoopSnapshot
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    command = _resolve_workdir_command(
+        session=session,
+        command="pwd",
+        workdir=r"src\project",
+    )
+
+    assert command == f"cd {workspace.as_posix()}/src/project && pwd"
 
 
 @pytest.mark.asyncio
