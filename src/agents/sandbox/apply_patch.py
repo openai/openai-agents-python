@@ -14,7 +14,11 @@ from .errors import (
     InvalidManifestPathError,
     WorkspaceReadNotFoundError,
 )
-from .workspace_paths import SandboxWorkspaceScope, windows_absolute_path
+from .workspace_paths import (
+    SandboxWorkspaceScope,
+    _is_absolute_sandbox_path,
+    posix_path_for_error,
+)
 
 if TYPE_CHECKING:
     from .session.base_sandbox_session import BaseSandboxSession
@@ -83,12 +87,10 @@ class WorkspaceEditor:
 
         if operation.type == "update_file":
             decode_path = destination
-            if (
-                self._workspace_scope.cwd is not None
-                and not Path(operation.path).is_absolute()
-                and windows_absolute_path(operation.path) is None
+            if self._workspace_scope.cwd is not None and not _is_absolute_sandbox_path(
+                operation.path
             ):
-                decode_path = Path(display_path)
+                decode_path = posix_path_for_error(display_path)
             original_text = await self._read_text(
                 destination,
                 op_path=operation.path,

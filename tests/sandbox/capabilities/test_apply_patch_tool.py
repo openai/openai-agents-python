@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, cast
 
 import pytest
 
+import agents.sandbox.apply_patch as sandbox_apply_patch
 from agents import Agent, CustomTool, RunHooks
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem
@@ -280,9 +281,12 @@ class TestSandboxApplyPatchTool:
         assert "/provider/private/root" not in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_editor_scoped_decode_error_uses_model_relative_path(self) -> None:
+    async def test_editor_scoped_decode_error_uses_posix_model_relative_path_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_apply_patch, "Path", PureWindowsPath)
         session = ApplyPatchSession()
-        session.files[Path("/workspace/tasks/a/binary.txt")] = b"\xff\xfe\xfd"
+        session.files[Path("/workspace/tasks/a/nested/binary.txt")] = b"\xff\xfe\xfd"
         tool = SandboxApplyPatchTool(
             session=session,
             workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
@@ -292,13 +296,39 @@ class TestSandboxApplyPatchTool:
             await tool.editor.update_file(
                 ApplyPatchOperation(
                     type="update_file",
-                    path="binary.txt",
+                    path="nested/binary.txt",
                     diff="@@\n+replacement\n",
                 )
             )
 
-        assert exc_info.value.context["path"] == "binary.txt"
+        assert str(exc_info.value) == "apply_patch could not decode file: nested/binary.txt"
+        assert exc_info.value.context["path"] == "nested/binary.txt"
         assert "/workspace/tasks/a" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_editor_scoped_decode_error_keeps_posix_absolute_path_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_apply_patch, "Path", PureWindowsPath)
+        session = ApplyPatchSession()
+        session.files[Path("/workspace/root/nested/binary.txt")] = b"\xff\xfe\xfd"
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        with pytest.raises(ApplyPatchDecodeError) as exc_info:
+            await tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="/workspace/root/nested/binary.txt",
+                    diff="@@\n+replacement\n",
+                )
+            )
+
+        expected_path = "/workspace/root/nested/binary.txt"
+        assert str(exc_info.value) == f"apply_patch could not decode file: {expected_path}"
+        assert exc_info.value.context["path"] == expected_path
 
     @pytest.mark.asyncio
     async def test_scoped_tool_keeps_approval_operations_model_relative(self) -> None:
