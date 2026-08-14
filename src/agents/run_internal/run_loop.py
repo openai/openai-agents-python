@@ -6,7 +6,9 @@ approvals, and turn processing; all symbols here are internal and not part of th
 from __future__ import annotations
 
 import asyncio
+import builtins
 import dataclasses as _dc
+import sys
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from functools import partial
@@ -20,6 +22,11 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
+else:
+    BaseExceptionGroup = builtins.BaseExceptionGroup
 
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
@@ -566,13 +573,7 @@ async def _finalize_streamed_final_output(
                 await save_items(items, response_id, store_setting)
                 if on_persisted_after_guardrails is not None:
                     on_persisted_after_guardrails(False)
-            except (
-                Exception,
-                asyncio.CancelledError,
-                SystemExit,
-                KeyboardInterrupt,
-                GeneratorExit,
-            ) as persistence_error:
+            except BaseException as persistence_error:
                 if guardrail_error_is_redacted:
                     safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
                     if (
@@ -606,6 +607,11 @@ async def _finalize_streamed_final_output(
             raise
 
     if redacted_persistence_error is not None:
+        if not isinstance(redacted_persistence_error, Exception):
+            streamed_result._stored_exception = redacted_persistence_error
+            streamed_result.is_complete = True
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            return
         raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results = output_guardrail_results
@@ -634,10 +640,13 @@ async def _finalize_streamed_final_output(
 
 
 def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
-    if isinstance(error, asyncio.CancelledError):
-        safe_error: BaseException = asyncio.CancelledError(_DATA_REDACTED_ERROR_MESSAGE)
-        _mark_error_data_redacted(safe_error)
-        return safe_error
+    if isinstance(error, BaseExceptionGroup):
+        return _prepare_data_redacted_error(
+            error,
+            trusted_error_message=_DATA_REDACTED_ERROR_MESSAGE,
+            preserve_exception_groups=True,
+            preserve_base_exceptions=True,
+        )
     if isinstance(error, Exception):
         safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
         _mark_error_data_redacted(safe_error)
@@ -645,6 +654,8 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
     return _prepare_data_redacted_error(
         error,
         trusted_error_message=_DATA_REDACTED_ERROR_MESSAGE,
+        preserve_exception_groups=True,
+        preserve_base_exceptions=True,
     )
 
 
@@ -687,13 +698,7 @@ async def finalize_max_turns_handler_output(
             _detach_data_redacted_error_traceback(guardrail_error)
         try:
             await save_items_after_guardrails([synthesized_item] if include_in_history else [])
-        except (
-            Exception,
-            asyncio.CancelledError,
-            SystemExit,
-            KeyboardInterrupt,
-            GeneratorExit,
-        ) as persistence_error:
+        except BaseException as persistence_error:
             if not guardrail_error_is_redacted:
                 raise
             redacted_persistence_error = _safe_redacted_persistence_error(persistence_error)

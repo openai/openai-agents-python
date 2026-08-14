@@ -9,9 +9,11 @@ statements honor ``_debug.DONT_LOG_MODEL_DATA`` / ``_debug.DONT_LOG_TOOL_DATA``.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import logging
 import pickle
+import sys
 import threading
 import traceback
 import warnings
@@ -47,6 +49,7 @@ from agents import (
     trace,
 )
 from agents.agent_output import AgentOutputSchema
+from agents.exceptions import _is_error_data_redacted
 from agents.logger import (
     log_model_action_debug,
     log_model_action_error,
@@ -74,6 +77,12 @@ from agents.tracing.traces import Trace
 
 from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
+else:
+    BaseExceptionGroup = builtins.BaseExceptionGroup
+    ExceptionGroup = builtins.ExceptionGroup
 
 _SECRET = "super secret prompt content"
 
@@ -103,6 +112,10 @@ class _HostileException(Exception):
 class _HostileAttributeWriteException(Exception):
     def __setattr__(self, name: str, value: Any) -> None:
         raise RuntimeError("redacted handling mutated the handler exception")
+
+
+class _CustomBaseException(BaseException):
+    pass
 
 
 class _TruthinessException(Exception):
@@ -934,6 +947,46 @@ def _agents_traceback_frame_locals(error: BaseException) -> list[dict[str, Any]]
     return frame_locals
 
 
+def _exception_graph(error: BaseException) -> list[BaseException]:
+    errors: list[BaseException] = []
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        errors.append(current)
+        cause = current.__cause__
+        context = current.__context__
+        if cause is not None:
+            pending.append(cause)
+        if context is not None:
+            pending.append(context)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+    return errors
+
+
+def _assert_redacted_exception_graph_is_payload_free(
+    error: BaseException,
+    *secrets: str,
+) -> None:
+    graph = _exception_graph(error)
+    assert graph
+    for graph_error in graph:
+        assert _is_error_data_redacted(graph_error)
+        assert graph_error.__cause__ is None
+        assert graph_error.__context__ is None
+        for secret in secrets:
+            assert secret not in str(graph_error)
+            _assert_secret_absent_from_agents_traceback(
+                graph_error,
+                secret,
+                require_agents_frames=False,
+            )
+
+
 def _assert_handoff_closure_absent_from_traceback(
     error: BaseException,
     *,
@@ -1471,7 +1524,8 @@ async def test_streamed_session_error_after_output_guardrail_respects_redaction(
         else "session save failed"
     )
 
-    with pytest.raises(expected_error_type, match=expected_message) as exc_info:
+    expected_match = None if redacted and persistence_failure == "cancelled" else expected_message
+    with pytest.raises(expected_error_type, match=expected_match) as exc_info:
         async for _ in result.stream_events():
             pass
 
@@ -1482,7 +1536,7 @@ async def test_streamed_session_error_after_output_guardrail_respects_redaction(
         assert guardrail_error is None
         assert error.__cause__ is None
         assert _MODEL_OUTPUT_SECRET not in str(error)
-        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        _assert_redacted_exception_graph_is_payload_free(error, _MODEL_OUTPUT_SECRET)
         for record in caplog.records:
             assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)
             assert _MODEL_OUTPUT_SECRET not in logging.Formatter().format(record)
@@ -1553,6 +1607,7 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
 
 
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize(
     ("persistence_failure", "expected_error_type"),
     [
@@ -1561,18 +1616,25 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
         ("system_exit", SystemExit),
         ("keyboard_interrupt", KeyboardInterrupt),
         ("generator_exit", GeneratorExit),
+        ("base_exception", BaseException),
+        ("exception_group", ExceptionGroup),
+        ("base_exception_group", BaseExceptionGroup),
     ],
 )
 @pytest.mark.asyncio
-async def test_non_streamed_max_turns_session_error_after_redacted_guardrail_is_replaced(
+async def test_max_turns_session_error_after_redacted_guardrail_is_replaced(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    streamed: bool,
     persistence_failure: Literal[
         "error",
         "cancelled",
         "system_exit",
         "keyboard_interrupt",
         "generator_exit",
+        "base_exception",
+        "exception_group",
+        "base_exception_group",
     ],
     expected_error_type: type[BaseException],
 ) -> None:
@@ -1599,6 +1661,26 @@ async def test_non_streamed_max_turns_session_error_after_redacted_guardrail_is_
                     ) from cause
                 if persistence_failure == "generator_exit":
                     raise GeneratorExit(f"session save closed: {persistence_secret}") from cause
+                if persistence_failure == "base_exception":
+                    raise _CustomBaseException(
+                        f"session save base exception: {persistence_secret}"
+                    ) from cause
+                if persistence_failure == "exception_group":
+                    raise ExceptionGroup(
+                        f"session save exception group: {persistence_secret}",
+                        [LookupError(f"session save failed: {persistence_secret}")],
+                    ) from cause
+                if persistence_failure == "base_exception_group":
+                    raise BaseExceptionGroup(
+                        f"session save base exception group: {persistence_secret}",
+                        [
+                            LookupError(f"session save failed: {persistence_secret}"),
+                            SystemExit(f"session save exited: {persistence_secret}"),
+                            _CustomBaseException(
+                                f"session save base exception: {persistence_secret}"
+                            ),
+                        ],
+                    ) from cause
                 raise LookupError(f"session save failed: {persistence_secret}") from cause
             await super().add_items(items)
 
@@ -1618,26 +1700,39 @@ async def test_non_streamed_max_turns_session_error_after_redacted_guardrail_is_
     )
     caplog.set_level(logging.ERROR, logger="openai.agents")
 
-    with pytest.raises(expected_error_type) as exc_info:
-        await Runner.run(
+    if streamed:
+        result = Runner.run_streamed(
             agent,
             "go",
             max_turns=0,
             session=FailingFinalTurnSession(),
             error_handlers={"max_turns": lambda _data: handler_output_secret},
         )
+        with pytest.raises(expected_error_type) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(expected_error_type) as exc_info:
+            await Runner.run(
+                agent,
+                "go",
+                max_turns=0,
+                session=FailingFinalTurnSession(),
+                error_handlers={"max_turns": lambda _data: handler_output_secret},
+            )
 
     error = exc_info.value
-    if isinstance(error, UserError | RuntimeError | asyncio.CancelledError):
+    if isinstance(error, UserError | RuntimeError):
         assert str(error) == "Error details are redacted."
-    assert error.__cause__ is None
-    assert error.__context__ is None
     assert persistence_secret not in str(error)
     assert _MODEL_OUTPUT_SECRET not in str(error)
     assert handler_output_secret not in str(error)
-    _assert_secret_absent_from_agents_traceback(error, persistence_secret)
-    _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
-    _assert_secret_absent_from_agents_traceback(error, handler_output_secret)
+    _assert_redacted_exception_graph_is_payload_free(
+        error,
+        persistence_secret,
+        _MODEL_OUTPUT_SECRET,
+        handler_output_secret,
+    )
     for record in caplog.records:
         assert persistence_secret not in repr(record.__dict__)
         assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)

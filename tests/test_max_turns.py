@@ -667,9 +667,7 @@ async def test_streamed_max_turns_session_save_failure_does_not_expose_output(
             pass
 
     expected_error = asyncio.CancelledError if failure_type == "cancel" else RuntimeError
-    expected_message = (
-        "session save cancelled" if failure_type == "cancel" else "session save failed"
-    )
+    expected_message = None if failure_type == "cancel" else "session save failed"
     with pytest.raises(expected_error, match=expected_message):
         await asyncio.wait_for(consume_stream(), timeout=1)
 

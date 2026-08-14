@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 if sys.version_info < (3, 11):
-    from exceptiongroup import BaseExceptionGroup
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
 else:
     BaseExceptionGroup = builtins.BaseExceptionGroup
+    ExceptionGroup = builtins.ExceptionGroup
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -155,9 +156,17 @@ def _prepare_data_redacted_error(
     error: BaseException,
     *,
     trusted_error_message: str | None = None,
+    preserve_exception_groups: bool = False,
+    preserve_base_exceptions: bool = False,
 ) -> BaseException:
     """Detach payload-owned state and return a safe error for a public boundary."""
     error_type = type(error)
+    if preserve_exception_groups and issubclass(error_type, BaseExceptionGroup):
+        return _replace_data_redacted_exception_group(
+            cast(BaseExceptionGroup, error),
+            trusted_error_message=trusted_error_message,
+            preserve_base_exceptions=preserve_base_exceptions,
+        )
     process_control_error = _replace_data_redacted_process_control_error(error)
     if process_control_error is not None:
         return process_control_error
@@ -181,11 +190,48 @@ def _prepare_data_redacted_error(
         safe_error = UserError(safe_message)
     elif error_type is ValueError and safe_message is not None:
         safe_error = ValueError(safe_message)
+    elif preserve_base_exceptions and not issubclass(error_type, Exception):
+        safe_error = BaseException(_DATA_REDACTED_ERROR_MESSAGE)
     try:
         _mark_error_data_redacted(safe_error)
     except BaseException:
         pass
     return safe_error
+
+
+def _replace_data_redacted_exception_group(
+    error: BaseExceptionGroup,
+    *,
+    trusted_error_message: str | None,
+    preserve_base_exceptions: bool,
+) -> BaseExceptionGroup:
+    """Discard an exception group source and return a payload-free group replacement."""
+    group_exceptions = _base_exception_group_exceptions(error)
+    safe_exceptions = tuple(
+        _prepare_data_redacted_error(
+            child,
+            trusted_error_message=trusted_error_message,
+            preserve_exception_groups=True,
+            preserve_base_exceptions=preserve_base_exceptions,
+        )
+        for child in group_exceptions
+    )
+    _discard_exception_graph(error)
+    safe_group: BaseExceptionGroup
+    if isinstance(error, ExceptionGroup) and all(
+        isinstance(child, Exception) for child in safe_exceptions
+    ):
+        safe_group = ExceptionGroup(
+            _DATA_REDACTED_ERROR_MESSAGE,
+            cast(tuple[Exception, ...], safe_exceptions),
+        )
+    else:
+        safe_group = BaseExceptionGroup(_DATA_REDACTED_ERROR_MESSAGE, safe_exceptions)
+    try:
+        _mark_error_data_redacted(safe_group)
+    except BaseException:
+        pass
+    return safe_group
 
 
 def _replace_data_redacted_process_control_error(
@@ -223,6 +269,30 @@ def _replace_data_redacted_process_control_error(
     except BaseException:
         pass
     return safe_error
+
+
+def _base_exception_group_exceptions(error: BaseExceptionGroup) -> tuple[BaseException, ...]:
+    error_type = type(error)
+    try:
+        if sys.version_info < (3, 11):
+            group_state = _base_exception_instance_dict(error)
+            raw_group_exceptions = (
+                _exact_string_state_value(group_state, "_exceptions")
+                if group_state is not None
+                else None
+            )
+        else:
+            group_descriptor = type.__getattribute__(BaseExceptionGroup, "__dict__")["exceptions"]
+            raw_group_exceptions = group_descriptor.__get__(error, error_type)
+        if type(raw_group_exceptions) is tuple:
+            return tuple(
+                cast(BaseException, candidate)
+                for candidate in raw_group_exceptions
+                if issubclass(type(candidate), BaseException)
+            )
+        return ()
+    except BaseException:
+        return ()
 
 
 def _collect_nested_exceptions(value: object, linked: list[BaseException]) -> None:
@@ -268,30 +338,8 @@ def _discard_exception_graph(error: BaseException) -> None:
         group_exceptions: tuple[BaseException, ...] | None = None
         current_type = type(current)
         if issubclass(current_type, BaseExceptionGroup):
-            try:
-                if sys.version_info < (3, 11):
-                    group_state = _base_exception_instance_dict(current)
-                    raw_group_exceptions = (
-                        _exact_string_state_value(group_state, "_exceptions")
-                        if group_state is not None
-                        else None
-                    )
-                else:
-                    group_descriptor = type.__getattribute__(BaseExceptionGroup, "__dict__")[
-                        "exceptions"
-                    ]
-                    raw_group_exceptions = group_descriptor.__get__(current, current_type)
-                if type(raw_group_exceptions) is tuple:
-                    group_exceptions = tuple(
-                        cast(BaseException, candidate)
-                        for candidate in raw_group_exceptions
-                        if issubclass(type(candidate), BaseException)
-                    )
-                else:
-                    group_exceptions = ()
-                linked.extend(group_exceptions)
-            except BaseException:
-                pass
+            group_exceptions = _base_exception_group_exceptions(cast(BaseExceptionGroup, current))
+            linked.extend(group_exceptions)
         for descriptor in (
             cast(Any, BaseException.__cause__),
             cast(Any, BaseException.__context__),
