@@ -11,9 +11,10 @@ from pydantic import BaseModel, Field
 
 from ....run_context import RunContextWrapper
 from ....tool import FunctionTool, ToolOutputImage
-from ...errors import WorkspaceReadNotFoundError
+from ...errors import InvalidManifestPathError, WorkspaceReadNotFoundError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
+from ...workspace_paths import sandbox_path_str
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_SIZE_LABEL = "10MB"
@@ -104,8 +105,11 @@ class ViewImageTool(FunctionTool):
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
         input_path = Path(args.path)
         path_policy = self.session._workspace_path_policy()
-        resolved_path = path_policy.absolute_workspace_path(input_path)
-        display_path = path_policy.relative_path(input_path).as_posix()
+        resolved_path = path_policy.normalize_path(input_path)
+        try:
+            display_path = path_policy.relative_path(input_path).as_posix()
+        except InvalidManifestPathError:
+            display_path = sandbox_path_str(resolved_path)
 
         try:
             file_obj = await self.session.read(resolved_path, user=self.user)
