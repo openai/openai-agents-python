@@ -364,10 +364,10 @@ def _ensure_strict_json_schema(
     json_schema.pop("default", None)
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
-    # {"$ref": "...", "description": "my description"}
+    # `{"$ref": "...", "description": "my description"}`
     #
     # so we unravel the ref
-    # {"type": "string", "description": "my description"}
+    # `{"type": "string", "description": "my description"}`
     ref = json_schema.get("$ref")
     if ref and has_more_than_n_keys(json_schema, 1):
         assert isinstance(ref, str), f"Received non-string $ref - {ref}"
