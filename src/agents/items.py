@@ -12,7 +12,9 @@ import pydantic
 from openai.types.responses import (
     Response,
     ResponseComputerToolCall,
+    ResponseCustomToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCall,
     ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
@@ -547,7 +549,13 @@ class CompactionItem(RunItemBase[TResponseInputItem]):
 
 # Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
 ToolApprovalRawItem: TypeAlias = (
-    ResponseFunctionToolCall | McpCall | McpApprovalRequest | LocalShellCall | dict[str, Any]
+    ResponseFunctionToolCall
+    | ResponseCustomToolCall
+    | ResponseFunctionShellToolCall
+    | McpCall
+    | McpApprovalRequest
+    | LocalShellCall
+    | dict[str, Any]
 )
 
 

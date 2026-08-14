@@ -23,8 +23,9 @@ from agents import (
     handoff,
     tool_namespace,
 )
-from agents.items import ToolCallOutputItem
+from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.lifecycle import RunHooks
+from agents.run_internal.run_steps import NextStepInterruption
 from agents.testing import ScriptedModel
 from agents.tool import Tool, function_tool
 
@@ -35,6 +36,15 @@ from .test_responses import get_function_tool_call, get_handoff_tool_call, get_t
 def _record(calls: list[str], value: str, result: str | None = None) -> str:
     calls.append(value)
     return value if result is None else result
+
+
+def _authoritative_interruption(
+    state: RunState[Any, Agent[Any]],
+    call_id: str,
+) -> ToolApprovalItem:
+    """Return the RunState-owned approval used by corruption-path tests."""
+    assert isinstance(state._current_step, NextStepInterruption)
+    return next(item for item in state._current_step.interruptions if item.call_id == call_id)
 
 
 @pytest.mark.asyncio
@@ -776,7 +786,7 @@ async def test_resume_rejects_conflicting_persisted_identity_before_sibling_effe
     interruptions = state.get_interruptions()
     for interruption in interruptions:
         state.approve(interruption)
-    conflicting = next(item for item in interruptions if item.call_id == "conflicting_call")
+    conflicting = _authoritative_interruption(state, "conflicting_call")
     conflicting.raw_item = {
         "type": "function_call",
         "name": "lookup",
@@ -812,6 +822,7 @@ async def test_resume_rejects_legacy_approval_name_change_before_side_effects() 
     state = initial_result.to_state()
     interruption = state.get_interruptions()[0]
     state.approve(interruption)
+    interruption = _authoritative_interruption(state, "lookup_call")
     interruption.tool_lookup_key = None
     interruption.raw_item = {
         "type": "function_call",
@@ -919,7 +930,7 @@ async def test_approved_malformed_approval_only_stays_pending_without_side_effec
     assert state._last_processed_response is not None
     state._last_processed_response.functions = []
     state._model_responses[-1] = replace(state._model_responses[-1], output=[])
-    interruption.raw_item = malformed_raw_item
+    _authoritative_interruption(state, "lookup_call").raw_item = malformed_raw_item
 
     resumed_result = await Runner.run(agent, state)
 
@@ -966,7 +977,7 @@ async def test_resume_snapshots_function_approval_before_tool_inventory_await() 
     state = initial_result.to_state()
     approval = state.get_interruptions()[0]
     state.approve(approval)
-    approval_holder["approval"] = approval
+    approval_holder["approval"] = _authoritative_interruption(state, "lookup_call")
 
     resumed_result = await Runner.run(agent, state)
 
@@ -1005,7 +1016,8 @@ async def test_resume_uses_queued_arguments_instead_of_mutated_approval_argument
     state = await RunState.from_json(agent, initial_result.to_state().to_json())
     approval = state.get_interruptions()[0]
     state.approve(approval)
-    cast(Any, approval.raw_item).arguments = '{"amount":999}'
+    authoritative = _authoritative_interruption(state, "lookup_call")
+    cast(Any, authoritative.raw_item).arguments = '{"amount":999}'
 
     resumed_result = await Runner.run(agent, state)
 
@@ -1065,7 +1077,7 @@ async def test_resume_deep_copies_approval_only_program_caller_before_inventory_
         state._model_responses[-1],
         output=[program],
     )
-    approval_holder["approval"] = approval
+    approval_holder["approval"] = _authoritative_interruption(state, "lookup_call")
 
     resumed_result = await Runner.run(agent, state)
 
@@ -1116,7 +1128,8 @@ async def test_resume_snapshots_program_parent_context_before_inventory_await() 
     state = initial_result.to_state()
     approval = state.get_interruptions()[0]
     state.approve(approval)
-    cast(Any, approval.raw_item).caller.caller_id = "forged_program"
+    authoritative = _authoritative_interruption(state, "lookup_call")
+    cast(Any, authoritative.raw_item).caller.caller_id = "forged_program"
     assert state._last_processed_response is not None
     state._last_processed_response.functions = []
     state._model_responses[-1] = replace(
@@ -1165,7 +1178,7 @@ async def test_resume_rejects_response_backed_approval_lookup_mismatch_before_ef
         for run in state._last_processed_response.functions
         if run.tool_call.call_id != "lookup_call"
     ]
-    lookup_approval = next(item for item in interruptions if item.call_id == "lookup_call")
+    lookup_approval = _authoritative_interruption(state, "lookup_call")
     cast(Any, lookup_approval.raw_item).name = "other"
     lookup_approval.tool_name = "other"
     lookup_approval.tool_lookup_key = ("bare", "other")
@@ -1380,7 +1393,7 @@ async def test_approved_malformed_queued_approval_stays_pending_without_side_eff
     interruptions = state.get_interruptions()
     for interruption in interruptions:
         state.approve(interruption)
-    lookup_approval = next(item for item in interruptions if item.call_id == "lookup_call")
+    lookup_approval = _authoritative_interruption(state, "lookup_call")
     lookup_approval.raw_item = malformed_raw_item
 
     resumed_result = await Runner.run(agent, state)
@@ -1417,7 +1430,7 @@ async def test_resume_rejects_cross_kind_approval_identity_before_sibling_effect
     interruptions = state.get_interruptions()
     for interruption in interruptions:
         state.approve(interruption)
-    lookup_approval = next(item for item in interruptions if item.call_id == "lookup_call")
+    lookup_approval = _authoritative_interruption(state, "lookup_call")
     lookup_approval.raw_item = {
         "type": "custom_tool_call",
         "name": "evil",

@@ -6,12 +6,13 @@ import asyncio
 import copy
 import dataclasses
 import json
+import math
 import threading
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast, get_args
 from uuid import uuid4
 
 from openai.types.responses import (
@@ -36,7 +37,7 @@ from openai.types.responses.response_output_item import (
     Program,
     ProgramOutput,
 )
-from pydantic import StringConstraints, TypeAdapter, ValidationError
+from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import TypedDict, TypeVar
 
 from ._tool_identity import (
@@ -86,6 +87,7 @@ from .items import (
     ReasoningItem,
     RunItem,
     ToolApprovalItem,
+    ToolApprovalRawItem,
     ToolCallItem,
     ToolCallOutputItem,
     ToolSearchCallItem,
@@ -244,6 +246,18 @@ _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
 _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
+_TOOL_APPROVAL_MODEL_TYPES: tuple[type[BaseModel], ...] = tuple(
+    raw_item_type
+    for raw_item_type in get_args(ToolApprovalRawItem)
+    if isinstance(raw_item_type, type) and issubclass(raw_item_type, BaseModel)
+)
+_TOOL_APPROVAL_MODEL_ADAPTERS: tuple[tuple[type[BaseModel], TypeAdapter[Any]], ...] = tuple(
+    (model_type, TypeAdapter(model_type)) for model_type in _TOOL_APPROVAL_MODEL_TYPES
+)
+_UNSAFE_PYDANTIC_SUBTYPE_HOOKS = frozenset({"__getattr__", "__getattribute__"})
+_PYDANTIC_PUBLIC_COPY_INSTANCE_ATTRIBUTES = frozenset(
+    {"__dict__", "__pydantic_extra__", "__pydantic_fields_set__"}
+)
 _MISSING_CONTEXT_SENTINEL = object()
 _ALLOWED_MISSING_MESSAGE_FIELDS = frozenset({"status"})
 
@@ -251,6 +265,479 @@ _ALLOWED_MISSING_MESSAGE_FIELDS = frozenset({"status"})
 def _deserialize_tool_origin(data: Any) -> ToolOrigin | None:
     """Best-effort deserialization for optional tool origin metadata."""
     return ToolOrigin.from_json_dict(data)
+
+
+def _static_type_mro(value: Any) -> tuple[type[Any], ...]:
+    """Return an instance's real MRO without consulting instance attributes."""
+    return cast(tuple[type[Any], ...], type.__getattribute__(type(value), "__mro__"))
+
+
+def _declared_model_type_from_annotation(
+    annotation: Any,
+    value_mro: tuple[type[Any], ...],
+) -> type[BaseModel] | None:
+    """Resolve a nested model from trusted Pydantic field annotation identities."""
+    pending = [annotation]
+    visited: set[int] = set()
+    while pending:
+        candidate = pending.pop()
+        candidate_id = id(candidate)
+        if candidate_id in visited:
+            continue
+        visited.add(candidate_id)
+        if isinstance(candidate, type):
+            candidate_mro = type.__getattribute__(candidate, "__mro__")
+            if BaseModel in candidate_mro and candidate in value_mro:
+                return cast(type[BaseModel], candidate)
+        pending.extend(get_args(candidate))
+    return None
+
+
+def _copy_json_compatible_value(value: Any, active_container_ids: set[int]) -> Any:
+    """Copy bounded JSON-shaped data without invoking container or model hooks."""
+    if value is None or type(value) is bool:
+        return value
+    value_mro = _static_type_mro(value)
+    if str in value_mro:
+        return str.__str__(value)
+    if int in value_mro:
+        return int.__int__(value)
+    if float in value_mro:
+        copied_float = float.__float__(value)
+        if not math.isfinite(copied_float):
+            raise TypeError("Non-finite number in tool approval payload")
+        return copied_float
+    value_id = id(value)
+    if value_id in active_container_ids:
+        raise TypeError("Cyclic tool approval payload")
+    if dict in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            copied_dict: dict[str, Any] = {}
+            for key, item in dict.items(value):
+                if str not in _static_type_mro(key):
+                    raise TypeError("Non-string key in tool approval payload")
+                normalized_key = str.__str__(key)
+                if normalized_key in copied_dict:
+                    raise TypeError("Colliding key in tool approval payload")
+                copied_dict[normalized_key] = _copy_json_compatible_value(
+                    item,
+                    active_container_ids,
+                )
+            return copied_dict
+        finally:
+            active_container_ids.remove(value_id)
+    if list in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            return [
+                _copy_json_compatible_value(item, active_container_ids)
+                for item in list.__iter__(value)
+            ]
+        finally:
+            active_container_ids.remove(value_id)
+    if tuple in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            return [
+                _copy_json_compatible_value(item, active_container_ids)
+                for item in tuple.__iter__(value)
+            ]
+        finally:
+            active_container_ids.remove(value_id)
+    raise TypeError("Unsupported value in tool approval payload")
+
+
+def _copy_pydantic_value(
+    value: Any,
+    active_container_ids: set[int],
+    *,
+    allow_models: bool,
+    declared_model_type: type[BaseModel] | None = None,
+    declared_annotation: Any = None,
+) -> Any:
+    """Copy a Pydantic value before public serialization can traverse untrusted data."""
+    if value is None or type(value) is bool:
+        return value
+    value_mro = _static_type_mro(value)
+    if str in value_mro:
+        return str.__str__(value)
+    if int in value_mro:
+        return int.__int__(value)
+    if float in value_mro:
+        copied_float = float.__float__(value)
+        if not math.isfinite(copied_float):
+            raise TypeError("Non-finite number in tool approval payload")
+        return copied_float
+
+    value_id = id(value)
+    if value_id in active_container_ids:
+        raise TypeError("Cyclic tool approval payload")
+
+    if BaseModel in value_mro:
+        if not allow_models:
+            raise TypeError("Unsupported model in tool approval metadata")
+        if declared_model_type is None:
+            declared_model_type = _declared_model_type_from_annotation(
+                declared_annotation,
+                value_mro,
+            )
+        if declared_model_type is None or declared_model_type not in value_mro:
+            raise TypeError("Unsupported model in tool approval payload")
+        trusted_model_mro = frozenset(type.__getattribute__(declared_model_type, "__mro__"))
+        for subtype in value_mro:
+            if subtype in trusted_model_mro:
+                continue
+            subtype_namespace = type.__getattribute__(subtype, "__dict__")
+            if _UNSAFE_PYDANTIC_SUBTYPE_HOOKS & subtype_namespace.keys():
+                raise TypeError("Unsupported model hooks in tool approval payload")
+        for attribute_name in _PYDANTIC_PUBLIC_COPY_INSTANCE_ATTRIBUTES:
+            for attribute_owner in value_mro:
+                owner_namespace = type.__getattribute__(attribute_owner, "__dict__")
+                if attribute_name not in owner_namespace:
+                    continue
+                if attribute_owner not in trusted_model_mro:
+                    raise TypeError("Unsupported model storage hooks in tool approval payload")
+                break
+        active_container_ids.add(value_id)
+        try:
+            declared_fields = declared_model_type.model_fields
+            model_storage = object.__getattribute__(value, "__dict__")
+            if type(model_storage) is not dict:
+                raise TypeError("Unsupported tool approval model storage")
+            model_extra = BaseModel.model_extra.__get__(value, BaseModel)
+            copied_extra: dict[str, Any] = {}
+            if model_extra is not None:
+                if type(model_extra) is not dict:
+                    raise TypeError("Unsupported tool approval model extras")
+                seen_extra_names = set(declared_fields)
+                for extra_name, extra_value in dict.items(model_extra):
+                    if str not in _static_type_mro(extra_name):
+                        raise TypeError("Non-string key in tool approval model extras")
+                    normalized_name = str.__str__(extra_name)
+                    if normalized_name in seen_extra_names:
+                        raise TypeError("Colliding key in tool approval model extras")
+                    seen_extra_names.add(normalized_name)
+                    copied_extra[normalized_name] = _copy_pydantic_value(
+                        extra_value,
+                        active_container_ids,
+                        allow_models=False,
+                    )
+
+            copied_fields: dict[str, Any] = {}
+            for field_name, field_value in dict.items(model_storage):
+                if str not in _static_type_mro(field_name):
+                    raise TypeError("Non-string field name in tool approval payload")
+                normalized_field_name = str.__str__(field_name)
+                if normalized_field_name not in declared_fields:
+                    continue
+                if normalized_field_name in copied_fields:
+                    raise TypeError("Colliding field name in tool approval payload")
+                copied_fields[normalized_field_name] = _copy_pydantic_value(
+                    field_value,
+                    active_container_ids,
+                    allow_models=True,
+                    declared_annotation=declared_fields[normalized_field_name].annotation,
+                )
+
+            source_fields_set = BaseModel.model_fields_set.__get__(value, BaseModel)
+            if type(source_fields_set) is not set:
+                raise TypeError("Unsupported tool approval model fields set")
+            copied_fields_set: set[str] = set()
+            allowed_fields_set = set(declared_fields) | set(copied_extra)
+            for field_name in set.__iter__(source_fields_set):
+                if str not in _static_type_mro(field_name):
+                    raise TypeError("Non-string field name in tool approval fields set")
+                normalized_field_name = str.__str__(field_name)
+                if normalized_field_name in copied_fields_set:
+                    raise TypeError("Colliding field name in tool approval fields set")
+                if normalized_field_name in allowed_fields_set:
+                    copied_fields_set.add(normalized_field_name)
+
+            copied_model = declared_model_type.model_construct(
+                _fields_set=set(copied_fields_set),
+                **copied_fields,
+                **copied_extra,
+            )
+            constructed_fields_set = BaseModel.model_fields_set.__get__(
+                copied_model,
+                BaseModel,
+            )
+            set.clear(constructed_fields_set)
+            set.update(constructed_fields_set, copied_fields_set)
+            return copied_model
+        finally:
+            active_container_ids.remove(value_id)
+
+    if dict in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            copied_dict: dict[str, Any] = {}
+            seen_names: set[str] = set()
+            for key, item in dict.items(value):
+                if str not in _static_type_mro(key):
+                    raise TypeError("Non-string key in tool approval payload")
+                normalized_key = str.__str__(key)
+                if normalized_key in seen_names:
+                    raise TypeError("Colliding key in tool approval payload")
+                seen_names.add(normalized_key)
+                copied_dict[normalized_key] = _copy_pydantic_value(
+                    item,
+                    active_container_ids,
+                    allow_models=allow_models,
+                    declared_annotation=declared_annotation,
+                )
+            return copied_dict
+        finally:
+            active_container_ids.remove(value_id)
+
+    if list in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            return [
+                _copy_pydantic_value(
+                    item,
+                    active_container_ids,
+                    allow_models=allow_models,
+                    declared_annotation=declared_annotation,
+                )
+                for item in list.__iter__(value)
+            ]
+        finally:
+            active_container_ids.remove(value_id)
+
+    if tuple in value_mro:
+        active_container_ids.add(value_id)
+        try:
+            return [
+                _copy_pydantic_value(
+                    item,
+                    active_container_ids,
+                    allow_models=allow_models,
+                    declared_annotation=declared_annotation,
+                )
+                for item in tuple.__iter__(value)
+            ]
+        finally:
+            active_container_ids.remove(value_id)
+
+    raise TypeError("Unsupported value in tool approval payload")
+
+
+def _merge_realized_declared_values(
+    explicit: Any,
+    realized: Any,
+    baseline: Any,
+) -> Any:
+    """Keep realized declared values that differ from base-model defaults."""
+    if type(explicit) is dict and type(realized) is dict and type(baseline) is dict:
+        merged = dict(explicit)
+        for key, realized_value in dict.items(realized):
+            if key not in baseline:
+                continue
+            baseline_value = baseline[key]
+            if key in explicit:
+                merged[key] = _merge_realized_declared_values(
+                    explicit[key],
+                    realized_value,
+                    baseline_value,
+                )
+            elif realized_value != baseline_value:
+                merged[key] = realized_value
+        return merged
+    if (
+        type(explicit) is list
+        and type(realized) is list
+        and type(baseline) is list
+        and len(explicit) == len(realized) == len(baseline)
+    ):
+        return [
+            _merge_realized_declared_values(explicit_item, realized_item, baseline_item)
+            for explicit_item, realized_item, baseline_item in zip(
+                explicit,
+                realized,
+                baseline,
+                strict=True,
+            )
+        ]
+    return realized if realized != baseline else explicit
+
+
+def _validate_declared_payload(
+    model_adapter: TypeAdapter[Any],
+    explicit: dict[str, Any],
+    realized: dict[str, Any],
+) -> Any:
+    """Validate a declared payload after filling only missing required values."""
+    while True:
+        try:
+            return model_adapter.validate_python(explicit)
+        except ValidationError as error:
+            filled_missing_value = False
+            for detail in error.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            ):
+                if detail.get("type") != "missing":
+                    continue
+                location = detail.get("loc")
+                if not isinstance(location, tuple) or not location:
+                    continue
+                explicit_parent: Any = explicit
+                realized_parent: Any = realized
+                for part in location[:-1]:
+                    if (
+                        type(part) is str
+                        and type(explicit_parent) is dict
+                        and type(realized_parent) is dict
+                        and part in explicit_parent
+                        and part in realized_parent
+                    ):
+                        explicit_parent = explicit_parent[part]
+                        realized_parent = realized_parent[part]
+                    elif (
+                        type(part) is int
+                        and type(explicit_parent) is list
+                        and type(realized_parent) is list
+                        and 0 <= part < len(explicit_parent)
+                        and part < len(realized_parent)
+                    ):
+                        explicit_parent = explicit_parent[part]
+                        realized_parent = realized_parent[part]
+                    else:
+                        break
+                else:
+                    missing_part = location[-1]
+                    if (
+                        type(missing_part) is str
+                        and type(explicit_parent) is dict
+                        and type(realized_parent) is dict
+                        and missing_part not in explicit_parent
+                        and missing_part in realized_parent
+                    ):
+                        explicit_parent[missing_part] = realized_parent[missing_part]
+                        filled_missing_value = True
+            if not filled_missing_value:
+                raise
+
+
+def _restore_pydantic_fields_set(value: Any, source: Any) -> None:
+    """Restore declared field-set semantics after public Pydantic validation."""
+    value_mro = _static_type_mro(value)
+    source_mro = _static_type_mro(source)
+    if BaseModel in value_mro and BaseModel in source_mro:
+        value_fields_set = BaseModel.model_fields_set.__get__(value, BaseModel)
+        source_fields_set = BaseModel.model_fields_set.__get__(source, BaseModel)
+        set.clear(value_fields_set)
+        set.update(value_fields_set, source_fields_set)
+
+        source_values: dict[str, Any] = {}
+        for field_name, field_value in BaseModel.__iter__(source):
+            if str in _static_type_mro(field_name):
+                source_values[str.__str__(field_name)] = field_value
+        for field_name, field_value in BaseModel.__iter__(value):
+            if str not in _static_type_mro(field_name):
+                continue
+            source_value = source_values.get(str.__str__(field_name), _MISSING_CONTEXT_SENTINEL)
+            if source_value is not _MISSING_CONTEXT_SENTINEL:
+                _restore_pydantic_fields_set(field_value, source_value)
+        return
+
+    if list in value_mro and list in source_mro:
+        for item, source_item in zip(
+            list.__iter__(value),
+            list.__iter__(source),
+            strict=False,
+        ):
+            _restore_pydantic_fields_set(item, source_item)
+        return
+
+    if tuple in value_mro and tuple in source_mro:
+        for item, source_item in zip(
+            tuple.__iter__(value),
+            tuple.__iter__(source),
+            strict=False,
+        ):
+            _restore_pydantic_fields_set(item, source_item)
+        return
+
+    if dict in value_mro and dict in source_mro:
+        for key, item in dict.items(value):
+            if str not in _static_type_mro(key):
+                continue
+            source_item = dict.get(
+                source,
+                str.__str__(key),
+                _MISSING_CONTEXT_SENTINEL,
+            )
+            if source_item is not _MISSING_CONTEXT_SENTINEL:
+                _restore_pydantic_fields_set(item, source_item)
+
+
+def _copy_tool_approval_raw_item(raw_item: Any) -> Any:
+    """Copy a supported approval raw item through public Pydantic APIs."""
+    active_container_ids: set[int] = set()
+    raw_item_mro = _static_type_mro(raw_item)
+    for model_type, model_adapter in _TOOL_APPROVAL_MODEL_ADAPTERS:
+        if model_type not in raw_item_mro:
+            continue
+        copied_raw_item = _copy_pydantic_value(
+            raw_item,
+            active_container_ids,
+            allow_models=True,
+            declared_model_type=model_type,
+        )
+        explicit = model_adapter.dump_python(
+            copied_raw_item,
+            mode="json",
+            round_trip=True,
+            exclude_unset=True,
+            warnings="error",
+            serialize_as_any=False,
+            by_alias=False,
+        )
+        copied_explicit = _copy_json_compatible_value(explicit, active_container_ids)
+        if type(copied_explicit) is not dict:
+            raise TypeError("Unsupported serialized tool approval payload")
+        realized = model_adapter.dump_python(
+            copied_raw_item,
+            mode="json",
+            round_trip=True,
+            exclude_unset=False,
+            warnings="error",
+            serialize_as_any=False,
+            by_alias=False,
+        )
+        copied_realized = _copy_json_compatible_value(realized, active_container_ids)
+        if type(copied_realized) is not dict:
+            raise TypeError("Unsupported serialized tool approval payload")
+        baseline_model = _validate_declared_payload(
+            model_adapter,
+            copied_explicit,
+            copied_realized,
+        )
+        baseline = model_adapter.dump_python(
+            baseline_model,
+            mode="json",
+            round_trip=True,
+            exclude_unset=False,
+            warnings="error",
+            serialize_as_any=False,
+            by_alias=False,
+        )
+        copied_baseline = _copy_json_compatible_value(baseline, active_container_ids)
+        merged = _merge_realized_declared_values(
+            copied_explicit,
+            copied_realized,
+            copied_baseline,
+        )
+        validated_model = model_adapter.validate_python(merged)
+        _restore_pydantic_fields_set(validated_model, copied_raw_item)
+        return validated_model
+    if dict in raw_item_mro:
+        return _copy_json_compatible_value(raw_item, active_container_ids)
+    raise TypeError("Unsupported tool approval raw item")
 
 
 @dataclass
@@ -452,20 +939,47 @@ class RunState(Generic[TContext, TAgent]):
         self._pending_input = []
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
-        """Return pending interruptions if the current step is an interruption."""
+        """Return detached copies of pending interruptions for the current step."""
         # Import at runtime to avoid circular import
         from .run_internal.run_steps import NextStepInterruption
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
-        return list(self._current_step.interruptions)
+        copy_error: UserError | None = None
+        try:
+            interruptions: list[ToolApprovalItem] = []
+            for item in self._current_step.interruptions:
+                copied_raw_item = _copy_tool_approval_raw_item(item.raw_item)
+                interruptions.append(
+                    dataclasses.replace(
+                        item,
+                        agent=item.agent,
+                        raw_item=copied_raw_item,
+                    )
+                )
+        except Exception as error:
+            _prepare_data_redacted_error(error)
+            copy_error = UserError(
+                "Cannot safely copy pending tool approvals. Ensure each interruption uses a "
+                "supported tool call or contains only JSON-compatible mapping data."
+            )
+        if copy_error is not None:
+            _mark_error_data_redacted(copy_error)
+            self = cast(Any, None)
+            item = cast(Any, None)
+            copied_raw_item = None
+            interruptions = []
+            _raise_data_redacted_error(copy_error)
+        return interruptions
 
     @staticmethod
     def _approval_items_match(
         candidate: ToolApprovalItem,
         approval_item: ToolApprovalItem,
-    ) -> bool:
-        """Return whether two approval items identify the same nested invocation."""
+        *,
+        approval_is_authoritative: bool = False,
+    ) -> bool | None:
+        """Compare approval identity, returning None when an owner is unsafe to distinguish."""
         if candidate is approval_item:
             return True
         candidate_agent = candidate.agent
@@ -476,17 +990,63 @@ class RunState(Generic[TContext, TAgent]):
             and candidate_agent is not approval_agent
         ):
             return False
+        try:
+            approval_raw_item = _copy_tool_approval_raw_item(approval_item.raw_item)
+        except Exception:
+            return None if approval_is_authoritative else False
+        try:
+            candidate_raw_item = _copy_tool_approval_raw_item(candidate.raw_item)
+        except Exception:
+            return None
         candidate_identity = tool_invocation_identity(
-            candidate.raw_item,
+            candidate_raw_item,
             tool_lookup_key=candidate.tool_lookup_key,
             tool_name=candidate.tool_name,
         )
         approval_identity = tool_invocation_identity(
-            approval_item.raw_item,
+            approval_raw_item,
             tool_lookup_key=approval_item.tool_lookup_key,
             tool_name=approval_item.tool_name,
         )
         return candidate_identity is not None and candidate_identity == approval_identity
+
+    def _find_current_approval_item(
+        self,
+        approval_item: ToolApprovalItem,
+        *,
+        approval_is_authoritative: bool | None = None,
+    ) -> ToolApprovalItem | None:
+        """Resolve a detached approval snapshot to current authoritative pending state."""
+        from .run_internal.run_steps import NextStepInterruption
+
+        if not isinstance(self._current_step, NextStepInterruption):
+            return None
+        if approval_is_authoritative is None:
+            approval_is_authoritative = any(
+                candidate is approval_item for candidate in self._current_step.interruptions
+            )
+        canonical_matches: list[ToolApprovalItem] = []
+        has_indeterminate_candidate = False
+        for candidate in self._current_step.interruptions:
+            if candidate is approval_item:
+                canonical_matches.append(candidate)
+                continue
+            match = self._approval_items_match(
+                candidate,
+                approval_item,
+                approval_is_authoritative=approval_is_authoritative,
+            )
+            if match is None:
+                has_indeterminate_candidate = True
+            elif match:
+                canonical_matches.append(candidate)
+        if has_indeterminate_candidate or len(canonical_matches) > 1:
+            raise UserError(
+                "Cannot apply approval because multiple current pending approvals contain the "
+                "same tool invocation identity, or because it belongs to both the current run "
+                "and a nested agent-tool run. Use unique call IDs."
+            )
+        return canonical_matches[0] if canonical_matches else None
 
     def _find_nested_approval_state(
         self,
@@ -497,11 +1057,66 @@ class RunState(Generic[TContext, TAgent]):
             return None
 
         from .agent_tool_state import peek_agent_tool_run_result
+        from .run_internal.run_steps import NextStepInterruption
 
+        nested_candidates: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
+        for function_run in self._last_processed_response.functions:
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=self._agent_tool_state_scope_id,
+            )
+            interruptions = getattr(pending_result, "interruptions", None)
+            to_state = getattr(pending_result, "to_state", None)
+            if not isinstance(interruptions, list) or not callable(to_state):
+                continue
+            nested_state = to_state()
+            if not isinstance(nested_state, RunState) or nested_state is self:
+                continue
+            nested_candidates.extend(
+                (nested_state, candidate)
+                for candidate in interruptions
+                if isinstance(candidate, ToolApprovalItem)
+            )
+
+        current_candidates = (
+            self._current_step.interruptions
+            if isinstance(self._current_step, NextStepInterruption)
+            else []
+        )
+        approval_is_authoritative = any(
+            candidate is approval_item for candidate in current_candidates
+        ) or any(candidate is approval_item for _, candidate in nested_candidates)
+        current_approval_item = self._find_current_approval_item(
+            approval_item,
+            approval_is_authoritative=approval_is_authoritative,
+        )
+        canonical_matches: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
+        has_indeterminate_candidate = False
+        for nested_state, candidate in nested_candidates:
+            if candidate is approval_item:
+                canonical_matches.append((nested_state, candidate))
+                continue
+            match = self._approval_items_match(
+                candidate,
+                approval_item,
+                approval_is_authoritative=approval_is_authoritative,
+            )
+            if match is None:
+                has_indeterminate_candidate = True
+            elif match:
+                canonical_matches.append((nested_state, candidate))
+
+        if has_indeterminate_candidate:
+            raise UserError(
+                "Cannot apply approval because one or more nested agent-tool approvals cannot be "
+                "safely distinguished. Use JSON-compatible approval payloads and unique call IDs."
+            )
+
+        identity_item = current_approval_item or approval_item
         approval_identity = tool_invocation_identity_and_scope(
-            approval_item.raw_item,
-            tool_lookup_key=approval_item.tool_lookup_key,
-            tool_name=approval_item.tool_name,
+            identity_item.raw_item,
+            tool_lookup_key=identity_item.tool_lookup_key,
+            tool_name=identity_item.tool_name,
         )
         current_state_owns_approval = False
         if approval_identity is not None and self._context is not None:
@@ -579,38 +1194,11 @@ class RunState(Generic[TContext, TAgent]):
                 current_state_owns_approval and approval_identity in current_response_identities
             )
 
-        exact_match: tuple[RunState[Any, Agent[Any]], ToolApprovalItem] | None = None
-        canonical_matches: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
-        for function_run in self._last_processed_response.functions:
-            pending_result = peek_agent_tool_run_result(
-                function_run.tool_call,
-                scope_id=self._agent_tool_state_scope_id,
-            )
-            interruptions = getattr(pending_result, "interruptions", None)
-            to_state = getattr(pending_result, "to_state", None)
-            if not isinstance(interruptions, list) or not callable(to_state):
-                continue
-            nested_state = to_state()
-            if not isinstance(nested_state, RunState) or nested_state is self:
-                continue
-            for candidate in interruptions:
-                if not isinstance(candidate, ToolApprovalItem):
-                    continue
-                if candidate is approval_item:
-                    exact_match = (nested_state, candidate)
-                    break
-                if self._approval_items_match(candidate, approval_item):
-                    canonical_matches.append((nested_state, candidate))
-            if exact_match is not None:
-                break
-
-        if current_state_owns_approval and (exact_match is not None or canonical_matches):
+        if current_state_owns_approval and canonical_matches:
             raise UserError(
                 "Cannot apply approval because the same tool invocation identity belongs to both "
                 "the current run and a nested agent-tool run. Use distinct call IDs."
             )
-        if exact_match is not None:
-            return exact_match
         if len(canonical_matches) == 1:
             return canonical_matches[0]
         if len(canonical_matches) > 1:
@@ -629,7 +1217,11 @@ class RunState(Generic[TContext, TAgent]):
             nested_state, nested_item = nested_approval
             nested_state.approve(nested_item, always_approve=always_approve)
             return
-        self._context.approve_tool(approval_item, always_approve=always_approve)
+        current_approval_item = self._find_current_approval_item(approval_item)
+        self._context.approve_tool(
+            current_approval_item or approval_item,
+            always_approve=always_approve,
+        )
 
     def reject(
         self,
@@ -656,7 +1248,7 @@ class RunState(Generic[TContext, TAgent]):
             )
             return
         self._context.reject_tool(
-            approval_item,
+            self._find_current_approval_item(approval_item) or approval_item,
             always_reject=always_reject,
             rejection_message=rejection_message,
         )

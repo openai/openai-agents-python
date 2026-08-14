@@ -8,14 +8,16 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypeVar, cast
+from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import pytest
 from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseFunctionShellToolCall,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputText,
@@ -30,13 +32,15 @@ from openai.types.responses.response_computer_tool_call import (
 from openai.types.responses.response_function_tool_call import CallerProgram
 from openai.types.responses.response_output_item import (
     LocalShellCall,
+    LocalShellCallAction,
     McpApprovalRequest,
+    McpCall,
     Program,
     ProgramOutput,
 )
 from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.responses.tool_param import Mcp
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_serializer
 
 from agents import Agent, ModelSettings, RunConfig, RunHooks, Runner, handoff, trace
 from agents._tool_invocation import tool_invocation_identity_and_scope
@@ -1612,26 +1616,1318 @@ class TestRunState:
 
         interruptions = state.get_interruptions()
         assert len(interruptions) == 1
-        assert interruptions[0] == approval_item
+        assert interruptions[0] is not approval_item
+        assert interruptions[0].agent is agent
+        assert interruptions[0].tool_name == approval_item.tool_name
+        assert interruptions[0].raw_item.model_dump() == approval_item.raw_item.model_dump()
+        assert interruptions[0].raw_item is not approval_item.raw_item
 
-    def test_get_interruptions_returns_a_snapshot(self):
-        """Mutating returned interruptions must not change pending approvals."""
+    @pytest.mark.parametrize("raw_item_kind", ["pydantic", "mapping"])
+    def test_get_interruptions_returns_detached_item_snapshots(self, raw_item_kind: str):
+        """Mutating returned interruption content must not change pending approvals."""
         agent = Agent(name="SnapshotAgent")
-        approval_item = ToolApprovalItem(
-            agent=agent,
-            raw_item=ResponseFunctionToolCall(
+        raw_item: Any
+        if raw_item_kind == "pydantic":
+            raw_item = ResponseFunctionToolCall(
                 type="function_call",
                 name="toolA",
                 call_id="cid-snapshot",
                 status="completed",
-                arguments="{}",
-            ),
+                arguments='{"value": "original"}',
+            )
+        else:
+            raw_item = {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-snapshot",
+                "status": "completed",
+                "arguments": '{"value": "original"}',
+                "metadata": {"tags": ["original"]},
+            }
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
         )
         state = make_state_with_interruptions(agent, [approval_item])
 
-        state.get_interruptions().clear()
+        interruption = state.get_interruptions()[0]
+        interruption.tool_name = "changed"
+        if isinstance(interruption.raw_item, dict):
+            interruption.raw_item["arguments"] = '{"value": "changed"}'
+            interruption.raw_item["metadata"]["tags"].append("changed")
+        else:
+            interruption.raw_item.arguments = '{"value": "changed"}'
 
-        assert state.get_interruptions() == [approval_item]
+        pending = state.get_interruptions()[0]
+        assert pending is not interruption
+        assert pending.agent is agent
+        assert pending.tool_name == "toolA"
+        if isinstance(pending.raw_item, dict):
+            assert pending.raw_item["arguments"] == '{"value": "original"}'
+            assert pending.raw_item["metadata"] == {"tags": ["original"]}
+        else:
+            assert pending.raw_item.arguments == '{"value": "original"}'
+
+    @pytest.mark.parametrize("raw_item_kind", ["pydantic", "mapping"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_get_interruptions_snapshots_can_apply_approval_decisions(
+        self,
+        raw_item_kind: str,
+        approve: bool,
+    ) -> None:
+        """Detached snapshots must retain canonical approval identity."""
+        agent = Agent(name="DecisionAgent")
+        raw_item: Any = {
+            "type": "function_call",
+            "name": "toolA",
+            "call_id": "cid-decision",
+            "status": "completed",
+            "arguments": "{}",
+        }
+        if raw_item_kind == "pydantic":
+            raw_item = ResponseFunctionToolCall(**raw_item)
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state = make_state_with_interruptions(agent, [approval_item])
+
+        interruption = state.get_interruptions()[0]
+        assert interruption is not approval_item
+        if approve:
+            state.approve(interruption)
+        else:
+            state.reject(interruption)
+
+        assert state._context is not None
+        assert state._context.is_tool_approved("toolA", "cid-decision") is approve
+
+    def test_get_interruptions_fails_before_returning_an_unsafe_snapshot(self):
+        """Uncopyable payloads must fail at the snapshot boundary."""
+
+        class Uncopyable:
+            def __deepcopy__(self, _memo: dict[int, Any]) -> Any:
+                raise RuntimeError("cannot copy")
+
+        agent = Agent(name="UncopyableAgent")
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-uncopyable",
+                "status": "completed",
+                "arguments": "{}",
+                "metadata": Uncopyable(),
+            },
+        )
+        state = make_state_with_interruptions(agent, [approval_item])
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+    def test_get_interruptions_clone_failure_drops_sensitive_exception_context(self) -> None:
+        """Clone failures must not retain payload data in the exception graph."""
+        source_sentinel = "SENSITIVE_APPROVAL_CONTEXT_VALUE"
+        partial_sentinel = "SENSITIVE_PARTIAL_COPY_VALUE"
+        agent = Agent(name="CloneFailureContextAgent")
+        safe_item = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "safeTool",
+                "call_id": "cid-safe-before-sensitive-failure",
+                "arguments": "{}",
+                "metadata": {"secret": partial_sentinel},
+            },
+        )
+        raw_item = {
+            "type": "function_call",
+            "name": "toolA",
+            "call_id": "cid-sensitive-clone-failure",
+            "arguments": "{}",
+            "metadata": {"secret": source_sentinel, "unsafe": object()},
+        }
+        failing_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state = make_state_with_interruptions(
+            agent,
+            [safe_item, failing_item],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals") as exc:
+            state.get_interruptions()
+
+        assert exc.value.__cause__ is None
+        assert exc.value.__context__ is None
+        assert source_sentinel not in repr(exc.value)
+        assert partial_sentinel not in repr(exc.value)
+        traceback = exc.value.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if "/src/agents/" in frame.f_code.co_filename:
+                local_values = tuple(frame.f_locals.values())
+                assert all(value is not state for value in local_values)
+                assert all(value is not safe_item for value in local_values)
+                assert all(value is not failing_item for value in local_values)
+                assert all(value is not raw_item for value in local_values)
+                assert not any(isinstance(value, RunState) for value in local_values)
+                assert not any(isinstance(value, ToolApprovalItem) for value in local_values)
+                assert source_sentinel not in repr(frame.f_locals)
+                assert partial_sentinel not in repr(frame.f_locals)
+            traceback = traceback.tb_next
+
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_get_interruptions_canonicalizes_custom_outer_models(
+        self,
+        approve: bool,
+    ) -> None:
+        """Declared model subtypes must retain canonical approval identity."""
+
+        class CustomCall(ResponseFunctionToolCall):
+            serializer_called: ClassVar[bool] = False
+            status: Literal["completed"] = "completed"
+            action: dict[str, str]
+            subtype_metadata: dict[str, list[str]]
+            subtype_only: Any
+
+            @model_serializer(mode="wrap")
+            def serialize_custom_call(self, handler: Any) -> Any:
+                type(self).serializer_called = True
+                return handler(self)
+
+        raw_item = CustomCall(
+            type="function_call",
+            name="toolA",
+            call_id="cid-custom-model",
+            arguments="{}",
+            action={"kind": "subtype-only"},
+            subtype_metadata={"tags": ["subtype-only"]},
+            subtype_only=object(),
+        )
+        agent = Agent(name="CustomModelAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        assert state._context is not None
+        state._context._tool_invocation_status(raw_item)
+        CustomCall.serializer_called = False
+        snapshot = state.get_interruptions()[0]
+
+        assert not CustomCall.serializer_called
+        assert type(snapshot.raw_item) is ResponseFunctionToolCall
+        assert snapshot.raw_item.call_id == "cid-custom-model"
+        assert snapshot.raw_item.status == "completed"
+        assert "status" not in snapshot.raw_item.model_fields_set
+        assert "status" not in snapshot.raw_item.model_dump(exclude_unset=True)
+        assert "subtype_metadata" not in snapshot.raw_item.model_dump()
+        if approve:
+            state.approve(snapshot)
+        else:
+            state.reject(snapshot)
+        assert state._context.is_tool_approved("toolA", "cid-custom-model") is approve
+
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_get_interruptions_subtype_snapshots_route_to_nested_approval(
+        self,
+        approve: bool,
+    ) -> None:
+        """Canonical subtype snapshots must resolve to nested authoritative items."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        class CustomCall(ResponseFunctionToolCall):
+            status: Literal["completed"] = "completed"
+            action: dict[str, str]
+
+        agent = Agent(name="NestedSubtypeAgent")
+        nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+        nested_outer_call = make_tool_call(
+            call_id="outer-nested-subtype",
+            name="nested_agent_tool",
+        )
+        raw_item = CustomCall(
+            type="function_call",
+            name="toolA",
+            call_id="cid-nested-subtype",
+            arguments="{}",
+            action={"kind": "subtype-only"},
+        )
+        nested_approval = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        state = make_state_with_interruptions(agent, [nested_approval])
+        state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(tool_call=nested_outer_call, function_tool=nested_tool),
+            ]
+        )
+        nested_state = make_state_with_interruptions(agent, [nested_approval])
+        assert nested_state._context is not None
+        nested_state._context._tool_invocation_status(raw_item)
+        record_agent_tool_run_result(
+            nested_outer_call,
+            cast(
+                Any,
+                SimpleNamespace(
+                    interruptions=[nested_approval],
+                    to_state=lambda: nested_state,
+                ),
+            ),
+            scope_id=state._agent_tool_state_scope_id,
+        )
+
+        try:
+            snapshot = state.get_interruptions()[0]
+            assert snapshot.raw_item.status == "completed"
+            if approve:
+                state.approve(snapshot)
+            else:
+                state.reject(snapshot)
+            assert (
+                nested_state._context.is_tool_approved(
+                    "toolA",
+                    "cid-nested-subtype",
+                )
+                is approve
+            )
+        finally:
+            drop_agent_tool_run_result(
+                nested_outer_call,
+                scope_id=state._agent_tool_state_scope_id,
+            )
+
+    def test_get_interruptions_preserves_required_declared_subtype_defaults(self) -> None:
+        """Subtype defaults for base-required fields must survive canonicalization."""
+
+        class DefaultArgumentsCall(ResponseFunctionToolCall):
+            arguments: str = "{}"
+
+        raw_item = DefaultArgumentsCall(
+            type="function_call",
+            name="toolA",
+            call_id="cid-required-subtype-default",
+        )
+        agent = Agent(name="RequiredSubtypeDefaultAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert type(snapshot.raw_item) is ResponseFunctionToolCall
+        assert snapshot.raw_item.arguments == "{}"
+        assert "arguments" not in snapshot.raw_item.model_fields_set
+        assert "arguments" not in snapshot.raw_item.model_dump(exclude_unset=True)
+        assert raw_item.arguments == "{}"
+
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_get_interruptions_rejects_typed_extra_identity_collisions(
+        self,
+        approve: bool,
+    ) -> None:
+        """Typed extras must not replace declared approval identity fields."""
+        agent = Agent(name="TypedExtraCollisionAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="toolA",
+            call_id="authoritative",
+            arguments="{}",
+        )
+        assert raw_item.model_extra is not None
+        raw_item.model_extra["call_id"] = "forged"
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            snapshot = state.get_interruptions()[0]
+            if approve:
+                state.approve(snapshot)
+            else:
+                state.reject(snapshot)
+
+        assert state._context is not None
+        assert state._context.is_tool_approved("toolA", "authoritative") is None
+        assert state._context.is_tool_approved("toolA", "forged") is None
+
+    def test_get_interruptions_does_not_hash_typed_extra_keys(self) -> None:
+        """Typed-extra keys must be normalized before any hash-based lookup."""
+
+        class MutatingKey(str):
+            def __new__(cls, value: str, owner: ResponseFunctionToolCall) -> MutatingKey:
+                key = str.__new__(cls, value)
+                key.owner = owner
+                return key
+
+            def __hash__(self) -> int:
+                object.__setattr__(self.owner, "arguments", "mutated-by-key-hash")
+                return str.__hash__(self)
+
+        agent = Agent(name="TypedExtraKeyAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="toolA",
+            call_id="cid-typed-extra-key",
+            arguments="original",
+        )
+        assert raw_item.model_extra is not None
+        key = MutatingKey("metadata", raw_item)
+        raw_item.model_extra[key] = {"safe": True}
+        object.__setattr__(raw_item, "arguments", "original")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert raw_item.arguments == "original"
+        assert snapshot.raw_item.arguments == "original"
+        snapshot_extra = snapshot.raw_item.model_extra
+        assert snapshot_extra == {"metadata": {"safe": True}}
+        assert snapshot_extra is not None
+        assert all(type(extra_name) is str for extra_name in snapshot_extra)
+
+    def test_get_interruptions_copies_typed_extra_container_subtypes(self) -> None:
+        """Hook-free built-in container subtypes remain detached and supported."""
+
+        class PlainDict(dict[str, Any]):
+            pass
+
+        class PlainList(list[str]):
+            pass
+
+        metadata = PlainDict(tags=PlainList(["original"]))
+        raw_item = ResponseFunctionToolCall.model_validate(
+            {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-typed-extra-containers",
+                "arguments": "{}",
+                "metadata": metadata,
+            }
+        )
+        agent = Agent(name="TypedExtraContainerAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert raw_item.model_extra is not None
+        assert snapshot.raw_item.model_extra is not None
+        source_metadata = raw_item.model_extra["metadata"]
+        copied_metadata = snapshot.raw_item.model_extra["metadata"]
+        assert isinstance(source_metadata, PlainDict)
+        assert isinstance(source_metadata["tags"], PlainList)
+        assert type(copied_metadata) is dict
+        assert type(copied_metadata["tags"]) is list
+        copied_metadata["tags"].append("changed")
+        assert source_metadata["tags"] == ["original"]
+
+    @pytest.mark.parametrize("location", ["outer", "nested"])
+    def test_get_interruptions_rejects_serializer_bearing_typed_extras(
+        self,
+        location: str,
+    ) -> None:
+        """Typed extras must fail before a user serializer can mutate pending state."""
+
+        class MutatingExtra(BaseModel):
+            serializer_called: ClassVar[bool] = False
+            value: str
+
+            @model_serializer(mode="wrap")
+            def serialize_mutating_extra(self, handler: Any) -> Any:
+                type(self).serializer_called = True
+                self.value = "mutated-by-serializer"
+                return handler(self)
+
+        extra = MutatingExtra(value="original")
+        if location == "outer":
+            raw_item: Any = ResponseFunctionToolCall.model_validate(
+                {
+                    "type": "function_call",
+                    "name": "toolA",
+                    "call_id": "cid-serializer-extra",
+                    "arguments": "{}",
+                    "metadata": extra,
+                }
+            )
+        else:
+            raw_item = LocalShellCall.model_validate(
+                {
+                    "id": "local-shell-serializer-extra",
+                    "action": LocalShellCallAction.model_validate(
+                        {
+                            "command": ["echo", "ok"],
+                            "env": {},
+                            "type": "exec",
+                            "metadata": extra,
+                        }
+                    ),
+                    "call_id": "cid-serializer-extra",
+                    "status": "completed",
+                    "type": "local_shell_call",
+                }
+            )
+        agent = Agent(name="SerializerExtraAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert extra.value == "original"
+        assert not MutatingExtra.serializer_called
+
+    @pytest.mark.parametrize("location", ["outer", "nested"])
+    def test_get_interruptions_rejects_typed_subtype_attribute_hooks(
+        self,
+        location: str,
+    ) -> None:
+        """Subtype attribute hooks must fail before authoritative model access."""
+
+        class MutatingCall(ResponseFunctionToolCall):
+            armed: bool = False
+
+            def __getattribute__(self, name: str) -> Any:
+                if name in {"__dict__", "__pydantic_extra__"} and object.__getattribute__(
+                    self,
+                    "__dict__",
+                ).get("armed"):
+                    object.__setattr__(self, "arguments", '{"mutated":true}')
+                return super().__getattribute__(name)
+
+        class MutatingAction(LocalShellCallAction):
+            armed: bool = False
+
+            def __getattribute__(self, name: str) -> Any:
+                if name in {"__dict__", "__pydantic_extra__"} and object.__getattribute__(
+                    self,
+                    "__dict__",
+                ).get("armed"):
+                    object.__setattr__(self, "command", ["mutated"])
+                return super().__getattribute__(name)
+
+        if location == "outer":
+            raw_item: Any = MutatingCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-hook-bearing-subtype",
+                arguments="{}",
+            )
+            raw_item.armed = True
+        else:
+            action = MutatingAction(command=["echo", "ok"], env={}, type="exec")
+            action.armed = True
+            raw_item = LocalShellCall(
+                id="local-shell-hook-bearing-subtype",
+                action=action,
+                call_id="cid-hook-bearing-subtype",
+                status="completed",
+                type="local_shell_call",
+            )
+        agent = Agent(name="HookBearingSubtypeAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        if location == "outer":
+            assert raw_item.arguments == "{}"
+        else:
+            assert raw_item.action.command == ["echo", "ok"]
+
+    def test_get_interruptions_rejects_hooks_in_post_declared_model_mixins(self) -> None:
+        """Subtype hooks must be rejected even when their mixin follows the declared base."""
+
+        class MutatingMixin:
+            def __getattribute__(self, name: str) -> Any:
+                if name in {"__dict__", "__pydantic_extra__"} and object.__getattribute__(
+                    self,
+                    "__dict__",
+                ).get("armed"):
+                    object.__setattr__(self, "arguments", "mutated-by-post-declared-mixin")
+                return super().__getattribute__(name)
+
+        class MutatingCall(ResponseFunctionToolCall, MutatingMixin):
+            armed: bool = False
+
+        raw_item = MutatingCall(
+            type="function_call",
+            name="toolA",
+            call_id="cid-post-declared-mixin",
+            arguments="original",
+        )
+        agent = Agent(name="PostDeclaredMixinAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+        raw_item.armed = True
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert raw_item.arguments == "original"
+
+    @pytest.mark.parametrize(
+        ("location", "storage_name"),
+        [
+            ("outer", "__pydantic_extra__"),
+            ("nested", "__pydantic_fields_set__"),
+            ("outer", "__dict__"),
+        ],
+    )
+    def test_get_interruptions_rejects_pydantic_storage_descriptors(
+        self,
+        location: str,
+        storage_name: str,
+    ) -> None:
+        """Subtype storage descriptors must fail before public Pydantic instance access."""
+        hook_called = False
+        source_holder: dict[str, Any] = {}
+
+        def mutate_on_access(_instance: BaseModel) -> Any:
+            nonlocal hook_called
+            hook_called = True
+            source_model = source_holder["model"]
+            object.__setattr__(
+                source_model,
+                source_holder["field"],
+                source_holder["mutated_value"],
+            )
+            raise AssertionError("storage descriptor should not run")
+
+        class CustomCall(ResponseFunctionToolCall):
+            pass
+
+        class DictDescriptorCall(ResponseFunctionToolCall):
+            __dict__ = property(mutate_on_access)  # type: ignore[assignment]
+
+        class CustomAction(LocalShellCallAction):
+            pass
+
+        if location == "outer":
+            call_type = ResponseFunctionToolCall if storage_name == "__dict__" else CustomCall
+            raw_item: Any = call_type(
+                type="function_call",
+                name="toolA",
+                call_id="cid-storage-descriptor",
+                arguments="original",
+            )
+            if storage_name == "__dict__":
+                object.__setattr__(raw_item, "__class__", DictDescriptorCall)
+            source_model = raw_item
+            source_field = "arguments"
+            mutated_value: Any = "mutated-by-storage-descriptor"
+        else:
+            source_model = CustomAction(command=["echo", "ok"], env={}, type="exec")
+            raw_item = LocalShellCall(
+                id="local-shell-storage-descriptor",
+                action=source_model,
+                call_id="cid-storage-descriptor",
+                status="completed",
+                type="local_shell_call",
+            )
+            source_field = "command"
+            mutated_value = ["mutated-by-storage-descriptor"]
+
+        source_holder.update(
+            model=source_model,
+            field=source_field,
+            mutated_value=mutated_value,
+        )
+        if storage_name != "__dict__":
+            setattr(type(source_model), storage_name, property(mutate_on_access))
+        agent = Agent(name="StorageDescriptorAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert not hook_called
+        if location == "outer":
+            assert source_model.arguments == "original"
+        else:
+            assert source_model.command == ["echo", "ok"]
+
+    @pytest.mark.parametrize("location", ["outer", "nested"])
+    def test_get_interruptions_rejects_pydantic_storage_container_hooks(
+        self,
+        location: str,
+    ) -> None:
+        """Pydantic storage containers must be plain dicts before public iteration."""
+
+        class MutatingStorage(dict[str, Any]):
+            def __init__(self, *args: Any, field: str, mutated_value: Any) -> None:
+                super().__init__(*args)
+                self.field = field
+                self.mutated_value = mutated_value
+
+            def items(self) -> Any:
+                self[self.field] = self.mutated_value
+                return super().items()
+
+        if location == "outer":
+            raw_item: Any = ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-storage-container",
+                arguments="original",
+            )
+            source_model = raw_item
+            source_field = "arguments"
+            mutated_value: Any = "mutated-by-storage-container"
+        else:
+            source_model = LocalShellCallAction(command=["echo", "ok"], env={}, type="exec")
+            raw_item = LocalShellCall(
+                id="local-shell-storage-container",
+                action=source_model,
+                call_id="cid-storage-container",
+                status="completed",
+                type="local_shell_call",
+            )
+            source_field = "command"
+            mutated_value = ["mutated-by-storage-container"]
+
+        storage = MutatingStorage(
+            object.__getattribute__(source_model, "__dict__"),
+            field=source_field,
+            mutated_value=mutated_value,
+        )
+        object.__setattr__(source_model, "__dict__", storage)
+        agent = Agent(name="StorageContainerAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        if location == "outer":
+            assert source_model.arguments == "original"
+        else:
+            assert source_model.command == ["echo", "ok"]
+
+    @pytest.mark.parametrize("location", ["outer", "nested"])
+    def test_get_interruptions_does_not_dispatch_pydantic_storage_key_hooks(
+        self,
+        location: str,
+    ) -> None:
+        """Pydantic storage keys must be normalized without method dispatch."""
+        hook_called = False
+
+        class MutatingKey(str):
+            def __new__(
+                cls,
+                value: str,
+                owner: BaseModel,
+                field: str,
+                mutated_value: Any,
+            ) -> MutatingKey:
+                key = str.__new__(cls, value)
+                key.owner = owner
+                key.field = field
+                key.mutated_value = mutated_value
+                return key
+
+            def startswith(self, *args: Any, **kwargs: Any) -> bool:
+                nonlocal hook_called
+                hook_called = True
+                object.__setattr__(self.owner, self.field, self.mutated_value)
+                return str.startswith(self, *args, **kwargs)
+
+        if location == "outer":
+            raw_item: Any = ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-storage-key",
+                arguments="original",
+            )
+            source_model = raw_item
+            source_field = "arguments"
+            original_value: Any = "original"
+            mutated_value: Any = "mutated-by-storage-key"
+        else:
+            source_model = LocalShellCallAction(command=["echo", "ok"], env={}, type="exec")
+            raw_item = LocalShellCall(
+                id="local-shell-storage-key",
+                action=source_model,
+                call_id="cid-storage-key",
+                status="completed",
+                type="local_shell_call",
+            )
+            source_field = "command"
+            original_value = ["echo", "ok"]
+            mutated_value = ["mutated-by-storage-key"]
+
+        storage = object.__getattribute__(source_model, "__dict__")
+        assert type(storage) is dict
+        dict.__setitem__(
+            storage,
+            MutatingKey(
+                "subtype_only",
+                source_model,
+                source_field,
+                mutated_value,
+            ),
+            "ignored",
+        )
+        agent = Agent(name="StorageKeyAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert not hook_called
+        assert getattr(source_model, source_field) == original_value
+        snapshot_raw_item = cast(Any, snapshot.raw_item)
+        snapshot_model = snapshot_raw_item if location == "outer" else snapshot_raw_item.action
+        assert getattr(snapshot_model, source_field) == original_value
+
+    @pytest.mark.parametrize("location", ["mapping", "typed_extra"])
+    def test_get_interruptions_does_not_dispatch_payload_class_properties(
+        self,
+        location: str,
+    ) -> None:
+        """Classifying arbitrary payload values must not access their __class__."""
+
+        class MutatingClassProbe:
+            def __init__(self, mutate: Callable[[], None]) -> None:
+                self.mutate = mutate
+
+            @property
+            def __class__(self) -> type[object]:
+                self.mutate()
+                return object
+
+        if location == "mapping":
+            raw_item: Any = {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-class-property",
+                "arguments": "original",
+            }
+            probe = MutatingClassProbe(
+                lambda: raw_item.__setitem__("arguments", "mutated-by-class-property")
+            )
+            raw_item["metadata"] = probe
+        else:
+            raw_item = ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-class-property",
+                arguments="original",
+            )
+            probe = MutatingClassProbe(
+                lambda: object.__setattr__(
+                    raw_item,
+                    "arguments",
+                    "mutated-by-class-property",
+                )
+            )
+            assert raw_item.model_extra is not None
+            raw_item.model_extra["metadata"] = probe
+        agent = Agent(name="ClassPropertyAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        if location == "mapping":
+            assert raw_item["arguments"] == "original"
+        else:
+            assert raw_item.arguments == "original"
+
+    def test_get_interruptions_checks_later_adapter_subtypes_without_class_access(self) -> None:
+        """Adapter selection must reject hooks without reading instance __class__."""
+
+        class MutatingMcpCall(McpCall):
+            armed: bool = False
+
+            def __getattribute__(self, name: str) -> Any:
+                if name == "__class__" and object.__getattribute__(self, "__dict__").get("armed"):
+                    object.__setattr__(self, "arguments", "mutated-by-adapter-selection")
+                return super().__getattribute__(name)
+
+        raw_item = MutatingMcpCall(
+            id="mcp-hook-bearing-subtype",
+            arguments="original",
+            name="toolA",
+            server_label="server",
+            type="mcp_call",
+        )
+        agent = Agent(name="LaterAdapterSubtypeAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+        raw_item.armed = True
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert raw_item.arguments == "original"
+
+    def test_get_interruptions_uses_public_schema_for_nested_models(self) -> None:
+        """Base adapters must serialize nested models without subclass serializers."""
+
+        class CustomAction(LocalShellCallAction):
+            serializer_called: ClassVar[bool] = False
+            command: list[str] = ["echo", "ok"]
+            subtype_only: Any
+
+            @model_serializer(mode="wrap")
+            def serialize_custom_action(self, handler: Any) -> Any:
+                type(self).serializer_called = True
+                return handler(self)
+
+        action = CustomAction(
+            env={},
+            type="exec",
+            subtype_only=object(),
+        )
+        raw_item = LocalShellCall(
+            id="local-shell-public-schema",
+            action=action,
+            call_id="cid-local-shell-public-schema",
+            status="completed",
+            type="local_shell_call",
+        )
+        agent = Agent(name="PublicSchemaAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert type(snapshot.raw_item) is LocalShellCall
+        assert snapshot.raw_item.action.command == ["echo", "ok"]
+        assert type(snapshot.raw_item.action) is LocalShellCallAction
+        assert snapshot.raw_item.action is not action
+        assert "command" not in snapshot.raw_item.action.model_fields_set
+        assert "command" not in snapshot.raw_item.action.model_dump(exclude_unset=True)
+        assert not CustomAction.serializer_called
+
+    def test_get_interruptions_uses_trusted_nested_model_annotations(self) -> None:
+        """Nested model discovery must not trust a caller-controlled module name."""
+        source_holder: dict[str, Any] = {}
+
+        class SpoofedAction(LocalShellCallAction):
+            construct_called: ClassVar[bool] = False
+
+            @classmethod
+            def model_construct(
+                cls,
+                _fields_set: set[str] | None = None,
+                **values: object,
+            ) -> Any:
+                cls.construct_called = True
+                source_holder["action"].command = ["mutated"]
+                return super().model_construct(_fields_set=_fields_set, **values)
+
+        SpoofedAction.__module__ = "openai.types.responses.spoofed"
+        action = SpoofedAction(command=["echo", "ok"], env={}, type="exec")
+        source_holder["action"] = action
+        raw_item = LocalShellCall(
+            id="local-shell-spoofed-module",
+            action=action,
+            call_id="cid-spoofed-module",
+            status="completed",
+            type="local_shell_call",
+        )
+        agent = Agent(name="SpoofedNestedModelAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        snapshot = state.get_interruptions()[0]
+
+        assert not SpoofedAction.construct_called
+        assert action.command == ["echo", "ok"]
+        assert type(snapshot.raw_item.action) is LocalShellCallAction
+        assert snapshot.raw_item.action.command == ["echo", "ok"]
+
+    @pytest.mark.parametrize("location", ["mapping", "nested"])
+    def test_get_interruptions_rejects_normalized_key_collisions(self, location: str) -> None:
+        """Distinct source keys must not collapse into one approval identity field."""
+
+        class DistinctString(str):
+            def __hash__(self) -> int:
+                return id(self)
+
+            def __eq__(self, other: object) -> bool:
+                return self is other
+
+        colliding_key = DistinctString("call_id")
+        agent = Agent(name="KeyCollisionAgent")
+        if location == "mapping":
+            raw_item: Any = {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "original",
+                "arguments": "{}",
+                colliding_key: "replacement",
+            }
+        else:
+            metadata = {"call_id": "original", colliding_key: "replacement"}
+            raw_item = {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-nested-collision",
+                "arguments": "{}",
+                "metadata": metadata,
+            }
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        if location == "nested":
+            assert metadata["call_id"] == "original"
+            assert metadata[colliding_key] == "replacement"
+        else:
+            assert raw_item["call_id"] == "original"
+
+    def test_get_interruptions_bypasses_nested_container_hooks(self):
+        """Mapping snapshots must not invoke hooks on container subclasses."""
+
+        class MutatingDict(dict[str, Any]):
+            def items(self) -> Any:
+                self["serializer-side-effect"] = True
+                return super().items()
+
+        class MutatingList(list[str]):
+            def __iter__(self) -> Any:
+                self.append("serializer-side-effect")
+                return super().__iter__()
+
+        metadata = MutatingList(["original"])
+        raw_item = MutatingDict(
+            type="function_call",
+            name="toolA",
+            call_id="cid-hooks",
+            arguments="{}",
+            metadata=metadata,
+        )
+        agent = Agent(name="ContainerHooksAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        interruption = state.get_interruptions()[0]
+
+        assert type(interruption.raw_item) is dict
+        assert interruption.raw_item["metadata"] == ["original"]
+        assert dict.__contains__(raw_item, "serializer-side-effect") is False
+        assert list.__len__(metadata) == 1
+
+    @pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+    def test_get_interruptions_rejects_non_finite_mapping_values(
+        self,
+        non_finite: float,
+    ) -> None:
+        """Non-standard JSON numbers must fail before a snapshot is returned."""
+        agent = Agent(name="NonFiniteAgent")
+        raw_item = {
+            "type": "function_call",
+            "name": "toolA",
+            "call_id": "cid-non-finite",
+            "arguments": "{}",
+            "metadata": non_finite,
+        }
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+    def test_get_interruptions_failure_does_not_expose_partial_snapshots(self):
+        """A later unsafe payload must fail without changing earlier pending items."""
+        agent = Agent(name="PartialFailureAgent")
+        first_raw_item = {
+            "type": "function_call",
+            "name": "toolA",
+            "call_id": "cid-safe",
+            "arguments": "original",
+        }
+        second_raw_item = {
+            "type": "function_call",
+            "name": "toolB",
+            "call_id": "cid-unsafe",
+            "arguments": "{}",
+            "metadata": object(),
+        }
+        state = make_state_with_interruptions(
+            agent,
+            [
+                ToolApprovalItem(agent=agent, raw_item=first_raw_item),
+                ToolApprovalItem(agent=agent, raw_item=second_raw_item),
+            ],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert first_raw_item["arguments"] == "original"
+
+    def test_get_interruptions_rejects_unsafe_typed_extra_metadata(
+        self,
+    ) -> None:
+        """Unsafe typed extras must fail through the same bounded copy path."""
+        agent = Agent(name="TypedExtraFailureAgent")
+        raw_item = ResponseFunctionToolCall.model_validate(
+            {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-typed-extra",
+                "arguments": "{}",
+                "metadata": {"nested": object()},
+            }
+        )
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+    def test_get_interruptions_rejects_cyclic_mapping_data(self) -> None:
+        """Cyclic mapping content must fail without changing authoritative state."""
+        metadata: list[Any] = []
+        metadata.append(metadata)
+        agent = Agent(name="CyclicMappingAgent")
+        raw_item = {
+            "type": "function_call",
+            "name": "toolA",
+            "call_id": "cid-cycle",
+            "arguments": "{}",
+            "metadata": metadata,
+        }
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        with pytest.raises(UserError, match="Cannot safely copy pending tool approvals"):
+            state.get_interruptions()
+
+        assert len(metadata) == 1
+        assert metadata[0] is metadata
+
+    @pytest.mark.parametrize(
+        "raw_item",
+        [
+            ResponseFunctionToolCall.model_validate(
+                {
+                    "type": "function_call",
+                    "name": "toolA",
+                    "call_id": "cid-function",
+                    "status": "completed",
+                    "arguments": "{}",
+                    "metadata": {"tags": ["function"]},
+                }
+            ),
+            ResponseCustomToolCall.model_validate(
+                {
+                    "type": "custom_tool_call",
+                    "name": "toolA",
+                    "call_id": "cid-custom",
+                    "input": "original",
+                    "metadata": {"tags": ["custom"]},
+                }
+            ),
+            ResponseFunctionShellToolCall.model_validate(
+                {
+                    "id": "shell-call",
+                    "action": {
+                        "commands": ["echo", "ok"],
+                        "metadata": {"tags": ["action"]},
+                    },
+                    "call_id": "cid-shell",
+                    "status": "completed",
+                    "type": "shell_call",
+                    "metadata": {"tags": ["shell"]},
+                }
+            ),
+            McpCall.model_validate(
+                {
+                    "id": "mcp-call",
+                    "arguments": "{}",
+                    "name": "toolA",
+                    "server_label": "server",
+                    "type": "mcp_call",
+                    "metadata": {"tags": ["mcp-call"]},
+                }
+            ),
+            McpApprovalRequest.model_validate(
+                {
+                    "id": "mcp-approval",
+                    "arguments": "{}",
+                    "name": "toolA",
+                    "server_label": "server",
+                    "type": "mcp_approval_request",
+                    "metadata": {"tags": ["mcp-approval"]},
+                }
+            ),
+            LocalShellCall.model_validate(
+                {
+                    "id": "local-shell",
+                    "action": LocalShellCallAction.model_validate(
+                        {
+                            "command": ["echo", "ok"],
+                            "env": {},
+                            "type": "exec",
+                            "metadata": {"tags": ["action"]},
+                        }
+                    ),
+                    "call_id": "cid-local-shell",
+                    "status": "completed",
+                    "type": "local_shell_call",
+                    "metadata": {"tags": ["local-shell"]},
+                }
+            ),
+        ],
+        ids=["function", "custom", "shell", "mcp-call", "mcp-approval", "local-shell"],
+    )
+    def test_get_interruptions_copies_each_typed_raw_item(self, raw_item: Any) -> None:
+        """Each declared typed approval payload must be reconstructed safely."""
+        agent = Agent(name="TypedRawItemAgent")
+        state = make_state_with_interruptions(
+            agent,
+            [ToolApprovalItem(agent=agent, raw_item=raw_item)],
+        )
+
+        interruption = state.get_interruptions()[0]
+
+        assert isinstance(interruption.raw_item, type(raw_item))
+        assert interruption.raw_item.model_dump() == raw_item.model_dump()
+        assert interruption.raw_item is not raw_item
+        assert interruption.raw_item.model_fields_set == raw_item.model_fields_set
+        interruption_extra = interruption.raw_item.model_extra
+        raw_extra = raw_item.model_extra
+        assert interruption_extra == raw_extra
+        assert interruption_extra is not None
+        assert raw_extra is not None
+        assert interruption_extra is not raw_extra
+
+        interruption_extra["metadata"]["tags"].append("changed")
+        assert raw_extra["metadata"]["tags"][-1] != "changed"
+        if isinstance(raw_item, LocalShellCall | ResponseFunctionShellToolCall):
+            interruption_action_extra = interruption.raw_item.action.model_extra
+            raw_action_extra = raw_item.action.model_extra
+            assert interruption_action_extra == raw_action_extra
+            assert interruption_action_extra is not None
+            assert raw_action_extra is not None
+            assert interruption_action_extra is not raw_action_extra
+            interruption_action_extra["metadata"]["tags"].append("changed")
+            assert raw_action_extra["metadata"]["tags"] == ["action"]
+
+    @pytest.mark.parametrize(
+        ("raw_item", "tool_name", "call_id"),
+        [
+            (
+                ResponseCustomToolCall(
+                    type="custom_tool_call",
+                    name="custom_tool",
+                    call_id="cid-custom-decision",
+                    input="original",
+                ),
+                "custom_tool",
+                "cid-custom-decision",
+            ),
+            (
+                ResponseFunctionShellToolCall.model_validate(
+                    {
+                        "id": "shell-decision",
+                        "action": {"commands": ["echo", "ok"]},
+                        "call_id": "cid-shell-decision",
+                        "status": "completed",
+                        "type": "shell_call",
+                    }
+                ),
+                "shell",
+                "cid-shell-decision",
+            ),
+        ],
+        ids=["custom", "shell"],
+    )
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_approval_pipeline_models_can_apply_detached_decisions(
+        self,
+        raw_item: Any,
+        tool_name: str,
+        call_id: str,
+        approve: bool,
+    ) -> None:
+        """Production approval models must detach and retain canonical routing identity."""
+        agent = Agent(name="PipelineDecisionAgent")
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_name=tool_name,
+        )
+        state = make_state_with_interruptions(agent, [approval_item])
+
+        interruption = state.get_interruptions()[0]
+        if approve:
+            state.approve(interruption)
+        else:
+            state.reject(interruption)
+
+        assert state._context is not None
+        assert state._context.is_tool_approved(tool_name, call_id) is approve
+
+    def test_get_interruptions_detaches_a_nested_mutable_alias(self):
+        """Snapshot copying must not trust a nested object's deepcopy implementation."""
+
+        class SelfCopyingList(list[str]):
+            def __deepcopy__(self, _memo: dict[int, Any]) -> SelfCopyingList:
+                return self
+
+        agent = Agent(name="AliasedAgent")
+        metadata = SelfCopyingList(["original"])
+        approval_item = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "cid-aliased",
+                "status": "completed",
+                "arguments": "{}",
+                "metadata": metadata,
+            },
+        )
+        state = make_state_with_interruptions(agent, [approval_item])
+
+        interruption = state.get_interruptions()[0]
+        assert isinstance(interruption.raw_item, dict)
+        interruption.raw_item["metadata"].append("changed")
+
+        assert metadata == ["original"]
 
     async def test_serializes_and_restores_approvals(self):
         """Test that approval state is preserved through serialization."""
@@ -4027,6 +5323,466 @@ class TestDeserializeHelpers:
                 drop_agent_tool_run_result(
                     target_nested_call,
                     scope_id=target_state._agent_tool_state_scope_id,
+                )
+
+    @pytest.mark.parametrize("approval_input", ["snapshot", "exact"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_ambiguous_current_approval_identity_fails_closed(
+        self,
+        approval_input: str,
+        approve: bool,
+    ) -> None:
+        """A snapshot or exact approval shared by current owners must not be guessed."""
+        agent = Agent(name="AmbiguousCurrentAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="toolA",
+            call_id="shared-current",
+            arguments="{}",
+        )
+        first = ToolApprovalItem(
+            agent=agent,
+            raw_item=raw_item,
+            tool_name="toolA",
+            tool_lookup_key=("deferred_top_level", "toolA"),
+            _allow_bare_name_alias=True,
+        )
+        second = replace(
+            first,
+            raw_item=raw_item.model_copy(deep=True),
+            _allow_bare_name_alias=False,
+        )
+        state = make_state_with_interruptions(agent, [first, second])
+
+        selected = state.get_interruptions()[1] if approval_input == "snapshot" else second
+        with pytest.raises(UserError, match="multiple current pending approvals"):
+            if approve:
+                state.approve(selected)
+            else:
+                state.reject(selected)
+
+        assert state._context is not None
+        assert state._context.is_tool_approved("toolA", "shared-current") is None
+
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_unsafe_current_sibling_cannot_bypass_approval_ambiguity(
+        self,
+        approve: bool,
+    ) -> None:
+        """Unsafe same-Agent siblings must not be treated as distinct owners."""
+        agent = Agent(name="UnsafeCurrentSiblingAgent")
+        first = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "shared-unsafe-current",
+                "arguments": "{}",
+                "metadata": object(),
+            },
+        )
+        second = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "shared-unsafe-current",
+                "arguments": "{}",
+                "metadata": object(),
+            },
+        )
+        state = make_state_with_interruptions(agent, [first, second])
+
+        with pytest.raises(UserError, match="multiple current pending approvals"):
+            if approve:
+                state.approve(second)
+            else:
+                state.reject(second)
+
+        assert state._context is not None
+        assert state._context.is_tool_approved("toolA", "shared-unsafe-current") is None
+
+    @pytest.mark.parametrize("location", ["current", "nested"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_uncopyable_noncanonical_approval_does_not_select_pending_owner(
+        self,
+        location: str,
+        approve: bool,
+    ) -> None:
+        """An uncopyable noncanonical input must not select a same-Agent pending owner."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        agent = Agent(name="UncopyableDecisionAgent")
+        pending = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="cid-uncopyable-decision",
+                arguments="{}",
+            ),
+        )
+        supplied = ToolApprovalItem(agent=agent, raw_item={"metadata": object()})
+
+        target_state = make_state_with_interruptions(agent, [pending])
+        state = target_state
+        outer_call = make_tool_call(
+            call_id="outer-uncopyable-decision",
+            name="nested_agent_tool",
+        )
+        if location == "nested":
+            state = make_state_with_interruptions(agent, [])
+            nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+            state._last_processed_response = make_processed_response(
+                functions=[ToolRunFunction(tool_call=outer_call, function_tool=nested_tool)]
+            )
+            record_agent_tool_run_result(
+                outer_call,
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        interruptions=[pending],
+                        to_state=lambda: target_state,
+                    ),
+                ),
+                scope_id=state._agent_tool_state_scope_id,
+            )
+
+        try:
+            if approve:
+                state.approve(supplied)
+            else:
+                state.reject(supplied)
+
+            assert target_state._context is not None
+            assert (
+                target_state._context.is_tool_approved(
+                    "toolA",
+                    "cid-uncopyable-decision",
+                )
+                is None
+            )
+        finally:
+            if location == "nested":
+                drop_agent_tool_run_result(
+                    outer_call,
+                    scope_id=state._agent_tool_state_scope_id,
+                )
+
+    @pytest.mark.parametrize("location", ["current", "nested"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_safe_noncanonical_approval_does_not_select_uncopyable_pending_owner(
+        self,
+        location: str,
+        approve: bool,
+    ) -> None:
+        """A safe input must not be redirected to an unsafe same-Agent pending owner."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        agent = Agent(name="UnsafePendingOwnerAgent")
+        pending = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "pending_tool",
+                "call_id": "pending-unsafe-owner",
+                "arguments": "{}",
+                "metadata": object(),
+            },
+        )
+        supplied = ToolApprovalItem(
+            agent=agent,
+            raw_item=ResponseFunctionToolCall(
+                type="function_call",
+                name="supplied_tool",
+                call_id="supplied-safe-owner",
+                arguments="{}",
+            ),
+        )
+
+        target_state = make_state_with_interruptions(agent, [pending])
+        state = target_state
+        outer_call = make_tool_call(call_id="outer-unsafe-owner", name="nested_agent_tool")
+        if location == "nested":
+            state = make_state_with_interruptions(agent, [])
+            nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+            state._last_processed_response = make_processed_response(
+                functions=[ToolRunFunction(tool_call=outer_call, function_tool=nested_tool)]
+            )
+            record_agent_tool_run_result(
+                outer_call,
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        interruptions=[pending],
+                        to_state=lambda: target_state,
+                    ),
+                ),
+                scope_id=state._agent_tool_state_scope_id,
+            )
+
+        try:
+            with pytest.raises(UserError, match="Cannot apply approval"):
+                if approve:
+                    state.approve(supplied)
+                else:
+                    state.reject(supplied)
+
+            assert target_state._context is not None
+            assert (
+                target_state._context.is_tool_approved(
+                    "pending_tool",
+                    "pending-unsafe-owner",
+                )
+                is None
+            )
+            assert (
+                target_state._context.is_tool_approved(
+                    "supplied_tool",
+                    "supplied-safe-owner",
+                )
+                is None
+            )
+        finally:
+            if location == "nested":
+                drop_agent_tool_run_result(
+                    outer_call,
+                    scope_id=state._agent_tool_state_scope_id,
+                )
+
+    @pytest.mark.parametrize("approval_location", ["current", "nested"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_exact_uncopyable_approval_does_not_read_other_unsafe_owner(
+        self,
+        approval_location: str,
+        approve: bool,
+    ) -> None:
+        """An unsafe authoritative item must not expose another owner's raw payload."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        hook_calls: list[tuple[str, object]] = []
+
+        class HookedDict(dict[str, Any]):
+            def get(self, key: str, default: Any = None) -> Any:
+                hook_calls.append(("get", key))
+                return super().get(key, default)
+
+            def __contains__(self, key: object) -> bool:
+                hook_calls.append(("contains", key))
+                return super().__contains__(key)
+
+            def __getitem__(self, key: str) -> Any:
+                hook_calls.append(("getitem", key))
+                return super().__getitem__(key)
+
+        agent = Agent(name="UnsafeAuthoritativeOwnerAgent")
+        current = ToolApprovalItem(
+            agent=agent,
+            raw_item=HookedDict(
+                type="function_call",
+                name="current_tool",
+                call_id="current-unsafe-authoritative",
+                arguments="{}",
+                metadata=object(),
+            ),
+        )
+        nested = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "nested_tool",
+                "call_id": "nested-unsafe-authoritative",
+                "arguments": "{}",
+                "metadata": object(),
+            },
+        )
+        outer_state = make_state_with_interruptions(agent, [current])
+        nested_state = make_state_with_interruptions(agent, [nested])
+        outer_call = make_tool_call(
+            call_id="outer-unsafe-authoritative",
+            name="nested_agent_tool",
+        )
+        nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+        outer_state._last_processed_response = make_processed_response(
+            functions=[ToolRunFunction(tool_call=outer_call, function_tool=nested_tool)]
+        )
+        record_agent_tool_run_result(
+            outer_call,
+            cast(
+                Any,
+                SimpleNamespace(
+                    interruptions=[nested],
+                    to_state=lambda: nested_state,
+                ),
+            ),
+            scope_id=outer_state._agent_tool_state_scope_id,
+        )
+        hook_calls.clear()
+        approval_item = current if approval_location == "current" else nested
+
+        try:
+            with pytest.raises(UserError, match="Cannot apply approval"):
+                if approve:
+                    outer_state.approve(approval_item)
+                else:
+                    outer_state.reject(approval_item)
+
+            assert hook_calls == []
+            assert outer_state._context is not None
+            assert nested_state._context is not None
+            assert (
+                outer_state._context.is_tool_approved(
+                    "current_tool",
+                    "current-unsafe-authoritative",
+                )
+                is None
+            )
+            assert (
+                nested_state._context.is_tool_approved(
+                    "nested_tool",
+                    "nested-unsafe-authoritative",
+                )
+                is None
+            )
+        finally:
+            drop_agent_tool_run_result(
+                outer_call,
+                scope_id=outer_state._agent_tool_state_scope_id,
+            )
+
+    @pytest.mark.parametrize("unsafe_metadata", [False, True], ids=["safe", "unsafe"])
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_ambiguous_exact_nested_approval_identity_fails_closed(
+        self,
+        unsafe_metadata: bool,
+        approve: bool,
+    ) -> None:
+        """An exact nested approval must not bypass nested owner multiplicity."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        agent = Agent(name="AmbiguousNestedAgent")
+        if unsafe_metadata:
+            raw_item: Any = {
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "shared-nested",
+                "arguments": "{}",
+                "metadata": object(),
+            }
+            second_raw_item: Any = {**raw_item, "metadata": object()}
+        else:
+            raw_item = ResponseFunctionToolCall(
+                type="function_call",
+                name="toolA",
+                call_id="shared-nested",
+                arguments="{}",
+            )
+            second_raw_item = raw_item.model_copy(deep=True)
+        first = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="toolA")
+        second = replace(first, raw_item=second_raw_item)
+        nested_state = make_state_with_interruptions(agent, [first, second])
+        outer_state = make_state_with_interruptions(agent, [first])
+        outer_call = make_tool_call(call_id="outer-ambiguous-nested", name="nested_agent_tool")
+        nested_tool = function_tool(lambda: "nested", name_override="nested_agent_tool")
+        outer_state._last_processed_response = make_processed_response(
+            functions=[ToolRunFunction(tool_call=outer_call, function_tool=nested_tool)]
+        )
+        record_agent_tool_run_result(
+            outer_call,
+            cast(
+                Any,
+                SimpleNamespace(
+                    interruptions=[first],
+                    to_state=lambda: nested_state,
+                ),
+            ),
+            scope_id=outer_state._agent_tool_state_scope_id,
+        )
+
+        try:
+            with pytest.raises(UserError, match="multiple current pending approvals"):
+                if approve:
+                    outer_state.approve(first)
+                else:
+                    outer_state.reject(first)
+            assert nested_state._context is not None
+            assert nested_state._context.is_tool_approved("toolA", "shared-nested") is None
+        finally:
+            drop_agent_tool_run_result(
+                outer_call,
+                scope_id=outer_state._agent_tool_state_scope_id,
+            )
+
+    @pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+    def test_unsafe_exact_approval_across_nested_states_fails_closed(
+        self,
+        approve: bool,
+    ) -> None:
+        """Exact unsafe input must preserve ambiguity across all nested owner states."""
+        from agents.agent_tool_state import drop_agent_tool_run_result, record_agent_tool_run_result
+
+        agent = Agent(name="UnsafeNestedOwnerAgent")
+        first = ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "toolA",
+                "call_id": "shared-unsafe-nested",
+                "arguments": "{}",
+                "metadata": object(),
+            },
+        )
+        second = replace(first, raw_item={**first.raw_item, "metadata": object()})
+        first_state = make_state_with_interruptions(agent, [first])
+        second_state = make_state_with_interruptions(agent, [second])
+        outer_state = make_state_with_interruptions(agent, [])
+        first_outer_call = make_tool_call(call_id="outer-unsafe-first", name="nested_first")
+        second_outer_call = make_tool_call(call_id="outer-unsafe-second", name="nested_second")
+        first_tool = function_tool(lambda: "first", name_override="nested_first")
+        second_tool = function_tool(lambda: "second", name_override="nested_second")
+        outer_state._last_processed_response = make_processed_response(
+            functions=[
+                ToolRunFunction(tool_call=first_outer_call, function_tool=first_tool),
+                ToolRunFunction(tool_call=second_outer_call, function_tool=second_tool),
+            ]
+        )
+        for outer_call, item, nested_state in (
+            (first_outer_call, first, first_state),
+            (second_outer_call, second, second_state),
+        ):
+            record_agent_tool_run_result(
+                outer_call,
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        interruptions=[item],
+                        to_state=lambda nested_state=nested_state: nested_state,
+                    ),
+                ),
+                scope_id=outer_state._agent_tool_state_scope_id,
+            )
+
+        try:
+            with pytest.raises(UserError, match="cannot be safely distinguished"):
+                if approve:
+                    outer_state.approve(first)
+                else:
+                    outer_state.reject(first)
+
+            for nested_state in (first_state, second_state):
+                assert nested_state._context is not None
+                assert (
+                    nested_state._context.is_tool_approved(
+                        "toolA",
+                        "shared-unsafe-nested",
+                    )
+                    is None
+                )
+        finally:
+            for outer_call in (first_outer_call, second_outer_call):
+                drop_agent_tool_run_result(
+                    outer_call,
+                    scope_id=outer_state._agent_tool_state_scope_id,
                 )
 
     @pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
