@@ -775,6 +775,28 @@ async def test_docker_persist_workspace_closes_archive_http_response_after_norma
 
 
 @pytest.mark.asyncio
+async def test_docker_archive_zero_length_read_then_close_closes_http_response(
+    tmp_path: Path,
+) -> None:
+    session = _HostBackedDockerSession(
+        host_root=tmp_path / "container",
+        manifest=Manifest(root="/workspace"),
+    )
+    response = _StreamingArchiveResponse([b"archive"])
+    api = _StreamingArchiveAPI(response)
+    session._fake_container.client = _StreamingArchiveContainerClient(api)
+    session._fake_container.id = "container"
+
+    archive = session._workspace_archive_stream(Path("/workspace"))
+
+    assert archive.readinto(bytearray()) == 0
+    assert response.close_calls == 0
+
+    archive.close()
+    assert response.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_docker_persist_workspace_defers_stage_cleanup_until_archive_close(
     tmp_path: Path,
 ) -> None:

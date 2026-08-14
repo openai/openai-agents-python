@@ -68,7 +68,7 @@ class IteratorIO(io.IOBase):
         return out
 
     def readinto(self, b: bytearray) -> int:
-        if self._closed:
+        if self._closed or len(b) == 0:
             return 0
 
         # Fill buffer until we have something or iterator is exhausted

@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1446,10 +1446,34 @@ class DockerSandboxSession(BaseSandboxSession):
             headers={"Accept-Encoding": "identity"},
         )
         api._raise_for_status(response)
-        return IteratorIO(it=self._iter_archive_chunks(api, response), on_close=on_close)
+        response_closed = False
+
+        def close_response() -> None:
+            nonlocal response_closed
+            if response_closed:
+                return
+            response_closed = True
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        def finalize() -> None:
+            close_response()
+            if on_close is not None:
+                on_close()
+
+        return IteratorIO(
+            it=self._iter_archive_chunks(api, response, close_response),
+            on_close=finalize,
+        )
 
     @staticmethod
-    def _iter_archive_chunks(api: Any, response: Any) -> Iterator[bytes]:
+    def _iter_archive_chunks(
+        api: Any,
+        response: Any,
+        close_response: Callable[[], None],
+    ) -> Iterator[bytes]:
         try:
             yield from api._stream_raw_result(
                 response,
@@ -1457,10 +1481,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 decode=False,
             )
         finally:
-            try:
-                response.close()
-            except Exception:
-                pass
+            close_response()
 
 
 class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
