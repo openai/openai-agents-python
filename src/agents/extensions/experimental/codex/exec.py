@@ -200,7 +200,7 @@ class CodexExec:
 
             if process.returncode not in (0, None):
                 await stderr_task
-                stderr_text = b"".join(stderr_chunks).decode("utf-8")
+                stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
                 raise RuntimeError(
                     f"Codex exec exited with code {process.returncode}: {stderr_text}"
                 )
