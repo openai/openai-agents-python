@@ -368,6 +368,7 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         "snapshot",
         "concurrency_limits",
         "archive_limits",
+        "cwd",
     )
 
 

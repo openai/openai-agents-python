@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import threading
+from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,7 @@ class Capability(BaseModel):
     type: str
     session: BaseSandboxSession | None = Field(default=None, exclude=True)
     run_as: User | None = Field(default=None, exclude=True)
+    run_cwd: PurePosixPath | None = Field(default=None, exclude=True)
 
     def clone(self) -> "Capability":
         """Return a per-run copy of this capability."""
@@ -33,6 +35,10 @@ class Capability(BaseModel):
     def bind_run_as(self, user: User | None) -> None:
         """Bind the sandbox user identity for model-facing operations."""
         self.run_as = user
+
+    def bind_run_cwd(self, cwd: PurePosixPath | None) -> None:
+        """Bind the run-local base for model-facing relative workspace paths."""
+        self.run_cwd = cwd
 
     def required_capability_types(self) -> set[str]:
         """Return capability types that must be present alongside this capability."""

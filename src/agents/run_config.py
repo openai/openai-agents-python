@@ -218,6 +218,14 @@ class SandboxRunConfig:
     Use `SandboxArchiveLimits()` to enable SDK defaults.
     """
 
+    cwd: str | None = None
+    """Run-scoped base directory for model-facing relative sandbox paths.
+
+    Relative shell workdirs, image paths, and apply-patch paths are interpreted beneath this
+    directory. Absolute paths keep the existing workspace and path-grant validation behavior.
+    This setting does not change `Manifest.root` or direct sandbox-session operations.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -230,6 +238,7 @@ class SandboxRunConfig:
             snapshot: SnapshotSpec | SnapshotBase | dict[str, Any] | None = None,
             concurrency_limits: SandboxConcurrencyLimits | dict[str, Any] = ...,
             archive_limits: SandboxArchiveLimits | dict[str, Any] | None = None,
+            cwd: str | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:

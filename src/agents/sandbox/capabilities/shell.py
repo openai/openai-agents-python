@@ -9,6 +9,7 @@ from pydantic import Field
 
 from ...tool import Tool
 from ..manifest import Manifest
+from ._run_cwd_tools import RunCwdExecCommandTool
 from .capability import Capability
 from .tools import ExecCommandTool, WriteStdinTool
 
@@ -45,13 +46,19 @@ class Shell(Capability):
         if self.session is None:
             raise ValueError("Shell capability is not bound to a SandboxSession")
         toolset = ShellToolSet(
-            exec_command=ExecCommandTool(session=self.session, user=self.run_as),
+            exec_command=RunCwdExecCommandTool(
+                session=self.session,
+                user=self.run_as,
+                cwd=self.run_cwd,
+            ),
             write_stdin=WriteStdinTool(session=self.session)
             if self.session.supports_pty()
             else None,
         )
         if self.configure_tools is not None:
             self.configure_tools(toolset)
+        if isinstance(toolset.exec_command, RunCwdExecCommandTool):
+            toolset.exec_command.finalize_run_cwd()
         tools: list[Tool] = [toolset.exec_command]
         if toolset.write_stdin is not None:
             tools.append(toolset.write_stdin)

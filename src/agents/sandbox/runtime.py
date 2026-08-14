@@ -4,6 +4,7 @@ import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Generic, cast
 
 from ..agent import Agent
@@ -22,6 +23,7 @@ from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
 from .capabilities import Capability
 from .capabilities.memory import Memory
+from .errors import InvalidManifestPathError
 from .memory.manager import SandboxMemoryGenerationManager, get_or_create_memory_generation_manager
 from .memory.rollouts import (
     RolloutTerminalMetadata,
@@ -36,6 +38,7 @@ from .runtime_session_manager import SandboxRuntimeSessionManager
 from .sandbox_agent import SandboxAgent
 from .session.base_sandbox_session import BaseSandboxSession
 from .types import User
+from .workspace_paths import coerce_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -213,18 +216,24 @@ class SandboxRuntime(Generic[TContext]):
                 capabilities=prepared_capabilities,
                 is_resumed_state=is_resumed_state,
             )
+            run_cwd = _resolve_run_cwd(
+                session,
+                self._sandbox_config.cwd if self._sandbox_config is not None else None,
+            )
             if (
                 prepared_agent is not None
                 and self._prepared_sessions.get(id(current_agent)) is session
             ):
                 # Reuse the cached execution agent's bound capability instances so context
                 # processing can depend on live session state and preserve per-run state.
+                cached_capabilities = cast(SandboxAgent[TContext], prepared_agent).capabilities
                 _bind_capability_run_as(
-                    cast(SandboxAgent[TContext], prepared_agent).capabilities,
+                    cached_capabilities,
                     _coerce_run_as_user(current_agent.run_as),
                 )
+                _bind_capability_run_cwd(cached_capabilities, run_cwd)
                 prepared_input = prepare_sandbox_input(
-                    cast(SandboxAgent[TContext], prepared_agent).capabilities,
+                    cached_capabilities,
                     current_input,
                 )
                 return _SandboxPreparedAgent(
@@ -241,6 +250,7 @@ class SandboxRuntime(Generic[TContext]):
             for capability in prepared_capabilities:
                 capability.bind(session)
             _bind_capability_run_as(prepared_capabilities, run_as)
+            _bind_capability_run_cwd(prepared_capabilities, run_cwd)
             prepared_input = prepare_sandbox_input(prepared_capabilities, current_input)
             prepared_agent = prepare_sandbox_agent(
                 agent=current_agent,
@@ -290,6 +300,23 @@ def _coerce_run_as_user(run_as: User | str | None) -> User | None:
     return User(name=run_as)
 
 
+def _resolve_run_cwd(session: BaseSandboxSession, cwd: str | None) -> PurePosixPath | None:
+    if cwd is None:
+        return None
+    try:
+        relative = session._workspace_path_policy().relative_path(cwd)
+    except InvalidManifestPathError as exc:
+        raise UserError(f"sandbox.cwd must resolve within the sandbox workspace: {cwd}") from exc
+    return coerce_posix_path(relative)
+
+
 def _bind_capability_run_as(capabilities: Sequence[Capability], user: User | None) -> None:
     for capability in capabilities:
         capability.bind_run_as(user)
+
+
+def _bind_capability_run_cwd(
+    capabilities: Sequence[Capability], cwd: PurePosixPath | None
+) -> None:
+    for capability in capabilities:
+        capability.bind_run_cwd(cwd)
