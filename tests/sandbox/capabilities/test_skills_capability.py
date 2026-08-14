@@ -20,7 +20,11 @@ from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, FileMode, Group, Permissions, User
-from agents.sandbox.workspace_paths import coerce_posix_path, sandbox_path_str
+from agents.sandbox.workspace_paths import (
+    SandboxWorkspaceScope,
+    coerce_posix_path,
+    sandbox_path_str,
+)
 from agents.testing import scripted_sandbox_session
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
@@ -409,6 +413,18 @@ class TestSkillsInstructions:
         assert "- my-skill: desc (file: .sandbox/skills/my-skill)" in instructions
 
     @pytest.mark.asyncio
+    async def test_instructions_render_session_owned_paths_relative_to_run_cwd(self) -> None:
+        capability = Skills(
+            skills=[Skill(name="my-skill", description="desc", content="literal")],
+        )
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/task-a"))
+
+        instructions = await capability.instructions(Manifest(root="/workspace"))
+
+        assert instructions is not None
+        assert "- my-skill: desc (file: ../../.agents/my-skill)" in instructions
+
+    @pytest.mark.asyncio
     async def test_instructions_return_none_when_metadata_is_empty(self) -> None:
         capability = Skills(from_=Dir())
 
@@ -457,12 +473,14 @@ class TestSkillsInstructions:
         session = _SkillsSession(manifest)
         await session.apply_manifest()
         capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/task-a"))
 
         instructions = await capability.instructions(session.state.manifest)
 
         assert instructions is not None
         assert (
-            "- discovered-skill: loaded from runtime frontmatter (file: .agents/dynamic-skill)"
+            "- discovered-skill: loaded from runtime frontmatter "
+            "(file: ../../.agents/dynamic-skill)"
         ) in instructions
 
     @pytest.mark.asyncio
@@ -556,6 +574,35 @@ class TestSkillsInstructions:
         }
         loaded_skill = workspace_root / ".agents" / "dynamic-skill" / "SKILL.md"
         assert loaded_skill.read_text(encoding="utf-8") == "# dynamic skill\n"
+
+    @pytest.mark.asyncio
+    async def test_lazy_load_reports_scoped_path_without_relocating_skill(
+        self, tmp_path: Path
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# dynamic skill\n", encoding="utf-8")
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+        session = _SkillsSession(
+            capability.process_manifest(_source_granted_manifest(workspace_root, source=src_root))
+        )
+        capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/task-a"))
+
+        output = await capability.load_skill("dynamic-skill")
+
+        assert output == {
+            "status": "loaded",
+            "skill_name": "dynamic-skill",
+            "path": "../../.agents/dynamic-skill",
+        }
+        assert (workspace_root / ".agents" / "dynamic-skill" / "SKILL.md").is_file()
+        assert not (workspace_root / "tasks" / "task-a" / ".agents").exists()
 
     @pytest.mark.asyncio
     async def test_lazy_local_dir_load_skill_applies_source_metadata(self, tmp_path: Path) -> None:

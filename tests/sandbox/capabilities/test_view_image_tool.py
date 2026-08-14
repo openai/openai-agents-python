@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxWorkspaceScope
 from agents.sandbox.capabilities.tools import ViewImageTool
 from agents.sandbox.errors import WorkspaceReadNotFoundError
 from agents.sandbox.types import User
@@ -46,6 +46,75 @@ class TestViewImageTool:
         assert isinstance(output, ToolOutputImage)
         assert output.image_url == f"data:image/png;base64,{_PNG_BASE64}"
         assert output.detail is None
+        session.assert_complete()
+
+    @pytest.mark.asyncio
+    async def test_view_image_resolves_relative_path_from_workspace_scope(self) -> None:
+        session = scripted_sandbox_session(
+            [{"method": "read", "result": io.BytesIO(_PNG_BYTES)}],
+            manifest=Manifest(root="/workspace"),
+        )
+        tool = ViewImageTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        output = await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"path":"images/dot.png"}',
+        )
+
+        assert isinstance(output, ToolOutputImage)
+        assert session.calls[0].args == (Path("/workspace/tasks/a/images/dot.png"),)
+        session.assert_complete()
+
+    @pytest.mark.asyncio
+    async def test_view_image_keeps_absolute_path_behavior_with_workspace_scope(self) -> None:
+        session = scripted_sandbox_session(
+            [{"method": "read", "result": io.BytesIO(b"hello\n")}],
+            manifest=Manifest(root="/workspace"),
+        )
+        tool = ViewImageTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        output = await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"path":"/workspace/notes.txt"}',
+        )
+
+        assert output == "image path `notes.txt` is not a supported image file"
+        assert session.calls[0].args == (Path("/workspace/notes.txt"),)
+        session.assert_complete()
+
+    @pytest.mark.asyncio
+    async def test_view_image_scoped_error_uses_model_relative_path(self) -> None:
+        provider_root = Path("/provider/private/root")
+        session = scripted_sandbox_session(
+            [
+                {
+                    "method": "read",
+                    "error": WorkspaceReadNotFoundError(
+                        path=provider_root / "tasks/a/images/missing.png"
+                    ),
+                }
+            ],
+            manifest=Manifest(root="/workspace"),
+        )
+        tool = ViewImageTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        output = await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"path":"images/missing.png"}',
+        )
+
+        assert output == "image path `images/missing.png` was not found"
+        assert str(provider_root) not in output
+        assert session.calls[0].args == (Path("/workspace/tasks/a/images/missing.png"),)
         session.assert_complete()
 
     @pytest.mark.asyncio

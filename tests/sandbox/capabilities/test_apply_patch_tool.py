@@ -15,11 +15,14 @@ from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal.run_steps import ToolRunCustom
 from agents.run_internal.tool_actions import CustomToolAction
+from agents.sandbox import SandboxWorkspaceScope
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
+from agents.sandbox.errors import ApplyPatchDecodeError, ApplyPatchFileNotFoundError
 from agents.sandbox.types import User
 from agents.testing import scripted_sandbox_session
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
+    ProviderNotFoundApplyPatchSession,
     UserRecordingApplyPatchSession,
 )
 from tests.utils.hitl import make_context_wrapper
@@ -206,6 +209,158 @@ class TestSandboxApplyPatchTool:
         assert isinstance(delete_result, ApplyPatchResult)
         assert delete_result.output == "Deleted notes.txt"
         assert Path("/workspace/notes.txt") not in session.files
+
+    @pytest.mark.asyncio
+    async def test_editor_scopes_paths_and_move_outputs_to_run_cwd(self) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        create_result = await tool.editor.create_file(
+            ApplyPatchOperation(
+                type="create_file",
+                path="notes.txt",
+                diff="+hello\n",
+            )
+        )
+        move_result = await tool.editor.update_file(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n-hello\n+hi\n",
+                move_to="archive/notes.txt",
+            )
+        )
+
+        assert create_result.output == "Created notes.txt"
+        assert move_result.output == "Updated notes.txt\nMoved notes.txt to archive/notes.txt"
+        assert Path("/workspace/tasks/a/notes.txt") not in session.files
+        assert session.files[Path("/workspace/tasks/a/archive/notes.txt")] == b"hi"
+
+    @pytest.mark.asyncio
+    async def test_editor_keeps_absolute_path_behavior_with_workspace_scope(self) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        result = await tool.editor.create_file(
+            ApplyPatchOperation(
+                type="create_file",
+                path="/workspace/root.txt",
+                diff="+root\n",
+            )
+        )
+
+        assert result.output == "Created root.txt"
+        assert session.files[Path("/workspace/root.txt")] == b"root"
+
+    @pytest.mark.asyncio
+    async def test_editor_scoped_missing_error_uses_model_relative_path(self) -> None:
+        session = ProviderNotFoundApplyPatchSession()
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        with pytest.raises(ApplyPatchFileNotFoundError) as exc_info:
+            await tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="missing.txt",
+                    diff="@@\n-old\n+new\n",
+                )
+            )
+
+        assert str(exc_info.value) == "apply_patch missing file: missing.txt"
+        assert exc_info.value.context["path"] == "missing.txt"
+        assert "/provider/private/root" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_editor_scoped_decode_error_uses_model_relative_path(self) -> None:
+        session = ApplyPatchSession()
+        session.files[Path("/workspace/tasks/a/binary.txt")] = b"\xff\xfe\xfd"
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        with pytest.raises(ApplyPatchDecodeError) as exc_info:
+            await tool.editor.update_file(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="binary.txt",
+                    diff="@@\n+replacement\n",
+                )
+            )
+
+        assert exc_info.value.context["path"] == "binary.txt"
+        assert "/workspace/tasks/a" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_scoped_tool_keeps_approval_operations_model_relative(self) -> None:
+        checked_operations: list[tuple[str, str | None]] = []
+
+        async def needs_approval(
+            _ctx: RunContextWrapper[Any], operation: ApplyPatchOperation, _call_id: str
+        ) -> bool:
+            checked_operations.append((operation.path, operation.move_to))
+            return False
+
+        session = ApplyPatchSession()
+        session.files[Path("/workspace/tasks/a/notes.txt")] = b"old\n"
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+            needs_approval=needs_approval,
+        )
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(
+                "*** Begin Patch\n"
+                "*** Update File: notes.txt\n"
+                "*** Move to: moved.txt\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        )
+
+        assert checked_operations == [("notes.txt", "moved.txt")]
+        assert result.output == "Updated notes.txt\nMoved notes.txt to moved.txt"
+        assert session.files[Path("/workspace/tasks/a/moved.txt")] == b"new\n"
+
+    @pytest.mark.asyncio
+    async def test_direct_session_apply_patch_remains_workspace_root_relative(self) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="create_file",
+                path="direct.txt",
+                diff="+root\n",
+            )
+        )
+        await tool.editor.create_file(
+            ApplyPatchOperation(
+                type="create_file",
+                path="tool.txt",
+                diff="+scoped\n",
+            )
+        )
+
+        assert session.files[Path("/workspace/direct.txt")] == b"root"
+        assert session.files[Path("/workspace/tasks/a/tool.txt")] == b"scoped"
 
     @pytest.mark.asyncio
     async def test_editor_runs_file_operations_as_bound_user(self) -> None:

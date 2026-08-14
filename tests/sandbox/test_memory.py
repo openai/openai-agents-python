@@ -75,6 +75,7 @@ from agents.sandbox.memory.storage import (
 )
 from agents.sandbox.runtime import _stream_memory_input_override
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+from agents.sandbox.workspace_paths import SandboxWorkspaceScope
 from agents.testing import ScriptedModel
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
@@ -985,6 +986,35 @@ async def test_memory_capability_live_update_instructions() -> None:
             assert "memories/MEMORY.md" in instructions
             assert "same turn" in instructions
             assert "Never update memories." not in instructions
+    finally:
+        await client.delete(session)
+
+
+@pytest.mark.asyncio
+async def test_memory_capability_renders_session_owned_paths_relative_to_run_cwd() -> None:
+    client = UnixLocalSandboxClient()
+    session = await client.create(manifest=Manifest())
+    capability = Memory(generate=None)
+
+    try:
+        async with session:
+            await session.mkdir("memories", parents=True)
+            await session.write(
+                Path("memories/memory_summary.md"),
+                io.BytesIO(b"summary entry"),
+            )
+            capability.bind(session)
+            capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/task-a"))
+
+            instructions = await capability.instructions(session.state.manifest)
+
+            assert instructions is not None
+            assert (
+                "../../memories/memory_summary.md (already provided below; do NOT open again)"
+                in instructions
+            )
+            assert "../../memories/MEMORY.md" in instructions
+            assert "summary entry" in instructions
     finally:
         await client.delete(session)
 

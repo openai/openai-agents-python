@@ -9,6 +9,7 @@ from pydantic import Field
 
 from ...tool import Tool
 from ..manifest import Manifest
+from ..workspace_paths import SandboxWorkspaceScope
 from .capability import Capability
 from .tools import ExecCommandTool, WriteStdinTool
 
@@ -31,6 +32,7 @@ class ShellToolSet:
 
     exec_command: ExecCommandTool
     write_stdin: WriteStdinTool | None
+    workspace_scope: SandboxWorkspaceScope = SandboxWorkspaceScope()
 
 
 ShellToolConfigurator = Callable[[ShellToolSet], None]
@@ -45,10 +47,15 @@ class Shell(Capability):
         if self.session is None:
             raise ValueError("Shell capability is not bound to a SandboxSession")
         toolset = ShellToolSet(
-            exec_command=ExecCommandTool(session=self.session, user=self.run_as),
+            exec_command=ExecCommandTool(
+                session=self.session,
+                user=self.run_as,
+                workspace_scope=self.workspace_scope,
+            ),
             write_stdin=WriteStdinTool(session=self.session)
             if self.session.supports_pty()
             else None,
+            workspace_scope=self.workspace_scope,
         )
         if self.configure_tools is not None:
             self.configure_tools(toolset)

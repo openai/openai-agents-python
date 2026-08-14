@@ -1104,6 +1104,87 @@ async def test_non_approval_custom_tool_identical_siblings_execute_once() -> Non
 
 
 @pytest.mark.asyncio
+async def test_approved_custom_tool_resume_rebinds_to_current_tool() -> None:
+    executed: list[str] = []
+
+    async def invoke_original(_context: Any, value: str) -> str:
+        executed.append(f"original:{value}")
+        return value
+
+    async def invoke_replacement(_context: Any, value: str) -> str:
+        executed.append(f"replacement:{value}")
+        return value
+
+    original = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=invoke_original,
+        format={"type": "text"},
+        needs_approval=True,
+    )
+    replacement = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=invoke_replacement,
+        format={"type": "text"},
+        needs_approval=True,
+    )
+    call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="raw_editor",
+        call_id="call_0",
+        input="safe",
+    )
+    model = ScriptedModel(steps=[[call], [get_text_message("done")]])
+    agent = Agent(name="agent", model=model, tools=[original])
+
+    first = await Runner.run(agent, "edit text")
+    state = first.to_state()
+    state.approve(state.get_interruptions()[0])
+    agent.tools = [replacement]
+
+    resumed = await Runner.run(agent, state)
+
+    assert resumed.final_output == "done"
+    assert executed == ["replacement:safe"]
+
+
+@pytest.mark.asyncio
+async def test_approved_custom_tool_resume_fails_when_current_tool_is_missing() -> None:
+    executed: list[str] = []
+
+    async def invoke(_context: Any, value: str) -> str:
+        executed.append(value)
+        return value
+
+    tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=invoke,
+        format={"type": "text"},
+        needs_approval=True,
+    )
+    call = ResponseCustomToolCall(
+        type="custom_tool_call",
+        name="raw_editor",
+        call_id="call_0",
+        input="safe",
+    )
+    model = ScriptedModel(steps=[[call]])
+    agent = Agent(name="agent", model=model, tools=[tool])
+
+    first = await Runner.run(agent, "edit text")
+    state = first.to_state()
+    state.approve(state.get_interruptions()[0])
+    agent.tools = []
+
+    with pytest.raises(ModelBehaviorError, match="Tool raw_editor not found"):
+        await Runner.run(agent, state)
+
+    assert executed == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 async def test_changed_same_id_siblings_fail_before_approval_callback(
     mode: Literal["non_streamed", "streamed"],

@@ -115,6 +115,7 @@ def test_core_sandbox_public_export_surface_is_stable() -> None:
             "SandboxAgent",
             "SandboxArchiveLimits",
             "SandboxPathGrant",
+            "SandboxWorkspaceScope",
             "SandboxConcurrencyLimits",
             "SandboxError",
             "SandboxRunConfig",
@@ -368,6 +369,7 @@ def test_sandbox_dataclass_constructor_field_order_is_stable() -> None:
         "snapshot",
         "concurrency_limits",
         "archive_limits",
+        "cwd",
     )
 
 

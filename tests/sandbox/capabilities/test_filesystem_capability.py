@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from agents.editor import ApplyPatchOperation
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxWorkspaceScope
 from agents.sandbox.capabilities import Filesystem, FilesystemToolSet
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool, ViewImageTool
 from agents.sandbox.sandboxes.unix_local import (
@@ -87,6 +87,7 @@ class TestFilesystemCapability:
             nonlocal replacement_view_image
             replacement_view_image = ViewImageTool(
                 session=toolset.view_image.session,
+                workspace_scope=toolset.workspace_scope,
                 needs_approval=True,
             )
             toolset.view_image = replacement_view_image
@@ -101,6 +102,23 @@ class TestFilesystemCapability:
         assert view_image_tool is replacement_view_image
         assert view_image_tool.needs_approval is True
         assert isinstance(tools[1], SandboxApplyPatchTool)
+
+    def test_tools_and_configurator_receive_bound_workspace_scope(self, tmp_path: Path) -> None:
+        scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+        configured_scopes: list[SandboxWorkspaceScope] = []
+
+        def configure_tools(toolset: FilesystemToolSet) -> None:
+            configured_scopes.append(toolset.workspace_scope)
+
+        capability = Filesystem(configure_tools=configure_tools)
+        capability.bind(_make_session(tmp_path))
+        capability.bind_workspace_scope(scope)
+
+        tools = capability.tools()
+
+        assert configured_scopes == [scope]
+        assert cast(ViewImageTool, tools[0]).workspace_scope is scope
+        assert cast(SandboxApplyPatchTool, tools[1]).workspace_scope is scope
 
     def test_tools_passes_bound_run_as_to_file_tools(self, tmp_path: Path) -> None:
         run_as = User(name="sandbox-user")

@@ -674,12 +674,18 @@ class Skills(Capability):
             )
         if self.session is None:
             raise ValueError(f"{type(self).__name__} is not bound to a SandboxSession")
-        return await self.lazy_from.load_skill(
+        result = await self.lazy_from.load_skill(
             skill_name=skill_name,
             session=self.session,
             skills_path=self.skills_path,
             user=self.run_as,
         )
+        if self.workspace_scope.cwd is None:
+            return result
+        return {
+            **result,
+            "path": self.workspace_scope.model_path(result["path"]).as_posix(),
+        }
 
     async def _resolve_runtime_metadata(self, manifest: Manifest) -> list[SkillMetadata]:
         if self.session is None:
@@ -787,7 +793,11 @@ class Skills(Capability):
 
         available_skill_lines: list[str] = []
         for skill in skills:
-            path_str = str(skill.path).replace("\\", "/")
+            path_str = (
+                str(skill.path).replace("\\", "/")
+                if self.workspace_scope.cwd is None
+                else self.workspace_scope.model_path(skill.path).as_posix()
+            )
             available_skill_lines.append(f"- {skill.name}: {skill.description} (file: {path_str})")
 
         how_to_use_section = (

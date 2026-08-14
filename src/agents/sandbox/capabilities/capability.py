@@ -10,6 +10,7 @@ from ...tool import FunctionTool, Tool
 from ..manifest import Manifest
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..types import User
+from ..workspace_paths import SandboxWorkspaceScope
 
 
 class Capability(BaseModel):
@@ -18,6 +19,11 @@ class Capability(BaseModel):
     type: str
     session: BaseSandboxSession | None = Field(default=None, exclude=True)
     run_as: User | None = Field(default=None, exclude=True)
+    workspace_scope: SandboxWorkspaceScope = Field(
+        default_factory=SandboxWorkspaceScope,
+        exclude=True,
+        repr=False,
+    )
 
     def clone(self) -> "Capability":
         """Return a per-run copy of this capability."""
@@ -33,6 +39,10 @@ class Capability(BaseModel):
     def bind_run_as(self, user: User | None) -> None:
         """Bind the sandbox user identity for model-facing operations."""
         self.run_as = user
+
+    def bind_workspace_scope(self, scope: SandboxWorkspaceScope) -> None:
+        """Bind the immutable model-facing path scope for this run."""
+        self.workspace_scope = scope
 
     def required_capability_types(self) -> set[str]:
         """Return capability types that must be present alongside this capability."""
@@ -65,6 +75,7 @@ def _clone_capability_value(value: Any) -> Any:
     if isinstance(
         value,
         BaseSandboxSession
+        | SandboxWorkspaceScope
         | asyncio.Event
         | asyncio.Lock
         | asyncio.Semaphore

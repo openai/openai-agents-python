@@ -14,6 +14,7 @@ from .errors import (
     InvalidManifestPathError,
     WorkspaceReadNotFoundError,
 )
+from .workspace_paths import SandboxWorkspaceScope, windows_absolute_path
 
 if TYPE_CHECKING:
     from .session.base_sandbox_session import BaseSandboxSession
@@ -38,9 +39,11 @@ class WorkspaceEditor:
         session: BaseSandboxSession,
         *,
         user: str | User | None = None,
+        workspace_scope: SandboxWorkspaceScope | None = None,
     ) -> None:
         self._session = session
         self._user = user
+        self._workspace_scope = workspace_scope or SandboxWorkspaceScope()
 
     async def apply_patch(
         self,
@@ -62,9 +65,8 @@ class WorkspaceEditor:
         patch_format: PatchFormat | Literal["v4a"] = "v4a",
     ) -> ApplyPatchResult:
         format_impl = _resolve_patch_format(patch_format)
-        relative_path = self._validate_path(operation.path)
+        relative_path, display_path = self._resolve_path(operation.path)
         destination = self._session.normalize_path(relative_path)
-        display_path = relative_path.as_posix()
 
         if operation.type == "delete_file":
             await self._ensure_exists(destination, display_path=display_path)
@@ -80,7 +82,18 @@ class WorkspaceEditor:
             )
 
         if operation.type == "update_file":
-            original_text = await self._read_text(destination, op_path=operation.path)
+            decode_path = destination
+            if (
+                self._workspace_scope.cwd is not None
+                and not Path(operation.path).is_absolute()
+                and windows_absolute_path(operation.path) is None
+            ):
+                decode_path = Path(display_path)
+            original_text = await self._read_text(
+                destination,
+                op_path=operation.path,
+                decode_path=decode_path,
+            )
             try:
                 updated_text = format_impl.apply_diff(original_text, operation.diff, mode="default")
             except ValueError as exc:
@@ -93,12 +106,11 @@ class WorkspaceEditor:
                 await self._write_text(destination, updated_text)
                 return ApplyPatchResult(output=f"Updated {display_path}")
 
-            moved_relative_path = self._validate_path(operation.move_to)
+            moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
                 await self._session.rm(destination, user=self._user)
-            moved_display_path = moved_relative_path.as_posix()
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
@@ -120,7 +132,7 @@ class WorkspaceEditor:
             path=operation.path,
         )
 
-    def _validate_path(self, path: str | Path) -> Path:
+    def _resolve_path(self, path: str | Path) -> tuple[Path, str]:
         if isinstance(path, str):
             if not path.strip():
                 raise ApplyPatchPathError(path=path, reason="empty")
@@ -129,13 +141,19 @@ class WorkspaceEditor:
             normalized_path = path
 
         try:
-            return self._session._workspace_path_policy().relative_path(normalized_path)
+            scoped_path = self._workspace_scope.anchor(normalized_path)
+            relative_path = self._session._workspace_path_policy().relative_path(scoped_path)
         except InvalidManifestPathError as exc:
             raise ApplyPatchPathError(
                 path=normalized_path,
                 reason="escape_root",
                 cause=exc,
             ) from exc
+        display_path = self._workspace_scope.display_path(
+            original_path=normalized_path,
+            workspace_relative_path=relative_path,
+        ).as_posix()
+        return relative_path, display_path
 
     async def _ensure_exists(self, destination: Path, *, display_path: str) -> None:
         try:
@@ -145,7 +163,7 @@ class WorkspaceEditor:
         else:
             handle.close()
 
-    async def _read_text(self, destination: Path, *, op_path: str) -> str:
+    async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
         try:
             handle = await self._session.read(destination, user=self._user)
         except (FileNotFoundError, WorkspaceReadNotFoundError) as exc:
@@ -162,7 +180,7 @@ class WorkspaceEditor:
             try:
                 return bytes(payload).decode("utf-8")
             except UnicodeDecodeError as exc:
-                raise ApplyPatchDecodeError(path=destination, cause=exc) from exc
+                raise ApplyPatchDecodeError(path=decode_path, cause=exc) from exc
         raise ApplyPatchDiffError(
             message=f"apply_patch read() returned non-text content: {type(payload).__name__}",
             path=op_path,
