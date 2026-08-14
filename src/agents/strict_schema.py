@@ -3,8 +3,6 @@ from __future__ import annotations
 import copy
 from typing import Any, TypeGuard, cast
 
-from openai import NOT_GIVEN
-
 from .exceptions import UserError
 
 _EMPTY_SCHEMA = {
@@ -361,17 +359,15 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
-    if json_schema.get("default", NOT_GIVEN) is None:
-        json_schema.pop("default")
+    # Strict schemas mark every property as required, so API-level defaults are not used and
+    # must be omitted because Structured Outputs rejects `default` in property definitions.
+    json_schema.pop("default", None)
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
-    # `{"$ref": "...", "description": "my description"}`
+    # {"$ref": "...", "description": "my description"}
     #
     # so we unravel the ref
-    # `{"type": "string", "description": "my description"}`
+    # {"type": "string", "description": "my description"}
     ref = json_schema.get("$ref")
     if ref and has_more_than_n_keys(json_schema, 1):
         assert isinstance(ref, str), f"Received non-string $ref - {ref}"
