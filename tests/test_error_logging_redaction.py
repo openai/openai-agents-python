@@ -918,6 +918,7 @@ async def test_function_tool_output_validation_error_redacts_payload_when_tool_d
     assert _TOOL_OUTPUT_SECRET not in str(error)
     assert error.__cause__ is None
     assert error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(error, _TOOL_OUTPUT_SECRET)
 
 
 @pytest.mark.asyncio

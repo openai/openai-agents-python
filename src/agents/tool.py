@@ -2276,10 +2276,12 @@ def _validate_function_tool_output(
     except ValidationError as error:
         if not _debug.DONT_LOG_TOOL_DATA:
             raise UserError(f"{base_message}: {error}") from error
-    # Tool-data redaction is enabled: the ValidationError repr embeds the raw output value, so
-    # raise outside the ``except`` block. This keeps the payload-bearing ValidationError from
-    # being attached as the redacted error's ``__cause__``/``__context__`` (mirroring the tool
-    # argument validation path above).
+    # Tool-data redaction is enabled: the ValidationError repr embeds the raw output value. Drop
+    # the payload-bearing ``output`` local and raise outside the ``except`` block so the value
+    # cannot be recovered from this frame's traceback locals, and the ValidationError is not
+    # attached as the redacted error's ``__cause__``/``__context__`` (mirroring the tool argument
+    # validation path above).
+    output = None
     raise UserError(base_message)
 
 
@@ -2644,11 +2646,17 @@ def function_tool(
                 else:
                     result = await asyncio.to_thread(the_func, *args, **kwargs_dict)
 
-            result = _validate_function_tool_output(
-                tool_name=tool_name,
-                output=result,
-                output_type_adapter=output_type_adapter,
-            )
+            try:
+                result = _validate_function_tool_output(
+                    tool_name=tool_name,
+                    output=result,
+                    output_type_adapter=output_type_adapter,
+                )
+            except UserError:
+                # Output validation failed. Drop the payload-bearing local so a redacted error
+                # cannot leak the raw output through this frame's traceback locals.
+                result = None
+                raise
 
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug("Tool %s completed.", tool_name)
