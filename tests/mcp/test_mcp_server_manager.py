@@ -862,6 +862,36 @@ async def test_manager_reconnect_failed_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_servers_snapshot_mutation_does_not_suppress_reconnect() -> None:
+    server = FlakyServer(failures=1)
+
+    async with MCPServerManager([server]) as manager:
+        failed_servers = manager.failed_servers
+        failed_servers.clear()
+
+        assert manager.failed_servers == [server]
+
+        await manager.reconnect(failed_only=True)
+
+        assert server.connect_calls == 2
+        assert manager.active_servers == [server]
+        assert manager.failed_servers == []
+
+
+@pytest.mark.asyncio
+async def test_errors_snapshot_mutation_does_not_erase_diagnostics() -> None:
+    server = FlakyServer(failures=1)
+
+    async with MCPServerManager([server]) as manager:
+        original_error = manager.errors[server]
+        errors = manager.errors
+        errors.clear()
+        errors[server] = RuntimeError("replacement error")
+
+        assert manager.errors == {server: original_error}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("connect_in_parallel", [False, True])
 async def test_manager_reconnect_cleans_partial_failure_before_retry(
     connect_in_parallel: bool,
