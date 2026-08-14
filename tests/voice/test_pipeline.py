@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import weakref
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
+from unittest.mock import patch
 
 import numpy as np
 import numpy.typing as npt
@@ -27,6 +30,7 @@ try:
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
     )
+    from agents.voice.testing import ScriptedTTSModel
 
     from .helpers import extract_events
     from .pipeline_test_models import (
@@ -1532,3 +1536,75 @@ async def test_voice_workflow_errors_apply_model_and_tool_logging_policies(
             assert error in record.args
             assert record.exc_info is not None
             assert record.exc_info[1] is error
+
+
+class _WeakrefableChunk(bytearray):
+    """A buffer subclass that supports weak references, unlike ``bytes`` itself."""
+
+
+class RetentionProbeTTSModel(ScriptedTTSModel):
+    """Report whether the previous chunk survived after the pipeline consumed it."""
+
+    def __init__(self, chunk_count: int = 4) -> None:
+        super().__init__(model_name="retention-probe-tts")
+        self.chunk_count = chunk_count
+        self.retained_after_consumption: list[bool] = []
+
+    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        chunk_refs: list[weakref.ref[_WeakrefableChunk]] = []
+        for _ in range(self.chunk_count):
+            chunk = _WeakrefableChunk(np.zeros(2, dtype=np.int16).tobytes())
+            chunk_refs.append(weakref.ref(chunk))
+            yield cast(bytes, chunk)
+            # Control returns here only once the consumer has finished with the chunk.
+            del chunk
+            gc.collect()
+            # The consumer's `async for` variable still holds the chunk just yielded, so
+            # probe the one before it: by now only the span accumulator could keep it alive.
+            if len(chunk_refs) >= 2:
+                self.retained_after_consumption.append(chunk_refs[-2]() is not None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trace_include_sensitive_audio_data", [False, True])
+async def test_segment_audio_is_retained_only_for_audio_tracing(
+    trace_include_sensitive_audio_data: bool,
+) -> None:
+    tts_model = RetentionProbeTTSModel()
+    result = StreamedAudioResult(
+        tts_model,
+        # A buffer size of 1 flushes every chunk immediately, so the only thing that can
+        # still hold one afterwards is the span's audio accumulator.
+        TTSModelSettings(buffer_size=1),
+        VoicePipelineConfig(
+            trace_include_sensitive_audio_data=trace_include_sensitive_audio_data,
+        ),
+    )
+    collected: list[list[bytes]] = []
+
+    def fake_audio_to_base64(audio_data: list[bytes]) -> str:
+        collected.append(list(audio_data))
+        return ""
+
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+    with trace("test"):
+        with patch("agents.voice.result._audio_to_base64", fake_audio_to_base64):
+            await result._stream_audio("one two three", local_queue)
+
+    expected_chunk = np.zeros(2, dtype=np.int16).tobytes()
+    if trace_include_sensitive_audio_data:
+        assert tts_model.retained_after_consumption == [True, True, True]
+        assert collected == [[expected_chunk] * tts_model.chunk_count]
+    else:
+        assert tts_model.retained_after_consumption == [False, False, False]
+        assert collected == []
+
+    # The emitted audio is identical either way.
+    emitted: list[bytes] = []
+    while not local_queue.empty():
+        event = local_queue.get_nowait()
+        if event is None:
+            continue
+        if isinstance(event, VoiceStreamEventAudio) and event.data is not None:
+            emitted.append(event.data.tobytes())
+    assert emitted == [expected_chunk] * tts_model.chunk_count

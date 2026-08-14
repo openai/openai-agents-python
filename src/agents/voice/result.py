@@ -143,7 +143,10 @@ class StreamedAudioResult:
 
                     if chunk:
                         buffer.append(chunk)
-                        full_audio_data.append(chunk)
+                        if self._voice_pipeline_config.trace_include_sensitive_audio_data:
+                            # Only read back to populate the span output, so retaining it when
+                            # audio tracing is off would hold a whole segment of PCM for nothing.
+                            full_audio_data.append(chunk)
                         if len(buffer) >= self._buffer_size:
                             combined = pending_byte + b"".join(buffer)
                             if len(combined) % 2 != 0:

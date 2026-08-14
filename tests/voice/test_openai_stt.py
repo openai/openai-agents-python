@@ -795,3 +795,46 @@ async def test_inactivity_timeout():
         assert len(collected_turns) == 0, "No transcripts expected, but we got something?"
 
         await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trace_include_sensitive_audio_data", [False, True])
+async def test_stream_audio_buffers_turn_audio_only_for_audio_tracing(
+    trace_include_sensitive_audio_data: bool,
+) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=trace_include_sensitive_audio_data,
+    )
+    session._websocket = AsyncMock()
+
+    frames: list[npt.NDArray[np.int16]] = [
+        np.zeros(2, dtype=np.int16),
+        np.ones(2, dtype=np.int16),
+    ]
+    audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None] = asyncio.Queue()
+    for frame in frames:
+        await audio_queue.put(frame)
+    await audio_queue.put(None)
+
+    with patch(
+        "agents.voice.models.openai_stt.transcription_span",
+        return_value=MagicMock(),
+    ):
+        await session._stream_audio(audio_queue)
+
+    # Every frame still reaches the websocket regardless of the tracing setting.
+    assert session._websocket.send.await_count == len(frames)
+
+    if trace_include_sensitive_audio_data:
+        assert len(session._turn_audio_buffer) == len(frames)
+        assert all(
+            buffered is frame
+            for buffered, frame in zip(session._turn_audio_buffer, frames, strict=True)
+        )
+    else:
+        assert session._turn_audio_buffer == []

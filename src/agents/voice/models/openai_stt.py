@@ -280,7 +280,10 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             if buffer is None:
                 break
 
-            self._turn_audio_buffer.append(buffer)
+            if self._trace_include_sensitive_audio_data:
+                # The buffer is only read back to populate the span input, so retaining it
+                # when audio tracing is off would hold a whole turn of PCM for nothing.
+                self._turn_audio_buffer.append(buffer)
             try:
                 await self._websocket.send(
                     json.dumps(
