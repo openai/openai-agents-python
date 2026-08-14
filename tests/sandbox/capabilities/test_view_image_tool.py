@@ -54,9 +54,7 @@ class TestViewImageTool:
             [{"method": "read", "result": io.BytesIO(_PNG_BYTES)}],
             manifest=Manifest(
                 root="/workspace",
-                extra_path_grants=(
-                    SandboxPathGrant(path="/shared", read_only=True),
-                ),
+                extra_path_grants=(SandboxPathGrant(path="/shared", read_only=True),),
             ),
         )
         tool = ViewImageTool(session=session)
@@ -81,7 +79,7 @@ class TestViewImageTool:
                 '{"path":"/shared/dot.png"}',
             )
 
-        assert session.calls == []
+        assert session.calls == ()
 
     @pytest.mark.asyncio
     async def test_view_image_reads_as_bound_user(self) -> None:
