@@ -854,7 +854,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     @property
     def cached_tools(self) -> list[MCPTool] | None:
-        return self._tools_list
+        """A snapshot of the cached tools list, or `None` when nothing is cached.
+
+        This returns a new list so callers cannot mutate the server's cache in place.
+        """
+        return None if self._tools_list is None else list(self._tools_list)
 
     def __init__(
         self,
@@ -1474,6 +1478,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             filtered_tools = tools
             if self.tool_filter is not None:
                 filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
+            if filtered_tools is self._tools_list:
+                # The filters build a new list, but an absent filter — or a static filter with
+                # neither key set — passes the cached list straight through. Returning it would
+                # let a caller mutate the cache and corrupt every later `list_tools()` result.
+                return list(filtered_tools)
             return filtered_tools
         except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
