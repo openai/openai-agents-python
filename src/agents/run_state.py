@@ -889,6 +889,45 @@ class RunState(Generic[TContext, TAgent]):
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
 
+    def _copy_for_result_checkpoint(self) -> RunState[TContext, TAgent]:
+        """Copy SDK-owned decision state when nesting this checkpoint in a result snapshot."""
+        copied = copy.copy(self)
+        if self._context is None:
+            return copied
+        copied._context = self._context._copy_for_run_state()
+        from .agent_tool_state import (
+            get_agent_tool_resume_state,
+            get_agent_tool_state_scope,
+            peek_agent_tool_run_result,
+            record_agent_tool_resume_state,
+        )
+
+        copied._agent_tool_state_scope_id = get_agent_tool_state_scope(copied._context)
+        if self._last_processed_response is None:
+            return copied
+
+        for function_run in self._last_processed_response.functions:
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=self._agent_tool_state_scope_id,
+            )
+            interruptions = getattr(pending_result, "interruptions", None)
+            to_state = getattr(pending_result, "to_state", None)
+            if not isinstance(interruptions, list) or not interruptions or not callable(to_state):
+                continue
+            pending_state = get_agent_tool_resume_state(pending_result)
+            copy_for_checkpoint = getattr(pending_state, "_copy_for_result_checkpoint", None)
+            nested_state = copy_for_checkpoint() if callable(copy_for_checkpoint) else to_state()
+            if not isinstance(nested_state, RunState) or nested_state is self:
+                continue
+            record_agent_tool_resume_state(
+                function_run.tool_call,
+                nested_state,
+                scope_id=copied._agent_tool_state_scope_id,
+                approval_items=interruptions,
+            )
+        return copied
+
     @property
     def pending_input(self) -> list[TResponseInputItem]:
         """Return a copy of input currently staged for the next resumed model call."""

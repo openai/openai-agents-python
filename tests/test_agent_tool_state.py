@@ -86,6 +86,20 @@ def test_agent_tool_run_result_returns_none_for_ambiguous_signature_matches() ->
     assert tool_state.peek_agent_tool_run_result(restored_call, scope_id="other-scope") is None
 
 
+def test_agent_tool_run_result_keeps_same_call_isolated_by_scope() -> None:
+    tool_call = _function_tool_call("lookup_account", "{}", call_id="call-1")
+    first_result = cast(Any, object())
+    second_result = cast(Any, object())
+
+    tool_state.record_agent_tool_run_result(tool_call, first_result, scope_id="scope-1")
+    tool_state.record_agent_tool_run_result(tool_call, second_result, scope_id="scope-2")
+
+    assert tool_state.peek_agent_tool_run_result(tool_call, scope_id="scope-1") is first_result
+    assert tool_state.peek_agent_tool_run_result(tool_call, scope_id="scope-2") is second_result
+    assert tool_state.consume_agent_tool_run_result(tool_call, scope_id="scope-1") is first_result
+    assert tool_state.peek_agent_tool_run_result(tool_call, scope_id="scope-2") is second_result
+
+
 def test_agent_tool_run_result_is_dropped_when_tool_call_is_collected() -> None:
     tool_call = _function_tool_call("lookup_account", "{}", call_id="call-1")
     tool_call_ref = weakref.ref(tool_call)

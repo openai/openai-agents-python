@@ -172,6 +172,61 @@ def _populate_state_from_result(
     return state
 
 
+def _copy_pending_nested_agent_tool_states(state: RunState[Any], result: RunResultBase) -> None:
+    """Bind detached nested approval checkpoints to the new outer checkpoint scope."""
+    if state._last_processed_response is None:
+        return
+
+    from .agent_tool_state import (
+        drop_agent_tool_run_result,
+        get_agent_tool_resume_state,
+        get_agent_tool_state_scope,
+        peek_agent_tool_run_result,
+        record_agent_tool_resume_state,
+    )
+
+    source_scope = get_agent_tool_state_scope(result.context_wrapper)
+    templates = getattr(result, "_checkpoint_nested_state_templates", None)
+    if not isinstance(templates, dict):
+        templates = {}
+        result.__dict__["_checkpoint_nested_state_templates"] = templates
+    for function_run in state._last_processed_response.functions:
+        template = templates.get(id(function_run.tool_call))
+        if isinstance(template, RunState):
+            nested_state = template._copy_for_result_checkpoint()
+            resolved_interruptions = template.get_interruptions()
+        else:
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=source_scope,
+            )
+            pending_interruptions = getattr(pending_result, "interruptions", None)
+            to_state = getattr(pending_result, "to_state", None)
+            if (
+                not isinstance(pending_interruptions, list)
+                or not pending_interruptions
+                or not callable(to_state)
+            ):
+                continue
+            pending_state = get_agent_tool_resume_state(pending_result)
+            copy_for_checkpoint = getattr(pending_state, "_copy_for_result_checkpoint", None)
+            template = copy_for_checkpoint() if callable(copy_for_checkpoint) else to_state()
+            if not isinstance(template, RunState):
+                continue
+            templates[id(function_run.tool_call)] = template
+            drop_agent_tool_run_result(function_run.tool_call, scope_id=source_scope)
+            nested_state = template._copy_for_result_checkpoint()
+            resolved_interruptions = pending_interruptions
+        if not isinstance(nested_state, RunState) or nested_state is state:
+            continue
+        record_agent_tool_resume_state(
+            function_run.tool_call,
+            nested_state,
+            scope_id=state._agent_tool_state_scope_id,
+            approval_items=resolved_interruptions,
+        )
+
+
 ToInputListMode = Literal["preserve_all", "normalized"]
 
 
@@ -510,7 +565,7 @@ class RunResult(RunResultBase):
         # Create a RunState from the current result
         original_input_for_state = getattr(self, "_original_input", None)
         state = RunState(
-            context=self.context_wrapper,
+            context=self.context_wrapper._copy_for_run_state(),
             original_input=original_input_for_state
             if original_input_for_state is not None
             else self.input,
@@ -518,7 +573,7 @@ class RunResult(RunResultBase):
             max_turns=self.max_turns,
         )
 
-        return _populate_state_from_result(
+        state = _populate_state_from_result(
             state,
             self,
             current_turn=self._current_turn,
@@ -529,6 +584,8 @@ class RunResult(RunResultBase):
             previous_response_id=self._previous_response_id,
             auto_previous_response_id=self._auto_previous_response_id,
         )
+        _copy_pending_nested_agent_tool_states(state, self)
+        return state
 
     def __str__(self) -> str:
         return pretty_print_result(self)
@@ -1111,13 +1168,13 @@ class RunResultStreaming(RunResultBase):
         # Use _original_input (updated on handoffs/resume when input history changes).
         # This avoids serializing a mutated view of input history.
         state = RunState(
-            context=self.context_wrapper,
+            context=self.context_wrapper._copy_for_run_state(),
             original_input=self._original_input if self._original_input is not None else self.input,
             starting_agent=_starting_agent_for_state(self),
             max_turns=self.max_turns,
         )
 
-        return _populate_state_from_result(
+        state = _populate_state_from_result(
             state,
             self,
             current_turn=self.current_turn,
@@ -1128,3 +1185,5 @@ class RunResultStreaming(RunResultBase):
             previous_response_id=self._previous_response_id,
             auto_previous_response_id=self._auto_previous_response_id,
         )
+        _copy_pending_nested_agent_tool_states(state, self)
+        return state

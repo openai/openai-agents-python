@@ -6572,6 +6572,63 @@ class TestRunStateResumption:
 
         assert result2.final_output == "Second response"
 
+    @pytest.mark.parametrize("streamed", [False, True])
+    @pytest.mark.asyncio
+    async def test_result_to_state_detaches_tool_decision_ledgers(self, streamed: bool):
+        """States created from one result must not share approval decisions."""
+        model = ScriptedModel()
+        executions: list[str] = []
+
+        @function_tool(needs_approval=True)
+        async def approval_tool() -> str:
+            executions.append("executed")
+            return "approved"
+
+        agent = Agent(name="TestAgent", model=model, tools=[approval_tool])
+        model.enqueue([get_function_tool_call("approval_tool", "{}")])
+
+        if streamed:
+            result = Runner.run_streamed(agent, "First input")
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "First input")
+
+        decided = result.to_state()
+        untouched = result.to_state()
+        untouched_approvals_before = untouched.to_json()["context"]["approvals"]
+
+        decided.approve(decided.get_interruptions()[0])
+
+        assert decided._context is not untouched._context
+        assert decided._context is not None
+        assert untouched._context is not None
+        assert decided._context.context is untouched._context.context
+        assert decided._context._approvals is not untouched._context._approvals
+        assert decided._context._tool_invocations is not untouched._context._tool_invocations
+        assert untouched.to_json()["context"]["approvals"] == untouched_approvals_before
+
+        if streamed:
+            untouched_result = Runner.run_streamed(agent, untouched)
+            async for _ in untouched_result.stream_events():
+                pass
+        else:
+            untouched_result = await Runner.run(agent, untouched)
+
+        assert untouched_result.interruptions
+        assert executions == []
+
+    def test_nested_resume_checkpoint_to_state_keeps_its_owned_decision_ledger(self):
+        """A scoped nested checkpoint returns the state that resume will consume."""
+        from agents.agent_tool_state import _AgentToolResumeCheckpoint
+
+        agent = Agent(name="NestedAgent")
+        approval_item = make_tool_approval_item(agent, call_id="nested-call")
+        state = make_state_with_interruptions(agent, [approval_item])
+        checkpoint = _AgentToolResumeCheckpoint(state, frozenset())
+
+        assert checkpoint.to_state() is state
+
     @pytest.mark.asyncio
     async def test_resume_from_run_state_streamed(self):
         """Test resuming a run from a RunState using run_streamed."""

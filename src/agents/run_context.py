@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
+from uuid import uuid4
 
 from typing_extensions import TypeVar
 
@@ -111,6 +113,17 @@ class RunContextWrapper(Generic[TContext]):
             self._allow_legacy_approval_binding_reconstruction
         )
         target._restored_unbound_approval_call_ids = self._restored_unbound_approval_call_ids
+
+    def _copy_for_run_state(self) -> RunContextWrapper[TContext]:
+        """Copy SDK-owned tool state for an independently resumable checkpoint."""
+        copied = copy.copy(self)
+        copied._approvals = copy.deepcopy(self._approvals)
+        copied._tool_invocations = copy.deepcopy(self._tool_invocations)
+        copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)
+        from .agent_tool_state import set_agent_tool_state_scope
+
+        set_agent_tool_state_scope(copied, uuid4().hex)
+        return copied
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
