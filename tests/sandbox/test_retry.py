@@ -30,6 +30,11 @@ class _ErrorWithHttpMetadata(Exception):
             self.response = type("_Response", (), {"status_code": response_status_code})()
 
 
+class _FalsyError(Exception):
+    def __bool__(self) -> bool:
+        return False
+
+
 def test_iter_exception_chain_supports_context_and_stops_on_cycles() -> None:
     outer = RuntimeError("outer")
     inner = ValueError("inner")
@@ -43,6 +48,16 @@ def test_iter_exception_chain_supports_context_and_stops_on_cycles() -> None:
     cyclical_inner.__cause__ = cyclical_outer
 
     assert list(iter_exception_chain(cyclical_outer)) == [cyclical_outer, cyclical_inner]
+
+
+def test_iter_exception_chain_preserves_falsy_explicit_cause() -> None:
+    outer = RuntimeError("outer")
+    cause = _FalsyError("cause")
+    context = ValueError("context")
+    outer.__cause__ = cause
+    outer.__context__ = context
+
+    assert list(iter_exception_chain(outer)) == [outer, cause]
 
 
 def test_exception_chain_helpers_detect_types_and_status_codes() -> None:

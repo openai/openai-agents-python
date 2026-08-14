@@ -32,9 +32,10 @@ def iter_exception_chain(exc: BaseException) -> Iterable[BaseException]:
     while current is not None and id(current) not in seen:
         yield current
         seen.add(id(current))
+        cause = getattr(current, "__cause__", None)
         current = cast(
             BaseException | None,
-            getattr(current, "__cause__", None) or getattr(current, "__context__", None),
+            cause if cause is not None else getattr(current, "__context__", None),
         )
 
 
