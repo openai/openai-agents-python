@@ -135,6 +135,22 @@ def test_buffer_to_audio_file_invalid_dtype():
         _buffer_to_audio_file(buffer=buffer, channels=2)
 
 
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_buffer_to_audio_file_rejects_non_finite_float_samples(value):
+    buffer = np.array([0.0, value], dtype=np.float32)
+
+    with pytest.raises(UserError, match="finite values"):
+        _buffer_to_audio_file(buffer)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_audio_input_to_base64_rejects_non_finite_float_samples(value):
+    audio_input = AudioInput(buffer=np.array([0.0, value], dtype=np.float32))
+
+    with pytest.raises(UserError, match="finite values"):
+        audio_input.to_base64()
+
+
 class TestAudioInput:
     def test_audio_input_default_params(self):
         # Create a simple sine wave

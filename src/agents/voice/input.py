@@ -28,6 +28,9 @@ def _buffer_to_audio_file(
     if buffer.dtype not in (np.int16, np.float32):
         raise UserError("Buffer must be a numpy array of int16 or float32")
 
+    if buffer.dtype == np.float32 and not np.isfinite(buffer).all():
+        raise UserError("Buffer must contain only finite values")
+
     if channels <= 0:
         raise UserError("Channels must be greater than zero")
 
@@ -102,6 +105,8 @@ class AudioInput:
     def to_base64(self) -> str:
         """Returns the audio data as a base64 encoded string."""
         if self.buffer.dtype == np.float32:
+            if not np.isfinite(self.buffer).all():
+                raise UserError("Buffer must contain only finite values")
             # convert to int16 without mutating the caller's buffer
             int16_buffer = (np.clip(self.buffer, -1.0, 1.0) * 32767).astype(np.int16)
         elif self.buffer.dtype == np.int16:
