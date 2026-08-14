@@ -61,8 +61,13 @@ def _filesystem_instructions(
             [
                 header,
                 f"For this run, the working directory is `{working_directory.as_posix()}`.",
-                "Relative paths passed to sandbox capabilities resolve from this directory.",
+                "Relative paths passed to the built-in `exec_command`, `view_image`, and "
+                "`apply_patch` tools resolve from this directory.",
+                "Other sandbox tools follow their own path contract.",
                 f"The session workspace root remains `{workspace_root.as_posix()}`.",
+                "The working directory changes path resolution; it does not isolate this run "
+                "from the rest of the session workspace.",
+                "Files outside the working directory may be visible to or shared with other runs.",
             ]
         )
     tree = render_manifest_description(

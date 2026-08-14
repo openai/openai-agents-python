@@ -222,9 +222,10 @@ class SandboxRunConfig:
     cwd: str | PurePath | None = None
     """Optional model-facing working directory relative to the sandbox workspace root.
 
-    Relative paths used by prepared sandbox capabilities resolve from this directory. The
-    directory must already exist when the run starts. This setting does not change
-    `Manifest.root` or direct `BaseSandboxSession` path behavior.
+    Relative paths used by the built-in `exec_command`, `view_image`, and `apply_patch` tools
+    resolve from this directory. Custom path-bearing capabilities must apply their bound
+    `SandboxWorkspaceScope` explicitly. The directory must already exist when the run starts.
+    This setting does not change `Manifest.root` or direct `BaseSandboxSession` path behavior.
     """
 
     if TYPE_CHECKING:

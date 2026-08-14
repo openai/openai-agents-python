@@ -71,6 +71,68 @@ def test_sandbox_workspace_scope_renders_model_paths() -> None:
     ) == PurePosixPath("shared.txt")
 
 
+def test_sandbox_workspace_scope_renders_session_resources_as_absolute_with_cwd() -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath("/workspace/.agents/my-skill")
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=PureWindowsPath(r".agents\my-skill"),
+    ) == PurePosixPath("/workspace/.agents/my-skill")
+
+
+def test_sandbox_workspace_scope_preserves_root_relative_resource_paths_without_cwd() -> None:
+    scope = SandboxWorkspaceScope()
+
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath(".agents/my-skill")
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/workspace/.agents/my-skill", "must be workspace-relative"),
+        ("../my-skill", "must be workspace-relative"),
+        ("C:/skills/my-skill", "must be workspace-relative"),
+        (PureWindowsPath("C:/skills/my-skill"), "must be workspace-relative"),
+        (r".agents\my-skill", "must use POSIX path separators"),
+        ("", "must be non-empty"),
+    ],
+)
+def test_sandbox_workspace_scope_rejects_invalid_session_resource_paths(
+    path: str | PurePath,
+    message: str,
+) -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    with pytest.raises(ValueError, match=message):
+        scope.model_resource_path(
+            workspace_root="/workspace",
+            workspace_relative_path=path,
+        )
+
+
+@pytest.mark.parametrize(
+    "root",
+    [r"\workspace", "C:/workspace", PureWindowsPath("C:/workspace"), "workspace"],
+)
+def test_sandbox_workspace_scope_rejects_non_posix_absolute_resource_roots(
+    root: str | PurePath,
+) -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    with pytest.raises(ValueError, match="sandbox workspace root must be POSIX absolute"):
+        scope.model_resource_path(
+            workspace_root=root,
+            workspace_relative_path=".agents/my-skill",
+        )
+
+
 def test_sandbox_workspace_scope_none_preserves_root_relative_paths() -> None:
     scope = SandboxWorkspaceScope()
 

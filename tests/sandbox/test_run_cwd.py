@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import shlex
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -15,7 +16,15 @@ from agents import RunConfig, Runner, ToolOutputImage
 from agents.items import ToolCallOutputItem
 from agents.run_state import RunState
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
-from agents.sandbox.capabilities import Filesystem, FilesystemToolSet, Shell, ShellToolSet
+from agents.sandbox.capabilities import (
+    Filesystem,
+    FilesystemToolSet,
+    Shell,
+    ShellToolSet,
+    Skill,
+    Skills,
+)
+from agents.sandbox.entries import File
 from agents.sandbox.errors import WorkspaceReadNotFoundError
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -155,6 +164,87 @@ async def test_concurrent_runs_scope_relative_paths_with_shared_live_session() -
             for root_relative_path in ("plot.png", "notes.md"):
                 with pytest.raises(WorkspaceReadNotFoundError):
                     await session.read(Path(root_relative_path))
+    finally:
+        await client.delete(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix local sandbox is unavailable on Windows")
+async def test_python_skill_uses_absolute_root_from_nested_workdir() -> None:
+    skill_script = (
+        b"from pathlib import Path\n"
+        b"skill_root = Path(__file__).parent.parent\n"
+        b"suffix = (skill_root / 'assets' / 'suffix.txt').read_text(encoding='utf-8')\n"
+        b"source = Path('input.txt').read_text(encoding='utf-8')\n"
+        b"Path('output.txt').write_text(source + suffix, encoding='utf-8')\n"
+    )
+    skills = Skills(
+        skills=[
+            Skill(
+                name="python-proof",
+                description="Proves shared Python skills keep task files local.",
+                content="# Python proof\n",
+                scripts={"prove.py": File(content=skill_script)},
+                assets={"suffix.txt": File(content=b"-from-shared-skill")},
+            )
+        ]
+    )
+    client = UnixLocalSandboxClient()
+    session = await client.create(manifest=skills.process_manifest(Manifest()))
+
+    try:
+        async with session:
+            await session.mkdir("tasks/task-a/nested", parents=True)
+            await session.write(
+                Path("tasks/task-a/nested/input.txt"),
+                io.BytesIO(b"task-a"),
+            )
+            workspace_root = session.state.manifest.root
+            skill_root = f"{workspace_root}/.agents/python-proof"
+            script_path = f"{skill_root}/scripts/prove.py"
+            model = ScriptedModel(
+                [
+                    [
+                        function_call(
+                            "exec_command",
+                            {
+                                "cmd": (
+                                    f"{shlex.quote(sys.executable)} {shlex.quote(script_path)}"
+                                ),
+                                "workdir": "nested",
+                                "login": False,
+                            },
+                            call_id="python_skill",
+                        )
+                    ],
+                    [assistant_message("done", item_id="python_skill_message")],
+                ]
+            )
+            agent = SandboxAgent(
+                name="python-skill-task",
+                model=model,
+                capabilities=[Shell(), skills],
+            )
+
+            result = await Runner.run(
+                agent,
+                "Use the available Python skill.",
+                run_config=RunConfig(sandbox=SandboxRunConfig(session=session, cwd="tasks/task-a")),
+            )
+
+            assert result.final_output == "done"
+            assert await _read_bytes(session, "tasks/task-a/nested/output.txt") == (
+                b"task-a-from-shared-skill"
+            )
+            assert (
+                await _read_bytes(session, ".agents/python-proof/scripts/prove.py") == skill_script
+            )
+            instructions = model.calls[0].system_instructions
+            assert instructions is not None
+            assert f"(file: {skill_root})" in instructions
+            assert "Treat each listed path as the skill root" in instructions
+            assert "Files outside the working directory may be visible to or shared" in instructions
+            model.assert_complete()
     finally:
         await client.delete(session)
 

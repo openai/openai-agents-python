@@ -143,6 +143,43 @@ class SandboxWorkspaceScope:
             )
         )
 
+    def model_resource_path(
+        self,
+        *,
+        workspace_root: str | PurePath,
+        workspace_relative_path: str | PurePath,
+    ) -> PurePosixPath:
+        """Render a session-owned workspace resource for model-facing instructions.
+
+        Without a run cwd, preserve the existing workspace-root-relative representation. With a
+        run cwd, use an absolute sandbox path so the resource remains addressable after a shell
+        command selects a nested workdir or changes directory.
+        """
+
+        if isinstance(workspace_relative_path, str) and "\\" in workspace_relative_path:
+            raise ValueError("session resource paths must use POSIX path separators")
+        if windows_absolute_path(workspace_relative_path) is not None:
+            raise ValueError("session resource paths must be workspace-relative")
+
+        relative_path = coerce_posix_path(workspace_relative_path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError("session resource paths must be workspace-relative")
+        if relative_path.parts in [(), (".",)]:
+            raise ValueError("session resource paths must be non-empty")
+
+        normalized_path = PurePosixPath(posixpath.normpath(relative_path.as_posix()))
+        if self.cwd is None:
+            return normalized_path
+
+        if isinstance(workspace_root, str) and "\\" in workspace_root:
+            raise ValueError("sandbox workspace root must be POSIX absolute")
+        if windows_absolute_path(workspace_root) is not None:
+            raise ValueError("sandbox workspace root must be POSIX absolute")
+        root_path = coerce_posix_path(workspace_root)
+        if not root_path.is_absolute():
+            raise ValueError("sandbox workspace root must be POSIX absolute")
+        return PurePosixPath(posixpath.normpath((root_path / normalized_path).as_posix()))
+
     def display_path(
         self,
         *,

@@ -261,8 +261,19 @@ def test_filesystem_instructions_describe_run_working_directory() -> None:
     )
 
     assert "For this run, the working directory is `/workspace/tasks/a`." in result
-    assert "Relative paths passed to sandbox capabilities resolve from this directory." in result
+    assert (
+        "Relative paths passed to the built-in `exec_command`, `view_image`, and `apply_patch` "
+        "tools resolve from this directory."
+    ) in result
+    assert "Other sandbox tools follow their own path contract." in result
     assert "The session workspace root remains `/workspace`." in result
+    assert (
+        "The working directory changes path resolution; it does not isolate this run from the "
+        "rest of the session workspace."
+    ) in result
+    assert (
+        "Files outside the working directory may be visible to or shared with other runs." in result
+    )
 
 
 def test_prepare_sandbox_agent_validates_required_capabilities() -> None:
