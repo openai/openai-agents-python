@@ -27,7 +27,11 @@ class SpanProcessorForTests(TracingProcessor):
         # the identical timestamp. Sorting on the timestamp alone then falls back
         # to insertion order, which is span *end* order, and a child ends before
         # its parent -- the exact reverse of what consumers need.
-        self._start_order: dict[str, int] = {}
+        #
+        # Keyed by (trace_id, span_id): a span ID is only unique within its
+        # trace, and callers may pass an explicit one, so keying on the span ID
+        # alone would let a later trace inherit an earlier trace's position.
+        self._start_order: dict[tuple[str, str], int] = {}
 
     def on_trace_start(self, trace: Trace) -> None:
         with self._lock:
@@ -43,7 +47,7 @@ class SpanProcessorForTests(TracingProcessor):
         with self._lock:
             # Purposely not appending the span here, we want to do that in on_span_end
             self._events.append("span_start")
-            self._start_order.setdefault(span.span_id, len(self._start_order))
+            self._start_order.setdefault((span.trace_id, span.span_id), len(self._start_order))
 
     def on_span_end(self, span: Span[Any]) -> None:
         with self._lock:
@@ -55,7 +59,10 @@ class SpanProcessorForTests(TracingProcessor):
             spans = [x for x in self._spans if including_empty or x.export()]
             return sorted(
                 spans,
-                key=lambda x: (x.started_at or "", self._start_order.get(x.span_id, 0)),
+                key=lambda x: (
+                    x.started_at or "",
+                    self._start_order.get((x.trace_id, x.span_id), 0),
+                ),
             )
 
     def get_traces(self, including_empty: bool = False) -> list[Trace]:
