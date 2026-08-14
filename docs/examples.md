@@ -69,6 +69,7 @@ Check out a variety of sample implementations that use the SDK in the examples s
     -   Prefetching all MCP tools with `MCPUtil.get_all_function_tools` (`examples/mcp/get_all_mcp_tools_example`)
     -   Using `MCPServerManager` in a FastAPI application (`examples/mcp/manager_example`)
     -   MCP tool filtering (`examples/mcp/tool_filter_example`)
+    -   Discovering third-party agents in a registry, then trust-checking them (`examples/mcp/aidress_example`)
 
 - **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):** Examples of different memory implementations for agents, including:
 
