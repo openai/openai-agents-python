@@ -1916,7 +1916,7 @@ def _find_subset_errors(expected: object, actual: object, path: str = "state") -
 
 
 def _restore_agent(payload: dict[str, Any]) -> Any:
-    from agents import Agent, handoff
+    from agents import Agent, function_tool, handoff
 
     current_agent = payload.get("current_agent")
     name = (
@@ -1928,6 +1928,25 @@ def _restore_agent(payload: dict[str, Any]) -> Any:
     if identity == f"{name}#2":
         duplicate = Agent(name=name)
         return Agent(name=name, handoffs=[handoff(duplicate)])
+
+    processed_response = payload.get("last_processed_response")
+    serialized_functions = (
+        processed_response.get("functions", []) if isinstance(processed_response, dict) else []
+    )
+    has_send_email_tool = any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("tool"), dict)
+        and entry["tool"].get("name") == "send_email"
+        for entry in serialized_functions
+    )
+    if has_send_email_tool:
+
+        @function_tool(name_override="send_email")
+        def send_email(recipient: str) -> str:
+            return f"sent:{recipient}"
+
+        return Agent(name=name, tools=[send_email])
+
     return Agent(name=name)
 
 

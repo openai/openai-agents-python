@@ -7,10 +7,10 @@ import threading
 from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC
+from .session import SessionABC, SessionHistoryRewriteArgs, apply_session_history_mutations
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 _T = TypeVar("_T")
@@ -47,6 +47,7 @@ class SQLiteSession(SessionABC):
     """
 
     session_settings: SessionSettings | None = None
+    supports_expected_history_mutations: Literal[True] = True
     _file_locks: ClassVar[dict[Path, threading.RLock]] = {}
     _file_lock_counts: ClassVar[dict[Path, int]] = {}
     _file_locks_guard: ClassVar[threading.Lock] = threading.Lock()
@@ -428,6 +429,71 @@ class SQLiteSession(SessionABC):
                 conn.commit()
 
         await _await_mutation(asyncio.to_thread(_clear_session_sync))
+
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> bool:
+        """Rewrite persisted session history using structured mutations."""
+        mutations = list(args.get("mutations", []))
+        if not mutations:
+            return True
+
+        def _apply_history_mutations_sync() -> None:
+            with self._write_connection() as conn:
+                cursor = conn.execute(
+                    f"""
+                    SELECT id, message_data FROM {self.messages_table}
+                    WHERE session_id = ?
+                    ORDER BY id ASC
+                """,
+                    (self.session_id,),
+                )
+                rows = cursor.fetchall()
+
+                decoded_rows: list[tuple[int, TResponseInputItem]] = []
+                for row_id, message_data in rows:
+                    try:
+                        item = json.loads(message_data)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    decoded_rows.append((row_id, item))
+
+                for mutation in mutations:
+                    previous_items = [item for _, item in decoded_rows]
+                    rewritten_items = apply_session_history_mutations(
+                        previous_items,
+                        [mutation],
+                    )
+                    for (row_id, previous_item), rewritten_item in zip(
+                        decoded_rows, rewritten_items, strict=True
+                    ):
+                        if previous_item == rewritten_item:
+                            continue
+                        conn.execute(
+                            f"""
+                            UPDATE {self.messages_table}
+                            SET message_data = ?
+                            WHERE id = ? AND session_id = ?
+                        """,
+                            (json.dumps(rewritten_item), row_id, self.session_id),
+                        )
+                    decoded_rows = [
+                        (row_id, rewritten_item)
+                        for (row_id, _), rewritten_item in zip(
+                            decoded_rows, rewritten_items, strict=True
+                        )
+                    ]
+
+                conn.execute(
+                    f"""
+                    UPDATE {self.sessions_table}
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE session_id = ?
+                """,
+                    (self.session_id,),
+                )
+                conn.commit()
+
+        await _await_mutation(asyncio.to_thread(_apply_history_mutations_sync))
+        return True
 
     def close(self) -> None:
         """Close the database connection."""

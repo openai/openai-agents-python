@@ -165,14 +165,66 @@ def test_historical_state_comparison_preserves_json_scalar_types() -> None:
 def test_historical_fixture_corpus_matches_supported_schema_versions() -> None:
     assert SOURCES["baseline"] == "v0.19.4"
     assert frozenset(SOURCES["versions"]) == SUPPORTED_SCHEMA_VERSIONS
-    assert all(entry["commit"] for entry in SOURCES["versions"].values())
+    assert all(
+        entry.get("commit") or entry.get("lineage_commit") for entry in SOURCES["versions"].values()
+    )
     assert {entry["version"] for entry in SOURCES["features"]} == {
         version for version in SUPPORTED_SCHEMA_VERSIONS if version not in {"1.0", "1.1"}
     }
     assert {entry["provenance"] for entry in SOURCES["features"]} == {
         "historical_writer",
         "canonical_compatibility",
+        "current_writer",
     }
+
+
+def test_current_approval_override_fixtures_cover_both_persistence_modes() -> None:
+    entries = {
+        entry["feature"]: entry for entry in SOURCES["features"] if entry["version"] == "1.16"
+    }
+    assert set(entries) == {
+        "approval_argument_overrides",
+        "durable_approval_argument_overrides",
+    }
+
+    execution_only = json.loads(
+        (FIXTURE_ROOT / entries["approval_argument_overrides"]["fixture"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    durable = json.loads(
+        (FIXTURE_ROOT / entries["durable_approval_argument_overrides"]["fixture"]).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert execution_only["approval_argument_override_modes"] == [
+        {"call_id": "approval-override-1", "mode": "execution_only"}
+    ]
+    assert execution_only["session_history_mutations"] == []
+    assert durable["approval_argument_override_modes"] == [
+        {"call_id": "approval-override-1", "mode": "durable"}
+    ]
+    assert durable["session_history_mutations"] == [
+        {
+            "call_id": "approval-override-1",
+            "expected": {
+                "arguments": json.dumps({"recipient": "alice@example.com"}),
+                "call_id": "approval-override-1",
+                "id": "fc-override",
+                "name": "send_email",
+                "type": "function_call",
+            },
+            "replacement": {
+                "arguments": json.dumps({"recipient": "bob@example.com"}),
+                "call_id": "approval-override-1",
+                "id": "fc-override",
+                "name": "send_email",
+                "type": "function_call",
+            },
+            "type": "replace_function_call",
+        }
+    ]
 
 
 @pytest.mark.parametrize(

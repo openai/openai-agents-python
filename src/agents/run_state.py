@@ -6,6 +6,7 @@ import asyncio
 import copy
 import dataclasses
 import json
+import math
 import threading
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
@@ -100,6 +101,7 @@ from .logger import (
     log_model_and_tool_data_warning,
     logger,
 )
+from .memory import SessionHistoryMutation
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -150,6 +152,8 @@ if TYPE_CHECKING:
         ToolRunFunction,
     )
 
+from .run_internal.items import ensure_input_item_format
+
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
 TAction = TypeVar("TAction")
@@ -177,7 +181,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.15"
+CURRENT_SCHEMA_VERSION = "1.16"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
@@ -207,6 +211,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
         "rebind metadata, durable pending input, and resumable next-model-call state."
     ),
+    "1.16": "Persists approval argument overrides and pending session-history rewrites.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -346,6 +351,14 @@ class RunState(Generic[TContext, TAgent]):
     _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
     """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
 
+    _session_history_mutations: list[SessionHistoryMutation] = field(default_factory=list)
+    """Pending session history rewrites that must be applied after persistence."""
+
+    _approval_argument_override_modes: dict[str, Literal["durable", "execution_only"]] = field(
+        default_factory=dict
+    )
+    """Persistence mode for each pending approved argument override."""
+
     _trace_state: TraceState | None = field(default=None, repr=False)
     """Serialized trace metadata for resuming tracing context."""
 
@@ -395,6 +408,8 @@ class RunState(Generic[TContext, TAgent]):
         self._generated_items_last_processed_marker = None
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
+        self._session_history_mutations = []
+        self._approval_argument_override_modes = {}
         self._trace_state = None
         self._sandbox = None
         self._schema_version = CURRENT_SCHEMA_VERSION
@@ -491,8 +506,8 @@ class RunState(Generic[TContext, TAgent]):
     def _find_nested_approval_state(
         self,
         approval_item: ToolApprovalItem,
-    ) -> tuple[RunState[Any, Agent[Any]], ToolApprovalItem] | None:
-        """Find the nested agent-tool state that owns an approval interruption."""
+    ) -> tuple[RunState[Any, Agent[Any]], ToolApprovalItem, Any, Any] | None:
+        """Find the nested state, approval, owning tool call, and cached result."""
         if self._last_processed_response is None:
             return None
 
@@ -579,8 +594,8 @@ class RunState(Generic[TContext, TAgent]):
                 current_state_owns_approval and approval_identity in current_response_identities
             )
 
-        exact_match: tuple[RunState[Any, Agent[Any]], ToolApprovalItem] | None = None
-        canonical_matches: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem]] = []
+        exact_match: tuple[RunState[Any, Agent[Any]], ToolApprovalItem, Any, Any] | None = None
+        canonical_matches: list[tuple[RunState[Any, Agent[Any]], ToolApprovalItem, Any, Any]] = []
         for function_run in self._last_processed_response.functions:
             pending_result = peek_agent_tool_run_result(
                 function_run.tool_call,
@@ -597,10 +612,12 @@ class RunState(Generic[TContext, TAgent]):
                 if not isinstance(candidate, ToolApprovalItem):
                     continue
                 if candidate is approval_item:
-                    exact_match = (nested_state, candidate)
+                    exact_match = (nested_state, candidate, function_run.tool_call, pending_result)
                     break
                 if self._approval_items_match(candidate, approval_item):
-                    canonical_matches.append((nested_state, candidate))
+                    canonical_matches.append(
+                        (nested_state, candidate, function_run.tool_call, pending_result)
+                    )
             if exact_match is not None:
                 break
 
@@ -620,16 +637,286 @@ class RunState(Generic[TContext, TAgent]):
             )
         return None
 
-    def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
+    def approve(
+        self,
+        approval_item: ToolApprovalItem,
+        always_approve: bool = False,
+        *,
+        override_arguments: dict[str, Any] | None = None,
+        save_override_arguments: bool | None = None,
+    ) -> None:
         """Approve a tool call and rerun with this state to continue."""
         if self._context is None:
             raise UserError("Cannot approve tool: RunState has no context")
         nested_approval = self._find_nested_approval_state(approval_item)
         if nested_approval is not None:
-            nested_state, nested_item = nested_approval
-            nested_state.approve(nested_item, always_approve=always_approve)
+            nested_state, nested_item, outer_tool_call, pending_result = nested_approval
+            if override_arguments is None:
+                nested_state.approve(
+                    nested_item,
+                    always_approve=always_approve,
+                    save_override_arguments=save_override_arguments,
+                )
+                return
+
+            from .agent_tool_state import (
+                record_agent_tool_resume_state,
+                record_agent_tool_run_result,
+            )
+
+            approval_items = getattr(pending_result, "interruptions", None)
+            record_agent_tool_resume_state(
+                outer_tool_call,
+                nested_state,
+                scope_id=self._agent_tool_state_scope_id,
+                approval_items=approval_items if isinstance(approval_items, list) else None,
+            )
+            try:
+                nested_state.approve(
+                    nested_item,
+                    always_approve=always_approve,
+                    override_arguments=override_arguments,
+                    save_override_arguments=save_override_arguments,
+                )
+            except Exception:
+                record_agent_tool_run_result(
+                    outer_tool_call,
+                    pending_result,
+                    scope_id=self._agent_tool_state_scope_id,
+                )
+                raise
             return
+
+        if save_override_arguments is not None and override_arguments is None:
+            raise UserError(
+                "save_override_arguments can only be used together with override_arguments."
+            )
+
+        if override_arguments is not None:
+            self._apply_approval_argument_override(
+                approval_item=approval_item,
+                override_arguments=override_arguments,
+                always_approve=always_approve,
+                save_override_arguments=save_override_arguments,
+            )
         self._context.approve_tool(approval_item, always_approve=always_approve)
+
+    def _get_session_history_mutations(self) -> list[SessionHistoryMutation]:
+        """Return a defensive copy of pending persisted-history mutations."""
+        return copy.deepcopy(self._session_history_mutations)
+
+    def _has_pending_execution_only_approval_overrides(self) -> bool:
+        """Return whether execution-only argument overrides still need a server-managed resume."""
+        return "execution_only" in self._approval_argument_override_modes.values()
+
+    def _clear_executed_approval_argument_overrides(
+        self,
+        *,
+        _visited_state_ids: set[int] | None = None,
+    ) -> None:
+        """Clear executed override bookkeeping in this state and owned checkpoints."""
+        visited_state_ids = _visited_state_ids if _visited_state_ids is not None else set()
+        if id(self) in visited_state_ids:
+            return
+        visited_state_ids.add(id(self))
+
+        if self._context is None:
+            return
+        for interruption in self.get_interruptions():
+            call_id = _get_raw_item_call_id(interruption.raw_item)
+            if call_id is None:
+                continue
+            mode = self._approval_argument_override_modes.get(call_id)
+            if mode is None:
+                continue
+            try:
+                invocation_status = self._context._approved_tool_invocation_status(
+                    interruption.raw_item,
+                    tool_lookup_key=interruption.tool_lookup_key,
+                    tool_name=interruption.tool_name,
+                )
+            except ModelBehaviorError:
+                continue
+            if invocation_status is not None and invocation_status[2]:
+                self._approval_argument_override_modes.pop(call_id, None)
+                if mode == "durable":
+                    self._session_history_mutations = [
+                        mutation
+                        for mutation in self._session_history_mutations
+                        if mutation["call_id"] != call_id
+                    ]
+
+        if self._last_processed_response is None:
+            return
+
+        from .agent_tool_state import get_agent_tool_resume_state, peek_agent_tool_run_result
+
+        for function_run in getattr(self._last_processed_response, "functions", ()):
+            pending_result = peek_agent_tool_run_result(
+                function_run.tool_call,
+                scope_id=self._agent_tool_state_scope_id,
+            )
+            nested_state = get_agent_tool_resume_state(pending_result)
+            if isinstance(nested_state, RunState):
+                nested_state._clear_executed_approval_argument_overrides(
+                    _visited_state_ids=visited_state_ids
+                )
+
+    def _clear_session_history_mutations(self) -> None:
+        """Clear pending persisted-history mutations after they are applied."""
+        self._session_history_mutations = []
+        self._approval_argument_override_modes = {
+            call_id: mode
+            for call_id, mode in self._approval_argument_override_modes.items()
+            if mode != "durable"
+        }
+
+    def _apply_approval_argument_override(
+        self,
+        *,
+        approval_item: ToolApprovalItem,
+        override_arguments: dict[str, Any],
+        always_approve: bool,
+        save_override_arguments: bool | None,
+    ) -> None:
+        context = self._context
+        assert context is not None
+        if always_approve:
+            raise UserError("override_arguments cannot be used together with always_approve.")
+
+        if not _is_function_call_raw_item(approval_item.raw_item):
+            raise UserError("override_arguments is only supported for function_call approvals.")
+
+        if type(override_arguments) is not dict:
+            raise UserError("override_arguments must be a plain JSON object.")
+
+        serialized_arguments: str | None = None
+        try:
+            if not _is_plain_json_value(override_arguments):
+                raise TypeError("Approval arguments must contain only plain JSON values")
+            serialized_arguments = json.dumps(override_arguments, allow_nan=False)
+        except Exception:
+            pass
+
+        if not isinstance(serialized_arguments, str):
+            raise UserError(
+                "override_arguments must contain only JSON-serializable values."
+            ) from None
+
+        should_save_override_arguments = save_override_arguments is not False
+        has_server_managed_conversation = bool(
+            self._conversation_id or self._previous_response_id or self._auto_previous_response_id
+        )
+        if should_save_override_arguments and has_server_managed_conversation:
+            raise UserError(
+                "save_override_arguments requires local canonical history. "
+                "Server-managed conversations cannot persist corrected function_call arguments. "
+                "Pass save_override_arguments=False to apply the override only to the current "
+                "execution."
+            )
+
+        call_id = _get_raw_item_call_id(approval_item.raw_item)
+        if not isinstance(call_id, str):
+            raise UserError("override_arguments requires a function_call with a call_id.")
+        previous_override_mode = self._approval_argument_override_modes.get(call_id)
+        if previous_override_mode is not None:
+            raise UserError(
+                "Cannot replace an existing argument override for the same function_call. "
+                "Rebuild the RunState from before the first argument override."
+            )
+
+        expected_tool_call = copy.deepcopy(
+            ensure_input_item_format(cast(TResponseInputItem, approval_item.raw_item))
+        )
+        updated_tool_call = _create_function_call_override(
+            approval_item.raw_item,
+            serialized_arguments,
+        )
+        previous_identity = tool_invocation_identity(
+            approval_item.raw_item,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        if previous_identity is None:
+            raise UserError("override_arguments requires a canonical function_call identity.")
+        rebound = context._rebind_tool_invocation(
+            updated_tool_call,
+            previous_identity=previous_identity,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        if rebound is None:
+            raise UserError("override_arguments could not rebind the function_call identity.")
+        approval_item.raw_item = updated_tool_call
+        self._replace_function_call_in_interruptions(call_id, updated_tool_call)
+        if self._last_processed_response is not None:
+            for interruption in self._last_processed_response.interruptions:
+                if not _is_function_call_raw_item(interruption.raw_item):
+                    continue
+                if _get_raw_item_call_id(interruption.raw_item) != call_id:
+                    continue
+                interruption.raw_item = updated_tool_call
+
+        self._approval_argument_override_modes[call_id] = (
+            "durable" if should_save_override_arguments else "execution_only"
+        )
+
+        if self._last_processed_response is not None:
+            for function_run in self._last_processed_response.functions:
+                if _get_raw_item_call_id(function_run.tool_call) != call_id:
+                    continue
+                function_run.tool_call = updated_tool_call
+
+            if should_save_override_arguments:
+                self._replace_function_call_in_run_items(
+                    self._last_processed_response.new_items,
+                    call_id,
+                    updated_tool_call,
+                )
+
+        if should_save_override_arguments:
+            self._replace_function_call_in_run_items(
+                self._generated_items, call_id, updated_tool_call
+            )
+            self._replace_function_call_in_run_items(
+                self._session_items, call_id, updated_tool_call
+            )
+            self._record_session_history_mutation(
+                {
+                    "type": "replace_function_call",
+                    "call_id": call_id,
+                    "expected": expected_tool_call,
+                    "replacement": ensure_input_item_format(updated_tool_call),
+                }
+            )
+            self._mark_generated_items_merged_with_last_processed()
+
+    def _replace_function_call_in_interruptions(self, call_id: str, tool_call: Any) -> None:
+        """Replace a function call inside pending approval interruptions."""
+        for interruption in self.get_interruptions():
+            if not _is_function_call_raw_item(interruption.raw_item):
+                continue
+            if _get_raw_item_call_id(interruption.raw_item) != call_id:
+                continue
+            interruption.raw_item = tool_call
+
+    def _replace_function_call_in_run_items(
+        self,
+        items: list[RunItem],
+        call_id: str,
+        tool_call: Any,
+    ) -> None:
+        """Replace matching function-call raw items inside serialized run item history."""
+        for item in items:
+            if not _is_function_call_raw_item(getattr(item, "raw_item", None)):
+                continue
+            if _get_raw_item_call_id(item.raw_item) != call_id:
+                continue
+            item.raw_item = tool_call
+
+    def _record_session_history_mutation(self, mutation: SessionHistoryMutation) -> None:
+        """Record one pending persisted-history mutation for an approved function call."""
+        self._session_history_mutations.append(copy.deepcopy(mutation))
 
     def reject(
         self,
@@ -648,7 +935,7 @@ class RunState(Generic[TContext, TAgent]):
             raise UserError("Cannot reject tool: RunState has no context")
         nested_approval = self._find_nested_approval_state(approval_item)
         if nested_approval is not None:
-            nested_state, nested_item = nested_approval
+            nested_state, nested_item, _outer_tool_call, _pending_result = nested_approval
             nested_state.reject(
                 nested_item,
                 always_reject=always_reject,
@@ -1167,6 +1454,14 @@ class RunState(Generic[TContext, TAgent]):
                 for item_ref in self._nested_history_owned_session_item_refs
             ],
             "generated_session_item_indexes": self._generated_session_item_indexes(generated_items),
+            "approval_argument_override_modes": [
+                {"call_id": call_id, "mode": mode}
+                for call_id, mode in self._approval_argument_override_modes.items()
+            ],
+            "session_history_mutations": [
+                _serialize_session_history_mutation(mutation)
+                for mutation in self._session_history_mutations
+            ],
         }
 
         result["generated_items"] = [
@@ -1774,6 +2069,474 @@ def _serialize_agent_reference(
         if identity is not None and identity != agent.name:
             entry["identity"] = identity
     return entry
+
+
+def _serialize_session_history_mutation(mutation: SessionHistoryMutation) -> dict[str, Any]:
+    """Serialize a session history mutation into a JSON-compatible dictionary."""
+    return {
+        "type": mutation["type"],
+        "call_id": mutation["call_id"],
+        "expected": _serialize_raw_item_value(mutation["expected"]),
+        "replacement": _serialize_raw_item_value(mutation["replacement"]),
+    }
+
+
+def _is_plain_json_value(value: Any, active_containers: set[int] | None = None) -> bool:
+    """Return whether a value is an acyclic tree of exact built-in JSON types."""
+    value_type = type(value)
+    if value is None or value_type in {str, bool, int}:
+        return True
+    if value_type is float:
+        return math.isfinite(value)
+    if active_containers is None:
+        active_containers = set()
+    if value_type is list:
+        value_id = id(value)
+        if value_id in active_containers:
+            return False
+        active_containers.add(value_id)
+        try:
+            return all(_is_plain_json_value(item, active_containers) for item in value)
+        finally:
+            active_containers.remove(value_id)
+    if value_type is dict:
+        value_id = id(value)
+        if value_id in active_containers:
+            return False
+        active_containers.add(value_id)
+        try:
+            return all(
+                type(key) is str and _is_plain_json_value(item, active_containers)
+                for key, item in dict.items(value)
+            )
+        finally:
+            active_containers.remove(value_id)
+    return False
+
+
+def _deserialize_session_history_mutations(
+    serialized_mutations: Any,
+    *,
+    validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+) -> list[SessionHistoryMutation]:
+    """Deserialize persisted session history mutations from JSON data."""
+    if not isinstance(serialized_mutations, Sequence) or isinstance(
+        serialized_mutations, str | bytes
+    ):
+        raise validation_error_factory(
+            "Run state session_history_mutations must be a list of valid function-call "
+            "replacements.",
+            UserError,
+        )
+
+    mutations: list[SessionHistoryMutation] = []
+    for mutation in serialized_mutations:
+        call_id = mutation.get("call_id") if isinstance(mutation, Mapping) else None
+        expected = mutation.get("expected") if isinstance(mutation, Mapping) else None
+        replacement = mutation.get("replacement") if isinstance(mutation, Mapping) else None
+        normalized_expected = dict(expected) if isinstance(expected, Mapping) else {}
+        normalized_replacement = dict(replacement) if isinstance(replacement, Mapping) else {}
+        is_valid = (
+            isinstance(mutation, Mapping)
+            and mutation.get("type") == "replace_function_call"
+            and isinstance(call_id, str)
+            and normalized_expected.get("type") == "function_call"
+            and normalized_expected.get("call_id") == call_id
+            and isinstance(normalized_expected.get("name"), str)
+            and isinstance(normalized_expected.get("arguments"), str)
+            and normalized_replacement.get("type") == "function_call"
+            and normalized_replacement.get("call_id") == call_id
+            and isinstance(normalized_replacement.get("name"), str)
+            and isinstance(normalized_replacement.get("arguments"), str)
+        )
+        if not is_valid:
+            raise validation_error_factory(
+                "Run state session_history_mutations contains an invalid function-call "
+                "replacement.",
+                UserError,
+            )
+        mutations.append(
+            {
+                "type": "replace_function_call",
+                "call_id": cast(str, call_id),
+                "expected": cast(TResponseInputItem, normalized_expected),
+                "replacement": cast(TResponseInputItem, normalized_replacement),
+            }
+        )
+    return mutations
+
+
+def _validate_session_history_mutations_match_interruptions(
+    state: RunState[Any, Agent[Any]],
+    *,
+    validation_error_factory: RunStateValidationErrorFactory,
+) -> None:
+    """Validate that durable rewrites exactly match their pending execution calls."""
+    interruptions = state.get_interruptions()
+    canonical_calls = [
+        item.raw_item
+        for item in state._generated_items
+        if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+    ]
+    session_calls = [
+        item.raw_item
+        for item in state._session_items
+        if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+    ]
+    processed_calls = (
+        [run.tool_call for run in state._last_processed_response.functions]
+        if state._last_processed_response is not None
+        else []
+    )
+    processed_new_item_calls = (
+        [
+            item.raw_item
+            for item in state._last_processed_response.new_items
+            if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+        ]
+        if state._last_processed_response is not None
+        else []
+    )
+    model_response_calls = [
+        raw_item
+        for response in state._model_responses
+        for raw_item in response.output
+        if _is_function_call_raw_item(raw_item)
+    ]
+    for mutation in state._session_history_mutations:
+        call_id = mutation["call_id"]
+        matching_interruptions = [
+            interruption
+            for interruption in interruptions
+            if _is_function_call_raw_item(interruption.raw_item)
+            and _get_raw_item_call_id(interruption.raw_item) == call_id
+        ]
+        matching_canonical_calls = [
+            raw_item for raw_item in canonical_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_session_calls = [
+            raw_item for raw_item in session_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_processed_calls = [
+            raw_item for raw_item in processed_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_processed_new_item_calls = [
+            raw_item
+            for raw_item in processed_new_item_calls
+            if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_model_response_calls = [
+            raw_item
+            for raw_item in model_response_calls
+            if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        expected = ensure_input_item_format(mutation["expected"])
+        replacement = mutation["replacement"]
+        normalized_replacement = ensure_input_item_format(replacement)
+        is_match = (
+            isinstance(expected, dict)
+            and isinstance(normalized_replacement, dict)
+            and len(matching_interruptions) == 1
+            and len(matching_canonical_calls) == 1
+            and len(matching_session_calls) == 1
+            and len(matching_processed_calls) == 1
+            and len(matching_processed_new_item_calls) == 1
+            and len(matching_model_response_calls) == 1
+            and expected
+            == ensure_input_item_format(cast(TResponseInputItem, matching_model_response_calls[0]))
+            and normalized_replacement
+            == ensure_input_item_format(
+                cast(TResponseInputItem, matching_interruptions[0].raw_item)
+            )
+            and normalized_replacement
+            == ensure_input_item_format(cast(TResponseInputItem, matching_canonical_calls[0]))
+            and normalized_replacement
+            == ensure_input_item_format(cast(TResponseInputItem, matching_session_calls[0]))
+            and normalized_replacement
+            == ensure_input_item_format(cast(TResponseInputItem, matching_processed_calls[0]))
+            and normalized_replacement
+            == ensure_input_item_format(
+                cast(TResponseInputItem, matching_processed_new_item_calls[0])
+            )
+        )
+        if not is_match:
+            raise validation_error_factory(
+                "Run state session_history_mutations does not match the pending function call.",
+                UserError,
+            )
+
+
+def _deserialize_approval_argument_override_modes(
+    serialized_modes: Any,
+    *,
+    validation_error_factory: RunStateValidationErrorFactory,
+) -> dict[str, Literal["durable", "execution_only"]]:
+    """Deserialize per-call override modes with strict current-schema validation."""
+    if type(serialized_modes) is not list:
+        raise validation_error_factory(
+            "Run state approval_argument_override_modes must be a list of unique valid "
+            "per-call modes.",
+            UserError,
+        )
+    result: dict[str, Literal["durable", "execution_only"]] = {}
+    for item in serialized_modes:
+        if type(item) is not dict or set(item) != {"call_id", "mode"}:
+            raise validation_error_factory(
+                "Run state approval_argument_override_modes must be a list of unique valid "
+                "per-call modes.",
+                UserError,
+            )
+        call_id = item.get("call_id")
+        mode = item.get("mode")
+        if (
+            type(call_id) is not str
+            or not call_id
+            or mode not in {"durable", "execution_only"}
+            or call_id in result
+        ):
+            raise validation_error_factory(
+                "Run state approval_argument_override_modes must be a list of unique valid "
+                "per-call modes.",
+                UserError,
+            )
+        result[call_id] = cast(Literal["durable", "execution_only"], mode)
+    return result
+
+
+def _validate_approval_argument_overrides(
+    state: RunState[Any, Agent[Any]],
+    *,
+    validation_error_factory: RunStateValidationErrorFactory,
+) -> None:
+    """Validate override modes against pending execution, replay, and durable mutations."""
+    context = state._context
+    assert context is not None
+    modes = state._approval_argument_override_modes
+    mutation_call_ids = [mutation["call_id"] for mutation in state._session_history_mutations]
+    durable_call_ids = {call_id for call_id, mode in modes.items() if mode == "durable"}
+    if len(mutation_call_ids) != len(set(mutation_call_ids)) or durable_call_ids != set(
+        mutation_call_ids
+    ):
+        raise validation_error_factory(
+            "Run state approval_argument_override_modes is inconsistent with pending function "
+            "calls and session history mutations.",
+            UserError,
+        )
+
+    interruptions = [
+        interruption
+        for interruption in state.get_interruptions()
+        if _is_function_call_raw_item(interruption.raw_item)
+    ]
+    canonical_calls = [
+        item.raw_item
+        for item in state._generated_items
+        if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+    ]
+    session_calls = [
+        item.raw_item
+        for item in state._session_items
+        if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+    ]
+    model_response_calls = [
+        raw_item
+        for response in state._model_responses
+        for raw_item in response.output
+        if _is_function_call_raw_item(raw_item)
+    ]
+    processed_calls = (
+        [run.tool_call for run in state._last_processed_response.functions]
+        if state._last_processed_response is not None
+        else []
+    )
+    processed_new_item_calls = (
+        [
+            item.raw_item
+            for item in state._last_processed_response.new_items
+            if isinstance(item, ToolCallItem) and _is_function_call_raw_item(item.raw_item)
+        ]
+        if state._last_processed_response is not None
+        else []
+    )
+
+    approved_pending_call_ids: set[str] = set()
+    for interruption in interruptions:
+        call_id = _get_raw_item_call_id(interruption.raw_item)
+        if call_id is None:
+            continue
+        try:
+            approval_status = context._approved_tool_invocation_status(
+                interruption.raw_item,
+                tool_lookup_key=interruption.tool_lookup_key,
+                tool_name=interruption.tool_name,
+            )
+        except ModelBehaviorError:
+            continue
+        if approval_status is None or approval_status[1] or approval_status[2]:
+            continue
+        if call_id in approved_pending_call_ids:
+            raise validation_error_factory(
+                "Run state approval_argument_override_modes is inconsistent with pending "
+                "function calls and session history mutations.",
+                UserError,
+            )
+        approved_pending_call_ids.add(call_id)
+        matching_canonical_calls = [
+            raw_item for raw_item in canonical_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_model_response_calls = [
+            raw_item
+            for raw_item in model_response_calls
+            if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_session_calls = [
+            raw_item for raw_item in session_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_processed_calls = [
+            raw_item for raw_item in processed_calls if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        matching_processed_new_item_calls = [
+            raw_item
+            for raw_item in processed_new_item_calls
+            if _get_raw_item_call_id(raw_item) == call_id
+        ]
+        execution_payload = ensure_input_item_format(
+            cast(TResponseInputItem, interruption.raw_item)
+        )
+        canonical_payload = (
+            ensure_input_item_format(cast(TResponseInputItem, matching_canonical_calls[0]))
+            if len(matching_canonical_calls) == 1
+            else None
+        )
+        session_payloads = [
+            ensure_input_item_format(cast(TResponseInputItem, raw_item))
+            for raw_item in matching_session_calls
+        ]
+        model_response_payloads = [
+            ensure_input_item_format(cast(TResponseInputItem, raw_item))
+            for raw_item in matching_model_response_calls
+        ]
+        processed_payloads = [
+            ensure_input_item_format(cast(TResponseInputItem, raw_item))
+            for raw_item in matching_processed_calls
+        ]
+        processed_new_item_payloads = [
+            ensure_input_item_format(cast(TResponseInputItem, raw_item))
+            for raw_item in matching_processed_new_item_calls
+        ]
+        mode = modes.get(call_id)
+        model_response_identity_payload = (
+            _function_call_payload_without_arguments(model_response_payloads[0])
+            if len(model_response_payloads) == 1
+            else None
+        )
+        execution_identity_payload = _function_call_payload_without_arguments(execution_payload)
+        audit_identity_is_consistent = mode not in {"durable", "execution_only"} or (
+            model_response_identity_payload is not None
+            and execution_identity_payload == model_response_identity_payload
+        )
+        execution_only_is_consistent = mode != "execution_only" or (
+            canonical_payload is not None
+            and len(session_payloads) == 1
+            and len(model_response_payloads) == 1
+            and len(processed_payloads) == 1
+            and len(processed_new_item_payloads) == 1
+            and canonical_payload == session_payloads[0]
+            and canonical_payload == model_response_payloads[0]
+            and canonical_payload == processed_new_item_payloads[0]
+            and execution_payload == processed_payloads[0]
+        )
+        unmarked_payload_diverges = mode is None and (
+            (canonical_payload is not None and execution_payload != canonical_payload)
+            or any(execution_payload != payload for payload in model_response_payloads)
+        )
+        if (
+            not audit_identity_is_consistent
+            or not execution_only_is_consistent
+            or unmarked_payload_diverges
+        ):
+            raise validation_error_factory(
+                "Run state approval_argument_override_modes is inconsistent with pending "
+                "function calls and session history mutations.",
+                UserError,
+            )
+
+    if not set(modes).issubset(approved_pending_call_ids):
+        raise validation_error_factory(
+            "Run state approval_argument_override_modes is inconsistent with pending function "
+            "calls and session history mutations.",
+            UserError,
+        )
+
+
+def _function_call_payload_without_arguments(
+    payload: TResponseInputItem,
+) -> dict[str, Any] | None:
+    """Return the stable function-call payload used to compare override audit identity."""
+    if not isinstance(payload, dict):
+        return None
+    identity_payload = dict(payload)
+    identity_payload.pop("arguments", None)
+    return identity_payload
+
+
+def _validate_last_model_response_matches_model_responses(
+    state_json: Mapping[str, Any],
+    *,
+    validation_error_factory: RunStateValidationErrorFactory,
+) -> None:
+    """Validate the current writer's duplicate last-model-response audit record."""
+    model_responses = state_json.get("model_responses")
+    expected_last_response = (
+        model_responses[-1] if isinstance(model_responses, list) and model_responses else None
+    )
+    if state_json.get("last_model_response") != expected_last_response:
+        raise validation_error_factory(
+            "Run state approval_argument_override_modes is inconsistent with pending function "
+            "calls and session history mutations.",
+            UserError,
+        )
+
+
+def _is_function_call_raw_item(raw_item: Any) -> bool:
+    """Return whether the raw item represents a function call."""
+    if isinstance(raw_item, dict):
+        return raw_item.get("type") == "function_call"
+    return getattr(raw_item, "type", None) == "function_call"
+
+
+def _get_raw_item_call_id(raw_item: Any) -> str | None:
+    """Return the call_id for a raw tool item when available."""
+    if isinstance(raw_item, dict):
+        call_id = raw_item.get("call_id") or raw_item.get("callId") or raw_item.get("id")
+        return call_id if isinstance(call_id, str) else None
+    for attr in ("call_id", "callId", "id"):
+        value = getattr(raw_item, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _create_function_call_override(raw_item: Any, serialized_arguments: str) -> Any:
+    """Return a copy of a function call raw item with corrected arguments."""
+    if isinstance(raw_item, ResponseFunctionToolCall):
+        return raw_item.model_copy(update={"arguments": serialized_arguments})
+    if isinstance(raw_item, dict):
+        updated = dict(raw_item)
+        updated["arguments"] = serialized_arguments
+        return updated
+    if hasattr(raw_item, "model_dump"):
+        try:
+            payload = raw_item.model_dump(exclude_unset=True)
+        except TypeError:
+            payload = raw_item.model_dump()
+        payload = dict(payload)
+        payload["arguments"] = serialized_arguments
+        try:
+            return ResponseFunctionToolCall(**payload)
+        except Exception:
+            return payload
+    raise UserError("override_arguments is only supported for function_call approvals.")
 
 
 def _ensure_json_compatible(value: Any) -> Any:
@@ -3631,6 +4394,31 @@ async def _build_run_state_from_json(
     state._generated_prompt_cache_key = (
         serialized_prompt_cache_key if isinstance(serialized_prompt_cache_key, str) else None
     )
+    if (schema_major, schema_minor) >= (1, 16):
+        state._approval_argument_override_modes = _deserialize_approval_argument_override_modes(
+            state_json.get("approval_argument_override_modes", []),
+            validation_error_factory=validation_error_factory,
+        )
+        if state._approval_argument_override_modes:
+            _validate_last_model_response_matches_model_responses(
+                state_json,
+                validation_error_factory=validation_error_factory,
+            )
+        state._session_history_mutations = _deserialize_session_history_mutations(
+            state_json.get("session_history_mutations", []),
+            validation_error_factory=validation_error_factory,
+        )
+        _validate_session_history_mutations_match_interruptions(
+            state,
+            validation_error_factory=validation_error_factory,
+        )
+        _validate_approval_argument_overrides(
+            state,
+            validation_error_factory=validation_error_factory,
+        )
+    else:
+        state._approval_argument_override_modes = {}
+        state._session_history_mutations = []
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
     trace_data = state_json.get("trace")
     if isinstance(trace_data, Mapping):
@@ -4779,6 +5567,17 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         ),
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
+        ("Run state session_history_mutations must be a list of valid function-call replacements."),
+        ("Run state session_history_mutations contains an invalid function-call replacement."),
+        "Run state session_history_mutations does not match the pending function call.",
+        (
+            "Run state approval_argument_override_modes must be a list of unique valid per-call "
+            "modes."
+        ),
+        (
+            "Run state approval_argument_override_modes is inconsistent with pending function "
+            "calls and session history mutations."
+        ),
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "

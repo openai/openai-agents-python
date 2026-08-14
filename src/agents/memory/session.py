@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, cast, runtime_checkable
 
 from typing_extensions import TypedDict
 
@@ -10,6 +11,8 @@ if TYPE_CHECKING:
     from ..items import TResponseInputItem
     from ..run_context import RunContextWrapper
     from .session_settings import SessionSettings
+
+SERVER_MANAGED_CONVERSATION_SESSION_ATTR = "_server_managed_conversation_session"
 
 
 @runtime_checkable
@@ -104,6 +107,129 @@ class SessionABC(ABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         ...
+
+
+@runtime_checkable
+class ServerManagedConversationSession(Session, Protocol):
+    """Protocol for sessions whose canonical history is managed by a remote service."""
+
+    _server_managed_conversation_session: Literal[True]
+
+
+def is_server_managed_conversation_session(
+    session: Session | None,
+) -> TypeGuard[ServerManagedConversationSession]:
+    """Check whether a session advertises server-managed history semantics."""
+    if session is None:
+        return False
+    try:
+        marker = inspect.getattr_static(session, SERVER_MANAGED_CONVERSATION_SESSION_ATTR, False)
+    except Exception:
+        return False
+    return marker is True
+
+
+class ReplaceFunctionCallSessionHistoryMutation(TypedDict):
+    """Replace the canonical persisted function call for a tool call."""
+
+    type: Literal["replace_function_call"]
+    call_id: str
+    expected: TResponseInputItem
+    replacement: TResponseInputItem
+
+
+SessionHistoryMutation = ReplaceFunctionCallSessionHistoryMutation
+
+
+class SessionHistoryRewriteArgs(TypedDict):
+    """Arguments for persisted-history rewrites."""
+
+    mutations: list[SessionHistoryMutation]
+
+
+@runtime_checkable
+class SessionHistoryRewriteAwareSession(Session, Protocol):
+    """Protocol for sessions that can compare and rewrite persisted function calls."""
+
+    supports_expected_history_mutations: Literal[True]
+
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> bool:
+        """Apply every expected mutation and confirm all targets were reconciled."""
+        ...
+
+
+def is_session_history_rewrite_aware_session(
+    session: Session | None,
+) -> TypeGuard[SessionHistoryRewriteAwareSession]:
+    """Check whether a session supports expected persisted-history rewrites."""
+    if session is None:
+        return False
+    try:
+        apply_history_mutations = inspect.getattr_static(session, "apply_history_mutations", None)
+        supports_expected_mutations = inspect.getattr_static(
+            session, "supports_expected_history_mutations", False
+        )
+    except Exception:
+        return False
+    return callable(apply_history_mutations) and supports_expected_mutations is True
+
+
+def apply_session_history_mutations(
+    items: list[TResponseInputItem],
+    mutations: list[SessionHistoryMutation],
+) -> list[TResponseInputItem]:
+    """Apply structured history mutations to a list of persisted session items."""
+    next_items = list(items)
+    for mutation in mutations:
+        if mutation["type"] == "replace_function_call":
+            next_items = _apply_replace_function_call_mutation(next_items, mutation)
+    return next_items
+
+
+def _apply_replace_function_call_mutation(
+    items: list[TResponseInputItem],
+    mutation: ReplaceFunctionCallSessionHistoryMutation,
+) -> list[TResponseInputItem]:
+    """Replace the latest expected call or accept an already-applied replacement."""
+    call_id = mutation["call_id"]
+    expected = _snapshot_matching_function_call(mutation["expected"], call_id)
+    replacement = _snapshot_matching_function_call(mutation["replacement"], call_id)
+    if expected is None or replacement is None:
+        raise ValueError("Session history mutation contains an invalid function call.")
+
+    for index in range(len(items) - 1, -1, -1):
+        candidate = _snapshot_matching_function_call(items[index], call_id)
+        if candidate is None:
+            continue
+        if candidate == replacement:
+            return list(items)
+        if candidate == expected:
+            next_items = list(items)
+            next_items[index] = cast(Any, replacement)
+            return next_items
+        break
+
+    raise ValueError("Session history mutation target did not match the expected function call.")
+
+
+def _snapshot_matching_function_call(item: Any, call_id: str) -> dict[str, Any] | None:
+    """Snapshot a matching function call without inspecting unrelated history values."""
+    if isinstance(item, dict):
+        payload = item
+    elif hasattr(item, "model_dump"):
+        try:
+            payload = item.model_dump(exclude_unset=True)
+        except TypeError:
+            payload = item.model_dump()
+    else:
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") != "function_call"
+        or payload.get("call_id") != call_id
+    ):
+        return None
+    return copy.deepcopy(payload)
 
 
 class OpenAIResponsesCompactionArgs(TypedDict, total=False):

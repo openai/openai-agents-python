@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 
 from agents.items import TResponseInputItem
-from agents.memory.session import Session
+from agents.memory.session import (
+    Session,
+    SessionHistoryRewriteArgs,
+    apply_session_history_mutations,
+)
 from agents.memory.session_settings import SessionSettings
 
 
@@ -80,3 +84,20 @@ class IdStrippingSession(CountingSession):
             else:
                 sanitized.append(item)
         await super().add_items(sanitized)
+
+
+class RewriteAwareSimpleSession(SimpleListSession):
+    """In-memory test session that supports persisted-history rewrites."""
+
+    supports_expected_history_mutations: Literal[True] = True
+
+    async def apply_history_mutations(self, args: SessionHistoryRewriteArgs) -> bool:
+        self._items = apply_session_history_mutations(self._items, args.get("mutations", []))
+        self.saved_items = self._items
+        return True
+
+
+class ServerManagedSimpleSession(SimpleListSession):
+    """In-memory test session that advertises server-managed history semantics."""
+
+    _server_managed_conversation_session = True

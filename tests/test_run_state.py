@@ -256,6 +256,56 @@ def set_last_processed_response(
     state._last_processed_response = make_processed_response(new_items=new_items)
 
 
+def build_overrideable_approval_state(
+    *,
+    conversation_id: str | None = None,
+    previous_response_id: str | None = None,
+    auto_previous_response_id: bool = False,
+) -> tuple[RunState[Any, Agent[Any]], ToolApprovalItem, ResponseFunctionToolCall]:
+    """Build a RunState whose interruption can override function-call arguments."""
+
+    @function_tool(name_override="send_email")
+    def send_email(recipient: str) -> str:
+        return f"sent:{recipient}"
+
+    context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    agent = Agent(name="OverrideAgent", tools=[send_email])
+    raw_item = ResponseFunctionToolCall(
+        type="function_call",
+        id="fc_override",
+        call_id="call-override",
+        name="send_email",
+        arguments=json.dumps({"recipient": "alice@example.com"}),
+    )
+    tool_call_item = ToolCallItem(agent=agent, raw_item=raw_item)
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=raw_item,
+        tool_name="send_email",
+    )
+    state = make_state(agent, context=context, original_input="input", max_turns=2)
+    state._conversation_id = conversation_id
+    state._previous_response_id = previous_response_id
+    state._auto_previous_response_id = auto_previous_response_id
+    state._generated_items = [tool_call_item]
+    state._session_items = [ToolCallItem(agent=agent, raw_item=raw_item)]
+    state._current_step = NextStepInterruption(interruptions=[approval_item])
+    state._model_responses = [
+        ModelResponse(
+            output=[raw_item],
+            usage=Usage(),
+            response_id="resp-override",
+        )
+    ]
+    state._last_processed_response = make_processed_response(
+        new_items=[ToolCallItem(agent=agent, raw_item=raw_item)],
+        functions=[ToolRunFunction(tool_call=raw_item, function_tool=send_email)],
+        interruptions=[approval_item],
+    )
+    state._mark_generated_items_merged_with_last_processed()
+    return state, approval_item, raw_item
+
+
 class TestRunState:
     """Test RunState initialization, serialization, and core functionality."""
 
@@ -863,6 +913,573 @@ class TestRunState:
         # Check that the tool is approved
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolX", call_id="cid123") is True
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "get_session_history_mutations",
+            "has_pending_execution_only_approval_overrides",
+            "clear_execution_only_approval_overrides",
+            "clear_session_history_mutations",
+        ],
+    )
+    def test_approval_override_bookkeeping_methods_are_not_public(self, method_name: str) -> None:
+        """Override bookkeeping should remain internal to validated resume boundaries."""
+        assert not hasattr(RunState, method_name)
+
+    def test_approve_with_override_arguments_updates_durable_replay_state(self):
+        """approve() should update replay history and record a session history mutation."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+        assert approval_item.arguments == json.dumps({"recipient": "bob@example.com"})
+        assert cast(Any, state._generated_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert cast(Any, state._session_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert (
+            state._last_processed_response is not None
+            and state._last_processed_response.functions[0].tool_call.arguments
+            == json.dumps({"recipient": "bob@example.com"})
+        )
+        assert cast(Any, state._model_responses[0].output[0]).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert state._get_session_history_mutations() == [
+            {
+                "type": "replace_function_call",
+                "call_id": "call-override",
+                "expected": {
+                    "type": "function_call",
+                    "id": "fc_override",
+                    "call_id": "call-override",
+                    "name": "send_email",
+                    "arguments": json.dumps({"recipient": "alice@example.com"}),
+                },
+                "replacement": {
+                    "type": "function_call",
+                    "id": "fc_override",
+                    "call_id": "call-override",
+                    "name": "send_email",
+                    "arguments": json.dumps({"recipient": "bob@example.com"}),
+                },
+            }
+        ]
+        assert state.to_json()["approval_argument_override_modes"] == [
+            {"call_id": "call-override", "mode": "durable"}
+        ]
+        assert state._has_pending_execution_only_approval_overrides() is False
+
+    def test_approve_with_execution_only_override_keeps_replay_history_unchanged(self):
+        """Execution-only overrides should only affect the pending execution surface."""
+        state, approval_item, raw_item = build_overrideable_approval_state()
+
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+
+        assert approval_item.arguments == json.dumps({"recipient": "bob@example.com"})
+        assert cast(Any, state._generated_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert cast(Any, state._session_items[0].raw_item).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert state._last_processed_response is not None
+        assert state._last_processed_response.functions[0].tool_call.arguments == json.dumps(
+            {"recipient": "bob@example.com"}
+        )
+        assert state._model_responses[0].output[0] == raw_item
+        assert state._get_session_history_mutations() == []
+        assert state.to_json()["approval_argument_override_modes"] == [
+            {"call_id": "call-override", "mode": "execution_only"}
+        ]
+        assert state._has_pending_execution_only_approval_overrides() is True
+
+    @pytest.mark.parametrize("save_override_arguments", [None, False])
+    def test_repeated_argument_override_is_rejected_before_rebinding(
+        self,
+        save_override_arguments: bool | None,
+    ) -> None:
+        """A second argument override should leave the first approved state unchanged."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=save_override_arguments,
+        )
+        serialized = state.to_json()
+
+        with pytest.raises(UserError, match="Cannot replace an existing argument override"):
+            state.approve(
+                approval_item,
+                override_arguments={"recipient": "carol@example.com"},
+                save_override_arguments=save_override_arguments,
+            )
+
+        assert approval_item.arguments == json.dumps({"recipient": "bob@example.com"})
+        assert state.to_json() == serialized
+
+    def test_approve_with_override_arguments_rejects_server_managed_conversation_defaults(self):
+        """Durable overrides should fail fast for server-managed conversations."""
+        state, approval_item, _ = build_overrideable_approval_state(previous_response_id="resp-1")
+
+        with pytest.raises(
+            UserError, match="save_override_arguments requires local canonical history"
+        ):
+            state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+    def test_approve_with_override_arguments_validates_options(self):
+        """approve() should reject invalid override option combinations."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError, match="save_override_arguments can only be used"):
+            state.approve(approval_item, save_override_arguments=False)
+        with pytest.raises(UserError, match="cannot be used together with always_approve"):
+            state.approve(
+                approval_item,
+                always_approve=True,
+                override_arguments={"recipient": "bob@example.com"},
+            )
+        with pytest.raises(UserError, match="plain JSON object"):
+            state.approve(approval_item, override_arguments=cast(Any, ["not", "a", "dict"]))
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_approve_with_override_arguments_rejects_non_finite_numbers(self, value: float) -> None:
+        """Approval overrides should contain only standards-compliant JSON values."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError, match="must contain only JSON-serializable values"):
+            state.approve(approval_item, override_arguments={"value": value})
+
+    def test_approve_with_override_arguments_redacts_serialization_errors(self) -> None:
+        """Serialization failures should not retain payload-bearing exception context."""
+
+        class LeakyList(list[Any]):
+            def __iter__(self):
+                raise ValueError("replacement-secret-sentinel")
+
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError) as exc_info:
+            state.approve(
+                approval_item,
+                override_arguments={"value": LeakyList(["secret"])},
+            )
+
+        assert str(exc_info.value) == (
+            "override_arguments must contain only JSON-serializable values."
+        )
+        assert "replacement-secret-sentinel" not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    @pytest.mark.parametrize(
+        "override_arguments",
+        [
+            {1: "integer"},
+            {1: "integer", "1": "string"},
+            {"nested": [{False: "boolean"}]},
+        ],
+    )
+    def test_approve_with_override_arguments_rejects_non_string_object_keys(
+        self, override_arguments: Any
+    ) -> None:
+        """JSON object keys should remain identical through serialization."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError, match="must contain only JSON-serializable values"):
+            state.approve(approval_item, override_arguments=override_arguments)
+
+    @pytest.mark.parametrize(
+        "override_arguments",
+        [
+            {"value": (1, 2)},
+            {"value": [{"nested": (1,)}]},
+        ],
+    )
+    def test_approve_with_override_arguments_rejects_non_json_containers(
+        self, override_arguments: Any
+    ) -> None:
+        """Approval arguments should not coerce Python-only containers."""
+        state, approval_item, _ = build_overrideable_approval_state()
+
+        with pytest.raises(UserError, match="must contain only JSON-serializable values"):
+            state.approve(approval_item, override_arguments=override_arguments)
+
+    async def test_override_state_roundtrips_through_serialization(self):
+        """Override-specific bookkeeping should survive RunState serialization."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+
+        restored = await RunState.from_string(state._current_agent, state.to_string())  # type: ignore[arg-type]
+
+        assert restored._has_pending_execution_only_approval_overrides() is True
+        assert restored._get_session_history_mutations() == []
+
+    @pytest.mark.parametrize(
+        "serialized_modes",
+        [
+            None,
+            [123],
+            [{"call_id": 123, "mode": "execution_only"}],
+            [{"call_id": "", "mode": "execution_only"}],
+            [{"call_id": "call-override", "mode": "unknown"}],
+            [
+                {"call_id": "call-override", "mode": "execution_only"},
+                {"call_id": "call-override", "mode": "durable"},
+            ],
+        ],
+    )
+    async def test_current_deserialization_rejects_malformed_approval_override_modes(
+        self, serialized_modes: Any
+    ) -> None:
+        """Current-schema override modes should be exact and unambiguous."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+        serialized = state.to_json()
+        serialized["approval_argument_override_modes"] = serialized_modes
+
+        with pytest.raises(UserError, match="must be a list of unique valid per-call modes"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("remove_field", [False, True])
+    async def test_current_deserialization_requires_execution_only_mode_for_divergence(
+        self, remove_field: bool
+    ) -> None:
+        """Divergent pending execution should retain its execution-only mode."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+        serialized = state.to_json()
+        if remove_field:
+            serialized.pop("approval_argument_override_modes")
+        else:
+            serialized["approval_argument_override_modes"] = []
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_requires_canonical_call_for_pending_approval(
+        self,
+    ) -> None:
+        """A pending function approval should retain exactly one canonical replay call."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+        serialized = state.to_json()
+        serialized["approval_argument_override_modes"] = []
+        serialized["generated_items"] = []
+        serialized["generated_session_item_indexes"] = []
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "surface",
+        ["generated_items", "session_items", "processed_new_items", "model_responses"],
+    )
+    async def test_current_deserialization_rejects_execution_only_history_mismatch(
+        self, surface: str
+    ) -> None:
+        """Execution-only historical copies should retain one original model call."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+        serialized = state.to_json()
+        if surface == "generated_items":
+            raw_item = serialized["generated_items"][0]["raw_item"]
+        elif surface == "session_items":
+            raw_item = serialized["session_items"][0]["raw_item"]
+        elif surface == "processed_new_items":
+            raw_item = serialized["last_processed_response"]["new_items"][0]["raw_item"]
+        else:
+            raw_item = serialized["model_responses"][0]["output"][0]
+        raw_item["arguments"] = json.dumps({"recipient": "mallory@example.com"})
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_execution_only_processed_call_mismatch(
+        self,
+    ) -> None:
+        """Execution-only processed calls should match the approved pending execution."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(
+            approval_item,
+            override_arguments={"recipient": "bob@example.com"},
+            save_override_arguments=False,
+        )
+        serialized = state.to_json()
+        serialized["last_processed_response"]["functions"][0]["tool_call"]["arguments"] = (
+            json.dumps({"recipient": "mallory@example.com"})
+        )
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_durable_override_state_roundtrips_through_serialization(self):
+        """Durable override mutations should survive RunState serialization."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+        restored = await RunState.from_string(state._current_agent, state.to_string())  # type: ignore[arg-type]
+
+        assert restored._get_session_history_mutations() == [
+            {
+                "type": "replace_function_call",
+                "call_id": "call-override",
+                "expected": {
+                    "type": "function_call",
+                    "id": "fc_override",
+                    "call_id": "call-override",
+                    "name": "send_email",
+                    "arguments": json.dumps({"recipient": "alice@example.com"}),
+                },
+                "replacement": {
+                    "type": "function_call",
+                    "id": "fc_override",
+                    "call_id": "call-override",
+                    "name": "send_email",
+                    "arguments": json.dumps({"recipient": "bob@example.com"}),
+                },
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "missing_field", ["approval_argument_override_modes", "session_history_mutations"]
+    )
+    async def test_current_deserialization_requires_complete_durable_override_provenance(
+        self, missing_field: str
+    ) -> None:
+        """Durable overrides should retain both mode provenance and the rewrite payload."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized[missing_field] = []
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_durable_override_marked_execution_only(
+        self,
+    ) -> None:
+        """A durable mutation should not be accepted under execution-only provenance."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["approval_argument_override_modes"][0]["mode"] = "execution_only"
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_mutation_execution_mismatch(self) -> None:
+        """A durable mutation should exactly match the pending function call."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["session_history_mutations"][0]["replacement"]["arguments"] = json.dumps(
+            {"recipient": "mallory@example.com"}
+        )
+
+        with pytest.raises(UserError, match="does not match the pending function call"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_mutation_expected_audit_mismatch(self) -> None:
+        """A durable mutation should remain bound to the original model call."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["session_history_mutations"][0]["expected"]["arguments"] = json.dumps(
+            {"recipient": "mallory@example.com"}
+        )
+
+        with pytest.raises(UserError, match="does not match the pending function call"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_mutation_item_identity_mismatch(self) -> None:
+        """A durable replacement should preserve the complete canonical call payload."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["session_history_mutations"][0]["replacement"]["id"] = "fc-tampered"
+
+        with pytest.raises(UserError, match="does not match the pending function call"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_mutation_processed_call_mismatch(self) -> None:
+        """A durable replacement must match the function call that resume will execute."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["last_processed_response"]["functions"][0]["tool_call"]["arguments"] = (
+            json.dumps({"recipient": "mallory@example.com"})
+        )
+
+        with pytest.raises(UserError, match="does not match the pending function call"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "surface",
+        ["session_items", "processed_new_items"],
+    )
+    async def test_current_deserialization_rejects_durable_replay_surface_mismatch(
+        self, surface: str
+    ) -> None:
+        """A durable replacement should match every stored replay copy."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        if surface == "session_items":
+            raw_item = serialized["session_items"][0]["raw_item"]
+        else:
+            raw_item = serialized["last_processed_response"]["new_items"][0]["raw_item"]
+        raw_item["arguments"] = json.dumps({"recipient": "mallory@example.com"})
+
+        with pytest.raises(UserError, match="does not match the pending function call"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_preserves_raw_model_response_provenance(self) -> None:
+        """Raw model responses should retain the model-requested arguments for auditability."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+
+        restored = await RunState.from_json(state._current_agent, state.to_json())  # type: ignore[arg-type]
+
+        assert cast(Any, restored._model_responses[0].output[0]).arguments == json.dumps(
+            {"recipient": "alice@example.com"}
+        )
+        assert restored._get_session_history_mutations()[0]["replacement"][
+            "arguments"
+        ] == json.dumps({"recipient": "bob@example.com"})
+
+    async def test_current_deserialization_requires_durable_raw_model_audit_call(self) -> None:
+        """A durable override should retain its matching raw model audit call."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = json.loads(state.to_string())
+        serialized["model_responses"][0]["output"] = []
+        serialized["last_model_response"] = serialized["model_responses"][-1]
+
+        with pytest.raises(UserError, match="session_history_mutations does not match"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_durable_raw_model_identity_mismatch(
+        self,
+    ) -> None:
+        """A durable raw audit call should preserve the overridden call's identity."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = json.loads(state.to_string())
+        serialized["model_responses"][0]["output"][0]["id"] = "fc-tampered"
+        serialized["last_model_response"] = serialized["model_responses"][-1]
+
+        with pytest.raises(UserError, match="session_history_mutations does not match"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    async def test_current_deserialization_rejects_last_model_response_mismatch(self) -> None:
+        """The duplicate last model response should match the serialized response list."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = json.loads(state.to_string())
+        serialized["last_model_response"]["output"][0]["arguments"] = json.dumps(
+            {"recipient": "mallory@example.com"}
+        )
+
+        with pytest.raises(UserError, match="is inconsistent with pending function calls"):
+            await RunState.from_json(state._current_agent, serialized)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            None,
+            {},
+            {
+                "type": "function_call",
+                "call_id": "different-call",
+                "name": "send_email",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-override",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-override",
+                "name": "send_email",
+                "arguments": {"recipient": "bob@example.com"},
+            },
+        ],
+    )
+    async def test_deserialization_rejects_invalid_current_session_history_mutations(
+        self, replacement: Any
+    ) -> None:
+        """Malformed current-schema mutations should fail closed."""
+        state, _, _ = build_overrideable_approval_state()
+        serialized = state.to_json()
+        serialized["session_history_mutations"] = [
+            {
+                "type": "replace_function_call",
+                "call_id": "call-override",
+                "expected": serialized["model_responses"][-1]["output"][0],
+                "replacement": replacement,
+            }
+        ]
+
+        with pytest.raises(UserError, match="contains an invalid function-call replacement"):
+            await RunState.from_string(  # type: ignore[arg-type]
+                state._current_agent,
+                json.dumps(serialized),
+            )
+
+    @pytest.mark.parametrize(
+        "schema_version",
+        [
+            version
+            for version in sorted(SUPPORTED_SCHEMA_VERSIONS)
+            if tuple(int(part) for part in version.split(".")) < (1, 16)
+        ],
+    )
+    async def test_legacy_deserialization_ignores_approval_override_fields(
+        self, schema_version: str
+    ) -> None:
+        """Schemas predating override bookkeeping should ignore its fields."""
+        state, approval_item, _ = build_overrideable_approval_state()
+        state.approve(approval_item, override_arguments={"recipient": "bob@example.com"})
+        serialized = state.to_json()
+        serialized["$schemaVersion"] = schema_version
+
+        restored = await RunState.from_string(  # type: ignore[arg-type]
+            state._current_agent,
+            json.dumps(serialized),
+        )
+
+        assert restored._get_session_history_mutations() == []
+        assert restored.to_json()["approval_argument_override_modes"] == []
 
     def test_returns_undefined_when_approval_status_is_unknown(self):
         """Test that isToolApproved returns None for unknown tools."""
@@ -7123,6 +7740,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.12",
                 "1.13",
                 "1.14",
+                "1.15",
                 CURRENT_SCHEMA_VERSION,
             }
         )
