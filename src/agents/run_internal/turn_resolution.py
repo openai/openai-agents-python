@@ -1452,29 +1452,35 @@ async def resolve_interrupted_turn(
     ) -> Literal["approved", "pending", "rejected"]:
         interruptions = cast(Sequence[ToolApprovalItem], nested_run_result.interruptions)
         nested_state = nested_run_result.to_state()
-        nested_decision_context = getattr(nested_state, "_context", None)
         has_pending = False
         for interruption in interruptions:
-            call_id = get_tool_approval_item_call_id(interruption)
+            nested_owner = (
+                nested_state._find_nested_approval_state(interruption)
+                if isinstance(nested_state, RunState)
+                else None
+            )
+            decision_state, decision_item = nested_owner or (nested_state, interruption)
+            nested_decision_context = getattr(decision_state, "_context", None)
+            call_id = get_tool_approval_item_call_id(decision_item)
             if not call_id:
                 has_pending = True
                 continue
             status = (
                 nested_decision_context.get_approval_status(
-                    interruption.tool_name or "",
+                    decision_item.tool_name or "",
                     call_id,
-                    tool_namespace=interruption.tool_namespace,
-                    existing_pending=interruption,
+                    tool_namespace=decision_item.tool_namespace,
+                    existing_pending=decision_item,
                 )
                 if isinstance(nested_decision_context, RunContextWrapper)
                 else None
             )
             if status is None and context_wrapper._allow_legacy_approval_binding_reconstruction:
                 status = context_wrapper.get_approval_status(
-                    interruption.tool_name or "",
+                    decision_item.tool_name or "",
                     call_id,
-                    tool_namespace=interruption.tool_namespace,
-                    existing_pending=interruption,
+                    tool_namespace=decision_item.tool_namespace,
+                    existing_pending=decision_item,
                 )
             if status is False:
                 return "rejected"

@@ -746,21 +746,31 @@ class Agent(AgentBase, Generic[TContext]):
                 pending_run_result: RunResult | RunResultStreaming,
             ) -> Literal["approved", "pending", "rejected"]:
                 interruptions = pending_run_result.interruptions
-                nested_decision_context = pending_run_result.to_state()._context
+                nested_state = pending_run_result.to_state()
                 has_pending = False
                 has_decision = False
                 for interruption in interruptions:
-                    call_id = get_tool_approval_item_call_id(interruption)
+                    find_nested_owner = getattr(
+                        nested_state,
+                        "_find_nested_approval_state",
+                        None,
+                    )
+                    nested_owner = (
+                        find_nested_owner(interruption) if callable(find_nested_owner) else None
+                    )
+                    decision_state, decision_item = nested_owner or (nested_state, interruption)
+                    nested_decision_context = getattr(decision_state, "_context", None)
+                    call_id = get_tool_approval_item_call_id(decision_item)
                     if not call_id:
                         has_pending = True
                         continue
-                    tool_namespace = RunContextWrapper._resolve_tool_namespace(interruption)
+                    tool_namespace = RunContextWrapper._resolve_tool_namespace(decision_item)
                     status = (
                         nested_decision_context.get_approval_status(
-                            interruption.tool_name or "",
+                            decision_item.tool_name or "",
                             call_id,
                             tool_namespace=tool_namespace,
-                            existing_pending=interruption,
+                            existing_pending=decision_item,
                         )
                         if nested_decision_context is not None
                         else None
@@ -771,24 +781,24 @@ class Agent(AgentBase, Generic[TContext]):
                         and context._allow_legacy_approval_binding_reconstruction
                     ):
                         status = context.get_approval_status(
-                            interruption.tool_name or "",
+                            decision_item.tool_name or "",
                             call_id,
                             tool_namespace=tool_namespace,
-                            existing_pending=interruption,
+                            existing_pending=decision_item,
                         )
                         if status is not None:
                             legacy_namespace = RunContextWrapper._resolve_tool_namespace(
-                                interruption
+                                decision_item
                             )
-                            legacy_tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                            legacy_tool_name = RunContextWrapper._resolve_tool_name(decision_item)
                             legacy_qualified_key = (
                                 f"{legacy_namespace}.{legacy_tool_name}"
                                 if legacy_namespace is not None
                                 else legacy_tool_name
                             )
                             approval_keys = (
-                                RunContextWrapper._resolve_approval_key(interruption),
-                                *RunContextWrapper._resolve_approval_keys(interruption),
+                                RunContextWrapper._resolve_approval_key(decision_item),
+                                *RunContextWrapper._resolve_approval_keys(decision_item),
                                 legacy_qualified_key,
                             )
                             approval_record = next(
@@ -802,7 +812,7 @@ class Agent(AgentBase, Generic[TContext]):
                             if status:
                                 RunContextWrapper.approve_tool(
                                     nested_decision_context,
-                                    interruption,
+                                    decision_item,
                                     always_approve=bool(
                                         approval_record and approval_record.approved is True
                                     ),
@@ -810,15 +820,15 @@ class Agent(AgentBase, Generic[TContext]):
                             else:
                                 RunContextWrapper.reject_tool(
                                     nested_decision_context,
-                                    interruption,
+                                    decision_item,
                                     always_reject=bool(
                                         approval_record and approval_record.rejected is True
                                     ),
                                     rejection_message=context.get_rejection_message(
-                                        interruption.tool_name or "",
+                                        decision_item.tool_name or "",
                                         call_id,
                                         tool_namespace=tool_namespace,
-                                        existing_pending=interruption,
+                                        existing_pending=decision_item,
                                     ),
                                 )
                     if status is False:

@@ -11464,6 +11464,91 @@ async def test_resume_nested_agent_as_tool_with_context_override() -> None:
     )
 
 
+@pytest.mark.parametrize("nesting_edges", [2, 3])
+@pytest.mark.parametrize("approval_timing", ["live", "before_restore", "after_restore"])
+@pytest.mark.parametrize("approve", [True, False])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_resume_recursively_nested_agent_as_tool_decision(
+    streamed: bool,
+    approve: bool,
+    approval_timing: str,
+    nesting_edges: int,
+) -> None:
+    """Tool decisions reach a protected tool through nested agent tools."""
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def protected(text: str) -> str:
+        calls.append(text)
+        return f"approved:{text}"
+
+    leaf_model = ScriptedModel()
+    leaf_model.extend(
+        [
+            [get_function_tool_call("protected", json.dumps({"text": "one"}), call_id="inner-1")],
+            [get_final_output_message("inner-done")],
+        ]
+    )
+    outer = Agent(name="inner", model=leaf_model, tools=[protected])
+    for edge in range(nesting_edges):
+        tool_name = f"agent_tool_{edge}"
+        model = ScriptedModel()
+        model.extend(
+            [
+                [
+                    get_function_tool_call(
+                        tool_name,
+                        json.dumps({"input": "go"}),
+                        call_id=f"agent-call-{edge}",
+                    )
+                ],
+                [get_final_output_message(f"done-{edge}")],
+            ]
+        )
+        outer = Agent(
+            name=f"agent-{edge}",
+            model=model,
+            tools=[outer.as_tool(tool_name=tool_name, tool_description="Run nested agent")],
+        )
+
+    if streamed:
+        first = Runner.run_streamed(outer, "start")
+        async for _ in first.stream_events():
+            pass
+    else:
+        first = await Runner.run(outer, "start")
+
+    state = first.to_state()
+    assert len(state.get_interruptions()) == 1
+
+    def apply_decision() -> None:
+        if approve:
+            state.approve(state.get_interruptions()[0])
+        else:
+            state.reject(state.get_interruptions()[0])
+
+    if approval_timing == "before_restore":
+        apply_decision()
+        state = await RunState.from_json(outer, state.to_json())
+    elif approval_timing == "after_restore":
+        state = await RunState.from_json(outer, state.to_json())
+        apply_decision()
+    else:
+        apply_decision()
+
+    if streamed:
+        resumed = Runner.run_streamed(outer, state)
+        async for _ in resumed.stream_events():
+            pass
+    else:
+        resumed = await Runner.run(outer, state)
+
+    assert resumed.final_output == f"done-{nesting_edges - 1}"
+    assert resumed.interruptions == []
+    assert calls == (["one"] if approve else [])
+
+
 @pytest.mark.asyncio
 async def test_hosted_mcp_approval_request_restores_matching_server_tool() -> None:
     class FalsyHostedMCPTool(HostedMCPTool):

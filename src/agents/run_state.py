@@ -1111,11 +1111,11 @@ class RunState(Generic[TContext, TAgent]):
             nested_state = to_state()
             if not isinstance(nested_state, RunState) or nested_state is self:
                 continue
-            nested_candidates.extend(
-                (nested_state, candidate)
-                for candidate in interruptions
-                if isinstance(candidate, ToolApprovalItem)
-            )
+            for candidate in interruptions:
+                if not isinstance(candidate, ToolApprovalItem):
+                    continue
+                recursive_owner = nested_state._find_nested_approval_state(candidate)
+                nested_candidates.append(recursive_owner or (nested_state, candidate))
 
         current_candidates = (
             self._current_step.interruptions
