@@ -31,7 +31,9 @@ def test_shell_workdir_normalizes_backslashes_as_sandbox_separators() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="UnixLocalSandbox is Unix-only")
-def test_shell_workdir_normalizes_backslashes_before_unix_local_resolution(tmp_path: Path) -> None:
+def test_shell_workdir_normalizes_backslashes_before_unix_local_resolution(
+    tmp_path: Path,
+) -> None:
     from agents.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxSession,
         UnixLocalSandboxSessionState,
