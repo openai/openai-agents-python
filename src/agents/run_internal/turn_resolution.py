@@ -1149,6 +1149,7 @@ async def resolve_interrupted_turn(
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+    output_index = _build_tool_output_index(original_pre_step_items)
 
     current_step = run_state._current_step if run_state is not None else None
     if (
@@ -1169,6 +1170,14 @@ async def resolve_interrupted_turn(
     if (
         isinstance(current_step, NextStepInterruption)
         and current_step.response_accepted
+        and not any(
+            get_mapping_or_attr(output, "type") == "custom_tool_call"
+            and (
+                (call_id := extract_tool_call_id(output)) is None
+                or ("custom_tool_call_output", call_id) not in output_index
+            )
+            for output in new_response.output
+        )
         and not processed_response.has_tools_or_approvals_to_run()
     ):
         return await execute_tools_and_side_effects(
@@ -1302,8 +1311,6 @@ async def resolve_interrupted_turn(
     pending_interruptions: list[ToolApprovalItem] = []
     pending_interruption_keys: set[str] = set()
     stable_function_approval_sources: dict[int, ToolApprovalItem] = {}
-
-    output_index = _build_tool_output_index(original_pre_step_items)
 
     def _has_output_item(call_id: str, expected_type: str) -> bool:
         return (expected_type, call_id) in output_index
@@ -1846,6 +1853,93 @@ async def resolve_interrupted_turn(
         else None
     )
 
+    custom_calls_to_reconcile: list[ResponseCustomToolCall] = []
+    custom_call_identities: dict[str, tuple[str, str, str, str]] = {}
+    rejected_custom_approvals_by_call_id: dict[
+        str,
+        tuple[ToolApprovalItem, ResponseCustomToolCall],
+    ] = {}
+
+    def _custom_reconciliation_approval(
+        call: ResponseCustomToolCall,
+        identity: tuple[str, str, str, str],
+    ) -> tuple[ToolApprovalItem, bool | None] | None:
+        for approval in pending_approval_items:
+            if not _approval_matches_agent(approval):
+                continue
+            if get_mapping_or_attr(approval.raw_item, "type") != "custom_tool_call":
+                continue
+            if get_tool_approval_item_call_id(approval) != call.call_id:
+                continue
+            approval_name = get_mapping_or_attr(approval.raw_item, "name")
+            if not isinstance(approval_name, str):
+                continue
+            approval_identity = tool_invocation_identity_and_scope(
+                approval.raw_item,
+                tool_name=approval_name,
+            )
+            if approval_identity != identity:
+                continue
+            return (
+                approval,
+                context_wrapper.get_approval_status(
+                    approval.tool_name or call.name,
+                    call.call_id,
+                    tool_namespace=approval.tool_namespace,
+                    existing_pending=approval,
+                ),
+            )
+        return None
+
+    def _append_custom_reconciliation_call(raw_item: Any) -> None:
+        if isinstance(raw_item, ResponseCustomToolCall):
+            call = raw_item.model_copy(deep=True)
+        elif isinstance(raw_item, Mapping) and raw_item.get("type") == "custom_tool_call":
+            try:
+                call = ResponseCustomToolCall(**dict(raw_item))
+            except Exception as error:
+                raise ModelBehaviorError(
+                    "Persisted custom tool call is invalid. Start a new run instead of "
+                    "resuming this RunState."
+                ) from error
+        else:
+            return
+
+        call_id = extract_tool_call_id(call)
+        if call_id is None:
+            raise ModelBehaviorError("Custom tool call is missing call_id.")
+        identity = tool_invocation_identity_and_scope(call, tool_name=call.name)
+        if identity is None:
+            raise ModelBehaviorError("Custom tool call has an invalid invocation identity.")
+        previous_identity = custom_call_identities.get(call_id)
+        if previous_identity is not None:
+            if previous_identity != identity:
+                raise ModelBehaviorError(
+                    "Run state reused a custom tool call ID for different invocations. "
+                    "Start a new run instead of resuming this RunState."
+                )
+            return
+        custom_call_identities[call_id] = identity
+        if _custom_tool_output_exists(call_id):
+            return
+        approval_decision = _custom_reconciliation_approval(call, identity)
+        if approval_decision is not None:
+            approval, approval_status = approval_decision
+            if approval_status is False:
+                rejected_custom_approvals_by_call_id[call_id] = (approval, call)
+                return
+            if approval_status is None:
+                return
+        custom_calls_to_reconcile.append(call)
+
+    for output in new_response.output:
+        _append_custom_reconciliation_call(output)
+    for custom_run in processed_response.custom_tool_calls:
+        _append_custom_reconciliation_call(custom_run.tool_call)
+    for approval_item in pending_approval_items:
+        if _approval_matches_agent(approval_item):
+            _append_custom_reconciliation_call(approval_item.raw_item)
+
     available_handoffs = await get_handoffs(execution_agent, context_wrapper)
     with execution_agent._use_mcp_handoff_snapshot(available_handoffs):
         current_tool_inventory = await execution_agent.get_all_tools(context_wrapper)
@@ -1915,10 +2009,15 @@ async def resolve_interrupted_turn(
 
     classifier_tools: list[Tool] = [*resolved_function_tools]
     classifier_tools.extend(
-        tool for tool in resolved_tools if isinstance(tool, ProgrammaticToolCallingTool)
+        tool
+        for tool in resolved_tools
+        if isinstance(tool, ProgrammaticToolCallingTool | CustomTool | ApplyPatchTool)
     )
     classifier_response = ModelResponse(
-        output=cast(Any, [*classifier_context_items, *calls_to_reconcile]),
+        output=cast(
+            Any,
+            [*classifier_context_items, *calls_to_reconcile, *custom_calls_to_reconcile],
+        ),
         usage=new_response.usage,
         response_id=new_response.response_id,
         request_id=new_response.request_id,
@@ -1938,6 +2037,37 @@ async def resolve_interrupted_turn(
     current_functions = {run.tool_call.call_id: run for run in classified.functions}
     current_handoffs = {run.tool_call.call_id: run for run in classified.handoffs}
     current_missing = {run.tool_call.call_id: run for run in classified.function_tools_not_found}
+    processed_response.custom_tool_calls = [
+        run
+        for run in processed_response.custom_tool_calls
+        if _custom_tool_output_exists(_custom_call_id_from_run(run))
+    ]
+    processed_response.custom_tool_calls.extend(classified.custom_tool_calls)
+    rejected_custom_approval_outputs: list[RunItem] = []
+    for call_id, (approval, rejected_custom_call) in rejected_custom_approvals_by_call_id.items():
+        rejection_message = await resolve_approval_rejection_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_call=rejected_custom_call,
+            tool_type="custom",
+            tool_name=approval.tool_name or rejected_custom_call.name,
+            call_id=call_id,
+            tool_namespace=approval.tool_namespace,
+            existing_pending=approval,
+        )
+        raw_item = {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": rejection_message,
+        }
+        ItemHelpers.copy_tool_call_caller(rejected_custom_call, raw_item)
+        rejected_custom_approval_outputs.append(
+            ToolCallOutputItem(
+                agent=public_agent,
+                output=rejection_message,
+                raw_item=cast(Any, raw_item),
+            )
+        )
     pending_nested_transfers: list[tuple[ResponseFunctionToolCall, Any]] = []
     pending_nested_drops: list[ResponseFunctionToolCall] = []
 
@@ -2392,6 +2522,8 @@ async def resolve_interrupted_turn(
     for shell_rejection in rejected_shell_results:
         append_if_new(shell_rejection)
     for custom_tool_rejection in rejected_custom_tool_results:
+        append_if_new(custom_tool_rejection)
+    for custom_tool_rejection in rejected_custom_approval_outputs:
         append_if_new(custom_tool_rejection)
     for apply_patch_rejection in rejected_apply_patch_results:
         append_if_new(apply_patch_rejection)

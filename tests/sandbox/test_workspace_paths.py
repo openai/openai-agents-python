@@ -9,11 +9,12 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox import Manifest, SandboxPathGrant, SandboxWorkspaceScope
 from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 from agents.sandbox.workspace_paths import (
     WorkspacePathPolicy,
     coerce_posix_path,
+    normalize_sandbox_cwd,
     posix_path_as_path,
     sandbox_path_grant_host_path,
 )
@@ -33,6 +34,141 @@ class WorkspacePathCase:
 
 def _policy(root: Path | str = "/workspace") -> WorkspacePathPolicy:
     return WorkspacePathPolicy(root=root)
+
+
+def test_sandbox_workspace_scope_anchors_relative_paths() -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    assert scope.anchor("plot.png") == PurePosixPath("tasks/a/plot.png")
+    assert scope.anchor(PureWindowsPath("reports/plot.png")) == PurePosixPath(
+        "tasks/a/reports/plot.png"
+    )
+    assert scope.anchor("/workspace/plot.png") == "/workspace/plot.png"
+    assert scope.anchor(PureWindowsPath("C:/plot.png")) == PureWindowsPath("C:/plot.png")
+
+
+def test_sandbox_workspace_scope_preserves_raw_tool_backslashes() -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    anchored = scope.anchor(r"reports\plot.png")
+
+    assert isinstance(anchored, PurePosixPath)
+    assert anchored.as_posix() == r"tasks/a/reports\plot.png"
+
+
+def test_sandbox_workspace_scope_renders_model_paths() -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    assert scope.model_path("tasks/a/plot.png") == PurePosixPath("plot.png")
+    assert scope.model_path("shared/skill/SKILL.md") == PurePosixPath("../../shared/skill/SKILL.md")
+    assert scope.display_path(
+        original_path="../shared.txt",
+        workspace_relative_path="tasks/shared.txt",
+    ) == PurePosixPath("../shared.txt")
+    assert scope.display_path(
+        original_path="/workspace/shared.txt",
+        workspace_relative_path="shared.txt",
+    ) == PurePosixPath("shared.txt")
+
+
+def test_sandbox_workspace_scope_renders_session_resources_as_absolute_with_cwd() -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath("/workspace/.agents/my-skill")
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=PureWindowsPath(r".agents\my-skill"),
+    ) == PurePosixPath("/workspace/.agents/my-skill")
+    assert scope.model_resource_path(
+        workspace_root=PureWindowsPath(r"C:\workspace"),
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath("C:/workspace/.agents/my-skill")
+    assert scope.model_resource_path(
+        workspace_root=r"C:\workspace",
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath("C:/workspace/.agents/my-skill")
+
+
+def test_sandbox_workspace_scope_preserves_root_relative_resource_paths_without_cwd() -> None:
+    scope = SandboxWorkspaceScope()
+
+    assert scope.model_resource_path(
+        workspace_root="/workspace",
+        workspace_relative_path=".agents/my-skill",
+    ) == PurePosixPath(".agents/my-skill")
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/workspace/.agents/my-skill", "must be workspace-relative"),
+        ("../my-skill", "must be workspace-relative"),
+        ("C:/skills/my-skill", "must be workspace-relative"),
+        (PureWindowsPath("C:/skills/my-skill"), "must be workspace-relative"),
+        (r".agents\my-skill", "must use POSIX path separators"),
+        ("", "must be non-empty"),
+    ],
+)
+def test_sandbox_workspace_scope_rejects_invalid_session_resource_paths(
+    path: str | PurePath,
+    message: str,
+) -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    with pytest.raises(ValueError, match=message):
+        scope.model_resource_path(
+            workspace_root="/workspace",
+            workspace_relative_path=path,
+        )
+
+
+@pytest.mark.parametrize(
+    "root",
+    [r"\workspace", "workspace"],
+)
+def test_sandbox_workspace_scope_rejects_non_posix_absolute_resource_roots(
+    root: str | PurePath,
+) -> None:
+    scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+
+    with pytest.raises(ValueError, match="sandbox workspace root must be POSIX absolute"):
+        scope.model_resource_path(
+            workspace_root=root,
+            workspace_relative_path=".agents/my-skill",
+        )
+
+
+def test_sandbox_workspace_scope_none_preserves_root_relative_paths() -> None:
+    scope = SandboxWorkspaceScope()
+
+    assert scope.anchor("plot.png") == "plot.png"
+    assert scope.model_path("reports/plot.png") == PurePosixPath("reports/plot.png")
+
+
+def test_sandbox_workspace_scope_constructor_validates_cwd() -> None:
+    with pytest.raises(ValueError, match="sandbox.cwd must not contain parent segments"):
+        SandboxWorkspaceScope(cwd=PurePosixPath("tasks/../a"))
+
+
+@pytest.mark.parametrize(
+    ("cwd", "message"),
+    [
+        ("", "sandbox.cwd must be non-empty"),
+        ("/workspace/tasks/a", "sandbox.cwd must be workspace-relative"),
+        ("tasks/../a", "sandbox.cwd must not contain parent segments"),
+        (r"tasks\a", "sandbox.cwd must use POSIX path separators"),
+        (PureWindowsPath("C:/tasks/a"), "sandbox.cwd must be workspace-relative"),
+    ],
+)
+def test_normalize_sandbox_cwd_rejects_invalid_values(
+    cwd: str | PurePath,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        normalize_sandbox_cwd(cwd)
 
 
 def test_workspace_path_policy_rejects_relative_root() -> None:

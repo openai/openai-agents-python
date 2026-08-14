@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -47,6 +48,7 @@ def test_run_config_normalizes_first_party_dictionary_settings() -> None:
             "manifest": {"root": "/workspace"},
             "snapshot": {"type": "noop"},
             "concurrency_limits": {"manifest_entries": 3},
+            "cwd": "tasks/a",
         },
     )
 
@@ -63,6 +65,28 @@ def test_run_config_normalizes_first_party_dictionary_settings() -> None:
     assert isinstance(config.sandbox.snapshot, NoopSnapshotSpec)
     assert isinstance(config.sandbox.concurrency_limits, SandboxConcurrencyLimits)
     assert config.sandbox.concurrency_limits.manifest_entries == 3
+    assert config.sandbox.cwd == "tasks/a"
+
+
+def test_sandbox_run_config_normalizes_typed_cwd() -> None:
+    config = SandboxRunConfig(cwd=PureWindowsPath("tasks/a"))
+
+    assert config.cwd == "tasks/a"
+
+
+@pytest.mark.parametrize(
+    ("cwd", "message"),
+    [
+        ("", "sandbox.cwd must be non-empty"),
+        ("/workspace/tasks/a", "sandbox.cwd must be workspace-relative"),
+        ("tasks/../a", "sandbox.cwd must not contain parent segments"),
+        (r"tasks\a", "sandbox.cwd must use POSIX path separators"),
+        (PureWindowsPath("C:/tasks/a"), "sandbox.cwd must be workspace-relative"),
+    ],
+)
+def test_sandbox_run_config_rejects_invalid_cwd(cwd: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SandboxRunConfig(cwd=cast(Any, cwd))
 
 
 def test_run_config_preserves_typed_configuration_instances() -> None:

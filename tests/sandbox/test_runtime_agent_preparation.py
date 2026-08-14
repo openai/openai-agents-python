@@ -10,7 +10,11 @@ import pytest
 from agents import UserError
 from agents.models.default_models import get_default_model
 from agents.run_context import RunContextWrapper
-from agents.sandbox import MemoryReadConfig, runtime_agent_preparation as sandbox_prep
+from agents.sandbox import (
+    MemoryReadConfig,
+    SandboxWorkspaceScope,
+    runtime_agent_preparation as sandbox_prep,
+)
 from agents.sandbox.capabilities import Capability, Compaction, Memory
 from agents.sandbox.entries import BaseEntry, File
 from agents.sandbox.manifest import Manifest
@@ -246,6 +250,30 @@ def test_filesystem_instructions_tell_model_to_ls_when_manifest_tree_is_truncate
         "The filesystem layout above was truncated. "
         "Use `ls` to explore specific directories before relying on omitted paths."
     ) in result
+
+
+def test_filesystem_instructions_describe_run_working_directory() -> None:
+    manifest = Manifest(root="/workspace", entries={"tasks/a": File(content=b"")})
+
+    result = sandbox_prep._filesystem_instructions(
+        manifest,
+        SandboxWorkspaceScope.from_cwd("tasks/a"),
+    )
+
+    assert "For this run, the working directory is `/workspace/tasks/a`." in result
+    assert (
+        "Relative paths passed to the built-in `exec_command`, `view_image`, and `apply_patch` "
+        "tools resolve from this directory."
+    ) in result
+    assert "Other sandbox tools follow their own path contract." in result
+    assert "The session workspace root remains `/workspace`." in result
+    assert (
+        "The working directory changes path resolution; it does not isolate this run from the "
+        "rest of the session workspace."
+    ) in result
+    assert (
+        "Files outside the working directory may be visible to or shared with other runs." in result
+    )
 
 
 def test_prepare_sandbox_agent_validates_required_capabilities() -> None:

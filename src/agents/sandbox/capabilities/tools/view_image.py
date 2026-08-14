@@ -14,7 +14,7 @@ from ....tool import FunctionTool, ToolOutputImage
 from ...errors import InvalidManifestPathError, WorkspaceReadNotFoundError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
-from ...workspace_paths import sandbox_path_str
+from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox_path_str
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_SIZE_LABEL = "10MB"
@@ -82,6 +82,12 @@ class ViewImageTool(FunctionTool):
     )
     session: BaseSandboxSession = field(init=False, repr=False, compare=False)
     user: str | User | None = field(default=None, init=False, repr=False, compare=False)
+    workspace_scope: SandboxWorkspaceScope = field(
+        default_factory=SandboxWorkspaceScope,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __init__(
         self,
@@ -91,9 +97,11 @@ class ViewImageTool(FunctionTool):
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = False,
+        workspace_scope: SandboxWorkspaceScope | None = None,
     ) -> None:
         self.session = session
         self.user = user
+        self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
         super().__init__(
             name=self.tool_name,
             description=self.tool_description,
@@ -107,10 +115,16 @@ class ViewImageTool(FunctionTool):
         return await self.run(self.args_model.model_validate_json(raw_input))
 
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
+        input_path = args.path
+        scoped_path = self.workspace_scope.anchor(coerce_posix_path(input_path))
         path_policy = self.session._workspace_path_policy()
-        resolved_path = path_policy.normalize_path(args.path)
+        resolved_path = path_policy.normalize_path(scoped_path)
         try:
-            display_path = path_policy.relative_path(args.path).as_posix()
+            workspace_relative_path = path_policy.relative_path(scoped_path)
+            display_path = self.workspace_scope.display_path(
+                original_path=scoped_path,
+                workspace_relative_path=workspace_relative_path,
+            ).as_posix()
         except InvalidManifestPathError:
             display_path = sandbox_path_str(resolved_path)
 

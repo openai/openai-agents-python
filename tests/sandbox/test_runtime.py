@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import uuid
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, ClassVar, Literal, TypedDict, cast
 
 import pytest
@@ -54,6 +54,11 @@ from agents.sandbox.capabilities import (
     Memory,
     Shell,
     StaticCompactionPolicy,
+)
+from agents.sandbox.capabilities.tools import (
+    ExecCommandTool,
+    SandboxApplyPatchTool,
+    ViewImageTool,
 )
 from agents.sandbox.entries import (
     BaseEntry,
@@ -207,6 +212,34 @@ class _FakeSession(BaseSandboxSession):
     async def _aclose_dependencies(self) -> None:
         self.close_dependency_calls += 1
         await super()._aclose_dependencies()
+
+
+class _CwdProbeSession(_FakeSession):
+    def __init__(self, manifest: Manifest, *, accessible: bool = True) -> None:
+        super().__init__(manifest)
+        self.accessible = accessible
+        self.cwd_probe_calls: list[tuple[tuple[str, ...], bool | list[str], User | str | None]] = []
+
+    async def exec(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: str | User | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        self.cwd_probe_calls.append((tuple(str(part) for part in command), shell, user))
+        return ExecResult(
+            stdout=b"",
+            stderr=b"" if self.accessible else b"not accessible",
+            exit_code=0 if self.accessible else 1,
+        )
+
+
+class _WindowsPathCwdProbeSession(_CwdProbeSession):
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        _ = (path, for_write)
+        return cast(Path, PureWindowsPath("/workspace/tasks/a"))
 
 
 class _FailingStopSession(_FakeSession):
@@ -5864,6 +5897,192 @@ async def test_prepare_agent_rechecks_session_liveness_before_reusing_cached_age
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_revalidates_cwd_after_restarting_cached_session() -> None:
+    session = _CwdProbeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        run_as="sandbox-user",
+    )
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/a",
+            )
+        ),
+        run_state=None,
+    )
+    context_wrapper = RunContextWrapper(context=None)
+
+    await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="hello",
+        context_wrapper=context_wrapper,
+        is_resumed_state=False,
+    )
+    session._running = False
+    session.accessible = False
+
+    with pytest.raises(
+        UserError,
+        match=r"Sandbox working directory `tasks/a` does not exist or is not accessible",
+    ):
+        await runtime.prepare_agent(
+            current_agent=agent,
+            current_input="hello again",
+            context_wrapper=context_wrapper,
+            is_resumed_state=False,
+        )
+
+    assert session.start_calls == 2
+    assert session.cwd_probe_calls == [
+        (("test", "-d", "/workspace/tasks/a"), False, User(name="sandbox-user")),
+        (("test", "-x", "/workspace/tasks/a"), False, User(name="sandbox-user")),
+        (("test", "-d", "/workspace/tasks/a"), False, User(name="sandbox-user")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_revalidates_cwd_when_cached_agent_run_as_changes() -> None:
+    session = _CwdProbeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        run_as="first-user",
+    )
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/a",
+            )
+        ),
+        run_state=None,
+    )
+    context_wrapper = RunContextWrapper(context=None)
+
+    await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="hello",
+        context_wrapper=context_wrapper,
+        is_resumed_state=False,
+    )
+    agent.run_as = "second-user"
+    session.accessible = False
+    session.cwd_probe_calls.clear()
+
+    with pytest.raises(
+        UserError,
+        match=r"Sandbox working directory `tasks/a` does not exist or is not accessible",
+    ):
+        await runtime.prepare_agent(
+            current_agent=agent,
+            current_input="hello again",
+            context_wrapper=context_wrapper,
+            is_resumed_state=False,
+        )
+
+    assert session.cwd_probe_calls == [
+        (
+            ("test", "-d", "/workspace/tasks/a"),
+            False,
+            User(name="second-user"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_rematerializes_cached_tools_when_run_as_changes() -> None:
+    session = _CwdProbeSession(Manifest())
+    client = _FakeClient(session)
+    run_as = User(name="first-user")
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        capabilities=[Shell(), Filesystem()],
+        run_as=run_as,
+    )
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/a",
+            )
+        ),
+        run_state=None,
+    )
+    context_wrapper = RunContextWrapper(context=None)
+
+    first = await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="first",
+        context_wrapper=context_wrapper,
+        is_resumed_state=False,
+    )
+    first_agent = cast(SandboxAgent[Any], first.bindings.execution_agent)
+    first_capabilities = list(first_agent.capabilities)
+    first_shell = next(tool for tool in first_agent.tools if isinstance(tool, ExecCommandTool))
+    first_view = next(tool for tool in first_agent.tools if isinstance(tool, ViewImageTool))
+    first_patch = next(
+        tool for tool in first_agent.tools if isinstance(tool, SandboxApplyPatchTool)
+    )
+    assert first_shell.user == User(name="first-user")
+    assert first_view.user == User(name="first-user")
+    assert first_patch.editor.user == User(name="first-user")
+
+    run_as.name = "second-user"
+    second = await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="second",
+        context_wrapper=context_wrapper,
+        is_resumed_state=False,
+    )
+    second_agent = cast(SandboxAgent[Any], second.bindings.execution_agent)
+
+    assert second_agent is not first_agent
+    assert all(
+        second_capability is first_capability
+        for second_capability, first_capability in zip(
+            second_agent.capabilities,
+            first_capabilities,
+            strict=True,
+        )
+    )
+    second_shell = next(tool for tool in second_agent.tools if isinstance(tool, ExecCommandTool))
+    second_view = next(tool for tool in second_agent.tools if isinstance(tool, ViewImageTool))
+    second_patch = next(
+        tool for tool in second_agent.tools if isinstance(tool, SandboxApplyPatchTool)
+    )
+    assert second_shell.user == User(name="second-user")
+    assert second_view.user == User(name="second-user")
+    assert second_patch.editor.user == User(name="second-user")
+
+    third = await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="third",
+        context_wrapper=context_wrapper,
+        is_resumed_state=False,
+    )
+
+    assert third.bindings.execution_agent is second_agent
+    assert session.cwd_probe_calls[-4:] == [
+        (("test", "-d", "/workspace/tasks/a"), False, User(name="second-user")),
+        (("test", "-x", "/workspace/tasks/a"), False, User(name="second-user")),
+        (("test", "-d", "/workspace/tasks/a"), False, User(name="second-user")),
+        (("test", "-x", "/workspace/tasks/a"), False, User(name="second-user")),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_binds_run_as_to_cloned_capabilities() -> None:
     session = _FakeSession(Manifest())
     client = _FakeClient(session)
@@ -5892,6 +6111,108 @@ async def test_prepare_agent_binds_run_as_to_cloned_capabilities() -> None:
     assert capability.bound_session is None
     assert prepared_capability.bound_session is client.session
     assert prepared_capability.run_as == User(name="sandbox-user")
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_binds_and_validates_run_workspace_scope() -> None:
+    session = _CwdProbeSession(Manifest())
+    client = _FakeClient(session)
+    capability = _RecordingCapability()
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        capabilities=[capability],
+        run_as="sandbox-user",
+    )
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/a",
+            )
+        ),
+        run_state=None,
+    )
+
+    prepared = await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="hello",
+        context_wrapper=RunContextWrapper(context=None),
+        is_resumed_state=False,
+    )
+
+    execution_agent = cast(SandboxAgent[Any], prepared.bindings.execution_agent)
+    prepared_capability = cast(_RecordingCapability, execution_agent.capabilities[0])
+    assert capability.workspace_scope.cwd is None
+    assert prepared_capability.workspace_scope.cwd == PurePosixPath("tasks/a")
+    assert session.cwd_probe_calls == [
+        (("test", "-d", "/workspace/tasks/a"), False, User(name="sandbox-user")),
+        (("test", "-x", "/workspace/tasks/a"), False, User(name="sandbox-user")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_serializes_cwd_probe_with_posix_sandbox_semantics() -> None:
+    session = _WindowsPathCwdProbeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(name="sandbox", model=ScriptedModel())
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/a",
+            )
+        ),
+        run_state=None,
+    )
+    await runtime.prepare_agent(
+        current_agent=agent,
+        current_input="hello",
+        context_wrapper=RunContextWrapper(context=None),
+        is_resumed_state=False,
+    )
+
+    assert session.cwd_probe_calls == [
+        (("test", "-d", "/workspace/tasks/a"), False, None),
+        (("test", "-x", "/workspace/tasks/a"), False, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_rejects_inaccessible_run_workspace_scope() -> None:
+    session = _CwdProbeSession(Manifest(), accessible=False)
+    client = _FakeClient(session)
+    agent = SandboxAgent(name="sandbox", model=ScriptedModel())
+    runtime = SandboxRuntime(
+        starting_agent=agent,
+        run_config=RunConfig(
+            sandbox=SandboxRunConfig(
+                client=client,
+                options={"image": "sandbox"},
+                cwd="tasks/missing",
+            )
+        ),
+        run_state=None,
+    )
+
+    with pytest.raises(
+        UserError,
+        match=r"Sandbox working directory `tasks/missing` does not exist or is not accessible",
+    ):
+        await runtime.prepare_agent(
+            current_agent=agent,
+            current_input="hello",
+            context_wrapper=RunContextWrapper(context=None),
+            is_resumed_state=False,
+        )
+
+    assert session.cwd_probe_calls == [
+        (("test", "-d", "/workspace/tasks/missing"), False, None),
+    ]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
 
@@ -64,6 +65,135 @@ def sandbox_path_str(path: str | PurePath) -> str:
     """Return a POSIX string for a sandbox filesystem path."""
 
     return coerce_posix_path(path).as_posix()
+
+
+def normalize_sandbox_cwd(cwd: str | PurePath) -> PurePosixPath:
+    """Validate and normalize a run working directory relative to the workspace root."""
+
+    if isinstance(cwd, PurePath):
+        raw_cwd = cwd.as_posix()
+    elif isinstance(cwd, str):
+        if "\\" in cwd:
+            raise ValueError("sandbox.cwd must use POSIX path separators")
+        raw_cwd = cwd
+    else:
+        raise ValueError("sandbox.cwd must be a string or Path")
+
+    if not raw_cwd.strip():
+        raise ValueError("sandbox.cwd must be non-empty")
+    if windows_absolute_path(cwd) is not None:
+        raise ValueError("sandbox.cwd must be workspace-relative")
+
+    posix_cwd = PurePosixPath(raw_cwd)
+    if posix_cwd.is_absolute():
+        raise ValueError("sandbox.cwd must be workspace-relative")
+    if ".." in posix_cwd.parts:
+        raise ValueError("sandbox.cwd must not contain parent segments")
+
+    return PurePosixPath(posixpath.normpath(posix_cwd.as_posix()))
+
+
+def _is_absolute_sandbox_path(path: str | PurePath) -> bool:
+    if windows_absolute_path(path) is not None:
+        return True
+    raw_path = path.as_posix() if isinstance(path, PurePath) else path
+    return PurePosixPath(raw_path).is_absolute()
+
+
+@dataclass(frozen=True)
+class SandboxWorkspaceScope:
+    """Immutable model-facing relative-path base for one sandbox run.
+
+    This scope changes only how relative paths are anchored. The owning sandbox session and its
+    existing workspace policy remain responsible for access validation and filesystem operations.
+    """
+
+    cwd: PurePosixPath | None = None
+
+    def __post_init__(self) -> None:
+        if self.cwd is not None:
+            object.__setattr__(self, "cwd", normalize_sandbox_cwd(self.cwd))
+
+    @classmethod
+    def from_cwd(cls, cwd: str | PurePath | None) -> SandboxWorkspaceScope:
+        """Create a scope from an optional workspace-relative working directory."""
+
+        return cls(cwd=normalize_sandbox_cwd(cwd) if cwd is not None else None)
+
+    def anchor(self, path: str | PurePath) -> str | PurePath:
+        """Anchor a relative sandbox path beneath this scope's working directory."""
+
+        if self.cwd is None or _is_absolute_sandbox_path(path):
+            return path
+        raw_path = path.as_posix() if isinstance(path, PurePath) else path
+        return self.cwd / PurePosixPath(raw_path)
+
+    def model_path(self, workspace_relative_path: str | PurePath) -> PurePosixPath:
+        """Render a workspace-root-relative path relative to the model-facing cwd."""
+
+        relative_path = coerce_posix_path(workspace_relative_path)
+        if relative_path.is_absolute():
+            raise ValueError("workspace-relative display paths must not be absolute")
+        if self.cwd is None:
+            return PurePosixPath(posixpath.normpath(relative_path.as_posix()))
+        return PurePosixPath(
+            posixpath.relpath(
+                posixpath.normpath(relative_path.as_posix()),
+                start=self.cwd.as_posix(),
+            )
+        )
+
+    def model_resource_path(
+        self,
+        *,
+        workspace_root: str | PurePath,
+        workspace_relative_path: str | PurePath,
+    ) -> PurePosixPath:
+        """Render a session-owned workspace resource for model-facing instructions.
+
+        Without a run cwd, preserve the existing workspace-root-relative representation. With a
+        run cwd, use an absolute sandbox path so the resource remains addressable after a shell
+        command selects a nested workdir or changes directory.
+        """
+
+        if isinstance(workspace_relative_path, str) and "\\" in workspace_relative_path:
+            raise ValueError("session resource paths must use POSIX path separators")
+        if windows_absolute_path(workspace_relative_path) is not None:
+            raise ValueError("session resource paths must be workspace-relative")
+
+        relative_path = coerce_posix_path(workspace_relative_path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError("session resource paths must be workspace-relative")
+        if relative_path.parts in [(), (".",)]:
+            raise ValueError("session resource paths must be non-empty")
+
+        normalized_path = PurePosixPath(posixpath.normpath(relative_path.as_posix()))
+        if self.cwd is None:
+            return normalized_path
+
+        windows_root = windows_absolute_path(workspace_root)
+        if windows_root is not None:
+            root_path = PurePosixPath(windows_root.as_posix())
+        else:
+            if isinstance(workspace_root, str) and "\\" in workspace_root:
+                raise ValueError("sandbox workspace root must be POSIX absolute")
+            root_path = coerce_posix_path(workspace_root)
+            if not root_path.is_absolute():
+                raise ValueError("sandbox workspace root must be POSIX absolute")
+        return PurePosixPath(posixpath.normpath((root_path / normalized_path).as_posix()))
+
+    def display_path(
+        self,
+        *,
+        original_path: str | PurePath,
+        workspace_relative_path: str | PurePath,
+    ) -> PurePosixPath:
+        """Render a tool result path without changing existing absolute-input display behavior."""
+
+        relative_path = coerce_posix_path(workspace_relative_path)
+        if self.cwd is None or _is_absolute_sandbox_path(original_path):
+            return PurePosixPath(posixpath.normpath(relative_path.as_posix()))
+        return self.model_path(relative_path)
 
 
 def _native_path_from_windows_absolute(path: PureWindowsPath) -> Path | None:

@@ -5,7 +5,7 @@ import io
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
@@ -29,6 +29,20 @@ _SKILLS_SECTION_INTRO = (
     "A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. "
     "Below is the list of skills that can be used. Each entry includes a name, description, "
     "and file path so you can open the source for full instructions when using a specific skill."
+)
+
+_SKILL_PATH_GUIDANCE = (
+    "- Skill paths: Treat each listed path as the skill root. Resolve relative paths in "
+    "`SKILL.md`, including `scripts/`, `references/`, and `assets/`, against that root rather "
+    "than the shell working directory.",
+    "- Shared resources: Skill files belong to the sandbox session and may be visible to other "
+    "runs. Unless the task explicitly requires editing a skill, invoke scripts through the "
+    "listed skill root and write task inputs, outputs, caches, and temporary files in the run "
+    "working directory.",
+)
+
+_SCOPED_SKILL_PATH_ERROR = (
+    "skill path must be non-empty and workspace-relative when sandbox.cwd is configured"
 )
 
 _HOW_TO_USE_SKILLS_SECTION = "\n".join(
@@ -666,6 +680,32 @@ class Skills(Capability):
             raise ValueError(f"{type(self).__name__} is not bound to a SandboxSession")
         return [_LoadSkillTool(skills=self)]
 
+    def _model_skill_path(
+        self,
+        *,
+        manifest: Manifest,
+        skill_name: str,
+        path: str | PurePath,
+    ) -> str:
+        if self.workspace_scope.cwd is None:
+            return str(path).replace("\\", "/")
+        try:
+            return self.workspace_scope.model_resource_path(
+                workspace_root=manifest.root,
+                workspace_relative_path=path,
+            ).as_posix()
+        except ValueError as exc:
+            raise SkillsConfigError(
+                message=_SCOPED_SKILL_PATH_ERROR,
+                context={
+                    "skill_name": skill_name,
+                    "field": "path",
+                    "path": path.as_posix() if isinstance(path, PurePath) else path,
+                    "reason": "invalid",
+                },
+                cause=exc,
+            ) from exc
+
     async def load_skill(self, skill_name: str) -> dict[str, str]:
         if self.lazy_from is None:
             raise SkillsConfigError(
@@ -674,12 +714,29 @@ class Skills(Capability):
             )
         if self.session is None:
             raise ValueError(f"{type(self).__name__} is not bound to a SandboxSession")
-        return await self.lazy_from.load_skill(
+        result = await self.lazy_from.load_skill(
             skill_name=skill_name,
             session=self.session,
             skills_path=self.skills_path,
             user=self.run_as,
         )
+        if self.workspace_scope.cwd is None:
+            return result
+
+        source_path = result.get("path")
+        if source_path is None:
+            raise SkillsConfigError(
+                message=_SCOPED_SKILL_PATH_ERROR,
+                context={"skill_name": skill_name, "field": "path", "reason": "missing"},
+            )
+        return {
+            **result,
+            "path": self._model_skill_path(
+                manifest=self.session.state.manifest,
+                skill_name=skill_name,
+                path=source_path,
+            ),
+        }
 
     async def _resolve_runtime_metadata(self, manifest: Manifest) -> list[SkillMetadata]:
         if self.session is None:
@@ -787,7 +844,11 @@ class Skills(Capability):
 
         available_skill_lines: list[str] = []
         for skill in skills:
-            path_str = str(skill.path).replace("\\", "/")
+            path_str = self._model_skill_path(
+                manifest=manifest,
+                skill_name=skill.name,
+                path=skill.path,
+            )
             available_skill_lines.append(f"- {skill.name}: {skill.description} (file: {path_str})")
 
         how_to_use_section = (
@@ -801,6 +862,11 @@ class Skills(Capability):
                 _SKILLS_SECTION_INTRO,
                 "### Available skills",
                 *available_skill_lines,
+                *(
+                    ["### Run-scoped skill paths", *_SKILL_PATH_GUIDANCE]
+                    if self.workspace_scope.cwd is not None
+                    else []
+                ),
                 *(
                     [
                         "### Lazy loading",

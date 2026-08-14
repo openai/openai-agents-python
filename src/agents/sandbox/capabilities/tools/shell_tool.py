@@ -15,7 +15,7 @@ from ...errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundEr
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 from ...util.token_truncation import formatted_truncate_text_with_token_count
-from ...workspace_paths import sandbox_path_str
+from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox_path_str
 
 _DEFAULT_EXEC_YIELD_TIME_MS = 10_000
 _DEFAULT_WRITE_STDIN_YIELD_TIME_MS = 250
@@ -67,12 +67,20 @@ def _normalize_output(stdout: bytes, stderr: bytes) -> str:
 
 
 def _resolve_workdir_command(
-    *, session: BaseSandboxSession, command: str, workdir: str | None
+    *,
+    session: BaseSandboxSession,
+    workspace_scope: SandboxWorkspaceScope,
+    command: str,
+    workdir: str | None,
 ) -> str:
     if workdir is None or workdir.strip() == "":
-        return command
+        if workspace_scope.cwd is None:
+            return command
+        workdir = "."
 
-    resolved_workdir = session.normalize_path(sandbox_path_str(workdir))
+    resolved_workdir = session.normalize_path(
+        sandbox_path_str(workspace_scope.anchor(coerce_posix_path(workdir)))
+    )
     return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
 
 
@@ -156,6 +164,12 @@ class ExecCommandTool(FunctionTool):
     )
     session: BaseSandboxSession = field(init=False, repr=False, compare=False)
     user: str | User | None = field(default=None, init=False, repr=False, compare=False)
+    workspace_scope: SandboxWorkspaceScope = field(
+        default_factory=SandboxWorkspaceScope,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __init__(
         self,
@@ -165,9 +179,11 @@ class ExecCommandTool(FunctionTool):
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = False,
+        workspace_scope: SandboxWorkspaceScope | None = None,
     ) -> None:
         self.session = session
         self.user = user
+        self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
         super().__init__(
             name=self.tool_name,
             description=self.tool_description,
@@ -184,7 +200,10 @@ class ExecCommandTool(FunctionTool):
         start = time.perf_counter()
         timeout_s = args.yield_time_ms / 1000
         wrapped_command = _resolve_workdir_command(
-            session=self.session, command=args.cmd, workdir=args.workdir
+            session=self.session,
+            workspace_scope=self.workspace_scope,
+            command=args.cmd,
+            workdir=args.workdir,
         )
         shell = _resolve_shell(args.shell, args.login)
         fallback_notice: str | None = None

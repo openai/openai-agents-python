@@ -54,7 +54,8 @@ class Memory(Capability):
         if self.session is None:
             raise ValueError("Memory capability is not bound to a SandboxSession")
 
-        memory_summary_path = Path(self.layout.memories_dir) / "memory_summary.md"
+        memory_dir_path = Path(self.layout.memories_dir)
+        memory_summary_path = memory_dir_path / "memory_summary.md"
         try:
             handle = await self.session.read(memory_summary_path, user=self.run_as)
         except WorkspaceReadNotFoundError:
@@ -72,8 +73,16 @@ class Memory(Capability):
         if not memory_summary:
             return None
 
+        model_memory_dir = (
+            self.layout.memories_dir
+            if self.workspace_scope.cwd is None
+            else self.workspace_scope.model_resource_path(
+                workspace_root=manifest.root,
+                workspace_relative_path=memory_dir_path,
+            ).as_posix()
+        )
         return render_memory_read_prompt(
-            memory_dir=self.layout.memories_dir,
+            memory_dir=model_memory_dir,
             memory_summary=memory_summary,
             live_update=self.read.live_update,
         )

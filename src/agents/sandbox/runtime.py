@@ -4,6 +4,7 @@ import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Generic, cast
 
 from ..agent import Agent
@@ -36,6 +37,7 @@ from .runtime_session_manager import SandboxRuntimeSessionManager
 from .sandbox_agent import SandboxAgent
 from .session.base_sandbox_session import BaseSandboxSession
 from .types import User
+from .workspace_paths import SandboxWorkspaceScope, sandbox_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,13 @@ logger = logging.getLogger(__name__)
 class _SandboxPreparedAgent(Generic[TContext]):
     bindings: AgentBindings[TContext]
     input: str | list[TResponseInputItem]
+
+
+@dataclass
+class _SandboxPreparedAgentCache(Generic[TContext]):
+    agent: Agent[TContext]
+    session: BaseSandboxSession
+    run_as_name: str | None
 
 
 def _supports_trace_spans() -> bool:
@@ -74,6 +83,9 @@ class SandboxRuntime(Generic[TContext]):
     ) -> None:
         self._sandbox_config = run_config.sandbox if run_config is not None else None
         self._run_config_model = run_config.model if run_config is not None else None
+        self._workspace_scope = SandboxWorkspaceScope.from_cwd(
+            self._sandbox_config.cwd if self._sandbox_config is not None else None
+        )
         # The runner resolves this before constructing the runtime. It can be None only when
         # sandbox is disabled or tests instantiate the runtime directly.
         self._rollout_id = rollout_id
@@ -83,8 +95,7 @@ class SandboxRuntime(Generic[TContext]):
             sandbox_config=self._sandbox_config,
             run_state=run_state,
         )
-        self._prepared_agents: dict[int, Agent[TContext]] = {}
-        self._prepared_sessions: dict[int, BaseSandboxSession] = {}
+        self._prepared_agents: dict[int, _SandboxPreparedAgentCache[TContext]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -206,27 +217,45 @@ class SandboxRuntime(Generic[TContext]):
         )
         with span_cm:
             self._session_manager.acquire_agent(current_agent)
-            prepared_agent = self._prepared_agents.get(id(current_agent))
+            cached_preparation = self._prepared_agents.get(id(current_agent))
             prepared_capabilities = clone_capabilities(current_agent.capabilities)
             session = await self._session_manager.ensure_session(
                 agent=current_agent,
                 capabilities=prepared_capabilities,
                 is_resumed_state=is_resumed_state,
             )
-            if (
-                prepared_agent is not None
-                and self._prepared_sessions.get(id(current_agent)) is session
-            ):
+            run_as = _coerce_run_as_user(current_agent.run_as)
+            await _validate_workspace_scope(
+                session=session,
+                scope=self._workspace_scope,
+                run_as=run_as,
+            )
+            prepared_agent: Agent[TContext]
+            if cached_preparation is not None and cached_preparation.session is session:
                 # Reuse the cached execution agent's bound capability instances so context
                 # processing can depend on live session state and preserve per-run state.
-                _bind_capability_run_as(
-                    cast(SandboxAgent[TContext], prepared_agent).capabilities,
-                    _coerce_run_as_user(current_agent.run_as),
-                )
+                cached_agent = cast(SandboxAgent[TContext], cached_preparation.agent)
+                prepared_agent = cached_agent
+                cached_capabilities = cached_agent.capabilities
+                _bind_capability_run_as(cached_capabilities, run_as)
                 prepared_input = prepare_sandbox_input(
-                    cast(SandboxAgent[TContext], prepared_agent).capabilities,
+                    cached_capabilities,
                     current_input,
                 )
+                run_as_name = run_as.name if run_as is not None else None
+                if cached_preparation.run_as_name != run_as_name:
+                    prepared_agent = prepare_sandbox_agent(
+                        agent=current_agent,
+                        session=session,
+                        capabilities=cached_capabilities,
+                        run_config_model=self._run_config_model,
+                        workspace_scope=self._workspace_scope,
+                    )
+                    self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
+                        agent=prepared_agent,
+                        session=session,
+                        run_as_name=run_as_name,
+                    )
                 return _SandboxPreparedAgent(
                     bindings=bind_execution_agent(
                         public_agent=current_agent,
@@ -237,9 +266,9 @@ class SandboxRuntime(Generic[TContext]):
 
             # Bind before context processing: capabilities may inspect self.session while
             # transforming input.
-            run_as = _coerce_run_as_user(current_agent.run_as)
             for capability in prepared_capabilities:
                 capability.bind(session)
+                capability.bind_workspace_scope(self._workspace_scope)
             _bind_capability_run_as(prepared_capabilities, run_as)
             prepared_input = prepare_sandbox_input(prepared_capabilities, current_input)
             prepared_agent = prepare_sandbox_agent(
@@ -247,9 +276,13 @@ class SandboxRuntime(Generic[TContext]):
                 session=session,
                 capabilities=prepared_capabilities,
                 run_config_model=self._run_config_model,
+                workspace_scope=self._workspace_scope,
             )
-            self._prepared_agents[id(current_agent)] = prepared_agent
-            self._prepared_sessions[id(current_agent)] = session
+            self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
+                agent=prepared_agent,
+                session=session,
+                run_as_name=run_as.name if run_as is not None else None,
+            )
             return _SandboxPreparedAgent(
                 bindings=bind_execution_agent(
                     public_agent=current_agent,
@@ -259,7 +292,7 @@ class SandboxRuntime(Generic[TContext]):
             )
 
     async def cleanup(self) -> dict[str, object] | None:
-        should_trace_cleanup = self.current_session is not None or bool(self._prepared_sessions)
+        should_trace_cleanup = self.current_session is not None or bool(self._prepared_agents)
         span_cm = (
             custom_span("sandbox.cleanup", data={})
             if should_trace_cleanup and _supports_trace_spans()
@@ -270,7 +303,6 @@ class SandboxRuntime(Generic[TContext]):
                 return await self._session_manager.cleanup()
             finally:
                 self._prepared_agents.clear()
-                self._prepared_sessions.clear()
 
 
 def _get_memory_capability(agent: Agent[TContext]) -> Memory | None:
@@ -293,3 +325,29 @@ def _coerce_run_as_user(run_as: User | str | None) -> User | None:
 def _bind_capability_run_as(capabilities: Sequence[Capability], user: User | None) -> None:
     for capability in capabilities:
         capability.bind_run_as(user)
+
+
+async def _validate_workspace_scope(
+    *,
+    session: BaseSandboxSession,
+    scope: SandboxWorkspaceScope,
+    run_as: User | None,
+) -> None:
+    cwd = scope.cwd
+    if cwd is None:
+        return
+
+    resolved_cwd = sandbox_path_str(session.normalize_path(cast(Path | str, scope.anchor("."))))
+    for test_flag in ("-d", "-x"):
+        result = await session.exec(
+            "test",
+            test_flag,
+            resolved_cwd,
+            shell=False,
+            user=run_as,
+        )
+        if not result.ok():
+            raise UserError(
+                f"Sandbox working directory `{sandbox_path_str(cwd)}` does not exist or is not "
+                "accessible for the configured sandbox user"
+            )

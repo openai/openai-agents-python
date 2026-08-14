@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox import Manifest, SandboxPathGrant, SandboxWorkspaceScope
 from agents.sandbox.capabilities import Shell, ShellToolSet
 from agents.sandbox.capabilities.tools import (
     ExecCommandArgs,
@@ -196,6 +196,23 @@ class TestShellCapability:
         assert exec_command_tool is replacement_exec_command
         assert exec_command_tool.needs_approval is True
 
+    def test_configure_tools_receives_workspace_scope(self) -> None:
+        observed_scope: SandboxWorkspaceScope | None = None
+
+        def configure_tools(toolset: ShellToolSet) -> None:
+            nonlocal observed_scope
+            observed_scope = toolset.workspace_scope
+
+        capability = Shell(configure_tools=configure_tools)
+        capability.bind(_shell_session())
+        scope = SandboxWorkspaceScope.from_cwd("tasks/a")
+        capability.bind_workspace_scope(scope)
+
+        tool = cast(ExecCommandTool, capability.tools()[0])
+
+        assert observed_scope is scope
+        assert tool.workspace_scope is scope
+
     @pytest.mark.asyncio
     async def test_instructions_match_sandbox_shell_guidance(self) -> None:
         capability = Shell()
@@ -263,6 +280,7 @@ class TestShellCapability:
         )
         capability.bind(session)
         capability.bind_run_as(User(name="sandbox-user"))
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
         tool = cast(FunctionTool, capability.tools()[0])
 
         await tool.on_invoke_tool(
@@ -270,6 +288,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd").model_dump_json(),
         )
 
+        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
         assert session.calls[0].kwargs["user"] == User(name="sandbox-user")
         session.assert_complete()
 
@@ -347,6 +366,57 @@ class TestShellCapability:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("workdir", [None, "", "   "])
+    async def test_exec_command_tool_defaults_to_workspace_scope_cwd(
+        self,
+        workdir: str | None,
+    ) -> None:
+        capability = Shell()
+        session = _shell_session()
+        capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
+        tool = cast(FunctionTool, capability.tools()[0])
+
+        await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            ExecCommandArgs(cmd="pwd", workdir=workdir).model_dump_json(),
+        )
+
+        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
+
+    @pytest.mark.asyncio
+    async def test_exec_command_tool_resolves_relative_workdir_from_workspace_scope(self) -> None:
+        capability = Shell()
+        session = _shell_session()
+        capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
+        tool = cast(FunctionTool, capability.tools()[0])
+
+        await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            ExecCommandArgs(cmd="pwd", workdir="src/project").model_dump_json(),
+        )
+
+        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project && pwd",)
+
+    @pytest.mark.asyncio
+    async def test_exec_command_tool_normalizes_raw_backslashes_before_workspace_scope(
+        self,
+    ) -> None:
+        capability = Shell()
+        session = _shell_session()
+        capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
+        tool = cast(FunctionTool, capability.tools()[0])
+
+        await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            ExecCommandArgs(cmd="pwd", workdir=r"src\project").model_dump_json(),
+        )
+
+        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project && pwd",)
+
+    @pytest.mark.asyncio
     async def test_exec_command_tool_allows_split_path_grant_workdir(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -365,6 +435,7 @@ class TestShellCapability:
             )
         )
         capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
         tool = cast(FunctionTool, capability.tools()[0])
         _patch_shell_tool_clock(
             monkeypatch,
@@ -415,6 +486,7 @@ class TestShellCapability:
             ]
         )
         capability.bind(session)
+        capability.bind_workspace_scope(SandboxWorkspaceScope.from_cwd("tasks/a"))
         tool = cast(FunctionTool, capability.tools()[0])
         _patch_shell_tool_clock(
             monkeypatch,
@@ -428,6 +500,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", yield_time_ms=0, tty=True).model_dump_json(),
         )
 
+        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
         assert session.calls[0].kwargs["yield_time_s"] == 0.0
         assert (
             output == "Chunk ID: abcdef\n"
@@ -509,7 +582,10 @@ class TestShellCapability:
                 },
             ]
         )
-        tool = ExecCommandTool(session=session)
+        tool = ExecCommandTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
         _patch_shell_tool_clock(
             monkeypatch,
             chunk_id="44444444444444444444444444444444",
@@ -526,6 +602,8 @@ class TestShellCapability:
         assert "Process exited with code 0" in output
         assert "Process running with session ID" not in output
         assert "fallback ok" in output
+        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
+        assert session.calls[1].args == ("cd /workspace/tasks/a && pwd",)
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_does_not_fall_back_for_tty_sessions(self) -> None:

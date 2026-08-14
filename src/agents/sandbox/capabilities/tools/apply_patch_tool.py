@@ -18,6 +18,7 @@ from ...apply_patch import WorkspaceEditor
 from ...errors import ApplyPatchPathError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
+from ...workspace_paths import SandboxWorkspaceScope
 
 _APPLY_PATCH_CUSTOM_TOOL_GRAMMAR = r"""
 start: begin_patch hunk+ end_patch
@@ -137,18 +138,37 @@ _MOVE_TO = "*** Move to: "
 
 
 class SandboxApplyPatchEditor(ApplyPatchEditor):
-    def __init__(self, session: BaseSandboxSession, *, user: str | User | None = None) -> None:
+    def __init__(
+        self,
+        session: BaseSandboxSession,
+        *,
+        user: str | User | None = None,
+        workspace_scope: SandboxWorkspaceScope | None = None,
+    ) -> None:
         self.session = session
         self.user = user
+        self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
 
     async def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
-        return await WorkspaceEditor(self.session, user=self.user).apply_operation(operation)
+        return await WorkspaceEditor(
+            self.session,
+            user=self.user,
+            workspace_scope=self.workspace_scope,
+        ).apply_operation(operation)
 
     async def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
-        return await WorkspaceEditor(self.session, user=self.user).apply_operation(operation)
+        return await WorkspaceEditor(
+            self.session,
+            user=self.user,
+            workspace_scope=self.workspace_scope,
+        ).apply_operation(operation)
 
     async def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
-        return await WorkspaceEditor(self.session, user=self.user).apply_operation(operation)
+        return await WorkspaceEditor(
+            self.session,
+            user=self.user,
+            workspace_scope=self.workspace_scope,
+        ).apply_operation(operation)
 
 
 class SandboxApplyPatchTool(CustomTool):
@@ -164,9 +184,15 @@ class SandboxApplyPatchTool(CustomTool):
         user: str | User | None = None,
         needs_approval: bool | ApplyPatchApprovalFunction = False,
         on_approval: ApplyPatchOnApprovalFunction | None = None,
+        workspace_scope: SandboxWorkspaceScope | None = None,
     ) -> None:
         self.session = session
-        self.editor = SandboxApplyPatchEditor(session, user=user)
+        self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
+        self.editor = SandboxApplyPatchEditor(
+            session,
+            user=user,
+            workspace_scope=self.workspace_scope,
+        )
         super().__init__(
             name="apply_patch",
             description=_APPLY_PATCH_CUSTOM_TOOL_DESCRIPTION,

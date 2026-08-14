@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
 
 from pydantic import TypeAdapter
@@ -218,6 +219,15 @@ class SandboxRunConfig:
     Use `SandboxArchiveLimits()` to enable SDK defaults.
     """
 
+    cwd: str | PurePath | None = None
+    """Optional model-facing working directory relative to the sandbox workspace root.
+
+    Relative paths used by the built-in `exec_command`, `view_image`, and `apply_patch` tools
+    resolve from this directory. Custom path-bearing capabilities must apply their bound
+    `SandboxWorkspaceScope` explicitly. The directory must already exist when the run starts.
+    This setting does not change `Manifest.root` or direct `BaseSandboxSession` path behavior.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -230,9 +240,14 @@ class SandboxRunConfig:
             snapshot: SnapshotSpec | SnapshotBase | dict[str, Any] | None = None,
             concurrency_limits: SandboxConcurrencyLimits | dict[str, Any] = ...,
             archive_limits: SandboxArchiveLimits | dict[str, Any] | None = None,
+            cwd: str | PurePath | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.cwd is not None:
+            from .sandbox.workspace_paths import normalize_sandbox_cwd
+
+            self.cwd = normalize_sandbox_cwd(self.cwd).as_posix()
         if isinstance(self.manifest, dict):
             from .sandbox.manifest import _coerce_manifest
 

@@ -22,6 +22,7 @@ from .remote_mount_policy import build_remote_mount_policy_instructions
 from .sandbox_agent import SandboxAgent
 from .session.base_sandbox_session import BaseSandboxSession
 from .util.deep_merge import deep_merge
+from .workspace_paths import SandboxWorkspaceScope, coerce_posix_path
 
 
 @lru_cache(maxsize=1)
@@ -42,13 +43,33 @@ def clone_capabilities(capabilities: Sequence[Capability]) -> list[Capability]:
     return [capability.clone() for capability in capabilities]
 
 
-def _filesystem_instructions(manifest: Manifest) -> str:
+def _filesystem_instructions(
+    manifest: Manifest,
+    workspace_scope: SandboxWorkspaceScope | None = None,
+) -> str:
+    effective_workspace_scope = workspace_scope or SandboxWorkspaceScope()
     header = textwrap.dedent(
         """
         # Filesystem
         You have access to a container with a filesystem. The filesystem layout is:
         """
     ).strip()
+    if effective_workspace_scope.cwd is not None:
+        workspace_root = coerce_posix_path(manifest.root)
+        working_directory = workspace_root / effective_workspace_scope.cwd
+        header = "\n".join(
+            [
+                header,
+                f"For this run, the working directory is `{working_directory.as_posix()}`.",
+                "Relative paths passed to the built-in `exec_command`, `view_image`, and "
+                "`apply_patch` tools resolve from this directory.",
+                "Other sandbox tools follow their own path contract.",
+                f"The session workspace root remains `{workspace_root.as_posix()}`.",
+                "The working directory changes path resolution; it does not isolate this run "
+                "from the rest of the session workspace.",
+                "Files outside the working directory may be visible to or shared with other runs.",
+            ]
+        )
     tree = render_manifest_description(
         root=manifest.root,
         entries=manifest.validated_entries(),
@@ -68,8 +89,10 @@ def prepare_sandbox_agent(
     session: BaseSandboxSession,
     capabilities: Sequence[Capability],
     run_config_model: str | Model | None = None,
+    workspace_scope: SandboxWorkspaceScope | None = None,
 ) -> Agent[TContext]:
     manifest = session.state.manifest
+    effective_workspace_scope = workspace_scope or SandboxWorkspaceScope()
 
     available_capability_types = {capability.type for capability in capabilities}
     for capability in capabilities:
@@ -98,6 +121,7 @@ def prepare_sandbox_agent(
             additional_instructions=agent.instructions,
             capabilities=capabilities,
             manifest=manifest,
+            workspace_scope=effective_workspace_scope,
         ),
         model_settings=replace(
             model_settings,
@@ -155,7 +179,10 @@ def build_sandbox_instructions(
     | None,
     capabilities: Sequence[Capability],
     manifest: Manifest,
+    workspace_scope: SandboxWorkspaceScope | None = None,
 ) -> Callable[[RunContextWrapper[TContext], Agent[TContext]], Awaitable[str | None]]:
+    effective_workspace_scope = workspace_scope or SandboxWorkspaceScope()
+
     async def _instructions(
         run_context: RunContextWrapper[TContext],
         current_agent: Agent[TContext],
@@ -201,7 +228,7 @@ def build_sandbox_instructions(
         if remote_mount_policy := build_remote_mount_policy_instructions(manifest):
             parts.append(_instruction_section("Sandbox remote mount policy", remote_mount_policy))
 
-        parts.append(_filesystem_instructions(manifest))
+        parts.append(_filesystem_instructions(manifest, effective_workspace_scope))
 
         return "\n\n".join(parts) if parts else None
 

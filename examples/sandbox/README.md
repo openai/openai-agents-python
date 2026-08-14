@@ -19,6 +19,7 @@ Most examples call a model through `Runner`, so set `OPENAI_API_KEY` in the repo
 | [`memory.py`](./memory.py) | `uv run python examples/sandbox/memory.py` | Runs one sandbox agent twice across a snapshot resume so it can read and write its own memory. |
 | [`memory_s3.py`](./memory_s3.py) | `source ~/.s3.env && uv run python examples/sandbox/memory_s3.py` | Runs sandbox memory across two fresh Docker sandboxes with S3-backed memory storage. |
 | [`memory_multi_agent_multiturn.py`](./memory_multi_agent_multiturn.py) | `uv run python examples/sandbox/memory_multi_agent_multiturn.py` | Shows separate memory layouts for two agents sharing one sandbox workspace. |
+| [`shared_session_workdirs.py`](./shared_session_workdirs.py) | `uv run python examples/sandbox/shared_session_workdirs.py` | Shares one live sandbox between trusted agents while Shell, `view_image`, and `apply_patch` resolve relative paths from each run's `cwd`. This is not confinement; use separate sessions for untrusted agents or compute isolation. |
 | [`unix_local_pty.py`](./unix_local_pty.py) | `uv run python examples/sandbox/unix_local_pty.py` | Exercises an interactive pseudo-terminal in a Unix-local sandbox. |
 | [`unix_local_runner.py`](./unix_local_runner.py) | `uv run python examples/sandbox/unix_local_runner.py` | Runs against the Unix-local sandbox backend directly. |
 
