@@ -64,7 +64,10 @@ def _coerce_payload_bytes(payload: object) -> bytes:
 
 class ViewImageArgs(BaseModel):
     path: str = Field(
-        description="Path to the image file. Absolute and relative workspace paths are supported.",
+        description=(
+            "Path to the image file. Workspace paths and explicitly granted sandbox paths are "
+            "supported."
+        ),
         min_length=1,
     )
 
@@ -74,7 +77,8 @@ class ViewImageTool(FunctionTool):
     tool_name: ClassVar[str] = "view_image"
     args_model: ClassVar[type[ViewImageArgs]] = ViewImageArgs
     tool_description: ClassVar[str] = (
-        "Loads an image from the sandbox workspace and returns it as a structured image output."
+        "Loads an image from the sandbox workspace or an explicitly granted sandbox path and "
+        "returns it as a structured image output."
     )
     session: BaseSandboxSession = field(init=False, repr=False, compare=False)
     user: str | User | None = field(default=None, init=False, repr=False, compare=False)
@@ -103,11 +107,10 @@ class ViewImageTool(FunctionTool):
         return await self.run(self.args_model.model_validate_json(raw_input))
 
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
-        input_path = Path(args.path)
         path_policy = self.session._workspace_path_policy()
-        resolved_path = path_policy.normalize_path(input_path)
+        resolved_path = path_policy.normalize_path(args.path)
         try:
-            display_path = path_policy.relative_path(input_path).as_posix()
+            display_path = path_policy.relative_path(args.path).as_posix()
         except InvalidManifestPathError:
             display_path = sandbox_path_str(resolved_path)
 
