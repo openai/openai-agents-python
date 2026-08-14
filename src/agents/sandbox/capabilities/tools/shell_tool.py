@@ -72,7 +72,7 @@ def _resolve_workdir_command(
     if workdir is None or workdir.strip() == "":
         return command
 
-    resolved_workdir = session.normalize_path(workdir)
+    resolved_workdir = session.normalize_path(sandbox_path_str(workdir))
     return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
 
 
