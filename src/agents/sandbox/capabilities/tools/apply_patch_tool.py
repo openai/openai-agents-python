@@ -197,8 +197,7 @@ class SandboxApplyPatchTool(CustomTool):
 
     def _parse_and_normalize_input(self, raw_input: str) -> list[ApplyPatchOperation]:
         return [
-            self._normalize_operation(operation)
-            for operation in self.parse_custom_input(raw_input)
+            self._normalize_operation(operation) for operation in self.parse_custom_input(raw_input)
         ]
 
     async def _needs_custom_approval(
