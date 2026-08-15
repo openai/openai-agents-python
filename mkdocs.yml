@@ -85,6 +85,7 @@ plugins:
                 - Usage: usage.md
                 - Model context protocol (MCP): mcp.md
                 - Tracing: tracing.md
+                - Testing: testing.md
                 - Agent visualization: visualization.md
                 - REPL utility: repl.md
                 - Examples: examples.md
@@ -97,6 +98,7 @@ plugins:
                     - Runner: ref/run.md
                     - Run config: ref/run_config.md
                     - Run state: ref/run_state.md
+                    - Testing: ref/testing.md
                     - Sandbox:
                         - Overview: ref/sandbox.md
                         - SandboxAgent: ref/sandbox/sandbox_agent.md
@@ -166,6 +168,7 @@ plugins:
                     - Events: ref/realtime/events.md
                     - Configuration: ref/realtime/config.md
                     - Model: ref/realtime/model.md
+                    - Testing: ref/realtime/testing.md
                 - Voice:
                     - Pipeline: ref/voice/pipeline.md
                     - Workflow: ref/voice/workflow.md
@@ -179,6 +182,7 @@ plugins:
                     - OpenAI voice model provider: ref/voice/models/openai_provider.md
                     - OpenAI STT: ref/voice/models/openai_stt.md
                     - OpenAI TTS: ref/voice/models/openai_tts.md
+                    - Testing: ref/voice/testing.md
                 - Extensions:
                     - Handoff filters: ref/extensions/handoff_filters.md
                     - Handoff prompt: ref/extensions/handoff_prompt.md
@@ -234,6 +238,7 @@ plugins:
                 - usage.md
                 - mcp.md
                 - tracing.md
+                - テスト: testing.md
                 - visualization.md
                 - repl.md
                 - コード例: examples.md
@@ -277,6 +282,7 @@ plugins:
                 - usage.md
                 - mcp.md
                 - tracing.md
+                - 테스트: testing.md
                 - visualization.md
                 - repl.md
                 - 코드 예제: examples.md
@@ -320,6 +326,7 @@ plugins:
                 - usage.md
                 - mcp.md
                 - tracing.md
+                - 测试: testing.md
                 - visualization.md
                 - repl.md
                 - 示例: examples.md

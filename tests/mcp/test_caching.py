@@ -95,3 +95,102 @@ async def test_paginated_tools_are_cached_before_filtering(
         call(),
         call(params=PaginatedRequestParams(cursor="")),
     ]
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_list_tools_does_not_expose_the_tools_cache(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """Mutating the list returned by `list_tools()` must not corrupt the server's cache."""
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema={}), MCPTool(name="tool2", inputSchema={})]
+    )
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+
+        returned = await server.list_tools(run_context, agent)
+        assert returned is not server.cached_tools
+        returned.pop()
+
+        assert [tool.name for tool in await server.list_tools(run_context, agent)] == [
+            "tool1",
+            "tool2",
+        ]
+        assert mock_list_tools.call_count == 1, "the cache should still be serving both tools"
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_list_tools_does_not_expose_the_cache_with_a_no_op_static_filter(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """A static filter that sets neither key passes the cached list straight through."""
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True, tool_filter={})
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema={}), MCPTool(name="tool2", inputSchema={})]
+    )
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+
+        returned = await server.list_tools(run_context, agent)
+        returned.clear()
+
+        assert [tool.name for tool in await server.list_tools(run_context, agent)] == [
+            "tool1",
+            "tool2",
+        ]
+        assert mock_list_tools.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_cached_tools_returns_a_snapshot(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """`cached_tools` must not hand out the live cache: appending to it would inject a tool."""
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema={}), MCPTool(name="tool2", inputSchema={})]
+    )
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+        await server.list_tools(run_context, agent)
+
+        snapshot = server.cached_tools
+        assert snapshot is not None
+        snapshot.append(MCPTool(name="injected", inputSchema={}))
+
+        assert [tool.name for tool in (server.cached_tools or [])] == ["tool1", "tool2"]
+        assert [tool.name for tool in await server.list_tools(run_context, agent)] == [
+            "tool1",
+            "tool2",
+        ]
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_cached_tools_is_none_before_the_first_list(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """The snapshot must preserve the `None` sentinel rather than reporting an empty cache."""
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+    mock_list_tools.return_value = ListToolsResult(tools=[])
+
+    async with server:
+        assert server.cached_tools is None

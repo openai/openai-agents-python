@@ -7,9 +7,9 @@ from typing import cast
 
 import pytest
 
-from agents.sandbox import Manifest
+from agents.sandbox import Manifest, SandboxPathGrant
 from agents.sandbox.capabilities.tools import ViewImageTool
-from agents.sandbox.errors import WorkspaceReadNotFoundError
+from agents.sandbox.errors import InvalidManifestPathError, WorkspaceReadNotFoundError
 from agents.sandbox.types import User
 from agents.testing import scripted_sandbox_session
 from agents.tool import ToolOutputImage
@@ -47,6 +47,39 @@ class TestViewImageTool:
         assert output.image_url == f"data:image/png;base64,{_PNG_BASE64}"
         assert output.detail is None
         session.assert_complete()
+
+    @pytest.mark.asyncio
+    async def test_view_image_reads_absolute_extra_path_grant(self) -> None:
+        session = scripted_sandbox_session(
+            [{"method": "read", "result": io.BytesIO(_PNG_BYTES)}],
+            manifest=Manifest(
+                root="/workspace",
+                extra_path_grants=(SandboxPathGrant(path="/shared", read_only=True),),
+            ),
+        )
+        tool = ViewImageTool(session=session)
+
+        output = await tool.on_invoke_tool(
+            cast(ToolContext[object], None),
+            '{"path":"/shared/dot.png"}',
+        )
+
+        assert isinstance(output, ToolOutputImage)
+        assert session.calls[0].args[0].as_posix() == "/shared/dot.png"
+        session.assert_complete()
+
+    @pytest.mark.asyncio
+    async def test_view_image_still_rejects_ungranted_absolute_path(self) -> None:
+        session = scripted_sandbox_session(manifest=Manifest(root="/workspace"))
+        tool = ViewImageTool(session=session)
+
+        with pytest.raises(InvalidManifestPathError):
+            await tool.on_invoke_tool(
+                cast(ToolContext[object], None),
+                '{"path":"/shared/dot.png"}',
+            )
+
+        assert session.calls == ()
 
     @pytest.mark.asyncio
     async def test_view_image_reads_as_bound_user(self) -> None:

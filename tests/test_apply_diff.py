@@ -81,6 +81,48 @@ def test_apply_diff_applies_stacked_anchors_from_the_tool_description() -> None:
     )
 
 
+def test_apply_diff_reuses_a_prior_parent_anchor_across_stacked_hunks() -> None:
+    input_text = (
+        "\n".join(
+            [
+                "class Target",
+                "    def first():",
+                "        pass",
+                "",
+                "    def second():",
+                "        pass",
+            ]
+        )
+        + "\n"
+    )
+    diff = "\n".join(
+        [
+            "@@ class Target",
+            "@@     def first():",
+            "-        pass",
+            "+        return 1",
+            "@@ class Target",
+            "@@     def second():",
+            "-        pass",
+            "+        return 2",
+        ]
+    )
+
+    assert apply_diff(input_text, diff) == (
+        "\n".join(
+            [
+                "class Target",
+                "    def first():",
+                "        return 1",
+                "",
+                "    def second():",
+                "        return 2",
+            ]
+        )
+        + "\n"
+    )
+
+
 def test_apply_diff_stacked_anchors_narrow_to_the_named_block() -> None:
     """The second anchor skips an earlier matching body inside the selected class."""
     input_text = (
@@ -129,12 +171,62 @@ def test_apply_diff_stacked_anchors_narrow_to_the_named_block() -> None:
     )
 
 
-def test_apply_diff_stacked_anchors_stay_advisory_when_unmatched() -> None:
-    """Same rule a single unmatched anchor already follows: locate by context, don't fail."""
+def test_apply_diff_single_anchor_stays_advisory_when_unmatched() -> None:
+    """A single unmatched anchor keeps its established context fallback."""
     input_text = "a\nb\n"
-    diff = "\n".join(["@@ nope", "@@ also-nope", "-b", "+B"])
+    diff = "\n".join(["@@ nope", "-b", "+B"])
 
     assert apply_diff(input_text, diff) == "a\nB\n"
+
+
+def test_apply_diff_rejects_partially_matched_stacked_anchors() -> None:
+    input_text = (
+        "\n".join(
+            [
+                "class Target",
+                "    def helper():",
+                "        pass",
+                "",
+                "    def desired():",
+                "        return 1",
+            ]
+        )
+        + "\n"
+    )
+    diff = "\n".join(
+        [
+            "@@ class Target",
+            "@@     def missing():",
+            "-        pass",
+            "+        return 99",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Invalid Anchor"):
+        apply_diff(input_text, diff)
+
+
+def test_apply_diff_rejects_stacked_anchors_when_the_first_is_missing() -> None:
+    input_text = "class Wrong\n    def desired():\n        pass\n"
+    diff = "\n".join(
+        [
+            "@@ class Target",
+            "@@     def desired():",
+            "-        pass",
+            "+        return 99",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Invalid Anchor"):
+        apply_diff(input_text, diff)
+
+
+def test_apply_diff_rejects_a_missing_anchor_followed_by_a_bare_marker() -> None:
+    input_text = "a\nb\n"
+    diff = "\n".join(["@@ missing", "@@", "-b", "+B"])
+
+    with pytest.raises(ValueError, match="Invalid Anchor"):
+        apply_diff(input_text, diff)
 
 
 def test_apply_diff_stacked_anchors_accept_a_trailing_bare_anchor() -> None:

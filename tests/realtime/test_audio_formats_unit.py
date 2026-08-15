@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any
 
 import pytest
@@ -56,6 +57,14 @@ def test_to_realtime_audio_format_from_mapping():
     assert alaw.type == "audio/pcma"
 
     assert to_realtime_audio_format({"type": "audio/unknown", "rate": 8000}) is None
+
+
+@pytest.mark.parametrize("rate", [math.nan, math.inf, -math.inf])
+def test_to_realtime_audio_format_falls_back_for_non_finite_pcm_rate(rate: float) -> None:
+    result = to_realtime_audio_format({"type": "audio/pcm", "rate": rate})
+
+    assert isinstance(result, AudioPCM)
+    assert result.rate == 24000
 
 
 @pytest.mark.parametrize("tool_data_redacted", [False, True])
