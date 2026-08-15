@@ -130,18 +130,20 @@ def _parse_update_diff(lines: list[str], input: str) -> ParsedUpdateDiff:
     cursor = 0
 
     while not _is_done(parser, END_SECTION_MARKERS):
-        anchors, has_anchor = _read_anchors(parser)
+        anchors, anchor_count = _read_anchors(parser)
 
-        if not (has_anchor or cursor == 0):
+        if not (anchor_count > 0 or cursor == 0):
             current_line = parser.lines[parser.index] if parser.index < len(parser.lines) else ""
             raise ValueError(f"Invalid Line:\n{current_line}")
 
+        require_anchor_match = anchor_count > 1
         for index, anchor in enumerate(anchors):
             cursor = _advance_cursor_to_anchor(
                 anchor,
                 input_lines,
                 cursor,
                 parser,
+                require_match=require_anchor_match,
                 force_forward_search=index > 0,
             )
 
@@ -169,7 +171,7 @@ def _parse_update_diff(lines: list[str], input: str) -> ParsedUpdateDiff:
     return ParsedUpdateDiff(chunks=chunks, fuzz=parser.fuzz)
 
 
-def _read_anchors(parser: ParserState) -> tuple[list[str], bool]:
+def _read_anchors(parser: ParserState) -> tuple[list[str], int]:
     """Consume the ``@@`` header lines that introduce one hunk.
 
     The patch format lets a hunk carry several stacked headers, so nested code can be
@@ -179,29 +181,27 @@ def _read_anchors(parser: ParserState) -> tuple[list[str], bool]:
         @@     def method():
 
     Returns the non-empty headers in the order they should narrow the search, plus
-    whether a usable header was seen at all.
+    the total number of consumed headers, including bare ``@@`` markers.
     """
     anchors: list[str] = []
-    has_anchor = False
+    anchor_count = 0
 
     while True:
         start_index = parser.index
         anchor = _read_str(parser, "@@ ")
         consumed = parser.index != start_index
-        bare = False
 
         if not consumed and parser.index < len(parser.lines) and parser.lines[parser.index] == "@@":
             parser.index += 1
-            consumed = bare = True
+            consumed = True
 
         if not consumed:
             break
-        if anchor or bare:
-            has_anchor = True
+        anchor_count += 1
         if anchor.strip():
             anchors.append(anchor)
 
-    return anchors, has_anchor
+    return anchors, anchor_count
 
 
 def _advance_cursor_to_anchor(
@@ -210,27 +210,39 @@ def _advance_cursor_to_anchor(
     cursor: int,
     parser: ParserState,
     *,
+    require_match: bool = False,
     force_forward_search: bool = False,
 ) -> int:
     found = False
 
-    if force_forward_search or not any(line == anchor for line in input_lines[:cursor]):
+    has_exact_match_before_cursor = not force_forward_search and any(
+        line == anchor for line in input_lines[:cursor]
+    )
+    if has_exact_match_before_cursor:
+        found = True
+    else:
         for i in range(cursor, len(input_lines)):
             if input_lines[i] == anchor:
                 cursor = i + 1
                 found = True
                 break
 
-    if not found and (
-        force_forward_search
-        or not any(line.strip() == anchor.strip() for line in input_lines[:cursor])
-    ):
-        for i in range(cursor, len(input_lines)):
-            if input_lines[i].strip() == anchor.strip():
-                cursor = i + 1
-                parser.fuzz += 1
-                found = True
-                break
+    if not found:
+        has_trimmed_match_before_cursor = not force_forward_search and any(
+            line.strip() == anchor.strip() for line in input_lines[:cursor]
+        )
+        if has_trimmed_match_before_cursor:
+            found = True
+        else:
+            for i in range(cursor, len(input_lines)):
+                if input_lines[i].strip() == anchor.strip():
+                    cursor = i + 1
+                    parser.fuzz += 1
+                    found = True
+                    break
+
+    if require_match and not found:
+        raise ValueError(f"Invalid Anchor {cursor}:\n{anchor}")
 
     return cursor
 

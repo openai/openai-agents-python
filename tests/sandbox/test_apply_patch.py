@@ -89,6 +89,29 @@ async def test_apply_patch_update_uses_stacked_anchor_jump() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_update_rejects_partially_matched_stacked_anchors() -> None:
+    session = ApplyPatchSession()
+    path = Path("/workspace/stacked.py")
+    original = (
+        b"class Target\n    def helper():\n        pass\n\n    def desired():\n        return 1\n"
+    )
+    session.files[path] = original
+
+    with pytest.raises(ApplyPatchDiffError, match="Invalid Anchor"):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="stacked.py",
+                diff=(
+                    "@@ class Target\n@@     def missing():\n-        pass\n+        return 99\n"
+                ),
+            )
+        )
+
+    assert session.files[path] == original
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_update_matches_end_of_file_context() -> None:
     session = ApplyPatchSession()
     session.files[Path("/workspace/tail.txt")] = b"one\ntwo\nthree\n"
