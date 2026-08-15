@@ -4659,3 +4659,90 @@ async def test_response_span_reports_the_request_when_provider_omits_usage() -> 
     span_data = response_spans[0]["span_data"]  # type: ignore[index]
     assert span_data["usage"]["requests"] == 1
     assert span_data["usage"]["total_tokens"] == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_stream_counts_request_when_provider_omits_usage() -> None:
+    """A client with only `responses.create()` returns an async iterable, and still counts."""
+    final_response = _response_without_usage()
+
+    class _AsyncIterableStream:
+        """Async iterable, not an iterator: no `__anext__` of its own."""
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aiter__(self) -> Any:
+            yield ResponseCompletedEvent(
+                response=final_response,
+                type="response.completed",
+                sequence_number=0,
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = _AsyncIterableStream()
+
+    class _Responses:
+        async def create(self, **kwargs: Any) -> Any:
+            return stream
+
+    class _Client:
+        responses = _Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    assert not hasattr(_Client.responses, "with_streaming_response")
+
+    agent = Agent(
+        name="test",
+        model=OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, _Client())),
+    )
+    result = Runner.run_streamed(agent, "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+    assert final_response.usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_span_usage_survives_a_consumer_that_stops_at_the_terminal_event() -> None:
+    """A consumer closing at `response.completed` must not lose the synthesized request count."""
+    final_response = _response_without_usage()
+    client = _streaming_client_for(
+        [
+            ResponseCompletedEvent(
+                response=final_response,
+                type="response.completed",
+                sequence_number=0,
+            )
+        ]
+    )
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, client))
+
+    with trace("test"):
+        stream = model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+        async for event in stream:
+            if getattr(event, "type", None) == "response.completed":
+                break
+        await stream.aclose()
+
+    response_spans = [
+        span.export() for span in fetch_ordered_spans() if span.span_data.type == "response"
+    ]
+    assert len(response_spans) == 1
+    span_data = response_spans[0]["span_data"]  # type: ignore[index]
+    assert span_data["usage"]["requests"] == 1
+    assert span_data["usage"]["total_tokens"] == 0
