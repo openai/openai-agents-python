@@ -81,6 +81,48 @@ def test_apply_diff_applies_stacked_anchors_from_the_tool_description() -> None:
     )
 
 
+def test_apply_diff_reuses_a_prior_parent_anchor_across_stacked_hunks() -> None:
+    input_text = (
+        "\n".join(
+            [
+                "class Target",
+                "    def first():",
+                "        pass",
+                "",
+                "    def second():",
+                "        pass",
+            ]
+        )
+        + "\n"
+    )
+    diff = "\n".join(
+        [
+            "@@ class Target",
+            "@@     def first():",
+            "-        pass",
+            "+        return 1",
+            "@@ class Target",
+            "@@     def second():",
+            "-        pass",
+            "+        return 2",
+        ]
+    )
+
+    assert apply_diff(input_text, diff) == (
+        "\n".join(
+            [
+                "class Target",
+                "    def first():",
+                "        return 1",
+                "",
+                "    def second():",
+                "        return 2",
+            ]
+        )
+        + "\n"
+    )
+
+
 def test_apply_diff_stacked_anchors_narrow_to_the_named_block() -> None:
     """The second anchor skips an earlier matching body inside the selected class."""
     input_text = (
