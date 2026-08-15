@@ -11,6 +11,7 @@ from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
+from ..usage import _response_usage_to_usage
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -19,6 +20,7 @@ from .session import (
 )
 
 if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
     from .session import Session
 
 logger = logging.getLogger("openai-agents.openai.compaction")
@@ -165,8 +167,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return "input"
         return _resolve_compaction_mode(mode, response_id=response_id, store=store)
 
-    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
-        """Run compaction using responses.compact API."""
+    async def run_compaction(
+        self,
+        args: OpenAIResponsesCompactionArgs | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        """Run compaction using responses.compact API.
+
+        When a run context is provided, the billed compaction request contributes to
+        that run's usage totals.
+        """
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
@@ -225,6 +236,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             compact_kwargs["input"] = session_items
 
         compacted = await self.client.responses.compact(**compact_kwargs)
+
+        compacted_usage = getattr(compacted, "usage", None)
+        if wrapper is not None and compacted_usage is not None:
+            wrapper.usage.add(_response_usage_to_usage(compacted_usage))
 
         output_items = _strip_orphaned_assistant_ids(
             _normalize_compaction_output_items(compacted.output or [])

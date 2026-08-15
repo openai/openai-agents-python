@@ -565,6 +565,7 @@ async def save_result_to_session(
     if session is None:
         return 0
 
+    compaction_wrapper = wrapper
     wrapper = _get_session_wrapper(session, wrapper)
 
     new_run_items: list[RunItem]
@@ -691,7 +692,7 @@ async def save_result_to_session(
         await _call_session_method(
             session.run_compaction,
             compaction_args,
-            wrapper=wrapper,
+            wrapper=compaction_wrapper,
         )
 
     return saved_run_items_count

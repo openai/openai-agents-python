@@ -8,6 +8,11 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseUsage,
+)
 
 import agents._debug as _debug
 from agents import Agent, Runner
@@ -1452,6 +1457,16 @@ class TestOpenAIResponsesCompactionSession:
         underlying = SimpleListSession()
         compacted = SimpleNamespace(
             output=[{"type": "compaction", "encrypted_content": "enc"}],
+            usage=ResponseUsage(
+                input_tokens=150_000,
+                input_tokens_details=InputTokensDetails(
+                    cached_tokens=50_000,
+                    cache_write_tokens=0,
+                ),
+                output_tokens=42_000,
+                output_tokens_details=OutputTokensDetails(reasoning_tokens=10_000),
+                total_tokens=192_000,
+            ),
         )
         mock_client = MagicMock()
         mock_client.responses.compact = AsyncMock(return_value=compacted)
@@ -1466,9 +1481,17 @@ class TestOpenAIResponsesCompactionSession:
         model = ScriptedModel(steps=[[get_text_message("ok")]])
         agent = Agent(name="assistant", model=model)
 
-        await Runner.run(agent, "hello", session=session)
+        result = await Runner.run(agent, "hello", session=session)
 
         mock_client.responses.compact.assert_awaited_once()
+        assert result.context_wrapper.usage.requests == 2
+        assert result.context_wrapper.usage.input_tokens == 150_000
+        assert result.context_wrapper.usage.output_tokens == 42_000
+        assert result.context_wrapper.usage.total_tokens == 192_000
+        assert result.context_wrapper.usage.input_tokens_details.cached_tokens == 50_000
+        assert result.context_wrapper.usage.output_tokens_details.reasoning_tokens == 10_000
+        assert len(result.context_wrapper.usage.request_usage_entries) == 1
+        assert result.context_wrapper.usage.request_usage_entries[0].total_tokens == 192_000
         items = await session.get_items()
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
 
