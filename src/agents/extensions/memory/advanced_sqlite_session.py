@@ -70,7 +70,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         try:
             if create_tables:
                 self._init_structure_tables()
-            self._verify_structure_tables_scope()
+            else:
+                with self._locked_connection() as conn:
+                    self._verify_structure_tables_scope(conn)
         except BaseException:
             try:
                 self.close()
@@ -109,33 +111,46 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._current_branch_id = branch_id
             return True
 
-    def _verify_structure_tables_scope(self) -> None:
+    def _verify_structure_tables_scope(self, conn: sqlite3.Connection) -> None:
         """Reject a database file whose structure tables belong to other base tables.
 
-        ``message_structure`` and the other structure tables are not named after
-        ``sessions_table``/``messages_table``, so a database file can only hold the structure
-        rows of a single base-table pair. ``CREATE TABLE IF NOT EXISTS`` keeps the first pair's
-        foreign keys, so a second session configured with different base table names would join
-        ``message_structure`` against the wrong messages table and read back rows that belong to
-        the other pair.
+        The structure tables are not named after ``sessions_table``/``messages_table``, so a
+        database file can only hold the structure rows of a single base-table pair. ``CREATE
+        TABLE IF NOT EXISTS`` keeps the first pair's foreign keys, so a second session configured
+        with different base table names would join ``message_structure`` against the wrong
+        messages table and read back rows that belong to the other pair.
+
+        Both owner-bearing structure tables are checked, so a file whose two structure tables were
+        created for different pairs is rejected instead of being accepted by whichever one happens
+        to match.
         """
-        with self._locked_connection() as conn:
-            references = {
-                row[3]: row[2] for row in conn.execute("PRAGMA foreign_key_list(message_structure)")
+        expected = {
+            "message_structure": {
+                "session_id": self.sessions_table,
+                "message_id": self.messages_table,
+            },
+            "turn_usage": {"session_id": self.sessions_table},
+        }
+        for table, expected_owners in expected.items():
+            # SQLite resolves table names case-insensitively but `PRAGMA foreign_key_list` reports
+            # the spelling used at CREATE time, so compare case-folded.
+            owners = {
+                row[3].casefold(): row[2]
+                for row in conn.execute(f"PRAGMA foreign_key_list({table})")
             }
-        if not references:
-            return
-        if (
-            references.get("session_id") != self.sessions_table
-            or references.get("message_id") != self.messages_table
-        ):
-            raise ValueError(
-                f"The structure tables in {self.db_path} already belong to "
-                f"'{references.get('session_id')}'/'{references.get('message_id')}', not to the "
-                f"configured '{self.sessions_table}'/'{self.messages_table}'. Structure tables "
-                "are shared per database file, so give each sessions_table/messages_table pair "
-                "its own db_path."
-            )
+            if not owners:
+                continue
+            if any(
+                owners.get(column, "").casefold() != owner.casefold()
+                for column, owner in expected_owners.items()
+            ):
+                found = "/".join(owners.get(column, "?") for column in expected_owners)
+                configured = "/".join(expected_owners.values())
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} already belongs to '{found}', not to "
+                    f"the configured '{configured}'. Structure tables are shared per database "
+                    "file, so give each sessions_table/messages_table pair its own db_path."
+                )
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
@@ -145,6 +160,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         and usage analytics.
         """
         with self._write_connection() as conn:
+            # Take the database write lock before the first CREATE so two processes cannot each
+            # create part of the layout for a different base-table pair. Python's sqlite3 keeps
+            # DDL inside the open transaction, so the checked layout commits as one unit.
+            conn.execute("BEGIN IMMEDIATE")
+
             # Message structure with branch support
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS message_structure (
@@ -209,6 +229,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 CREATE INDEX IF NOT EXISTS idx_turn_usage_session_turn
                 ON turn_usage(session_id, branch_id, user_turn_number)
             """)
+
+            self._verify_structure_tables_scope(conn)
 
             conn.commit()
 

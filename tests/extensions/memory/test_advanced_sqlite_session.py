@@ -3816,3 +3816,31 @@ async def test_structure_tables_reject_a_second_base_table_pair(tmp_path: Path) 
         assert await first.get_items() == [{"role": "user", "content": "first"}]
     finally:
         first.close()
+
+
+async def test_structure_tables_accept_equivalent_identifier_casing(tmp_path: Path) -> None:
+    """SQLite resolves table names case-insensitively, so a recased pair is the same pair."""
+    db_path = tmp_path / "advanced_recased_structure.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="FooSessions",
+        messages_table="FooMessages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+    finally:
+        first.close()
+
+    recased = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="foosessions",
+        messages_table="foomessages",
+    )
+    try:
+        assert await recased.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        recased.close()
