@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal, cast
 
 from openai import AsyncOpenAI
@@ -258,6 +259,7 @@ class MultiProvider(ModelProvider):
         providers.extend(self._fallback_providers.values())
 
         seen: set[int] = set()
+        first_error: Exception | None = None
         for provider in providers:
             if provider is self:
                 continue
@@ -265,4 +267,13 @@ class MultiProvider(ModelProvider):
             if provider_id in seen:
                 continue
             seen.add(provider_id)
-            await provider.aclose()
+            try:
+                await provider.aclose()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+
+        if first_error is not None:
+            raise first_error
