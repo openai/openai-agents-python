@@ -231,7 +231,12 @@ def _output_item_to_input_item(raw_item: Any) -> TResponseInputItem:
     item_type = (
         raw_item.get("type") if isinstance(raw_item, dict) else getattr(raw_item, "type", None)
     )
-    if item_type in {"tool_search_call", "tool_search_output"}:
+    # ``item_type`` comes from an untrusted raw item, so it may be a non-string
+    # (for example ``{"type": []}``). Guarding on ``isinstance`` keeps the set
+    # membership test from raising ``TypeError: unhashable type`` before the
+    # dict/BaseModel handling below can produce the payload or raise the
+    # documented ``AgentsException``.
+    if isinstance(item_type, str) and item_type in {"tool_search_call", "tool_search_output"}:
         return _tool_search_item_to_input_item(raw_item)
 
     if isinstance(raw_item, dict):

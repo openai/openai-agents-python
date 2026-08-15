@@ -53,7 +53,12 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallItem, ToolCallOutputItem, TResponseOutputItem
+from agents.items import (
+    ToolCallItem,
+    ToolCallOutputItem,
+    TResponseOutputItem,
+    _output_item_to_input_item,
+)
 
 
 def make_message(
@@ -841,3 +846,16 @@ def test_tool_call_output_item_call_id_returns_none_when_missing() -> None:
     }
     item = ToolCallOutputItem(agent=agent, raw_item=raw, output="ok")
     assert item.call_id is None
+
+
+@pytest.mark.parametrize("bad_type", [[], {}, 5, None])
+def test_output_item_to_input_item_non_string_type_does_not_crash(bad_type: Any) -> None:
+    """A raw item whose ``type`` is a non-string value must not crash the
+    tool_search set-membership check with a raw ``TypeError`` (unhashable type).
+
+    The converter is defensive about the raw item's outer shape, so a malformed
+    ``type`` should fall through to the normal dict handling rather than raise.
+    """
+    raw = {"type": bad_type, "id": "x"}
+    result = _output_item_to_input_item(raw)
+    assert result == raw
