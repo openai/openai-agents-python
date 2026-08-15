@@ -120,6 +120,22 @@ class WorkspaceEditor:
             path=operation.path,
         )
 
+    def normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
+        """Return an operation whose paths use the workspace policy's canonical form."""
+        normalized_path = self._validate_path(operation.path).as_posix()
+        normalized_move_to = (
+            self._validate_path(operation.move_to).as_posix()
+            if operation.move_to is not None
+            else None
+        )
+        return ApplyPatchOperation(
+            type=operation.type,
+            path=normalized_path,
+            diff=operation.diff,
+            ctx_wrapper=operation.ctx_wrapper,
+            move_to=normalized_move_to,
+        )
+
     def _validate_path(self, path: str | Path) -> Path:
         if isinstance(path, str) and not path.strip():
             raise ApplyPatchPathError(path=path, reason="empty")
