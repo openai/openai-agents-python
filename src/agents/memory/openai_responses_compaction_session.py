@@ -11,6 +11,9 @@ from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+
+from ..usage import Usage
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -122,6 +125,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         self.session_id = session_id
         self.underlying_session = underlying_session
+        self.compaction_usage = Usage()
+        """Tokens billed by responses.compact calls made by this session.
+
+        Compaction is a real model call, so it is billed, but it happens outside the
+        agent run loop and therefore never reaches ``RunResult.context_wrapper.usage``.
+        This accumulates it so the cost is visible rather than silently dropped.
+        """
         self._client = client
         self.model = model
         self.compaction_mode = compaction_mode
@@ -226,6 +236,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
+        self._record_compaction_usage(getattr(compacted, "usage", None))
+
         output_items = _strip_orphaned_assistant_ids(
             _normalize_compaction_output_items(compacted.output or [])
         )
@@ -245,6 +257,52 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             resolved_mode,
             len(output_items),
             len(self._compaction_candidate_items or []),
+        )
+
+    def _record_compaction_usage(self, compacted_usage: Any) -> None:
+        """Accumulate the tokens a compaction pass billed.
+
+        Accounting must never break a run, so anything unexpected on the usage
+        object is logged and skipped rather than raised.
+        """
+        if compacted_usage is None:
+            return
+
+        def _count(name: str) -> int | None:
+            value = getattr(compacted_usage, name, None)
+            if value is None:
+                return 0
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        input_tokens = _count("input_tokens")
+        output_tokens = _count("output_tokens")
+        total_tokens = _count("total_tokens")
+        if input_tokens is None or output_tokens is None or total_tokens is None:
+            logger.debug(
+                "compact: skipping usage for %s, unexpected token fields", self._response_id
+            )
+            return
+
+        usage = Usage(
+            requests=1,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens or input_tokens + output_tokens,
+        )
+        input_details = getattr(compacted_usage, "input_tokens_details", None)
+        if isinstance(input_details, InputTokensDetails):
+            usage.input_tokens_details = input_details
+        output_details = getattr(compacted_usage, "output_tokens_details", None)
+        if isinstance(output_details, OutputTokensDetails):
+            usage.output_tokens_details = output_details
+
+        self.compaction_usage.add(usage)
+        logger.debug(
+            "compact: usage for %s (input=%s, output=%s, total=%s)",
+            self._response_id,
+            input_tokens,
+            output_tokens,
+            usage.total_tokens,
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
