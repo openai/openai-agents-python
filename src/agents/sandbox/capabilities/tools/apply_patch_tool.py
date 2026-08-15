@@ -219,7 +219,10 @@ class SandboxApplyPatchTool(CustomTool):
         return _parse_custom_tool_input(raw_input)
 
     def _normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
-        return WorkspaceEditor(self.session).normalize_operation(operation)
+        return WorkspaceEditor(
+            self.session,
+            workspace_scope=self.workspace_scope,
+        ).normalize_operation(operation)
 
     def _parse_and_normalize_input(self, raw_input: str) -> list[ApplyPatchOperation]:
         return [
@@ -249,9 +252,12 @@ class SandboxApplyPatchTool(CustomTool):
         return False
 
     async def _on_invoke_tool(self, ctx: ToolContext[Any], raw_input: str) -> str:
-        # Normalize every operation before executing any of them. This prevents a valid
-        # prefix from mutating the workspace when a later path is invalid.
-        operations = self._parse_and_normalize_input(raw_input)
+        operations = self.parse_custom_input(raw_input)
+        # Validate every operation before executing any of them. Keep the raw paths for
+        # execution so an absolute model path does not lose its identity before the scoped
+        # editor applies the run cwd.
+        for operation in operations:
+            self._normalize_operation(operation)
 
         operation_outputs: list[str] = []
         for operation in operations:

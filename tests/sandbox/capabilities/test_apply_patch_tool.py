@@ -387,7 +387,7 @@ class TestSandboxApplyPatchTool:
         assert exc_info.value.context["path"] == expected_path
 
     @pytest.mark.asyncio
-    async def test_scoped_tool_keeps_approval_operations_model_relative(self) -> None:
+    async def test_scoped_tool_approval_receives_execution_canonical_paths(self) -> None:
         checked_operations: list[tuple[str, str | None]] = []
 
         async def needs_approval(
@@ -418,9 +418,29 @@ class TestSandboxApplyPatchTool:
             ),
         )
 
-        assert checked_operations == [("notes.txt", "moved.txt")]
+        assert checked_operations == [("tasks/a/notes.txt", "tasks/a/moved.txt")]
         assert result.output == "Updated notes.txt\nMoved notes.txt to moved.txt"
         assert session.files[Path("/workspace/tasks/a/moved.txt")] == b"new\n"
+
+    @pytest.mark.asyncio
+    async def test_scoped_custom_tool_keeps_absolute_path_at_workspace_root(self) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(
+            session=session,
+            workspace_scope=SandboxWorkspaceScope.from_cwd("tasks/a"),
+        )
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(
+                "*** Begin Patch\n*** Add File: /workspace/root.txt\n+root\n*** End Patch\n"
+            ),
+        )
+
+        assert result.output == "Created root.txt"
+        assert session.files[Path("/workspace/root.txt")] == b"root"
+        assert Path("/workspace/tasks/a/root.txt") not in session.files
 
     @pytest.mark.asyncio
     async def test_direct_session_apply_patch_remains_workspace_root_relative(self) -> None:
