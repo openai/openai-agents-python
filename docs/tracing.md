@@ -231,3 +231,4 @@ The following community and vendor integrations support the tracing API surface 
 -   [Datadog](https://docs.datadoghq.com/llm_observability/instrumentation/auto_instrumentation/?tab=python#openai-agents)
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
+-   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
