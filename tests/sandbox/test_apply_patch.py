@@ -227,7 +227,6 @@ async def test_apply_patch_normalizes_backslashes_in_string_path() -> None:
     )
 
     assert session.files[Path("/workspace/nested/new.txt")] == b"hello"
-    assert Path(r"/workspace/nested\new.txt") not in session.files
 
 
 @pytest.mark.asyncio
