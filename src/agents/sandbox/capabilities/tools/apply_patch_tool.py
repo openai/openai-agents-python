@@ -15,6 +15,7 @@ from ....tool import (
 from ....tool_context import ToolContext
 from ....util._approvals import evaluate_needs_approval_setting
 from ...apply_patch import WorkspaceEditor
+from ...errors import ApplyPatchPathError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 
@@ -191,14 +192,20 @@ class SandboxApplyPatchTool(CustomTool):
     def parse_custom_input(self, raw_input: str) -> list[ApplyPatchOperation]:
         return _parse_custom_tool_input(raw_input)
 
+    def _normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
+        return WorkspaceEditor(self.session).normalize_operation(operation)
+
     async def _needs_custom_approval(
         self, ctx_wrapper: RunContextWrapper[Any], raw_input: str, call_id: str
     ) -> bool:
         try:
-            operations = self.parse_custom_input(raw_input)
-        except ValueError:
-            # Let malformed patches flow through normal tool execution so the model gets a
-            # recoverable tool error instead of aborting the whole run during approval pre-checks.
+            operations = [
+                self._normalize_operation(operation)
+                for operation in self.parse_custom_input(raw_input)
+            ]
+        except (ValueError, ApplyPatchPathError):
+            # Let malformed patches and invalid paths flow through normal tool execution so the
+            # model gets a recoverable tool error instead of aborting during approval pre-checks.
             return False
 
         for operation in operations:
@@ -216,6 +223,7 @@ class SandboxApplyPatchTool(CustomTool):
     async def _on_invoke_tool(self, ctx: ToolContext[Any], raw_input: str) -> str:
         operation_outputs: list[str] = []
         for operation in self.parse_custom_input(raw_input):
+            operation = self._normalize_operation(operation)
             operation.ctx_wrapper = ctx
             if operation.type == "create_file":
                 result = await self.editor.create_file(operation)
