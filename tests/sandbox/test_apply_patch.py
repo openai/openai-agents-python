@@ -215,6 +215,40 @@ async def test_apply_patch_rejects_empty_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_normalizes_backslashes_in_string_path() -> None:
+    session = ApplyPatchSession()
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="create_file",
+            path=r"nested\new.txt",
+            diff="+hello",
+        )
+    )
+
+    assert session.files[Path("/workspace/nested/new.txt")] == b"hello"
+    assert Path(r"/workspace/nested\new.txt") not in session.files
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_normalizes_backslashes_in_move_to() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/source.txt")] = b"alpha\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="source.txt",
+            diff="@@\n-alpha\n+beta\n",
+            move_to=r"nested\moved.txt",
+        )
+    )
+
+    assert session.files[Path("/workspace/nested/moved.txt")] == b"beta\n"
+    assert Path("/workspace/source.txt") not in session.files
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_allows_absolute_path_within_root() -> None:
     session = ApplyPatchSession()
 

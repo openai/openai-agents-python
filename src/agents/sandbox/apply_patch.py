@@ -121,18 +121,17 @@ class WorkspaceEditor:
         )
 
     def _validate_path(self, path: str | Path) -> Path:
-        if isinstance(path, str):
-            if not path.strip():
-                raise ApplyPatchPathError(path=path, reason="empty")
-            normalized_path = Path(path)
-        else:
-            normalized_path = path
+        if isinstance(path, str) and not path.strip():
+            raise ApplyPatchPathError(path=path, reason="empty")
 
+        # Keep raw model-provided strings intact until the sandbox path policy
+        # normalizes them. Converting through host-native Path first would make
+        # backslash handling depend on the SDK host operating system.
         try:
-            return self._session._workspace_path_policy().relative_path(normalized_path)
+            return self._session._workspace_path_policy().relative_path(path)
         except InvalidManifestPathError as exc:
             raise ApplyPatchPathError(
-                path=normalized_path,
+                path=path,
                 reason="escape_root",
                 cause=exc,
             ) from exc
