@@ -1,0 +1,42 @@
+name: Validate apply_patch path fix
+
+on:
+  push:
+    branches:
+      - fix/apply-patch-posix-path-normalization
+
+permissions:
+  contents: write
+
+env:
+  UV_FROZEN: "1"
+  OPENAI_API_KEY: fake-for-tests
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/apply-patch-posix-path-normalization
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          enable-cache: true
+      - run: make sync
+      - name: Focused tests
+        run: uv run pytest tests/sandbox/test_apply_patch.py -q
+      - name: Lint changed files
+        run: uv run ruff check src/agents/sandbox/apply_patch.py tests/sandbox/test_apply_patch.py
+      - name: Format check changed files
+        run: uv run ruff format --check src/agents/sandbox/apply_patch.py tests/sandbox/test_apply_patch.py
+      - name: Remove validation workflow
+        if: success()
+        run: |
+          rm -f .github/workflows/validate-posix-patch-paths.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: remove focused validation" || exit 0
+          git push origin HEAD:fix/apply-patch-posix-path-normalization
