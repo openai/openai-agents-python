@@ -4,6 +4,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+_CHAT_COMPLETIONS_REASONING_FIELD_KEY = "_chat_completions_reasoning_field"
+
 
 @dataclass
 class ReasoningContentSource:

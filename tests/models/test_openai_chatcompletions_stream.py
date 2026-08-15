@@ -911,6 +911,13 @@ async def test_stream_handler_converts_third_party_reasoning_text() -> None:
             object="chat.completion.chunk",
             choices=[Choice(index=0, delta=reasoning_delta2)],
         ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+        ),
     ]
 
     events = await _collect_handler_events(*chunks, model="third-party")
@@ -937,9 +944,121 @@ async def test_stream_handler_converts_third_party_reasoning_text() -> None:
     assert completed_reasoning_item.content
     assert cast(Any, completed_reasoning_item.content[0]).text == "think hard"
     assert completed_reasoning_item.model_dump().get("provider_data") == {
+        "_chat_completions_reasoning_field": "reasoning",
         "model": "third-party",
         "response_id": "chunk-id",
     }
+
+    replayed_messages = Converter.items_to_messages(
+        [item.model_dump() for item in completed_event.response.output],
+        model="third-party",
+    )
+    assert len(replayed_messages) == 1
+    assert replayed_messages[0]["reasoning"] == "think hard"  # type: ignore[typeddict-item]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_ignores_non_string_plaintext_reasoning() -> None:
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(reasoning={"bad": 1}))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks, model="third-party")
+
+    assert not any(
+        event.type in {"response.reasoning_text.delta", "response.reasoning_text.done"}
+        for event in events
+    )
+    completed_event = next(event for event in events if event.type == "response.completed")
+    assert len(completed_event.response.output) == 1
+    assert isinstance(completed_event.response.output[0], ResponseOutputMessage)
+    assert completed_event.response.output[0].content[0].text == "answer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split_across_chunks", [False, True])
+async def test_stream_handler_prefers_reasoning_content_over_plaintext_reasoning(
+    split_across_chunks: bool,
+) -> None:
+    if split_across_chunks:
+        reasoning_deltas = [
+            ChoiceDelta.model_construct(reasoning="raw"),
+            ChoiceDelta.model_construct(reasoning_content="summary"),
+        ]
+    else:
+        reasoning_deltas = [
+            ChoiceDelta.model_construct(reasoning="raw", reasoning_content="summary")
+        ]
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=delta)],
+        )
+        for delta in [*reasoning_deltas, ChoiceDelta(content="answer")]
+    ]
+
+    events = await _collect_handler_events(*chunks, model="deepseek-r1")
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.summary[0].text == "summary"
+    assert reasoning_item.content
+    assert [part.text for part in reasoning_item.content] == ["raw"]
+    assert "_chat_completions_reasoning_field" not in cast(Any, reasoning_item).provider_data
+
+    replayed_messages = Converter.items_to_messages(
+        [item.model_dump() for item in completed_event.response.output],
+        model="deepseek-r1",
+    )
+    assert len(replayed_messages) == 1
+    assert replayed_messages[0]["reasoning_content"] == "summary"  # type: ignore[typeddict-item]
+    assert "reasoning" not in replayed_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_prefers_later_thinking_blocks_over_plaintext_reasoning() -> None:
+    chunks = [
+        _thinking_chunk(reasoning="raw"),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "hidden", "signature": "sig"}]
+        ),
+        _thinking_chunk(content="answer"),
+    ]
+
+    events = await _collect_handler_events(*chunks, model="anthropic/claude-4-opus")
+    completed_event = next(event for event in events if event.type == "response.completed")
+    reasoning_item = completed_event.response.output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    assert reasoning_item.content
+    assert [part.text for part in reasoning_item.content] == ["raw", "hidden"]
+    assert "_chat_completions_reasoning_field" not in cast(Any, reasoning_item).provider_data
+
+    replayed_messages = Converter.items_to_messages(
+        [item.model_dump() for item in completed_event.response.output],
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+    assert len(replayed_messages) == 1
+    assert replayed_messages[0]["thinking_blocks"] == [  # type: ignore[typeddict-item]
+        {"type": "thinking", "thinking": "hidden", "signature": "sig"}
+    ]
+    assert "reasoning" not in replayed_messages[0]
 
 
 @pytest.mark.asyncio

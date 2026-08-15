@@ -639,6 +639,58 @@ async def test_any_llm_chat_path_normalizes_non_stream_payloads(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_any_llm_chat_path_preserves_plaintext_reasoning_for_replay(monkeypatch) -> None:
+    chat_response = _chat_completion("The answer is 42.")
+    chat_response.choices[0].message = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning_content": "",
+            "reasoning": "I should calculate this carefully.",
+        }
+    )
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=chat_response)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/reasoning-model")
+
+    model_settings = ModelSettings(reasoning=Reasoning(effort="high"))
+    response = await model.get_response(
+        system_instructions=None,
+        input="What is six times seven?",
+        model_settings=model_settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    await model.get_response(
+        system_instructions=None,
+        input=response.to_input_items(),
+        model_settings=model_settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    replayed_messages = provider.chat_calls[1]["messages"]
+    assert replayed_messages == [
+        {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I should calculate this carefully.",
+        }
+    ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_any_llm_chat_path_preserves_gemini_tool_call_metadata(monkeypatch) -> None:
     provider = FakeAnyLLMProvider(
         supports_responses=False,
@@ -1396,6 +1448,46 @@ def test_any_llm_reasoning_objects_prefer_content_attributes_over_iterable_pairs
     assert _extract_any_llm_reasoning_text(delta) == "用户"
 
 
+def test_any_llm_stream_flattens_reasoning_object_when_reasoning_content_is_empty(
+    monkeypatch,
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    delta = ChoiceDelta.model_construct(
+        reasoning_content="",
+        reasoning=pytypes.SimpleNamespace(content="Plaintext reasoning"),
+    )
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[ChunkChoice(index=0, delta=delta)],
+    )
+
+    normalized = module.AnyLLMModel(model="openrouter/reasoning-model")._normalize_chat_chunk(chunk)
+
+    assert normalized.choices[0].delta.reasoning == "Plaintext reasoning"
+
+
+def test_any_llm_nonstream_preserves_native_reasoning_content_field(monkeypatch) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    message = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning": "Plaintext reasoning",
+            "reasoning_content": "Native reasoning content",
+        }
+    )
+
+    normalized = module._normalize_any_llm_message(message)
+
+    assert normalized.reasoning_content == "Native reasoning content"
+    assert normalized.reasoning == ""
+
+
 def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> None:
     """Splitting multi-tool assistant messages must not duplicate text/thinking blocks.
 
@@ -1416,6 +1508,7 @@ def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> No
             "content": "Looking up both queries.",
             "thinking_blocks": [{"type": "thinking", "thinking": "plan", "signature": "sig_abc"}],
             "reasoning_content": "internal plan",
+            "reasoning": "plaintext plan",
             "tool_calls": [
                 {
                     "id": "call_1",
@@ -1441,10 +1534,12 @@ def test_any_llm_split_does_not_duplicate_content_or_thinking(monkeypatch) -> No
     assert assistants[0].get("content") == "Looking up both queries."
     assert "thinking_blocks" in assistants[0]
     assert "reasoning_content" in assistants[0]
+    assert "reasoning" in assistants[0]
     # Second split must NOT duplicate them.
     assert "content" not in assistants[1]
     assert "thinking_blocks" not in assistants[1]
     assert "reasoning_content" not in assistants[1]
+    assert "reasoning" not in assistants[1]
     # Tool calls are still split one-per-message.
     assert assistants[0]["tool_calls"][0]["id"] == "call_1"
     assert assistants[1]["tool_calls"][0]["id"] == "call_2"

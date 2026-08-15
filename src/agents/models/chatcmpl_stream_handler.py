@@ -60,6 +60,7 @@ from ..usage import (
 )
 from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
+from .reasoning_content_replay import _CHAT_COMPLETIONS_REASONING_FIELD_KEY
 
 
 # Define a Part class for internal use
@@ -556,6 +557,20 @@ class ChatCmplStreamHandler:
         if last_signature:
             reasoning_item.encrypted_content = last_signature
 
+    @staticmethod
+    def _discard_plaintext_reasoning_replay_marker(
+        reasoning_item: ResponseReasoningItem,
+    ) -> None:
+        provider_data = getattr(reasoning_item, "provider_data", None)
+        if not isinstance(provider_data, dict):
+            return
+        if provider_data.get(_CHAT_COMPLETIONS_REASONING_FIELD_KEY) != "reasoning":
+            return
+
+        reasoning_provider_data = provider_data.copy()
+        del reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY]
+        reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
+
     @classmethod
     def _finish_reasoning_item(
         cls,
@@ -682,8 +697,8 @@ class ChatCmplStreamHandler:
                 raise AgentsException("Audio is not currently supported")
 
             # Handle thinking blocks from Anthropic (for preserving signatures)
+            has_thinking_block = False
             if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
-                has_thinking_block = False
                 for block in delta.thinking_blocks:
                     if isinstance(block, dict):
                         has_thinking_block |= state.accumulate_thinking_block(block)
@@ -703,10 +718,14 @@ class ChatCmplStreamHandler:
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
+                if has_thinking_block and state.reasoning_content_index_and_output:
+                    cls._discard_plaintext_reasoning_replay_marker(
+                        state.reasoning_content_index_and_output[1]
+                    )
 
             # Handle reasoning content for reasoning summaries
-            if hasattr(delta, "reasoning_content"):
-                reasoning_content = delta.reasoning_content
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content is not None:
                 if reasoning_content and not state.reasoning_content_index_and_output:
                     reasoning_item = ResponseReasoningItem(
                         id=FAKE_RESPONSES_ID,
@@ -725,6 +744,7 @@ class ChatCmplStreamHandler:
 
                 if reasoning_content and state.reasoning_content_index_and_output:
                     reasoning_item = state.reasoning_content_index_and_output[1]
+                    cls._discard_plaintext_reasoning_replay_marker(reasoning_item)
                     if state.active_reasoning_summary_index is None:
                         summary_index = len(reasoning_item.summary)
                         reasoning_item.summary.append(Summary(text="", type="summary_text"))
@@ -758,6 +778,8 @@ class ChatCmplStreamHandler:
             # Handle reasoning content from 3rd party platforms
             if hasattr(delta, "reasoning"):
                 reasoning_text = delta.reasoning
+                if not isinstance(reasoning_text, str):
+                    reasoning_text = ""
                 if reasoning_text and not state.reasoning_content_index_and_output:
                     reasoning_item = ResponseReasoningItem(
                         id=FAKE_RESPONSES_ID,
@@ -765,8 +787,9 @@ class ChatCmplStreamHandler:
                         content=[Content(text="", type="reasoning_text")],
                         type="reasoning",
                     )
-                    if state.provider_data:
-                        reasoning_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                    reasoning_provider_data = state.provider_data.copy()
+                    reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY] = "reasoning"
+                    reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
                     state.reasoning_content_index_and_output = (0, reasoning_item)
                     yield ResponseOutputItemAddedEvent(
                         item=reasoning_item,

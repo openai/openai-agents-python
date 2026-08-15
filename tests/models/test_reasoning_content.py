@@ -19,9 +19,317 @@ from openai.types.responses import (
 )
 
 from agents.model_settings import ModelSettings
+from agents.models.chatcmpl_converter import Converter
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
+
+
+def test_plaintext_reasoning_round_trips_on_its_assistant_message() -> None:
+    message = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I should calculate this carefully.",
+        }
+    )
+
+    items = Converter.message_to_output_items(
+        message,
+        provider_data={"model": "openrouter/reasoning-model", "response_id": "chatcmpl-test"},
+    )
+    messages = Converter.items_to_messages(
+        [item.model_dump() for item in items], model="openrouter/reasoning-model"
+    )
+
+    assert len(items) == 2
+    assert isinstance(items[0], ResponseReasoningItem)
+    assert items[0].content
+    assert items[0].content[0].text == "I should calculate this carefully."
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I should calculate this carefully.",
+        }
+    ]
+
+
+def test_plaintext_reasoning_round_trips_with_a_tool_call() -> None:
+    message = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning": "I should call the weather tool.",
+            "tool_calls": [
+                {
+                    "id": "call-weather",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city":"Tokyo"}'},
+                }
+            ],
+        }
+    )
+
+    items = Converter.message_to_output_items(
+        message,
+        provider_data={"model": "openrouter/reasoning-model"},
+    )
+    messages = Converter.items_to_messages(
+        [item.model_dump() for item in items], model="openrouter/reasoning-model"
+    )
+
+    assert len(messages) == 1
+    assistant = messages[0]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] is None
+    assert assistant["reasoning"] == "I should call the weather tool."  # type: ignore[typeddict-item]
+    assert len(assistant["tool_calls"]) == 1  # type: ignore[typeddict-item]
+
+
+def test_plaintext_reasoning_is_not_replayed_to_a_different_model() -> None:
+    message = ChatCompletionMessage.model_validate(
+        {"role": "assistant", "content": "Answer", "reasoning": "Private reasoning"}
+    )
+    items = Converter.message_to_output_items(
+        message,
+        provider_data={"model": "openrouter/model-a"},
+    )
+
+    messages = Converter.items_to_messages(
+        [item.model_dump() for item in items], model="openrouter/model-b"
+    )
+
+    assert len(messages) == 1
+    assert "reasoning" not in messages[0]
+
+
+@pytest.mark.parametrize(
+    "intervening_reasoning",
+    [
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Foreign reasoning", "type": "reasoning_text"}],
+            "provider_data": {
+                "model": "openrouter/model-b",
+                "_chat_completions_reasoning_field": "reasoning",
+            },
+        },
+        {
+            "id": "__fake_id__",
+            "summary": [{"text": "Higher-fidelity reasoning", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": None,
+            "provider_data": {"model": "openrouter/model-a"},
+        },
+    ],
+)
+def test_intervening_reasoning_item_clears_pending_plaintext_reasoning(
+    intervening_reasoning: dict[str, Any],
+) -> None:
+    items: list[Any] = [
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Stale reasoning", "type": "reasoning_text"}],
+            "provider_data": {
+                "model": "openrouter/model-a",
+                "_chat_completions_reasoning_field": "reasoning",
+            },
+        },
+        intervening_reasoning,
+        {
+            "id": "__fake_id__",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Answer",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        },
+    ]
+
+    messages = Converter.items_to_messages(items, model="openrouter/model-a")
+
+    assert len(messages) == 1
+    assert "reasoning" not in messages[0]
+
+
+def test_plaintext_reasoning_item_clears_pending_native_reasoning_content() -> None:
+    items: list[Any] = [
+        {
+            "id": "__fake_id__",
+            "summary": [{"text": "Stale native reasoning", "type": "summary_text"}],
+            "type": "reasoning",
+            "content": None,
+            "provider_data": {"model": "deepseek-r1"},
+        },
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Fresh plaintext reasoning", "type": "reasoning_text"}],
+            "provider_data": {
+                "model": "deepseek-r1",
+                "_chat_completions_reasoning_field": "reasoning",
+            },
+        },
+        {
+            "id": "__fake_id__",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Answer",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        },
+    ]
+
+    messages = Converter.items_to_messages(items, model="deepseek-r1")
+
+    assert len(messages) == 1
+    assert messages[0]["reasoning"] == "Fresh plaintext reasoning"  # type: ignore[typeddict-item]
+    assert "reasoning_content" not in messages[0]
+
+
+def test_native_thinking_blocks_take_precedence_over_marked_plaintext_reasoning() -> None:
+    items: list[Any] = [
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Plaintext reasoning", "type": "reasoning_text"}],
+            "provider_data": {
+                "model": "anthropic/claude-x",
+                "_chat_completions_reasoning_field": "reasoning",
+                "thinking_blocks": [
+                    {"type": "thinking", "thinking": "Native thinking", "signature": "sig"}
+                ],
+            },
+        },
+        {
+            "id": "__fake_id__",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Answer",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        items,
+        model="anthropic/claude-x",
+        preserve_thinking_blocks=True,
+    )
+
+    assert len(messages) == 1
+    assert messages[0]["thinking_blocks"] == [  # type: ignore[typeddict-item]
+        {"type": "thinking", "thinking": "Native thinking", "signature": "sig"}
+    ]
+    assert "reasoning" not in messages[0]
+
+
+@pytest.mark.parametrize("native_thinking_blocks", [False, True])
+def test_plaintext_reasoning_item_clears_pending_thinking_blocks(
+    native_thinking_blocks: bool,
+) -> None:
+    provider_data: dict[str, Any] = {"model": "anthropic/claude-x"}
+    if native_thinking_blocks:
+        provider_data["thinking_blocks"] = [
+            {"type": "thinking", "thinking": "Stale thinking", "signature": "sig"}
+        ]
+    items: list[Any] = [
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Stale thinking", "type": "reasoning_text"}],
+            "provider_data": provider_data,
+        },
+        {
+            "id": "__fake_id__",
+            "summary": [],
+            "type": "reasoning",
+            "content": [{"text": "Fresh plaintext reasoning", "type": "reasoning_text"}],
+            "provider_data": {
+                "model": "anthropic/claude-x",
+                "_chat_completions_reasoning_field": "reasoning",
+            },
+        },
+        {
+            "id": "__fake_id__",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Answer",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        items,
+        model="anthropic/claude-x",
+        preserve_thinking_blocks=True,
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning": "Fresh plaintext reasoning",
+        }
+    ]
+
+
+def test_reasoning_content_takes_precedence_over_plaintext_reasoning() -> None:
+    message = ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning": "Plaintext reasoning",
+            "reasoning_content": "Existing reasoning content",
+        }
+    )
+
+    items = Converter.message_to_output_items(
+        message,
+        provider_data={"model": "deepseek-reasoner"},
+    )
+    messages = Converter.items_to_messages(
+        [item.model_dump() for item in items], model="deepseek-reasoner"
+    )
+
+    reasoning_item = cast(ResponseReasoningItem, items[0])
+    assert reasoning_item.content is None
+    assert reasoning_item.summary[0].text == "Existing reasoning content"
+    assert messages[0]["reasoning_content"] == "Existing reasoning content"  # type: ignore[typeddict-item]
+    assert "reasoning" not in messages[0]
 
 
 # Helper functions to create test objects consistently

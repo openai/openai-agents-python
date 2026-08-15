@@ -79,9 +79,10 @@ if TYPE_CHECKING:
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
-    """Internal wrapper used to carry normalized reasoning content."""
+    """Internal wrapper used to carry normalized reasoning fields."""
 
     reasoning_content: str = ""
+    reasoning: str = ""
 
 
 def _usage_payload(response: Any) -> Any | None:
@@ -200,7 +201,7 @@ def _flatten_any_llm_reasoning_value(value: Any) -> str:
 
 def _extract_any_llm_reasoning_text(value: Any) -> str:
     direct_reasoning_content = getattr(value, "reasoning_content", None)
-    if isinstance(direct_reasoning_content, str):
+    if isinstance(direct_reasoning_content, str) and direct_reasoning_content:
         return direct_reasoning_content
 
     reasoning = getattr(value, "reasoning", None)
@@ -208,7 +209,7 @@ def _extract_any_llm_reasoning_text(value: Any) -> str:
         reasoning = value.get("reasoning")
         if reasoning is None:
             direct_reasoning_content = value.get("reasoning_content")
-            if isinstance(direct_reasoning_content, str):
+            if isinstance(direct_reasoning_content, str) and direct_reasoning_content:
                 return direct_reasoning_content
 
     if reasoning is None:
@@ -232,6 +233,11 @@ def _normalize_any_llm_message(message: ChatCompletionMessage) -> ChatCompletion
             _convert_any_llm_tool_call_to_openai(tool_call) for tool_call in message.tool_calls
         ]
 
+    reasoning_content = getattr(message, "reasoning_content", "")
+    if not isinstance(reasoning_content, str):
+        reasoning_content = ""
+    reasoning = "" if reasoning_content else _extract_any_llm_reasoning_text(message)
+
     return InternalChatCompletionMessage(
         content=message.content,
         refusal=message.refusal,
@@ -239,7 +245,8 @@ def _normalize_any_llm_message(message: ChatCompletionMessage) -> ChatCompletion
         annotations=message.annotations,
         audio=message.audio,
         tool_calls=tool_calls,
-        reasoning_content=_extract_any_llm_reasoning_text(message),
+        reasoning_content=reasoning_content,
+        reasoning=reasoning,
     )
 
 
@@ -1527,7 +1534,7 @@ class AnyLLMModel(Model):
                         if isinstance(tool_call, dict) and tool_call.get("id"):
                             # Create a separate assistant message for each tool call.
                             # Only the first split keeps the assistant text/thinking
-                            # blocks/reasoning content; the rest carry tool_calls only,
+                            # blocks/reasoning fields; the rest carry tool_calls only,
                             # to avoid duplicating signed thinking blocks (which
                             # Anthropic rejects) and assistant text in history.
                             single_tool_msg = message_dict.copy()
@@ -1537,6 +1544,7 @@ class AnyLLMModel(Model):
                                     "content",
                                     "thinking_blocks",
                                     "reasoning_content",
+                                    "reasoning",
                                 ):
                                     single_tool_msg.pop(shared_field, None)
                             tool_call_messages[str(tool_call["id"])] = (
