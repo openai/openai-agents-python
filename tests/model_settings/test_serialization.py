@@ -127,6 +127,7 @@ def test_all_fields_serialization() -> None:
         context_management=[{"type": "compaction", "compact_threshold": 200000}],
         prompt_cache_options={"mode": "explicit", "ttl": "30m"},
         preserve_raw_usage=True,
+        timeout=1.25,
     )
 
     # Verify that every single field is set to a non-None value
@@ -158,10 +159,11 @@ def test_gpt_5_6_reasoning_and_prompt_cache_serialization() -> None:
 def test_usage_preservation_is_appended_to_public_field_order() -> None:
     field_names = [field.name for field in fields(ModelSettings)]
 
-    assert field_names[-3:] == [
+    assert field_names[-4:] == [
         "context_management",
         "prompt_cache_options",
         "preserve_raw_usage",
+        "timeout",
     ]
 
 

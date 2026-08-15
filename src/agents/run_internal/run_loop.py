@@ -2081,6 +2081,7 @@ async def run_single_turn_streamed(
         get_retry_advice=model.get_retry_advice,
         previous_response_id=previous_response_id,
         conversation_id=conversation_id,
+        timeout=model_settings.timeout,
         failed_retry_attempts_out=stream_failed_retry_attempts,
         replay_unsafe_request=any(
             isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
@@ -2463,6 +2464,7 @@ async def get_new_response(
             get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
+            timeout=model_settings.timeout,
             replay_unsafe_request=any(
                 isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
             ),

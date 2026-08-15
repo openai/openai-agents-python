@@ -9,7 +9,7 @@ from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.shared import Reasoning
-from pydantic import GetCoreSchemaHandler, TypeAdapter
+from pydantic import Field, FiniteFloat, GetCoreSchemaHandler, TypeAdapter
 from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 
@@ -81,6 +81,7 @@ _TRACEABLE_MODEL_SETTING_FIELDS = (
     "retry",
     "context_management",
     "prompt_cache_options",
+    "timeout",
 )
 
 
@@ -211,6 +212,14 @@ class ModelSettings:
     usage from the provider; use ``include_usage`` separately when a streaming provider requires it.
     """
 
+    timeout: Annotated[FiniteFloat, Field(gt=0)] | None = None
+    """Maximum duration in seconds for each model-call attempt.
+
+    The timeout is enforced cooperatively through normal asyncio cancellation. It bounds the
+    complete model attempt, including transport waits, but does not replace provider-specific
+    phase timeout configuration or bound the full run, tool calls, or retry backoff.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -239,6 +248,7 @@ class ModelSettings:
             context_management: list[ContextManagement] | None = None,
             prompt_cache_options: PromptCacheOptions | None = None,
             preserve_raw_usage: bool | None = None,
+            timeout: Annotated[FiniteFloat, Field(gt=0)] | None = None,
         ) -> None: ...
 
     def resolve(self, override: ModelSettings | dict[str, Any] | None) -> ModelSettings:

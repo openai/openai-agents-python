@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import json
@@ -80,7 +81,10 @@ from ..usage import (
     _attach_raw_usage_snapshot,
     _raw_usage_snapshot,
 )
-from ..util._error_tracing import REDACTED_TRACE_ERROR_MESSAGE
+from ..util._error_tracing import (
+    REDACTED_TRACE_ERROR_MESSAGE,
+    record_current_task_model_timeout_on_span,
+)
 
 
 class ModelScriptError(Exception):
@@ -350,6 +354,13 @@ class ScriptedModel(Model):
                     retry_advice_synced = True
                     raise step.error
                 return self._model_response(step, call.model_settings)
+            except asyncio.CancelledError:
+                record_current_task_model_timeout_on_span(
+                    span,
+                    message="Error",
+                    trace_include_sensitive_data=call.tracing.include_data(),
+                )
+                raise
             except Exception as error:
                 if not retry_advice_synced:
                     self._forget_retry_advice(error)
@@ -426,6 +437,13 @@ class ScriptedModel(Model):
                 )
             for event in events:
                 yield event
+        except asyncio.CancelledError:
+            record_current_task_model_timeout_on_span(
+                span,
+                message="Error",
+                trace_include_sensitive_data=call.tracing.include_data(),
+            )
+            raise
         except Exception as error:
             if not retry_advice_synced:
                 self._forget_retry_advice(error)

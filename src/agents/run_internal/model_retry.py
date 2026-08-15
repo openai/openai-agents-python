@@ -4,12 +4,13 @@ import asyncio
 import random
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from inspect import isawaitable
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx2
 from openai import APIConnectionError, APITimeoutError, BadRequestError
 
 from .._httpx_compat import is_legacy_httpx_instance
+from ..exceptions import ModelTimeoutError
 from ..items import ModelResponse, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
 from ..models._retry_runtime import (
@@ -34,11 +35,13 @@ from ..retry import (
     retry_policy_retries_safe_transport_errors,
 )
 from ..usage import RequestUsage, Usage
+from ..util._error_tracing import mark_model_timeout_task
 
 GetResponseCallable = Callable[[], Awaitable[ModelResponse]]
 GetStreamCallable = Callable[[], AsyncIterator[TResponseStreamEvent]]
 RewindCallable = Callable[[], Awaitable[None]]
 GetRetryAdviceCallable = Callable[[ModelRetryAdviceRequest], ModelRetryAdvice | None]
+T = TypeVar("T")
 
 DEFAULT_INITIAL_DELAY_SECONDS = 0.25
 DEFAULT_MAX_DELAY_SECONDS = 2.0
@@ -69,6 +72,9 @@ def _is_conversation_locked_error(error: Exception) -> bool:
 
 
 def _is_abort_like_error(error: Exception) -> bool:
+    if isinstance(error, ModelTimeoutError):
+        return False
+
     if isinstance(error, asyncio.CancelledError):
         return True
 
@@ -120,7 +126,7 @@ def _normalize_retry_error(
         is_abort=_is_abort_like_error(error),
         is_network_error=_is_network_like_error(error),
         is_timeout=any(
-            isinstance(candidate, APITimeoutError | TimeoutError)
+            isinstance(candidate, APITimeoutError | TimeoutError | ModelTimeoutError)
             for candidate in _iter_error_chain(error)
         ),
     )
@@ -202,6 +208,111 @@ async def _sleep_for_retry(delay: float) -> None:
     if delay <= 0:
         return
     await asyncio.sleep(delay)
+
+
+async def _drain_model_attempt_task(task: asyncio.Future[Any]) -> BaseException | None:
+    """Wait for a cancelled model task without letting its outcome replace cancellation."""
+    try:
+        await task
+    except BaseException as error:
+        return error
+    return None
+
+
+async def _await_cleanup_ignoring_cancellation(
+    cleanup_task: asyncio.Task[BaseException | None],
+) -> BaseException | None:
+    """Finish cooperative cleanup before restoring an already-received parent cancellation."""
+    while True:
+        try:
+            return await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if cleanup_task.done():
+                return cleanup_task.result()
+
+
+async def _cancel_and_drain_model_attempt_task(
+    task: asyncio.Future[Any],
+    timeout_error: ModelTimeoutError | None = None,
+    *,
+    cancel_cleanup: bool = False,
+) -> BaseException | None:
+    if timeout_error is not None:
+        mark_model_timeout_task(task, timeout_error)
+    task.cancel()
+    if cancel_cleanup:
+        # Give a cancelled model operation one event-loop turn to enter its owner-owned cleanup,
+        # then interrupt a cooperative cleanup wait that must not outlive the SDK deadline.
+        # Caller-owned cancellation and early consumer close do not opt into this second cancel.
+        await asyncio.sleep(0)
+        if not task.done():
+            task.cancel()
+    cleanup_task = asyncio.create_task(_drain_model_attempt_task(task))
+    try:
+        return await asyncio.shield(cleanup_task)
+    except asyncio.CancelledError:
+        await _await_cleanup_ignoring_cancellation(cleanup_task)
+        raise
+
+
+async def _run_stream_attempt_in_one_task(
+    get_stream: GetStreamCallable,
+    requests: asyncio.Queue[None],
+    results: asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]],
+) -> None:
+    """Own stream construction, pulls, and cleanup in one task context."""
+    stream: AsyncIterator[TResponseStreamEvent] | None = None
+    terminal_result: tuple[str, TResponseStreamEvent | BaseException | None] | None = None
+    try:
+        stream = get_stream()
+        while True:
+            await requests.get()
+            try:
+                event = await stream.__anext__()
+            except StopAsyncIteration:
+                terminal_result = ("done", None)
+                break
+            except BaseException as error:
+                terminal_result = ("error", error)
+                break
+            results.put_nowait(("event", event))
+    except BaseException as error:
+        terminal_result = ("error", error)
+    finally:
+        if stream is not None:
+            await _close_async_iterator_quietly(stream)
+    if terminal_result is not None:
+        results.put_nowait(terminal_result)
+
+
+async def _await_model_attempt(
+    awaitable: Awaitable[T],
+    timeout: float | None,
+    *,
+    timeout_error_seconds: float | None = None,
+) -> T:
+    """Await one model operation and turn only this deadline into a timeout error."""
+    if timeout is None:
+        return await awaitable
+
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, pending = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        await _cancel_and_drain_model_attempt_task(task)
+        raise
+
+    if task in done:
+        return await task
+
+    timeout_error = ModelTimeoutError(
+        timeout_error_seconds if timeout_error_seconds is not None else timeout
+    )
+    await _cancel_and_drain_model_attempt_task(task, timeout_error, cancel_cleanup=True)
+    # A traceback retains this frame's locals. Discard every reference that can keep the
+    # cancelled provider task, its cleanup exception, or provider payload locals reachable.
+    del awaitable, task, done, pending
+    raise timeout_error from None
 
 
 def _build_zero_request_usage_entry() -> RequestUsage:
@@ -468,6 +579,7 @@ async def get_response_with_retry(
     get_retry_advice: GetRetryAdviceCallable,
     previous_response_id: str | None,
     conversation_id: str | None,
+    timeout: float | None = None,
     replay_unsafe_request: bool = False,
 ) -> ModelResponse:
     request_attempt = 1
@@ -497,7 +609,7 @@ async def get_response_with_retry(
                 ),
                 websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
             ):
-                response = await get_response()
+                response = await _await_model_attempt(get_response(), timeout)
             response.usage = apply_retry_attempt_usage(
                 response.usage,
                 failed_policy_attempts + compatibility_retries_taken,
@@ -577,6 +689,7 @@ async def stream_response_with_retry(
     get_retry_advice: GetRetryAdviceCallable,
     previous_response_id: str | None,
     conversation_id: str | None,
+    timeout: float | None = None,
     failed_retry_attempts_out: list[int] | None = None,
     replay_unsafe_request: bool = False,
 ) -> AsyncGenerator[TResponseStreamEvent, None]:
@@ -595,6 +708,8 @@ async def stream_response_with_retry(
     while True:
         emitted_retry_unsafe_event = False
         stream: AsyncIterator[TResponseStreamEvent] | None = None
+        stream_owner: asyncio.Task[None] | None = None
+        deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
         try:
             disable_provider_managed_retries = _should_disable_provider_managed_retries(
                 retry_settings,
@@ -602,33 +717,113 @@ async def stream_response_with_retry(
                 stateful_request=stateful_request,
                 replay_unsafe_request=replay_unsafe_request,
             )
-            # Pull stream events under the retry-disable context, but yield them outside it so
-            # unrelated model calls made by the consumer do not inherit this setting.
-            with (
-                provider_managed_retries_disabled(disable_provider_managed_retries),
-                websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
-            ):
-                stream = get_stream()
-            while True:
-                try:
-                    with (
-                        provider_managed_retries_disabled(disable_provider_managed_retries),
-                        websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
-                    ):
-                        event = await stream.__anext__()
-                except StopAsyncIteration:
-                    await _close_async_iterator_quietly(stream)
-                    return
-                if _stream_event_blocks_retry(event):
-                    emitted_retry_unsafe_event = True
-                if failed_retry_attempts_out is not None:
-                    failed_retry_attempts_out[:] = [
-                        failed_policy_attempts + compatibility_retries_taken
-                    ]
-                yield event
+            stream_requests: asyncio.Queue[None] | None = None
+            stream_results: (
+                asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]] | None
+            ) = None
+            if timeout is None:
+                # Pull stream events under the retry-disable context, but yield them outside it
+                # so unrelated model calls made by the consumer do not inherit this setting.
+                with (
+                    provider_managed_retries_disabled(disable_provider_managed_retries),
+                    websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
+                ):
+                    stream = get_stream()
+            else:
+                stream_requests = asyncio.Queue()
+                stream_results = asyncio.Queue()
+                with (
+                    provider_managed_retries_disabled(disable_provider_managed_retries),
+                    websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
+                ):
+                    stream_owner = asyncio.create_task(
+                        _run_stream_attempt_in_one_task(
+                            get_stream,
+                            stream_requests,
+                            stream_results,
+                        )
+                    )
+            try:
+                while True:
+                    try:
+                        if timeout is None:
+                            assert stream is not None
+                            with (
+                                provider_managed_retries_disabled(disable_provider_managed_retries),
+                                websocket_pre_event_retries_disabled(
+                                    disable_websocket_pre_event_retry
+                                ),
+                            ):
+                                event = await stream.__anext__()
+                        else:
+                            assert stream_owner is not None
+                            assert stream_requests is not None
+                            assert stream_results is not None
+                            assert deadline is not None
+                            stream_requests.put_nowait(None)
+                            remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+                            try:
+                                result_kind, result_value = await _await_model_attempt(
+                                    stream_results.get(),
+                                    remaining,
+                                    timeout_error_seconds=timeout,
+                                )
+                            except ModelTimeoutError as error:
+                                await _cancel_and_drain_model_attempt_task(
+                                    stream_owner,
+                                    error,
+                                    cancel_cleanup=True,
+                                )
+                                raise
+                            except asyncio.CancelledError:
+                                await _cancel_and_drain_model_attempt_task(stream_owner)
+                                raise
+                            if result_kind == "done":
+                                remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+                                await _await_model_attempt(
+                                    stream_owner,
+                                    remaining,
+                                    timeout_error_seconds=timeout,
+                                )
+                                return
+                            if result_kind == "error":
+                                remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+                                await _await_model_attempt(
+                                    stream_owner,
+                                    remaining,
+                                    timeout_error_seconds=timeout,
+                                )
+                                assert isinstance(result_value, BaseException)
+                                raise result_value
+                            assert result_kind == "event"
+                            assert result_value is not None
+                            assert not isinstance(result_value, BaseException)
+                            event = result_value
+                    except StopAsyncIteration:
+                        if stream_owner is None:
+                            await _close_async_iterator_quietly(stream)
+                        return
+                    if _stream_event_blocks_retry(event):
+                        emitted_retry_unsafe_event = True
+                    if failed_retry_attempts_out is not None:
+                        failed_retry_attempts_out[:] = [
+                            failed_policy_attempts + compatibility_retries_taken
+                        ]
+                    yield event
+            finally:
+                if stream_owner is not None and not stream_owner.done():
+                    await _cancel_and_drain_model_attempt_task(stream_owner)
             return
         except BaseException as error:
-            await _close_async_iterator_quietly(stream)
+            if isinstance(error, ModelTimeoutError):
+                # The timed owner has already been cancelled and drained. Do not retain its
+                # task or result queues in the public timeout traceback frame.
+                stream = None
+                stream_owner = None
+                stream_requests = None
+                stream_results = None
+            if stream_owner is None:
+                await _close_async_iterator_quietly(stream)
             if isinstance(error, asyncio.CancelledError | GeneratorExit):
                 raise
             if not isinstance(error, Exception):

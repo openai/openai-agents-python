@@ -1,12 +1,46 @@
+import asyncio
 import contextlib
 from collections.abc import Iterator
 from typing import Any
 
 from .. import _debug
+from ..exceptions import ModelTimeoutError
 from ..logger import logger
 from ..tracing import Span, SpanError, get_current_span
 
 REDACTED_TRACE_ERROR_MESSAGE = "Error details are redacted."
+_MODEL_TIMEOUT_ERROR_ATTR = "_openai_agents_model_timeout_error"
+
+
+def mark_model_timeout_task(task: asyncio.Future[Any], error: ModelTimeoutError) -> None:
+    """Mark a model-owned task so cancellation-aware spans can record its timeout."""
+    setattr(task, _MODEL_TIMEOUT_ERROR_ATTR, error)
+
+
+def get_current_task_model_timeout_error() -> ModelTimeoutError | None:
+    """Return the timeout that is cancelling the current model-owned task, if any."""
+    task = asyncio.current_task()
+    error = getattr(task, _MODEL_TIMEOUT_ERROR_ATTR, None) if task is not None else None
+    return error if isinstance(error, ModelTimeoutError) else None
+
+
+def record_current_task_model_timeout_on_span(
+    span: Span[Any],
+    *,
+    message: str,
+    trace_include_sensitive_data: bool,
+) -> bool:
+    """Record a marked timeout cancellation on the current model span."""
+    timeout_error = get_current_task_model_timeout_error()
+    if timeout_error is None:
+        return False
+    record_model_error_on_span(
+        span,
+        message=message,
+        error=timeout_error,
+        trace_include_sensitive_data=trace_include_sensitive_data,
+    )
+    return True
 
 
 def get_trace_error(
@@ -102,6 +136,13 @@ def model_span_errors(
     """
     try:
         yield
+    except asyncio.CancelledError:
+        record_current_task_model_timeout_on_span(
+            span,
+            message=message,
+            trace_include_sensitive_data=trace_include_sensitive_data,
+        )
+        raise
     except Exception as error:
         record_model_error_on_span(
             span,

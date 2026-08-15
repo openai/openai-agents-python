@@ -8,6 +8,7 @@ tests pin the same behavior for the other providers.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -345,6 +346,38 @@ def test_failing_span_recording_preserves_the_provider_exception(
                     raise original
 
     assert exc_info.value is original
+
+
+@pytest.mark.asyncio
+async def test_marked_model_timeout_cancellation_records_span_error() -> None:
+    from agents.exceptions import ModelTimeoutError
+    from agents.tracing import generation_span
+    from agents.util._error_tracing import mark_model_timeout_task, model_span_errors
+
+    started = asyncio.Event()
+
+    async def run() -> None:
+        with trace(workflow_name="test"):
+            with generation_span() as span:
+                with model_span_errors(
+                    span,
+                    message="Error getting response",
+                    trace_include_sensitive_data=True,
+                ):
+                    started.set()
+                    await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    await started.wait()
+    mark_model_timeout_task(task, ModelTimeoutError(0.01))
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    error = _span_error("generation")
+    assert error is not None
+    assert error["data"]["error"] == "Model call timed out after 0.01 seconds."
 
 
 class _TerminalFailureEvent:

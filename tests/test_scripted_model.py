@@ -51,6 +51,7 @@ from agents import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
     ModelRetrySettings,
+    ModelTimeoutError,
     RunConfig,
     Runner,
     handoff,
@@ -1322,6 +1323,36 @@ async def test_scripted_model_preserves_unformattable_responder_error(streamed: 
                 "name": "UnformattableError",
                 "message": "Unrenderable UnformattableError",
             },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_scripted_model_timeout_records_generation_span_error(streamed: bool) -> None:
+    async def respond(_call: ModelCall) -> Any:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    model = ScriptedModel([ModelStep.respond(respond)], emit_traces=True)
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(timeout=0.01),
+    )
+
+    with pytest.raises(ModelTimeoutError):
+        if streamed:
+            result = Runner.run_streamed(agent, "hi")
+            async for _event in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "hi")
+
+    assert fetch_span_errors("generation") == [
+        {
+            "message": "Error",
+            "data": {"error": "Model call timed out after 0.01 seconds."},
         }
     ]
 

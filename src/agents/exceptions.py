@@ -474,6 +474,16 @@ class ModelRefusalError(AgentsException):
         super().__init__(f"Model refused to produce output: {refusal}")
 
 
+class ModelTimeoutError(AgentsException):
+    """Exception raised when a model-call attempt exceeds its configured timeout."""
+
+    timeout_seconds: float
+
+    def __init__(self, timeout_seconds: float):
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"Model call timed out after {timeout_seconds:g} seconds.")
+
+
 class UserError(AgentsException):
     """Exception raised when the user makes an error using the SDK."""
 
