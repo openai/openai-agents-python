@@ -565,6 +565,11 @@ async def save_result_to_session(
     if session is None:
         return 0
 
+    # Compaction is dispatched with the unfiltered run wrapper below: it is a billed
+    # model call whose usage belongs to this run, and _call_session_method still gates
+    # on whether run_compaction itself opts in. History calls keep the session-level
+    # contract, so a compaction session stays on the legacy scope.
+    run_wrapper = wrapper
     wrapper = _get_session_wrapper(session, wrapper)
 
     new_run_items: list[RunItem]
@@ -691,7 +696,7 @@ async def save_result_to_session(
         await _call_session_method(
             session.run_compaction,
             compaction_args,
-            wrapper=wrapper,
+            wrapper=run_wrapper,
         )
 
     return saved_run_items_count

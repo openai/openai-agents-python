@@ -300,18 +300,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             return
 
-        usage = Usage(
-            requests=1,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens or input_tokens + output_tokens,
-        )
+        usage_kwargs: dict[str, Any] = {
+            "requests": 1,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens or input_tokens + output_tokens,
+        }
         input_details = getattr(compacted_usage, "input_tokens_details", None)
         if isinstance(input_details, InputTokensDetails):
-            usage.input_tokens_details = input_details
+            usage_kwargs["input_tokens_details"] = input_details
         output_details = getattr(compacted_usage, "output_tokens_details", None)
         if isinstance(output_details, OutputTokensDetails):
-            usage.output_tokens_details = output_details
+            usage_kwargs["output_tokens_details"] = output_details
+
+        # Constructed rather than assigned after the fact so __post_init__ normalizes
+        # detail objects whose optional fields the provider left as None.
+        usage = Usage(**usage_kwargs)
 
         self.compaction_usage.add(usage)
         if wrapper is not None:
