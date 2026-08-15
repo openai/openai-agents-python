@@ -207,3 +207,32 @@ def test_tool_approval_item_preserves_positional_type_argument() -> None:
     assert approval.type == "tool_approval_item"
     assert approval.tool_name == "lookup_account"
     assert approval.tool_namespace == "billing"
+
+
+def test_run_context_per_call_decision_overrides_sticky_decision() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    # Rejecting one call after approving the tool for the session applies to that call only.
+    wrapper.approve_tool(approval("call-1"), always_approve=True)
+    wrapper.reject_tool(approval("call-2"), rejection_message="denied by user")
+    assert wrapper.is_tool_approved("tool_call", "call-2") is False
+    assert wrapper.is_tool_approved("tool_call", "call-3") is True
+
+    # The same holds in the other direction.
+    other: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    other.reject_tool(approval("call-4"), always_reject=True)
+    other.approve_tool(approval("call-5"))
+    assert other.is_tool_approved("tool_call", "call-5") is True
+    assert other.is_tool_approved("tool_call", "call-6") is False

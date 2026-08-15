@@ -616,6 +616,21 @@ class RunContextWrapper(Generic[TContext]):
         if approval_entry is None:
             return None
 
+        approved_ids = (
+            set(approval_entry.approved) if isinstance(approval_entry.approved, list) else set()
+        )
+        rejected_ids = (
+            set(approval_entry.rejected) if isinstance(approval_entry.rejected, list) else set()
+        )
+
+        # A decision made for this exact call is the more recent one, so it wins over a
+        # sticky value. Sticky decisions are stored as bools and per-call decisions as
+        # lists, so both forms can be present on the same record.
+        if call_id in approved_ids:
+            return True
+        if call_id in rejected_ids:
+            return False
+
         # Check for permanent approval/rejection
         if approval_entry.approved is True and approval_entry.rejected is True:
             # Approval takes precedence
@@ -627,17 +642,6 @@ class RunContextWrapper(Generic[TContext]):
         if approval_entry.rejected is True:
             return False
 
-        approved_ids = (
-            set(approval_entry.approved) if isinstance(approval_entry.approved, list) else set()
-        )
-        rejected_ids = (
-            set(approval_entry.rejected) if isinstance(approval_entry.rejected, list) else set()
-        )
-
-        if call_id in approved_ids:
-            return True
-        if call_id in rejected_ids:
-            return False
         # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
         return None
 
@@ -997,8 +1001,16 @@ class RunContextWrapper(Generic[TContext]):
             if isinstance(opposite, list) and call_id in opposite:
                 opposite.remove(call_id)
 
+            # A sticky decision leaves a bool in this field, and a per-call decision
+            # taken afterwards still has to be recorded, so start a list for it.
             target = approval_entry.approved if approve else approval_entry.rejected
-            if isinstance(target, list) and call_id not in target:
+            if not isinstance(target, list):
+                target = []
+                if approve:
+                    approval_entry.approved = target
+                else:
+                    approval_entry.rejected = target
+            if call_id not in target:
                 target.append(call_id)
             if approve:
                 self._clear_rejection_message(approval_entry, call_id)
