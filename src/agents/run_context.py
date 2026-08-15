@@ -1316,7 +1316,9 @@ class RunContextWrapper(Generic[TContext]):
                     call_id for call_id in decision if call_id not in self._tool_invocations
                 )
 
-    def _rebuild_hosted_mcp_approvals(self, approvals: Any) -> None:
+    def _rebuild_hosted_mcp_approvals(
+        self, approvals: Any, *, per_call_overrides_sticky: bool = True
+    ) -> None:
         """Restore typed hosted MCP approval records from serialized state."""
         if not isinstance(approvals, list):
             return
@@ -1351,7 +1353,9 @@ class RunContextWrapper(Generic[TContext]):
                 key = ("hosted_mcp_query", tool_name, request_id)
             else:
                 continue
-            self._approvals[key] = self._restore_approval_record(decision)
+            self._approvals[key] = self._restore_approval_record(
+                decision, per_call_overrides_sticky=per_call_overrides_sticky
+            )
 
     def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
         """Create a child context that shares approvals and usage with tool input set."""

@@ -3365,7 +3365,11 @@ async def _build_run_state_from_json(
         int(part) for part in _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
     )
     if (schema_major, schema_minor) >= (hosted_mcp_major, hosted_mcp_minor):
-        context._rebuild_hosted_mcp_approvals(context_data.get("hosted_mcp_approvals", []))
+        context._rebuild_hosted_mcp_approvals(
+            context_data.get("hosted_mcp_approvals", []),
+            per_call_overrides_sticky=(schema_major, schema_minor)
+            >= (per_call_major, per_call_minor),
+        )
     if (schema_major, schema_minor) >= (1, 15):
         context._mark_restored_unbound_approval_call_ids()
     serialized_tool_input = context_data.get("tool_input")
