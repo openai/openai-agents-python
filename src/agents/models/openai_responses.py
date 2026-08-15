@@ -231,6 +231,17 @@ class OpenAIResponsesWebSocketOptions(TypedDict):
     """
 
 
+def _count_transport_request_without_usage(response: object) -> None:
+    """Record a completed request whose provider payload carried no usage.
+
+    Only the transports this class owns call this. ``OpenAIHostedMultiAgentModel`` overrides
+    ``_fetch_response`` to multiplex several provider responses into one and reports its counts
+    separately, so it is excluded by construction.
+    """
+    if isinstance(response, Response) and response.usage is None:
+        _mark_request_completed_without_usage(response)
+
+
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
 
@@ -274,6 +285,8 @@ class _ResponseStreamWithRequestId:
         event_type = getattr(event, "type", None)
         if event_type in self._TERMINAL_EVENT_TYPES:
             self._yielded_terminal_event = True
+        if event_type == "response.completed":
+            _count_transport_request_without_usage(getattr(event, "response", None))
         return event
 
     async def aclose(self) -> None:
@@ -535,7 +548,9 @@ class OpenAIResponsesModel(Model):
                     if response.usage is not None
                     else Usage(requests=_requests_for_response_without_usage(response))
                 )
-                if response.usage is not None:
+                if response.usage is not None or usage.requests:
+                    # Keep the span in step with the returned usage, so request-count dashboards
+                    # built on spans do not disagree with the run.
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
 
                 if tracing.include_data():
@@ -675,6 +690,10 @@ class OpenAIResponsesModel(Model):
                     span_response.span_data.usage = model_usage_to_span_usage(
                         _response_usage_to_usage(final_response.usage)
                     )
+                elif final_response is not None and _requests_for_response_without_usage(
+                    final_response
+                ):
+                    span_response.span_data.usage = model_usage_to_span_usage(Usage(requests=1))
 
             except Exception as e:
                 span_response.set_error(
@@ -749,11 +768,7 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response = await client.responses.create(**create_kwargs)
-            if isinstance(response, Response) and response.usage is None:
-                # This call is one request even though the provider reported no usage. Marked
-                # here rather than in `get_response` so subclasses that override `_fetch_response`
-                # to multiplex several provider responses keep their own request accounting.
-                _mark_request_completed_without_usage(response)
+            _count_transport_request_without_usage(response)
             return cast(Response, response)
 
         streaming_response = getattr(client.responses, "with_streaming_response", None)
@@ -1201,8 +1216,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 f"{terminal_event_hint}"
             )
 
-        if final_response.usage is None:
-            _mark_request_completed_without_usage(final_response)
+        _count_transport_request_without_usage(final_response)
         return final_response
 
     async def _iter_websocket_response_events(
@@ -1286,6 +1300,8 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                         }
                         if is_terminal_event:
                             yielded_terminal_event = True
+                        if event_type == "response.completed":
+                            _count_transport_request_without_usage(getattr(event, "response", None))
                         yield event
 
                         if is_terminal_event:

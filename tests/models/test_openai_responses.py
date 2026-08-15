@@ -4515,3 +4515,147 @@ async def test_websocket_request_is_counted_when_provider_omits_usage(monkeypatc
 
     assert resp.usage.requests == 1
     assert resp.usage.total_tokens == 0
+
+
+def _streaming_client_for(events: list[Any]) -> Any:
+    """A minimal Responses client whose SSE stream yields `events` and then ends."""
+
+    class _InnerStream:
+        def __init__(self) -> None:
+            self._remaining = list(events)
+
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> Any:
+            if not self._remaining:
+                raise StopAsyncIteration
+            return self._remaining.pop(0)
+
+        async def close(self) -> None:
+            return None
+
+    inner = _InnerStream()
+
+    class _APIResponse:
+        request_id = "req-1"
+
+        async def parse(self) -> Any:
+            return inner
+
+        async def close(self) -> None:
+            return None
+
+    class _StreamingContextManager:
+        async def __aenter__(self) -> Any:
+            return _APIResponse()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _Responses:
+        def __init__(self) -> None:
+            self.with_streaming_response = SimpleNamespace(
+                create=lambda **kwargs: _StreamingContextManager()
+            )
+
+    class _Client:
+        responses = _Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    return _Client()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_run_counts_request_when_provider_omits_usage() -> None:
+    """Streaming must agree with the non-streaming path when the provider omits usage."""
+    final_response = _response_without_usage()
+    client = _streaming_client_for(
+        [
+            ResponseCompletedEvent(
+                response=final_response,
+                type="response.completed",
+                sequence_number=0,
+            )
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, client)),
+    )
+
+    result = Runner.run_streamed(agent, "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+    # No usage payload is synthesized, so nothing reports token counts that never arrived.
+    assert final_response.usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_streamed_run_counts_request_when_provider_omits_usage(
+    monkeypatch,
+) -> None:
+    """The websocket stream counts its request too, so no transport disagrees with another."""
+    frame = json.dumps(
+        {
+            "type": "response.completed",
+            "response": _response_without_usage().model_dump(),
+            "sequence_number": 1,
+        }
+    )
+    ws = DummyWSConnection([frame])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    result = Runner.run_streamed(Agent(name="test", model=model), "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_response_span_reports_the_request_when_provider_omits_usage() -> None:
+    """A span that omits the request disagrees with the `ModelResponse` the caller receives."""
+
+    class DummyResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            return _response_without_usage()
+
+    class DummyClient:
+        responses = DummyResponses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, DummyClient()))
+
+    with trace("test"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+
+    response_spans = [
+        span.export() for span in fetch_ordered_spans() if span.span_data.type == "response"
+    ]
+    assert len(response_spans) == 1
+    span_data = response_spans[0]["span_data"]  # type: ignore[index]
+    assert span_data["usage"]["requests"] == 1
+    assert span_data["usage"]["total_tokens"] == 0
