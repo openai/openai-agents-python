@@ -195,14 +195,17 @@ class SandboxApplyPatchTool(CustomTool):
     def _normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
         return WorkspaceEditor(self.session).normalize_operation(operation)
 
+    def _parse_and_normalize_input(self, raw_input: str) -> list[ApplyPatchOperation]:
+        return [
+            self._normalize_operation(operation)
+            for operation in self.parse_custom_input(raw_input)
+        ]
+
     async def _needs_custom_approval(
         self, ctx_wrapper: RunContextWrapper[Any], raw_input: str, call_id: str
     ) -> bool:
         try:
-            operations = [
-                self._normalize_operation(operation)
-                for operation in self.parse_custom_input(raw_input)
-            ]
+            operations = self._parse_and_normalize_input(raw_input)
         except (ValueError, ApplyPatchPathError):
             # Let malformed patches and invalid paths flow through normal tool execution so the
             # model gets a recoverable tool error instead of aborting during approval pre-checks.
@@ -221,9 +224,12 @@ class SandboxApplyPatchTool(CustomTool):
         return False
 
     async def _on_invoke_tool(self, ctx: ToolContext[Any], raw_input: str) -> str:
+        # Normalize every operation before executing any of them. This prevents a valid
+        # prefix from mutating the workspace when a later path is invalid.
+        operations = self._parse_and_normalize_input(raw_input)
+
         operation_outputs: list[str] = []
-        for operation in self.parse_custom_input(raw_input):
-            operation = self._normalize_operation(operation)
+        for operation in operations:
             operation.ctx_wrapper = ctx
             if operation.type == "create_file":
                 result = await self.editor.create_file(operation)
