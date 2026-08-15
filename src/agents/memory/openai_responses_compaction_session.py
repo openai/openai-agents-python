@@ -22,6 +22,7 @@ from .session import (
 )
 
 if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
     from .session import Session
 
 logger = logging.getLogger("openai-agents.openai.compaction")
@@ -175,8 +176,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return "input"
         return _resolve_compaction_mode(mode, response_id=response_id, store=store)
 
-    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
-        """Run compaction using responses.compact API."""
+    async def run_compaction(
+        self,
+        args: OpenAIResponsesCompactionArgs | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        """Run compaction using responses.compact API.
+
+        Args:
+            args: Compaction arguments from the run loop.
+            wrapper: Run context, when the caller provides one. Compaction is a billed
+                model call, so its usage is added to ``wrapper.usage`` and therefore
+                reaches ``RunResult.context_wrapper.usage`` like any other model call.
+        """
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
@@ -236,7 +249,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
-        self._record_compaction_usage(getattr(compacted, "usage", None))
+        self._record_compaction_usage(getattr(compacted, "usage", None), wrapper)
 
         output_items = _strip_orphaned_assistant_ids(
             _normalize_compaction_output_items(compacted.output or [])
@@ -259,7 +272,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             len(self._compaction_candidate_items or []),
         )
 
-    def _record_compaction_usage(self, compacted_usage: Any) -> None:
+    def _record_compaction_usage(
+        self,
+        compacted_usage: Any,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
         """Accumulate the tokens a compaction pass billed.
 
         Accounting must never break a run, so anything unexpected on the usage
@@ -297,6 +314,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             usage.output_tokens_details = output_details
 
         self.compaction_usage.add(usage)
+        if wrapper is not None:
+            wrapper.usage.add(usage)
         logger.debug(
             "compact: usage for %s (input=%s, output=%s, total=%s)",
             self._response_id,
