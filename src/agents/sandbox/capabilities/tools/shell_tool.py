@@ -69,10 +69,11 @@ def _normalize_output(stdout: bytes, stderr: bytes) -> str:
 def _resolve_workdir_command(
     *,
     session: BaseSandboxSession,
-    workspace_scope: SandboxWorkspaceScope,
+    workspace_scope: SandboxWorkspaceScope | None = None,
     command: str,
     workdir: str | None,
 ) -> str:
+    workspace_scope = workspace_scope or SandboxWorkspaceScope()
     if workdir is None or workdir.strip() == "":
         if workspace_scope.cwd is None:
             return command
