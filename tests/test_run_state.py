@@ -2967,6 +2967,89 @@ class TestRunState:
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
         assert new_state._context.get_rejection_message("tool2", "cid2") is None
 
+    @pytest.mark.parametrize("sticky_approved", [True, False], ids=["approve", "reject"])
+    async def test_exact_call_override_round_trips_with_sticky_default(
+        self,
+        sticky_approved: bool,
+    ) -> None:
+        """A current snapshot preserves an exact exception and the sticky default."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="MixedApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        def approval(call_id: str) -> ToolApprovalItem:
+            return ToolApprovalItem(
+                agent=agent,
+                raw_item=ResponseFunctionToolCall(
+                    type="function_call",
+                    name="tool1",
+                    call_id=call_id,
+                    status="completed",
+                    arguments="{}",
+                ),
+            )
+
+        if sticky_approved:
+            state.approve(approval("sticky"), always_approve=True)
+            state.reject(approval("exception"), rejection_message="denied exactly")
+        else:
+            state.reject(
+                approval("sticky"),
+                always_reject=True,
+                rejection_message="denied by default",
+            )
+            state.approve(approval("exception"))
+
+        serialized = state.to_json()
+        assert serialized["$schemaVersion"] == "1.16"
+
+        restored = await RunState.from_json(agent, serialized)
+        assert restored._context is not None
+        expected_exact = not sticky_approved
+        assert restored._context.is_tool_approved("tool1", "exception") is expected_exact
+        assert restored._context.is_tool_approved("tool1", "other") is sticky_approved
+        assert restored._context.get_rejection_message("tool1", "exception") == (
+            "denied exactly" if sticky_approved else None
+        )
+
+    @pytest.mark.parametrize("sticky_approved", [True, False], ids=["approve", "reject"])
+    async def test_schema_1_15_mixed_approval_record_keeps_exact_decision(
+        self,
+        sticky_approved: bool,
+    ) -> None:
+        """An explicit decision in a legacy snapshot remains authoritative."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="LegacyMixedApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        def approval(call_id: str) -> ToolApprovalItem:
+            return ToolApprovalItem(
+                agent=agent,
+                raw_item=ResponseFunctionToolCall(
+                    type="function_call",
+                    name="tool1",
+                    call_id=call_id,
+                    status="completed",
+                    arguments="{}",
+                ),
+            )
+
+        if sticky_approved:
+            state.approve(approval("sticky"), always_approve=True)
+            state.reject(approval("exception"), rejection_message="denied exactly")
+        else:
+            state.reject(approval("sticky"), always_reject=True)
+            state.approve(approval("exception"))
+
+        serialized = state.to_json()
+        serialized["$schemaVersion"] = "1.15"
+
+        restored = await RunState.from_json(agent, serialized)
+        assert restored._context is not None
+        expected_exact = not sticky_approved
+        assert restored._context.is_tool_approved("tool1", "exception") is expected_exact
+        assert restored._context.is_tool_approved("tool1", "other") is sticky_approved
+
     async def test_schema_1_13_restores_pending_approval_binding_from_interruption(self):
         """A 1.13 snapshot may resume only the exact invocation that was approved."""
         agent = Agent(name="ApprovalLegacyAgent")
@@ -6344,6 +6427,74 @@ class TestDeserializeHelpers:
 class TestRunStateResumption:
     """Test resuming runs from RunState using Runner.run()."""
 
+    @pytest.mark.parametrize("streamed", [False, True], ids=["run", "run_streamed"])
+    @pytest.mark.parametrize("sticky_approved", [True, False], ids=["approve", "reject"])
+    @pytest.mark.asyncio
+    async def test_resume_executes_only_exact_override_result(
+        self,
+        streamed: bool,
+        sticky_approved: bool,
+    ) -> None:
+        """Public resume paths execute only calls authorized by mixed decisions."""
+        model = ScriptedModel()
+        executions: list[str] = []
+
+        @function_tool(needs_approval=True)
+        async def approval_tool(value: str) -> str:
+            executions.append(value)
+            return f"approved:{value}"
+
+        agent = Agent(name="MixedApprovalAgent", model=model, tools=[approval_tool])
+        model.extend(
+            [
+                [
+                    get_function_tool_call(
+                        "approval_tool",
+                        json.dumps({"value": "sticky"}),
+                        call_id="sticky-call",
+                    ),
+                    get_function_tool_call(
+                        "approval_tool",
+                        json.dumps({"value": "exception"}),
+                        call_id="exception-call",
+                    ),
+                ],
+                [get_final_output_message("done")],
+            ]
+        )
+
+        initial = await Runner.run(agent, "start")
+        state = initial.to_state()
+        interruptions = {
+            cast(str, interruption.raw_item.call_id): interruption
+            for interruption in state.get_interruptions()
+        }
+        if sticky_approved:
+            state.approve(interruptions["sticky-call"], always_approve=True)
+            state.reject(
+                interruptions["exception-call"],
+                rejection_message="denied exactly",
+            )
+        else:
+            state.reject(
+                interruptions["sticky-call"],
+                always_reject=True,
+                rejection_message="denied by default",
+            )
+            state.approve(interruptions["exception-call"])
+
+        restored = await RunState.from_string(agent, state.to_string())
+        if streamed:
+            resumed = Runner.run_streamed(agent, restored)
+            async for _ in resumed.stream_events():
+                pass
+        else:
+            resumed = await Runner.run(agent, restored)
+
+        assert resumed.final_output == "done"
+        assert resumed.interruptions == []
+        assert executions == (["sticky"] if sticky_approved else ["exception"])
+
     @pytest.mark.asyncio
     async def test_resume_from_run_state(self):
         """Test resuming a run from a RunState."""
@@ -8936,6 +9087,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.12",
                 "1.13",
                 "1.14",
+                "1.15",
                 CURRENT_SCHEMA_VERSION,
             }
         )
@@ -11662,6 +11814,55 @@ async def test_hosted_mcp_approval_round_trip_uses_typed_identity_records() -> N
                     server_label="server-a",
                 ),
             ),
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_hosted_mcp_exact_rejection_overrides_sticky_approval_after_round_trip() -> None:
+    agent = Agent(name="test")
+    context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+    state = make_state(agent, context=context)
+
+    def approval(request_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item=McpApprovalRequest(
+                id=request_id,
+                type="mcp_approval_request",
+                arguments="{}",
+                name="lookup_account",
+                server_label="server-a",
+            ),
+        )
+
+    state.approve(approval("sticky-request"), always_approve=True)
+    state.reject(approval("exception-request"), rejection_message="denied exactly")
+
+    restored = await RunState.from_json(agent, state.to_json())
+    assert restored._context is not None
+    assert (
+        restored._context.get_approval_status(
+            "lookup_account",
+            "exception-request",
+            existing_pending=approval("exception-request"),
+        )
+        is False
+    )
+    assert (
+        restored._context.get_rejection_message(
+            "lookup_account",
+            "exception-request",
+            existing_pending=approval("exception-request"),
+        )
+        == "denied exactly"
+    )
+    assert (
+        restored._context.get_approval_status(
+            "lookup_account",
+            "other-request",
+            existing_pending=approval("other-request"),
         )
         is True
     )

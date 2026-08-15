@@ -207,3 +207,102 @@ def test_tool_approval_item_preserves_positional_type_argument() -> None:
     assert approval.type == "tool_approval_item"
     assert approval.tool_name == "lookup_account"
     assert approval.tool_namespace == "billing"
+
+
+def test_exact_call_decisions_override_sticky_defaults() -> None:
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    approved: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    approved.approve_tool(approval("approve-sticky"), always_approve=True)
+    approved.reject_tool(approval("approve-exception"), rejection_message="denied by user")
+
+    assert approved.is_tool_approved("tool_call", "approve-exception") is False
+    assert approved.get_rejection_message("tool_call", "approve-exception") == "denied by user"
+    assert approved.is_tool_approved("tool_call", "approve-other") is True
+
+    rejected: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    rejected.reject_tool(
+        approval("reject-sticky"),
+        always_reject=True,
+        rejection_message="denied by default",
+    )
+    rejected.approve_tool(approval("reject-exception"))
+
+    assert rejected.is_tool_approved("tool_call", "reject-exception") is True
+    assert rejected.get_rejection_message("tool_call", "reject-exception") is None
+    assert rejected.is_tool_approved("tool_call", "reject-other") is False
+    assert rejected.get_rejection_message("tool_call", "reject-other") == "denied by default"
+
+
+def test_matching_exact_call_decisions_preserve_sticky_defaults() -> None:
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    approved: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    approved.approve_tool(approval("approve-sticky"), always_approve=True)
+    approved.approve_tool(approval("approve-match"))
+    assert approved.is_tool_approved("tool_call", "approve-other") is True
+
+    rejected: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    rejected.reject_tool(approval("reject-sticky"), always_reject=True)
+    rejected.reject_tool(approval("reject-match"))
+    assert rejected.is_tool_approved("tool_call", "reject-other") is False
+
+
+def test_exact_call_reversals_keep_other_calls_on_sticky_default() -> None:
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    approved: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    approved.approve_tool(approval("approve-sticky"), always_approve=True)
+    approved.reject_tool(approval("approve-exception"), rejection_message="denied")
+    approved.approve_tool(approval("approve-exception"))
+
+    assert approved.is_tool_approved("tool_call", "approve-exception") is True
+    assert approved.get_rejection_message("tool_call", "approve-exception") is None
+    assert approved.is_tool_approved("tool_call", "approve-other") is True
+
+    rejected: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    rejected.reject_tool(
+        approval("reject-sticky"),
+        always_reject=True,
+        rejection_message="denied by default",
+    )
+    rejected.approve_tool(approval("reject-exception"))
+    rejected.reject_tool(approval("reject-exception"), rejection_message="denied exactly")
+
+    assert rejected.is_tool_approved("tool_call", "reject-exception") is False
+    assert rejected.get_rejection_message("tool_call", "reject-exception") == "denied exactly"
+    assert rejected.is_tool_approved("tool_call", "reject-other") is False
+    assert rejected.get_rejection_message("tool_call", "reject-other") == "denied by default"

@@ -179,7 +179,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.15"
+CURRENT_SCHEMA_VERSION = "1.16"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
@@ -209,6 +209,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
         "rebind metadata, durable pending input, and resumable next-model-call state."
     ),
+    "1.16": "Lets an exact call approval decision override a sticky decision for the same tool.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 

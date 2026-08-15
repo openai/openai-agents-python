@@ -109,6 +109,15 @@
       "fixture": "features/v1_15_canonical_invocation_identity.json",
       "provenance": "historical_writer",
       "version": "1.15"
+    },
+    {
+      "commit": "1c3b72019e547fe1cf1530419dc6fc687cc4df39",
+      "emitted_version": "1.15",
+      "feature": "per_call_approval_override",
+      "fixture": "features/v1_16_per_call_approval_override.json",
+      "note": "The schema transition introduced this reader version without a retained writer commit that emitted it. The recorded writer emitted 1.15; only the schema label is changed to exercise the canonical compatibility branch.",
+      "provenance": "canonical_compatibility",
+      "version": "1.16"
     }
   ],
   "resume": {
@@ -162,6 +171,13 @@
     "1.15": {
       "commit": "4720150fde047baa4e88b16082b282bee3a5e87d",
       "fixture": "minimal/v1_15.json"
+    },
+    "1.16": {
+      "commit": "1c3b72019e547fe1cf1530419dc6fc687cc4df39",
+      "emitted_version": "1.15",
+      "fixture": "minimal/v1_16.json",
+      "note": "The schema transition introduced this reader version without a retained writer commit that emitted it. The recorded writer emitted 1.15; only the schema label is changed to exercise the canonical compatibility branch.",
+      "provenance": "canonical_compatibility"
     },
     "1.2": {
       "commit": "74e8c1e22d7441bd42c58bcd4270937ccc2dca8c",
