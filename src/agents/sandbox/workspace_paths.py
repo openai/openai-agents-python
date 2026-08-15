@@ -251,7 +251,7 @@ class WorkspacePathPolicy:
                 if original is None:
                     raise self._invalid_path_error(windows_path)
             else:
-                original = Path(path)
+                original = posix_path_as_path(coerce_posix_path(path))
             result, grant = self._resolved_host_path_and_grant(original)
         else:
             if (windows_path := windows_absolute_path(path)) is not None:

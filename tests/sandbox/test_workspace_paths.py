@@ -202,6 +202,11 @@ def test_normalize_path_with_symlink_resolution(tmp_path: Path) -> None:
             expected=target.resolve(),
         ),
         WorkspacePathCase(
+            name="backslash string path uses sandbox POSIX semantics",
+            path=r"nested\..\target.txt",
+            expected=target.resolve(),
+        ),
+        WorkspacePathCase(
             name="safe internal leaf symlink resolves to target",
             path="link.txt",
             expected=target.resolve(),
