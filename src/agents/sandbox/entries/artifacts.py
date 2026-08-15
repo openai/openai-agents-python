@@ -371,64 +371,71 @@ class LocalDir(BaseEntry):
             | getattr(os, "O_NOFOLLOW", 0)
         )
         local_files: list[Path] = []
-        for entry in os.scandir(dir_fd):
-            rel_child = rel_dir / entry.name if rel_dir.parts else Path(entry.name)
-            try:
-                entry_stat = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                raise LocalDirReadError(
-                    src=src_root,
-                    context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
-                ) from None
-            except OSError as e:
-                raise LocalDirReadError(src=src_root, cause=e) from e
-            if stat.S_ISLNK(entry_stat.st_mode):
-                raise LocalDirReadError(
-                    src=src_root,
-                    context={"reason": "symlink_not_supported", "child": rel_child.as_posix()},
-                )
-            if stat.S_ISREG(entry_stat.st_mode):
-                local_files.append(rel_child)
-                continue
-            if not stat.S_ISDIR(entry_stat.st_mode):
-                continue
-
-            child_fd: int | None = None
-            try:
-                child_fd = os.open(entry.name, dir_flags, dir_fd=dir_fd)
-                child_stat = os.fstat(child_fd)
-                if not stat.S_ISDIR(child_stat.st_mode):
+        with os.scandir(dir_fd) as entries:
+            for entry in entries:
+                rel_child = rel_dir / entry.name if rel_dir.parts else Path(entry.name)
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
                     raise LocalDirReadError(
                         src=src_root,
                         context={
                             "reason": "path_changed_during_copy",
                             "child": rel_child.as_posix(),
                         },
+                    ) from None
+                except OSError as e:
+                    raise LocalDirReadError(src=src_root, cause=e) from e
+                if stat.S_ISLNK(entry_stat.st_mode):
+                    raise LocalDirReadError(
+                        src=src_root,
+                        context={"reason": "symlink_not_supported", "child": rel_child.as_posix()},
                     )
-                local_files.extend(
-                    self._list_local_dir_files_from_dir_fd(
+                if stat.S_ISREG(entry_stat.st_mode):
+                    local_files.append(rel_child)
+                    continue
+                if not stat.S_ISDIR(entry_stat.st_mode):
+                    continue
+
+                child_fd: int | None = None
+                try:
+                    child_fd = os.open(entry.name, dir_flags, dir_fd=dir_fd)
+                    child_stat = os.fstat(child_fd)
+                    if not stat.S_ISDIR(child_stat.st_mode):
+                        raise LocalDirReadError(
+                            src=src_root,
+                            context={
+                                "reason": "path_changed_during_copy",
+                                "child": rel_child.as_posix(),
+                            },
+                        )
+                    local_files.extend(
+                        self._list_local_dir_files_from_dir_fd(
+                            src_root=src_root,
+                            dir_fd=child_fd,
+                            rel_dir=rel_child,
+                        )
+                    )
+                except FileNotFoundError:
+                    raise LocalDirReadError(
+                        src=src_root,
+                        context={
+                            "reason": "path_changed_during_copy",
+                            "child": rel_child.as_posix(),
+                        },
+                    ) from None
+                except OSError as e:
+                    raise self._local_dir_open_error(
                         src_root=src_root,
-                        dir_fd=child_fd,
-                        rel_dir=rel_child,
-                    )
-                )
-            except FileNotFoundError:
-                raise LocalDirReadError(
-                    src=src_root,
-                    context={"reason": "path_changed_during_copy", "child": rel_child.as_posix()},
-                ) from None
-            except OSError as e:
-                raise self._local_dir_open_error(
-                    src_root=src_root,
-                    parent_fd=dir_fd,
-                    entry_name=entry.name,
-                    rel_child=rel_child,
-                    expect_dir=True,
-                    error=e,
-                ) from e
-            finally:
-                if child_fd is not None:
-                    os.close(child_fd)
+                        parent_fd=dir_fd,
+                        entry_name=entry.name,
+                        rel_child=rel_child,
+                        expect_dir=True,
+                        error=e,
+                    ) from e
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
         return local_files
 
     async def _copy_local_dir_file(

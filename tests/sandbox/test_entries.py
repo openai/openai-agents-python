@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import os
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path, PureWindowsPath
 
@@ -442,6 +444,26 @@ async def test_local_file_rejects_symlinked_source_before_checksum(tmp_path: Pat
     assert excinfo.value.context["reason"] == "symlink_not_supported"
     assert excinfo.value.context["child"] == "link.txt"
     assert session.writes == {}
+
+
+def test_local_dir_listing_closes_scandir_when_a_child_is_rejected(tmp_path: Path) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    (src_root / "safe.txt").write_text("safe", encoding="utf-8")
+    _symlink_or_skip(src_root / "link.txt", src_root / "safe.txt")
+
+    local_dir = LocalDir(src=Path("src"))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(LocalDirReadError) as excinfo:
+            local_dir._list_local_dir_files_pinned(base_dir=tmp_path, src_root=src_root)
+        gc.collect()
+
+    assert excinfo.value.context["reason"] == "symlink_not_supported"
+    assert not [
+        w for w in caught if issubclass(w.category, ResourceWarning) and "scandir" in str(w.message)
+    ]
 
 
 @pytest.mark.asyncio
