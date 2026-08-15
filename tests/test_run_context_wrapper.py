@@ -230,9 +230,38 @@ def test_run_context_per_call_decision_overrides_sticky_decision() -> None:
     assert wrapper.is_tool_approved("tool_call", "call-2") is False
     assert wrapper.is_tool_approved("tool_call", "call-3") is True
 
-    # The same holds in the other direction.
+    # The same holds in the other direction, and the approved call reports no
+    # rejection reason even though the sticky rejection carried one.
     other: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
-    other.reject_tool(approval("call-4"), always_reject=True)
+    other.reject_tool(approval("call-4"), always_reject=True, rejection_message="denied")
     other.approve_tool(approval("call-5"))
     assert other.is_tool_approved("tool_call", "call-5") is True
+    assert other.get_rejection_message("tool_call", "call-5") is None
     assert other.is_tool_approved("tool_call", "call-6") is False
+    assert other.get_rejection_message("tool_call", "call-6") == "denied"
+
+
+def test_run_context_per_call_decision_keeps_matching_sticky_decision() -> None:
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    # A per-call decision that agrees with the sticky one must leave it in place.
+    approved: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    approved.approve_tool(approval("call-1"), always_approve=True)
+    approved.approve_tool(approval("call-2"))
+    assert approved.is_tool_approved("tool_call", "call-3") is True
+
+    rejected: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    rejected.reject_tool(approval("call-4"), always_reject=True)
+    rejected.reject_tool(approval("call-5"))
+    assert rejected.is_tool_approved("tool_call", "call-6") is False

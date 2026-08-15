@@ -676,6 +676,10 @@ class RunContextWrapper(Generic[TContext]):
 
     @staticmethod
     def _get_rejection_message_for_key(record: _ApprovalRecord, call_id: str) -> str | None:
+        # An approval recorded for this exact call overrides a sticky rejection, so there
+        # is no rejection reason to report for it.
+        if isinstance(record.approved, list) and call_id in record.approved:
+            return None
         if record.rejected is True:
             if call_id in record.rejection_messages:
                 return record.rejection_messages[call_id]
@@ -1001,17 +1005,19 @@ class RunContextWrapper(Generic[TContext]):
             if isinstance(opposite, list) and call_id in opposite:
                 opposite.remove(call_id)
 
-            # A sticky decision leaves a bool in this field, and a per-call decision
-            # taken afterwards still has to be recorded, so start a list for it.
+            # A sticky decision leaves a bool in this field. A per-call decision that
+            # agrees with it is already covered, so keep the sticky value; one that
+            # opposes it still has to be recorded, so start a list for it.
             target = approval_entry.approved if approve else approval_entry.rejected
-            if not isinstance(target, list):
-                target = []
-                if approve:
-                    approval_entry.approved = target
-                else:
-                    approval_entry.rejected = target
-            if call_id not in target:
-                target.append(call_id)
+            if target is not True:
+                if not isinstance(target, list):
+                    target = []
+                    if approve:
+                        approval_entry.approved = target
+                    else:
+                        approval_entry.rejected = target
+                if call_id not in target:
+                    target.append(call_id)
             if approve:
                 self._clear_rejection_message(approval_entry, call_id)
             elif call_id is not None:
