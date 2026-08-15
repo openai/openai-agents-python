@@ -67,15 +67,16 @@ class AdvancedSQLiteSession(SQLiteSession):
             session_settings=session_settings,
             **kwargs,
         )
-        if create_tables:
-            try:
+        try:
+            if create_tables:
                 self._init_structure_tables()
+            self._verify_structure_tables_scope()
+        except BaseException:
+            try:
+                self.close()
             except BaseException:
-                try:
-                    self.close()
-                except BaseException:
-                    pass
-                raise
+                pass
+            raise
         self._current_branch_id = "main"
         # Synchronized with the durable session_clear_generations row whenever a
         # branch pointer is established or a write begins. A mismatch means
@@ -107,6 +108,34 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._generation = durable_generation
             self._current_branch_id = branch_id
             return True
+
+    def _verify_structure_tables_scope(self) -> None:
+        """Reject a database file whose structure tables belong to other base tables.
+
+        ``message_structure`` and the other structure tables are not named after
+        ``sessions_table``/``messages_table``, so a database file can only hold the structure
+        rows of a single base-table pair. ``CREATE TABLE IF NOT EXISTS`` keeps the first pair's
+        foreign keys, so a second session configured with different base table names would join
+        ``message_structure`` against the wrong messages table and read back rows that belong to
+        the other pair.
+        """
+        with self._locked_connection() as conn:
+            references = {
+                row[3]: row[2] for row in conn.execute("PRAGMA foreign_key_list(message_structure)")
+            }
+        if not references:
+            return
+        if (
+            references.get("session_id") != self.sessions_table
+            or references.get("message_id") != self.messages_table
+        ):
+            raise ValueError(
+                f"The structure tables in {self.db_path} already belong to "
+                f"'{references.get('session_id')}'/'{references.get('message_id')}', not to the "
+                f"configured '{self.sessions_table}'/'{self.messages_table}'. Structure tables "
+                "are shared per database file, so give each sessions_table/messages_table pair "
+                "its own db_path."
+            )
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.

@@ -3789,3 +3789,30 @@ async def test_clear_session_rolls_back_on_failure_after_earlier_delete(usage_da
         assert await session.get_items() == []
     finally:
         session.close()
+
+
+async def test_structure_tables_reject_a_second_base_table_pair(tmp_path: Path) -> None:
+    """A second base-table pair in one file would read the first pair's structure rows."""
+    db_path = tmp_path / "advanced_shared_structure.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="first_sessions",
+        messages_table="first_messages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+
+        with pytest.raises(ValueError, match="first_sessions"):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="second_sessions",
+                messages_table="second_messages",
+            )
+
+        assert await first.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        first.close()
