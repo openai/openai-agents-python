@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.20.0",
-  "baseline_commit": "c0b876379e82095b164c78cec65fb659a699a98d",
+  "baseline": "v0.21.0",
+  "baseline_commit": "1a0c08868aec2a18eba964e5a07da4270a490c25",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -18422,6 +18422,13 @@
         }
       ]
     },
+    "agents.extensions.sandbox.RunloopExistingSecret": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "model_fields": [],
+      "parameters": []
+    },
     "agents.extensions.sandbox.RunloopGatewaySpec": {
       "dataclass_fields": [],
       "kind": "class",
@@ -22732,6 +22739,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_backoff_seconds_max"
         }
       ]
     },
@@ -22997,6 +23013,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_backoff_seconds_max"
         }
       ]
     },
@@ -23262,6 +23287,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_backoff_seconds_max"
         }
       ]
     },
@@ -24925,6 +24959,258 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "config"
+        }
+      ]
+    },
+    "agents.realtime.testing.RealtimeStep": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "expect"
+        },
+        {
+          "default": {
+            "factory": "builtins.tuple",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "emit"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "error"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "expect"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "emit"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        }
+      ]
+    },
+    "agents.realtime.testing.ScriptedRealtimeModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "add_listener": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "listener"
+            }
+          ]
+        },
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "connect": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "options"
+            }
+          ]
+        },
+        "emit": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "VAR_POSITIONAL",
+              "name": "events"
+            }
+          ]
+        },
+        "remove_listener": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "listener"
+            }
+          ]
+        },
+        "send_event": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "event"
+            }
+          ]
+        },
+        "send_event_if": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "event"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "send_if"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "steps"
+        },
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "connect_events"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "connect_error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "close_error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "strict"
+        }
+      ]
+    },
+    "agents.realtime.testing.UnconsumedRealtimeSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.realtime.testing.UnexpectedRealtimeSend": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "actual"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "expected"
         }
       ]
     },
@@ -36523,6 +36809,3082 @@
         }
       ]
     },
+    "agents.testing.InvalidModelStep": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "input_index"
+        }
+      ]
+    },
+    "agents.testing.InvalidSandboxStep": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "input_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "method"
+        }
+      ]
+    },
+    "agents.testing.ModelCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "system_instructions"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "streamed"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "system_instructions"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "streamed"
+        }
+      ]
+    },
+    "agents.testing.ModelStep": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "factory": "builtins.tuple",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "factory": "agents.usage.Usage",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "resp-789"
+          },
+          "init": true,
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "responder"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "stream_events"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "retry_advice"
+        }
+      ],
+      "kind": "class",
+      "members": {
+        "raise_error": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "error"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "retry_advice"
+            }
+          ]
+        },
+        "respond": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "responder"
+            }
+          ]
+        },
+        "stream": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "events"
+            },
+            {
+              "default": {
+                "items": [],
+                "kind": "sequence",
+                "type": "builtins.tuple"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "output"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "usage"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "resp-789"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "response_id"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "resp-789"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "responder"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stream_events"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_advice"
+        }
+      ]
+    },
+    "agents.testing.SandboxCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "kwargs"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kwargs"
+        }
+      ]
+    },
+    "agents.testing.SandboxCallMatcherError": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        }
+      ]
+    },
+    "agents.testing.ScriptedModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "enqueue": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "step"
+            }
+          ]
+        },
+        "extend": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "steps"
+            }
+          ]
+        },
+        "get_response": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "system_instructions"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tools"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "output_schema"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "handoffs"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tracing"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "previous_response_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "conversation_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "prompt"
+            }
+          ]
+        },
+        "get_retry_advice": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "request"
+            }
+          ]
+        },
+        "set_default_usage": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "usage"
+            }
+          ]
+        },
+        "stream_response": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "system_instructions"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tools"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "output_schema"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "handoffs"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tracing"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "previous_response_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "conversation_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "prompt"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "steps"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "emit_traces"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "default_usage"
+        }
+      ]
+    },
+    "agents.testing.ScriptedSandboxSession": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "aclose": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "apply_manifest": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "only_ephemeral"
+            }
+          ]
+        },
+        "apply_patch": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "operations"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "v4a"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "patch_format"
+            }
+          ]
+        },
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "describe": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "exec": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "VAR_POSITIONAL",
+              "name": "command"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "timeout"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "shell"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "extract": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "compression_scheme"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "archive_limits"
+            }
+          ]
+        },
+        "hydrate_workspace": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            }
+          ]
+        },
+        "ls": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "mkdir": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "parents"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "normalize_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "for_write"
+            }
+          ]
+        },
+        "persist_workspace": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "provision_manifest_accounts": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "pty_exec_start": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "VAR_POSITIONAL",
+              "name": "command"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "timeout"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "shell"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "tty"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "yield_time_s"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_output_tokens"
+            }
+          ]
+        },
+        "pty_terminate_all": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "pty_write_stdin": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "session_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "chars"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "yield_time_s"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_output_tokens"
+            }
+          ]
+        },
+        "read": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "register_persist_workspace_skip_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            }
+          ]
+        },
+        "register_pre_stop_hook": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "hook"
+            }
+          ]
+        },
+        "resolve_exposed_port": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "port"
+            }
+          ]
+        },
+        "rm": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "recursive"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "run_pre_stop_hooks": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "running": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "set_dependencies": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dependencies"
+            }
+          ]
+        },
+        "should_provision_manifest_accounts_on_resume": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "shutdown": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "start": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "stop": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "supports_docker_volume_mounts": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "supports_pty": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "write": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.testing.UnconsumedModelSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.testing.UnconsumedSandboxSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "pending_methods"
+        }
+      ]
+    },
+    "agents.testing.UnexpectedModelCall": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        }
+      ]
+    },
+    "agents.testing.UnexpectedSandboxCall": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "expected_method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.testing.assistant_message": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "text"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "scripted-message"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "item_id"
+        }
+      ]
+    },
+    "agents.testing.function_call": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "arguments"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "item_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "namespace"
+        }
+      ]
+    },
+    "agents.testing.model.InvalidModelStep": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "input_index"
+        }
+      ]
+    },
+    "agents.testing.model.ModelCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "system_instructions"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "output_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "streamed"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "system_instructions"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tools"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_schema"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "handoffs"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "previous_response_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "conversation_id"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "streamed"
+        }
+      ]
+    },
+    "agents.testing.model.ModelStep": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "factory": "builtins.tuple",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "output"
+        },
+        {
+          "default": {
+            "factory": "agents.usage.Usage",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "resp-789"
+          },
+          "init": true,
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "responder"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "stream_events"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "retry_advice"
+        }
+      ],
+      "kind": "class",
+      "members": {
+        "raise_error": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "error"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "retry_advice"
+            }
+          ]
+        },
+        "respond": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "responder"
+            }
+          ]
+        },
+        "stream": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "events"
+            },
+            {
+              "default": {
+                "items": [],
+                "kind": "sequence",
+                "type": "builtins.tuple"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "output"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "usage"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "resp-789"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "response_id"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "resp-789"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "response_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "request_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "responder"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stream_events"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "retry_advice"
+        }
+      ]
+    },
+    "agents.testing.model.ScriptedModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "enqueue": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "step"
+            }
+          ]
+        },
+        "extend": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "steps"
+            }
+          ]
+        },
+        "get_response": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "system_instructions"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tools"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "output_schema"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "handoffs"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tracing"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "previous_response_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "conversation_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "prompt"
+            }
+          ]
+        },
+        "get_retry_advice": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "request"
+            }
+          ]
+        },
+        "set_default_usage": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "usage"
+            }
+          ]
+        },
+        "stream_response": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "system_instructions"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tools"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "output_schema"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "handoffs"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tracing"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "previous_response_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "conversation_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "prompt"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "steps"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": false
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "emit_traces"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "default_usage"
+        }
+      ]
+    },
+    "agents.testing.model.UnconsumedModelSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.testing.model.UnexpectedModelCall": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        }
+      ]
+    },
+    "agents.testing.model.assistant_message": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "text"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "scripted-message"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "item_id"
+        }
+      ]
+    },
+    "agents.testing.model.function_call": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "arguments"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "item_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "namespace"
+        }
+      ]
+    },
+    "agents.testing.sandbox.InvalidSandboxStep": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "reason"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "input_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "method"
+        }
+      ]
+    },
+    "agents.testing.sandbox.SandboxCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "kwargs"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "args"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "kwargs"
+        }
+      ]
+    },
+    "agents.testing.sandbox.SandboxCallMatcherError": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        }
+      ]
+    },
+    "agents.testing.sandbox.ScriptedSandboxSession": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "aclose": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "apply_manifest": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "only_ephemeral"
+            }
+          ]
+        },
+        "apply_patch": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "operations"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "v4a"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "patch_format"
+            }
+          ]
+        },
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "describe": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "exec": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "VAR_POSITIONAL",
+              "name": "command"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "timeout"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "shell"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "extract": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "compression_scheme"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "archive_limits"
+            }
+          ]
+        },
+        "hydrate_workspace": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            }
+          ]
+        },
+        "ls": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "mkdir": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "parents"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "normalize_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "for_write"
+            }
+          ]
+        },
+        "persist_workspace": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "provision_manifest_accounts": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "pty_exec_start": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "VAR_POSITIONAL",
+              "name": "command"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "timeout"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "shell"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "tty"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "yield_time_s"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_output_tokens"
+            }
+          ]
+        },
+        "pty_terminate_all": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "pty_write_stdin": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "session_id"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "chars"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "yield_time_s"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_output_tokens"
+            }
+          ]
+        },
+        "read": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "register_persist_workspace_skip_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            }
+          ]
+        },
+        "register_pre_stop_hook": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "hook"
+            }
+          ]
+        },
+        "resolve_exposed_port": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "port"
+            }
+          ]
+        },
+        "rm": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": false
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "recursive"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
+        "run_pre_stop_hooks": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "running": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "set_dependencies": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dependencies"
+            }
+          ]
+        },
+        "should_provision_manifest_accounts_on_resume": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "shutdown": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "start": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "stop": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "supports_docker_volume_mounts": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "supports_pty": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "write": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "data"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.testing.sandbox.UnconsumedSandboxSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "pending_methods"
+        }
+      ]
+    },
+    "agents.testing.sandbox.UnexpectedSandboxCall": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "call_index"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "expected_method"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.testing.sandbox.scripted_sandbox_session": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "steps"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "manifest"
+        }
+      ]
+    },
+    "agents.testing.scripted_sandbox_session": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "steps"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "manifest"
+        }
+      ]
+    },
     "agents.tool_context.ToolContext": {
       "dataclass_fields": [
         {
@@ -36973,6 +40335,497 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "tool_input"
+        }
+      ]
+    },
+    "agents.voice.testing.STTCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "trace_include_sensitive_audio_data"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_audio_data"
+        }
+      ]
+    },
+    "agents.voice.testing.STTSessionCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "trace_include_sensitive_audio_data"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_audio_data"
+        }
+      ]
+    },
+    "agents.voice.testing.ScriptedSTTModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "create_session": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        },
+        "transcribe": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "transcriptions"
+        },
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "sessions"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "scripted-stt"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "model_name"
+        }
+      ]
+    },
+    "agents.voice.testing.ScriptedTTSModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "run": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "text"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "results"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "scripted-tts"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "model_name"
+        }
+      ]
+    },
+    "agents.voice.testing.ScriptedTranscriptionSession": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "transcribe_turns": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turns"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "close_error"
+        }
+      ]
+    },
+    "agents.voice.testing.ScriptedVoiceWorkflow": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "assert_complete": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "on_start": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        },
+        "run": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "transcription"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "items": [],
+            "kind": "sequence",
+            "type": "builtins.tuple"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turns"
+        },
+        {
+          "default": {
+            "identity": "agents.voice.testing._START_NOT_CONFIGURED",
+            "kind": "sentinel"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "start"
+        }
+      ]
+    },
+    "agents.voice.testing.TTSCall": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "text"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "settings"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "text"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "settings"
+        }
+      ]
+    },
+    "agents.voice.testing.TTSResult": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "factory": "builtins.tuple",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "chunks"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "chunks"
+        }
+      ]
+    },
+    "agents.voice.testing.UnconsumedVoiceSteps": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "remaining_steps"
+        }
+      ]
+    },
+    "agents.voice.testing.UnexpectedVoiceCall": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "operation"
+        }
+      ]
+    },
+    "agents.voice.testing.pcm16_samples": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "samples"
         }
       ]
     },
@@ -39703,6 +43556,120 @@
       "canonical_name": "VercelSandboxClientOptions",
       "module": "agents.extensions.sandbox",
       "name": "VercelSandboxClientOptions"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "InvalidModelStep",
+      "module": "agents.testing",
+      "name": "InvalidModelStep"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelCall",
+      "module": "agents.testing",
+      "name": "ModelCall"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelScriptError",
+      "module": "agents.testing",
+      "name": "ModelScriptError"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelStep",
+      "module": "agents.testing",
+      "name": "ModelStep"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ModelStepSpec",
+      "module": "agents.testing",
+      "name": "ModelStepSpec"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "ScriptedModel",
+      "module": "agents.testing",
+      "name": "ScriptedModel"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "UnconsumedModelSteps",
+      "module": "agents.testing",
+      "name": "UnconsumedModelSteps"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "UnexpectedModelCall",
+      "module": "agents.testing",
+      "name": "UnexpectedModelCall"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "assistant_message",
+      "module": "agents.testing",
+      "name": "assistant_message"
+    },
+    {
+      "canonical_module": "agents.testing.model",
+      "canonical_name": "function_call",
+      "module": "agents.testing",
+      "name": "function_call"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "InvalidSandboxStep",
+      "module": "agents.testing",
+      "name": "InvalidSandboxStep"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxCall",
+      "module": "agents.testing",
+      "name": "SandboxCall"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxCallMatcherError",
+      "module": "agents.testing",
+      "name": "SandboxCallMatcherError"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "ScriptedSandboxSession",
+      "module": "agents.testing",
+      "name": "ScriptedSandboxSession"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxScriptError",
+      "module": "agents.testing",
+      "name": "SandboxScriptError"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "SandboxStepSpec",
+      "module": "agents.testing",
+      "name": "SandboxStepSpec"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "UnconsumedSandboxSteps",
+      "module": "agents.testing",
+      "name": "UnconsumedSandboxSteps"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "UnexpectedSandboxCall",
+      "module": "agents.testing",
+      "name": "UnexpectedSandboxCall"
+    },
+    {
+      "canonical_module": "agents.testing.sandbox",
+      "canonical_name": "scripted_sandbox_session",
+      "module": "agents.testing",
+      "name": "scripted_sandbox_session"
     }
   ],
   "optional_dependency_unsupported_platforms": {
@@ -39780,7 +43747,12 @@
     "agents.tool",
     "agents.tool_context",
     "agents.tool_guardrails",
-    "agents.tracing"
+    "agents.tracing",
+    "agents.realtime.testing",
+    "agents.testing",
+    "agents.testing.model",
+    "agents.testing.sandbox",
+    "agents.voice.testing"
   ],
   "public_properties": [
     {
@@ -39852,6 +43824,185 @@
         "mount_authority_redacted",
         "mount_authority_rebound"
       ]
+    },
+    {
+      "class_name": "ScriptedModel",
+      "module": "agents.testing.model",
+      "names": [
+        "calls",
+        "remaining_steps",
+        "first_call",
+        "last_call"
+      ]
+    },
+    {
+      "class_name": "ScriptedRealtimeModel",
+      "module": "agents.realtime.testing",
+      "names": [
+        "listeners",
+        "connect_calls",
+        "sent_events",
+        "remaining_steps"
+      ]
+    },
+    {
+      "factory_name": "scripted_sandbox_session",
+      "module": "agents.testing.sandbox",
+      "names": [
+        "calls",
+        "remaining_steps"
+      ]
+    },
+    {
+      "class_name": "ScriptedSTTModel",
+      "module": "agents.voice.testing",
+      "names": [
+        "calls",
+        "session_calls",
+        "created_sessions"
+      ]
+    },
+    {
+      "class_name": "ScriptedTTSModel",
+      "module": "agents.voice.testing",
+      "names": [
+        "calls"
+      ]
+    },
+    {
+      "class_name": "ScriptedVoiceWorkflow",
+      "module": "agents.voice.testing",
+      "names": [
+        "transcriptions"
+      ]
+    },
+    {
+      "class_name": "ScriptedSandboxSession",
+      "module": "agents.testing",
+      "names": [
+        "calls",
+        "remaining_steps"
+      ]
+    }
+  ],
+  "public_typed_dicts": [
+    {
+      "class_name": "ModelStepSpec",
+      "fields": [
+        {
+          "annotation": "Sequence[TResponseOutputItem]",
+          "name": "output",
+          "required": false
+        },
+        {
+          "annotation": "Usage",
+          "name": "usage",
+          "required": false
+        },
+        {
+          "annotation": "str | None",
+          "name": "response_id",
+          "required": false
+        },
+        {
+          "annotation": "str | None",
+          "name": "request_id",
+          "required": false
+        },
+        {
+          "annotation": "dict[str, Any] | None",
+          "name": "raw_usage",
+          "required": false
+        },
+        {
+          "annotation": "Exception | None",
+          "name": "error",
+          "required": false
+        },
+        {
+          "annotation": "ModelResponder | None",
+          "name": "responder",
+          "required": false
+        },
+        {
+          "annotation": "Sequence[TResponseStreamEvent] | ModelStreamFactory | None",
+          "name": "stream_events",
+          "required": false
+        },
+        {
+          "annotation": "ModelRetryAdvice | None",
+          "name": "retry_advice",
+          "required": false
+        }
+      ],
+      "module": "agents.testing.model"
+    },
+    {
+      "class_name": "SandboxStepSpec",
+      "fields": [
+        {
+          "annotation": "SandboxMethod",
+          "name": "method",
+          "required": false
+        },
+        {
+          "annotation": "SandboxMatcher",
+          "name": "match",
+          "required": false
+        },
+        {
+          "annotation": "Any",
+          "name": "result",
+          "required": false
+        },
+        {
+          "annotation": "SandboxResponder",
+          "name": "responder",
+          "required": false
+        },
+        {
+          "annotation": "Exception",
+          "name": "error",
+          "required": false
+        }
+      ],
+      "module": "agents.testing.sandbox"
+    },
+    {
+      "class_name": "RealtimeConnectCall",
+      "fields": [
+        {
+          "annotation": "Required[bool]",
+          "name": "api_key_provided",
+          "required": true
+        },
+        {
+          "annotation": "Required[bool]",
+          "name": "headers_provided",
+          "required": true
+        },
+        {
+          "annotation": "str",
+          "name": "url",
+          "required": false
+        },
+        {
+          "annotation": "RealtimeSessionModelSettings",
+          "name": "initial_model_settings",
+          "required": false
+        },
+        {
+          "annotation": "RealtimePlaybackTracker",
+          "name": "playback_tracker",
+          "required": false
+        },
+        {
+          "annotation": "str",
+          "name": "call_id",
+          "required": false
+        }
+      ],
+      "module": "agents.realtime.testing"
     }
   ],
   "required_submodule_exports": {
@@ -39953,6 +44104,7 @@
         "DEFAULT_RUNLOOP_WORKSPACE_ROOT",
         "DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT",
         "RunloopAfterIdle",
+        "RunloopExistingSecret",
         "RunloopGatewaySpec",
         "RunloopLaunchParameters",
         "RunloopMcpSpec",
@@ -39983,6 +44135,7 @@
         "ModalSandboxSessionState": "modal",
         "RunloopAfterIdle": "runloop_api_client",
         "RunloopCloudBucketMountStrategy": "runloop_api_client",
+        "RunloopExistingSecret": "runloop_api_client",
         "RunloopGatewaySpec": "runloop_api_client",
         "RunloopLaunchParameters": "runloop_api_client",
         "RunloopMcpSpec": "runloop_api_client",
@@ -40164,6 +44317,18 @@
       "optional_bindings": {},
       "optional_exports": {}
     },
+    "agents.realtime.testing": {
+      "names": [
+        "RealtimeConnectCall",
+        "RealtimeScriptError",
+        "RealtimeStep",
+        "ScriptedRealtimeModel",
+        "UnconsumedRealtimeSteps",
+        "UnexpectedRealtimeSend"
+      ],
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
     "agents.responses_websocket_session": {
       "names": [
         "ResponsesWebSocketSession",
@@ -40340,6 +44505,62 @@
       "optional_bindings": {},
       "optional_exports": {}
     },
+    "agents.testing": {
+      "names": [
+        "InvalidModelStep",
+        "ModelCall",
+        "ModelScriptError",
+        "ModelStep",
+        "ModelStepSpec",
+        "InvalidSandboxStep",
+        "SandboxCall",
+        "SandboxCallMatcherError",
+        "SandboxScriptError",
+        "SandboxStepSpec",
+        "ScriptedSandboxSession",
+        "ScriptedModel",
+        "UnconsumedModelSteps",
+        "UnexpectedModelCall",
+        "UnconsumedSandboxSteps",
+        "UnexpectedSandboxCall",
+        "assistant_message",
+        "function_call",
+        "scripted_sandbox_session"
+      ],
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.testing.model": {
+      "names": [
+        "InvalidModelStep",
+        "ModelCall",
+        "ModelScriptError",
+        "ModelStep",
+        "ModelStepSpec",
+        "ScriptedModel",
+        "UnconsumedModelSteps",
+        "UnexpectedModelCall",
+        "assistant_message",
+        "function_call"
+      ],
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.testing.sandbox": {
+      "names": [
+        "InvalidSandboxStep",
+        "SandboxCall",
+        "SandboxCallMatcherError",
+        "SandboxScriptError",
+        "SandboxStepSpec",
+        "ScriptedSandboxSession",
+        "UnconsumedSandboxSteps",
+        "UnexpectedSandboxCall",
+        "scripted_sandbox_session"
+      ],
+      "optional_bindings": {},
+      "optional_exports": {}
+    },
     "agents.tracing": {
       "names": [
         "add_trace_processor",
@@ -40389,6 +44610,37 @@
         "mcp_tools_span"
       ],
       "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.voice.testing": {
+      "names": [
+        "STTCall",
+        "STTSessionCall",
+        "ScriptedSTTModel",
+        "ScriptedTTSModel",
+        "ScriptedTranscriptionSession",
+        "ScriptedVoiceWorkflow",
+        "TTSCall",
+        "TTSResult",
+        "UnconsumedVoiceSteps",
+        "UnexpectedVoiceCall",
+        "VoiceScriptError",
+        "pcm16_samples"
+      ],
+      "optional_bindings": {
+        "STTCall": "numpy",
+        "STTSessionCall": "numpy",
+        "ScriptedSTTModel": "numpy",
+        "ScriptedTTSModel": "numpy",
+        "ScriptedTranscriptionSession": "numpy",
+        "ScriptedVoiceWorkflow": "numpy",
+        "TTSCall": "numpy",
+        "TTSResult": "numpy",
+        "UnconsumedVoiceSteps": "numpy",
+        "UnexpectedVoiceCall": "numpy",
+        "VoiceScriptError": "numpy",
+        "pcm16_samples": "numpy"
+      },
       "optional_exports": {}
     }
   },
