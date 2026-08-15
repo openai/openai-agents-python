@@ -1,0 +1,28 @@
+name: Apply apply_patch POSIX path fix
+
+on:
+  push:
+    branches:
+      - fix/apply-patch-posix-path-normalization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/apply-patch-posix-path-normalization
+      - name: Apply patch
+        run: python .github/scripts/apply-posix-patch-paths.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(sandbox): normalize apply_patch paths as POSIX"
+          git push origin HEAD:fix/apply-patch-posix-path-normalization
