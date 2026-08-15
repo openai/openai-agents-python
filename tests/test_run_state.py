@@ -1671,6 +1671,65 @@ class TestRunState:
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
         assert new_state._context.get_rejection_message("tool2", "cid2") is None
 
+    async def test_per_call_approval_after_sticky_round_trips(self):
+        """A per-call override survives serialization and resumes the same way."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="PerCallApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        def approval(call_id: str) -> ToolApprovalItem:
+            return ToolApprovalItem(
+                agent=agent,
+                raw_item=ResponseFunctionToolCall(
+                    type="function_call",
+                    name="tool1",
+                    call_id=call_id,
+                    status="completed",
+                    arguments="",
+                ),
+            )
+
+        state.approve(approval("cid1"), always_approve=True)
+        state.reject(approval("cid2"), rejection_message="denied")
+
+        json_data = state.to_json()
+        assert json_data["$schemaVersion"] == CURRENT_SCHEMA_VERSION
+
+        new_state = await RunState.from_string(agent, state.to_string())
+        assert new_state._context is not None
+        assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid2") is False
+        assert new_state._context.get_rejection_message("tool1", "cid2") == "denied"
+        assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid3") is True
+
+    async def test_older_schema_resolves_mixed_approval_record_as_sticky(self):
+        """A pre-1.16 snapshot keeps the sticky answer it was written with."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="LegacyMixedApprovalAgent")
+        state = make_state(agent, context=context, original_input="test")
+
+        def approval(call_id: str) -> ToolApprovalItem:
+            return ToolApprovalItem(
+                agent=agent,
+                raw_item=ResponseFunctionToolCall(
+                    type="function_call",
+                    name="tool1",
+                    call_id=call_id,
+                    status="completed",
+                    arguments="",
+                ),
+            )
+
+        state.approve(approval("cid1"), always_approve=True)
+        state.reject(approval("cid2"), rejection_message="denied")
+
+        json_data = state.to_json()
+        json_data["$schemaVersion"] = "1.15"
+
+        new_state = await RunState.from_json(agent, json_data)
+        assert new_state._context is not None
+        assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid2") is True
+        assert new_state._context.is_tool_approved(tool_name="tool1", call_id="cid3") is True
+
     async def test_schema_1_13_restores_pending_approval_binding_from_interruption(self):
         """A 1.13 snapshot may resume only the exact invocation that was approved."""
         agent = Agent(name="ApprovalLegacyAgent")
@@ -7123,6 +7182,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.12",
                 "1.13",
                 "1.14",
+                "1.15",
                 CURRENT_SCHEMA_VERSION,
             }
         )

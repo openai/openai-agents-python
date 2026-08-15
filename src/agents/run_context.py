@@ -1224,7 +1224,7 @@ class RunContextWrapper(Generic[TContext]):
             return status
         return status
 
-    def _rebuild_approvals(self, approvals: Any) -> None:
+    def _rebuild_approvals(self, approvals: Any, *, per_call_overrides_sticky: bool = True) -> None:
         """Restore approvals from serialized state."""
         self._approvals = {}
         if not isinstance(approvals, Mapping):
@@ -1232,13 +1232,24 @@ class RunContextWrapper(Generic[TContext]):
         for tool_name, record_dict in approvals.items():
             if not isinstance(tool_name, str) or not isinstance(record_dict, dict):
                 continue
-            self._approvals[tool_name] = self._restore_approval_record(record_dict)
+            self._approvals[tool_name] = self._restore_approval_record(
+                record_dict, per_call_overrides_sticky=per_call_overrides_sticky
+            )
 
     @classmethod
-    def _restore_approval_record(cls, record_dict: Mapping[str, Any]) -> _ApprovalRecord:
+    def _restore_approval_record(
+        cls, record_dict: Mapping[str, Any], *, per_call_overrides_sticky: bool = True
+    ) -> _ApprovalRecord:
         record = _ApprovalRecord()
         record.approved = cls._restore_approval_value(record_dict.get("approved", []))
         record.rejected = cls._restore_approval_value(record_dict.get("rejected", []))
+        if not per_call_overrides_sticky:
+            # Snapshots written before the per-call override resolved these as sticky, so
+            # drop the opposing per-call list to resume them the way they were written.
+            if record.approved is True and isinstance(record.rejected, list):
+                record.rejected = []
+            elif record.rejected is True and isinstance(record.approved, list):
+                record.approved = []
         rejection_messages = record_dict.get("rejection_messages", {})
         if isinstance(rejection_messages, dict):
             record.rejection_messages = {

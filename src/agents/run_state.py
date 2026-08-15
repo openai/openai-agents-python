@@ -177,9 +177,10 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.15"
+CURRENT_SCHEMA_VERSION = "1.16"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
+_PER_CALL_APPROVAL_OVERRIDE_MIN_SCHEMA_VERSION = "1.16"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -207,6 +208,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
         "rebind metadata, durable pending input, and resumable next-model-call state."
     ),
+    "1.16": "Lets a per-call approval decision override a sticky one for the same tool.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -3342,7 +3344,13 @@ async def _build_run_state_from_json(
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
-    context._rebuild_approvals(context_data.get("approvals", {}))
+    per_call_major, per_call_minor = (
+        int(part) for part in _PER_CALL_APPROVAL_OVERRIDE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+    )
+    context._rebuild_approvals(
+        context_data.get("approvals", {}),
+        per_call_overrides_sticky=(schema_major, schema_minor) >= (per_call_major, per_call_minor),
+    )
     if (schema_major, schema_minor) >= (1, 15):
         context._rebuild_tool_invocations(
             context_data.get("tool_invocations", {}),

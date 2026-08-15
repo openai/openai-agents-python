@@ -265,3 +265,32 @@ def test_run_context_per_call_decision_keeps_matching_sticky_decision() -> None:
     rejected.reject_tool(approval("call-4"), always_reject=True)
     rejected.reject_tool(approval("call-5"))
     assert rejected.is_tool_approved("tool_call", "call-6") is False
+
+
+def test_run_context_same_call_decision_reverses_in_both_directions() -> None:
+    agent = make_agent()
+
+    def approval(call_id: str) -> ToolApprovalItem:
+        return ToolApprovalItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call",
+                "name": "tool_call",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+        )
+
+    approve_then_reject: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    approve_then_reject.approve_tool(approval("call-1"))
+    assert approve_then_reject.is_tool_approved("tool_call", "call-1") is True
+    approve_then_reject.reject_tool(approval("call-1"), rejection_message="denied")
+    assert approve_then_reject.is_tool_approved("tool_call", "call-1") is False
+    assert approve_then_reject.get_rejection_message("tool_call", "call-1") == "denied"
+
+    reject_then_approve: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    reject_then_approve.reject_tool(approval("call-2"), rejection_message="denied")
+    assert reject_then_approve.is_tool_approved("tool_call", "call-2") is False
+    reject_then_approve.approve_tool(approval("call-2"))
+    assert reject_then_approve.is_tool_approved("tool_call", "call-2") is True
+    assert reject_then_approve.get_rejection_message("tool_call", "call-2") is None
