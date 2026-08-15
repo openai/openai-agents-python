@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, cast
@@ -80,6 +81,61 @@ class TestSandboxApplyPatchTool:
         )
 
         assert isinstance(result, ToolApprovalItem)
+
+    @pytest.mark.parametrize(
+        ("operation_payload", "expected_path", "expected_move_to"),
+        [
+            (
+                {
+                    "type": "create_file",
+                    "path": r"sensitive\secret.txt",
+                    "diff": "+secret\n",
+                },
+                "sensitive/secret.txt",
+                None,
+            ),
+            (
+                {
+                    "type": "update_file",
+                    "path": "notes.txt",
+                    "move_to": r"sensitive\secret.txt",
+                    "diff": "@@\n-old\n+new\n",
+                },
+                "notes.txt",
+                "sensitive/secret.txt",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_needs_approval_receives_canonical_paths(
+        self,
+        operation_payload: dict[str, object],
+        expected_path: str,
+        expected_move_to: str | None,
+    ) -> None:
+        checked_paths: list[tuple[str, str | None]] = []
+
+        async def needs_approval(
+            _ctx: RunContextWrapper[Any], operation: ApplyPatchOperation, _call_id: str
+        ) -> bool:
+            checked_paths.append((operation.path, operation.move_to))
+            return operation.path == "sensitive/secret.txt" or operation.move_to == (
+                "sensitive/secret.txt"
+            )
+
+        tool = SandboxApplyPatchTool(
+            session=ApplyPatchSession(),
+            needs_approval=needs_approval,
+        )
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=json.dumps(operation_payload),
+        )
+
+        assert isinstance(result, ToolApprovalItem)
+        assert checked_paths == [(expected_path, expected_move_to)]
 
     @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
     @pytest.mark.asyncio
