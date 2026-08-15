@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -228,3 +229,75 @@ def test_multi_provider_rejects_invalid_prefix_modes():
 
     with pytest.raises(UserError, match="unknown_prefix_mode"):
         MultiProvider(unknown_prefix_mode=bad_unknown_prefix_mode)
+
+
+@pytest.mark.asyncio
+async def test_multi_provider_aclose_continues_and_preserves_first_failure():
+    close_error = RuntimeError("close failed")
+    later_error = ValueError("later close failed")
+
+    class CloseTrackingProvider:
+        def __init__(self, error: Exception | None = None):
+            self.error = error
+            self.closed = False
+
+        def get_model(self, model_name: str | None):
+            return object()
+
+        async def aclose(self) -> None:
+            self.closed = True
+            if self.error is not None:
+                raise self.error
+
+    failing_provider = CloseTrackingProvider(close_error)
+    later_provider = CloseTrackingProvider(later_error)
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("failing", cast(Any, failing_provider))
+    provider_map.add_provider("later", cast(Any, later_provider))
+    provider = MultiProvider(provider_map=provider_map, openai_api_key="test")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value is close_error
+    assert failing_provider.closed
+    assert later_provider.closed
+
+
+@pytest.mark.asyncio
+async def test_multi_provider_aclose_propagates_hybrid_cancellation():
+    closed: list[str] = []
+
+    class HybridCancellation(asyncio.CancelledError, Exception):
+        pass
+
+    class CloseTrackingProvider:
+        def __init__(self, name: str, error: BaseException | None = None):
+            self.name = name
+            self.error = error
+
+        def get_model(self, model_name: str | None):
+            return object()
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.error is not None:
+                raise self.error
+
+    cancellation = HybridCancellation("cancelled")
+    provider_map = MultiProviderMap()
+    provider_map.add_provider(
+        "failing",
+        cast(Any, CloseTrackingProvider("failing", RuntimeError("close failed"))),
+    )
+    provider_map.add_provider(
+        "cancelling", cast(Any, CloseTrackingProvider("cancelling", cancellation))
+    )
+    provider_map.add_provider("later", cast(Any, CloseTrackingProvider("later")))
+    provider = MultiProvider(provider_map=provider_map, openai_api_key="test")
+
+    with pytest.raises(HybridCancellation) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value is cancellation
+    assert closed == ["failing", "cancelling"]
