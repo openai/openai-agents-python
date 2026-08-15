@@ -8,7 +8,7 @@ from typing import Any, cast
 import httpx2
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
-from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseErrorEvent
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.reasoning import Reasoning
@@ -4424,3 +4424,94 @@ def test_websocket_get_retry_advice_reports_no_response_started_for_stateful_req
     assert advice is not None
     assert advice.replay_safety == "unsafe"
     assert advice.response_started is False
+
+
+def _response_without_usage() -> Response:
+    return Response(
+        id="resp-no-usage",
+        created_at=0,
+        model="fake",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        top_p=None,
+        parallel_tool_calls=False,
+        usage=None,
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_request_is_counted_when_provider_omits_usage() -> None:
+    """A completed Responses call counts as one request even when the provider omits usage.
+
+    Some OpenAI-compatible providers and gateways behind a custom `base_url` return no `usage`
+    block. Counting those as zero requests understates `Usage.requests`, which is documented as
+    the number of requests made to the LLM API, and disagrees with the Chat Completions, LiteLLM
+    and AnyLLM adapters, which all count the request in the same situation.
+    """
+
+    class DummyResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            return _response_without_usage()
+
+    class DummyClient:
+        responses = DummyResponses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, DummyClient()))
+    resp = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert resp.usage.requests == 1
+    # Token counts stay at zero, since the provider genuinely did not report them.
+    assert resp.usage.input_tokens == 0
+    assert resp.usage.output_tokens == 0
+    assert resp.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_request_is_counted_when_provider_omits_usage(monkeypatch) -> None:
+    """The websocket transport counts its request too, so it does not disagree with HTTP."""
+    frame = json.dumps(
+        {
+            "type": "response.completed",
+            "response": _response_without_usage().model_dump(),
+            "sequence_number": 1,
+        }
+    )
+    client = DummyWSClient()
+    ws = DummyWSConnection([frame])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, client))
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    resp = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert resp.usage.requests == 1
+    assert resp.usage.total_tokens == 0

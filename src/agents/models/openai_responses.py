@@ -78,7 +78,9 @@ from ..tracing import SpanError, response_span
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
+    _mark_request_completed_without_usage,
     _raw_usage_snapshot,
+    _requests_for_response_without_usage,
     _response_usage_to_usage,
     model_usage_to_span_usage,
 )
@@ -531,7 +533,7 @@ class OpenAIResponsesModel(Model):
                 usage = (
                     _response_usage_to_usage(response.usage)
                     if response.usage is not None
-                    else Usage()
+                    else Usage(requests=_requests_for_response_without_usage(response))
                 )
                 if response.usage is not None:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
@@ -747,6 +749,11 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response = await client.responses.create(**create_kwargs)
+            if isinstance(response, Response) and response.usage is None:
+                # This call is one request even though the provider reported no usage. Marked
+                # here rather than in `get_response` so subclasses that override `_fetch_response`
+                # to multiplex several provider responses keep their own request accounting.
+                _mark_request_completed_without_usage(response)
             return cast(Response, response)
 
         streaming_response = getattr(client.responses, "with_streaming_response", None)
@@ -1194,6 +1201,8 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 f"{terminal_event_hint}"
             )
 
+        if final_response.usage is None:
+            _mark_request_completed_without_usage(final_response)
         return final_response
 
     async def _iter_websocket_response_events(
