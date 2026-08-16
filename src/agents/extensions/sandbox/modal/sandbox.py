@@ -296,6 +296,8 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
     use_sleep_cmd: bool = True
     image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION
     idle_timeout: int | None = None
+    cpu: float | tuple[float, float] | None = None
+    memory: int | tuple[int, int] | None = None
 
     def __init__(
         self,
@@ -311,6 +313,8 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
         image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION,
         idle_timeout: int | None = None,
         *,
+        cpu: float | tuple[float, float] | None = None,
+        memory: int | tuple[int, int] | None = None,
         type: Literal["modal"] = "modal",
     ) -> None:
         super().__init__(
@@ -326,6 +330,8 @@ class ModalSandboxClientOptions(BaseSandboxClientOptions):
             use_sleep_cmd=use_sleep_cmd,
             image_builder_version=image_builder_version,
             idle_timeout=idle_timeout,
+            cpu=cpu,
+            memory=memory,
         )
 
 
@@ -460,6 +466,8 @@ class ModalSandboxSessionState(SandboxSessionState):
     use_sleep_cmd: bool = True
     image_builder_version: str | None = _DEFAULT_IMAGE_BUILDER_VERSION
     idle_timeout: int | None = None
+    cpu: float | tuple[float, float] | None = None
+    memory: int | tuple[int, int] | None = None
 
     def _sanitize_persisted_provider_identity(
         self,
@@ -730,6 +738,8 @@ class ModalSandboxSession(BaseSandboxSession):
             encrypted_ports=self.state.exposed_ports,
             volumes=volumes,
             gpu=self.state.gpu,
+            cpu=self.state.cpu,
+            memory=self.state.memory,
             timeout=self.state.timeout,
             idle_timeout=self.state.idle_timeout,
         )
@@ -1835,6 +1845,8 @@ class ModalSandboxSession(BaseSandboxSession):
                 encrypted_ports=self.state.exposed_ports,
                 volumes=self._modal_cloud_bucket_mounts_for_manifest(),
                 gpu=self.state.gpu,
+                cpu=self.state.cpu,
+                memory=self.state.memory,
                 timeout=self.state.timeout,
                 idle_timeout=self.state.idle_timeout,
             )
@@ -2090,6 +2102,8 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
           (async timeout for snapshot restore call)
         - timeout: int (maximum sandbox lifetime in seconds, default 300)
         - idle_timeout: int | None (maximum sandbox inactivity in seconds, default None)
+        - cpu: float | tuple[float, float] | None (CPU request or request/limit pair)
+        - memory: int | tuple[int, int] | None (memory request or request/limit pair in MiB)
         - image_builder_version: str | None (Modal image builder version, default "2025.06")
         """
 
@@ -2213,6 +2227,8 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
             use_sleep_cmd=options.use_sleep_cmd,
             image_builder_version=image_builder_version,
             idle_timeout=options.idle_timeout,
+            cpu=options.cpu,
+            memory=options.memory,
         )
         if sandbox_create_timeout_s is not None:
             state.sandbox_create_timeout_s = float(sandbox_create_timeout_s)

@@ -503,6 +503,38 @@ async def test_modal_sandbox_create_passes_idle_timeout(
     assert session.state.idle_timeout == 60
 
 
+@pytest.mark.parametrize(
+    ("cpu", "memory"),
+    [
+        (1.0, 2048),
+        ((1.0, 4.0), (2048, 8192)),
+    ],
+    ids=["requests", "requests-and-limits"],
+)
+@pytest.mark.asyncio
+async def test_modal_sandbox_create_passes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    cpu: float | tuple[float, float],
+    memory: int | tuple[int, int],
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    client = modal_module.ModalSandboxClient()
+    session = await client.create(
+        options=modal_module.ModalSandboxClientOptions(
+            app_name="sandbox-tests",
+            cpu=cpu,
+            memory=memory,
+        ),
+    )
+
+    assert create_calls
+    assert create_calls[0]["cpu"] == cpu
+    assert create_calls[0]["memory"] == memory
+    assert session.state.cpu == cpu
+    assert session.state.memory == memory
+
+
 @pytest.mark.asyncio
 async def test_modal_sandbox_create_sets_default_cmd_for_custom_registry_image(
     monkeypatch: pytest.MonkeyPatch,
@@ -623,6 +655,30 @@ def test_modal_deserialize_session_state_defaults_missing_idle_timeout(
     )
 
     assert restored.idle_timeout is None
+
+
+def test_modal_deserialize_session_state_defaults_missing_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        cpu=(1.0, 4.0),
+        memory=(2048, 8192),
+    )
+    payload = state.model_dump(mode="json")
+    payload.pop("cpu")
+    payload.pop("memory")
+
+    restored = modal_module.ModalSandboxClient().deserialize_session_state(
+        cast(dict[str, object], payload)
+    )
+
+    assert restored.cpu is None
+    assert restored.memory is None
 
 
 @pytest.mark.asyncio
@@ -3444,6 +3500,8 @@ async def test_modal_snapshot_filesystem_restore_preserves_exposed_ports(
         workspace_persistence="snapshot_filesystem",
         exposed_ports=(8765,),
         idle_timeout=60,
+        cpu=(1.0, 4.0),
+        memory=(2048, 8192),
     )
     session = modal_module.ModalSandboxSession.from_state(state)
     call_names: list[str] = []
@@ -3470,6 +3528,8 @@ async def test_modal_snapshot_filesystem_restore_preserves_exposed_ports(
     assert create_calls
     assert create_calls[0]["encrypted_ports"] == (8765,)
     assert create_calls[0]["idle_timeout"] == 60
+    assert create_calls[0]["cpu"] == (1.0, 4.0)
+    assert create_calls[0]["memory"] == (2048, 8192)
     assert sys.modules["modal"].Image.from_id_calls == ["snap-123"]
     assert call_names == []
     assert call_timeouts == []

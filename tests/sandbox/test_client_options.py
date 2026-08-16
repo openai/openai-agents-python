@@ -58,6 +58,8 @@ def test_sandbox_client_options_exclude_unset_preserves_type_discriminator() -> 
         "use_sleep_cmd": True,
         "image_builder_version": "2025.06",
         "idle_timeout": None,
+        "cpu": None,
+        "memory": None,
     }
 
 
