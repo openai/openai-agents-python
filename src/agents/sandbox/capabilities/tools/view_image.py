@@ -78,7 +78,7 @@ def _resolve_view_image_path(
     session: BaseSandboxSession,
     workspace_scope: SandboxWorkspaceScope,
     input_path: str,
-) -> tuple[object, Path]:
+) -> tuple[Any, Path]:
     scoped_path = workspace_scope.anchor(coerce_posix_path(input_path))
     resolved_path = session._workspace_path_policy().normalize_path(scoped_path)
     return scoped_path, resolved_path
