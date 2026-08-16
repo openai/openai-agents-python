@@ -11,7 +11,7 @@ from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
 from ..run_internal.items import normalize_input_items_for_api
-from ..usage import _response_usage_to_usage
+from ..usage import Usage, _response_usage_to_usage
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
     OpenAIResponsesCompactionArgs,
@@ -238,8 +238,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         compacted = await self.client.responses.compact(**compact_kwargs)
 
         compacted_usage = getattr(compacted, "usage", None)
-        if wrapper is not None and compacted_usage is not None:
-            wrapper.usage.add(_response_usage_to_usage(compacted_usage))
+        if wrapper is not None:
+            # The compaction call is billed, so it counts even when the provider reports no
+            # usage. Recorded without synthesizing token counts that never arrived.
+            wrapper.usage.add(
+                _response_usage_to_usage(compacted_usage)
+                if compacted_usage is not None
+                else Usage(requests=1)
+            )
 
         output_items = _strip_orphaned_assistant_ids(
             _normalize_compaction_output_items(compacted.output or [])

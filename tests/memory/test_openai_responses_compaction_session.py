@@ -1496,6 +1496,38 @@ class TestOpenAIResponsesCompactionSession:
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
 
     @pytest.mark.asyncio
+    async def test_compaction_request_counts_when_provider_omits_usage(self) -> None:
+        """The compaction call is billed, so it counts even without a usage payload.
+
+        OpenAI-compatible endpoints behind a custom `base_url` can answer `responses.compact`
+        with no usage. Dropping the request entirely understates `Usage.requests`, which is the
+        accounting the issue behind #4446 was about.
+        """
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "encrypted_content": "enc"}],
+            usage=None,
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda ctx: True,
+        )
+
+        model = ScriptedModel(steps=[[get_text_message("ok")]])
+        result = await Runner.run(Agent(name="assistant", model=model), "hello", session=session)
+
+        mock_client.responses.compact.assert_awaited_once()
+        # One model call plus the compaction call.
+        assert result.context_wrapper.usage.requests == 2
+        # No usage payload is synthesized, so token counts stay at zero.
+        assert result.context_wrapper.usage.total_tokens == 0
+
+    @pytest.mark.asyncio
     async def test_compaction_skips_when_tool_outputs_present(self) -> None:
         underlying = SimpleListSession()
         mock_client = MagicMock()
