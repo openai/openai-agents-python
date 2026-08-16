@@ -47,8 +47,26 @@ def _consume_svg_prolog_construct(snippet: str) -> str | None:
     return None
 
 
+def _decode_svg_text(payload: bytes) -> str | None:
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encoding = "utf-16"
+    elif payload.startswith(b"<\x00"):
+        encoding = "utf-16-le"
+    elif payload.startswith(b"\x00<"):
+        encoding = "utf-16-be"
+    else:
+        encoding = "utf-8-sig"
+    try:
+        return payload.decode(encoding)
+    except UnicodeDecodeError:
+        return None
+
+
 def _looks_like_svg(payload: bytes) -> bool:
-    snippet = payload.decode("utf-8-sig", errors="ignore").lstrip()
+    decoded = _decode_svg_text(payload)
+    if decoded is None:
+        return False
+    snippet = decoded.lstrip()
     while snippet:
         lowered = snippet.lower()
         if lowered.startswith("<svg"):
