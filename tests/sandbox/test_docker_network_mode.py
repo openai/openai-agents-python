@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Any, cast
 
 import docker.errors  # type: ignore[import-untyped]
 import pytest
 
+from agents import Agent
+from agents.run_context import RunContextWrapper
+from agents.run_state import RunState
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.docker import (
@@ -38,9 +43,17 @@ class _Container:
         self.status = "running"
 
 
+class _ExistingContainer(_Container):
+    def __init__(self, attrs: dict[str, object]) -> None:
+        self.id = "existing-container"
+        self.status = "running"
+        self.attrs = attrs
+
+
 class _Containers:
-    def __init__(self) -> None:
+    def __init__(self, existing: _Container | None = None) -> None:
         self.created = _Container()
+        self.existing = existing
         self.create_calls: list[dict[str, object]] = []
 
     def create(self, **kwargs: object) -> _Container:
@@ -49,13 +62,15 @@ class _Containers:
 
     def get(self, container_id: str) -> _Container:
         _ = container_id
+        if self.existing is not None:
+            return self.existing
         raise docker.errors.NotFound("container not found")
 
 
 class _DockerClient:
-    def __init__(self) -> None:
+    def __init__(self, existing: _Container | None = None) -> None:
         self.images = _Images()
-        self.containers = _Containers()
+        self.containers = _Containers(existing)
 
 
 class _NoDockerProviderAccess:
@@ -63,8 +78,10 @@ class _NoDockerProviderAccess:
         raise AssertionError(f"unexpected Docker provider access: {name}")
 
 
-def _client() -> tuple[DockerSandboxClient, _DockerClient]:
-    docker_client = _DockerClient()
+def _client(
+    existing: _Container | None = None,
+) -> tuple[DockerSandboxClient, _DockerClient]:
+    docker_client = _DockerClient(existing)
     client = DockerSandboxClient(docker_client=cast(object, docker_client))
     return client, docker_client
 
@@ -79,6 +96,28 @@ def _state(*, network_mode: str | None = None) -> DockerSandboxSessionState:
     if network_mode is not None:
         payload["network_mode"] = network_mode
     return DockerSandboxSessionState.model_validate(payload)
+
+
+def test_docker_module_imports_self_from_typing_extensions() -> None:
+    module_path = (
+        Path(__file__).parents[2] / "src" / "agents" / "sandbox" / "sandboxes" / "docker.py"
+    )
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    typing_names = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "typing"
+        for alias in node.names
+    }
+    typing_extensions_names = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "typing_extensions"
+        for alias in node.names
+    }
+
+    assert "Self" not in typing_names
+    assert "Self" in typing_extensions_names
 
 
 def test_docker_options_accept_network_mode_none() -> None:
@@ -227,3 +266,82 @@ async def test_docker_resume_reapplies_network_mode_to_replacement_container() -
 
     assert docker_client.containers.create_calls[0]["network_mode"] == "none"
     assert state.container_id == "replacement-container"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {
+            "Mounts": [],
+            "HostConfig": {"NetworkMode": "bridge"},
+            "NetworkSettings": {"Networks": {"bridge": {}}},
+        },
+        {
+            "Mounts": [],
+            "HostConfig": {"NetworkMode": "none"},
+            "NetworkSettings": {"Networks": {"bridge": {}}},
+        },
+        {
+            "Mounts": [],
+            "HostConfig": {"NetworkMode": "none"},
+            "NetworkSettings": {},
+        },
+    ],
+    ids=["wrong-host-network-mode", "attached-after-create", "missing-network-map"],
+)
+async def test_docker_resume_rejects_reused_container_that_is_not_network_isolated(
+    attrs: dict[str, object],
+) -> None:
+    existing = _ExistingContainer(attrs)
+    client, docker_client = _client(existing)
+    state = _state(network_mode="none")
+    state.container_id = existing.id
+
+    with pytest.raises(ValueError, match="network"):
+        await client.resume(state)
+
+    assert docker_client.containers.create_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("networks", [{}, {"none": {}}], ids=["empty", "none-network"])
+async def test_docker_resume_reuses_container_that_is_network_isolated(
+    networks: dict[str, object],
+) -> None:
+    existing = _ExistingContainer(
+        {
+            "Mounts": [],
+            "HostConfig": {"NetworkMode": "none"},
+            "NetworkSettings": {"Networks": networks},
+        }
+    )
+    client, docker_client = _client(existing)
+    state = _state(network_mode="none")
+    state.container_id = existing.id
+
+    await client.resume(state)
+
+    assert docker_client.containers.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_state_round_trip_preserves_docker_network_mode() -> None:
+    agent = Agent(name="sandbox")
+    run_state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="resume sandbox",
+        starting_agent=agent,
+    )
+    run_state._sandbox = {
+        "backend_id": "docker",
+        "current_agent_name": agent.name,
+        "session_state": _state(network_mode="none").model_dump(mode="json"),
+    }
+
+    restored = await RunState.from_json(agent, run_state.to_json())
+
+    assert restored._sandbox is not None
+    restored_session_state = restored._sandbox["session_state"]
+    assert isinstance(restored_session_state, dict)
+    assert restored_session_state["network_mode"] == "none"

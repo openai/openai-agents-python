@@ -16,7 +16,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, Self, cast
+from typing import Any, Final, Literal, cast
 
 import docker.errors  # type: ignore[import-untyped]
 import docker.utils.socket as docker_socket  # type: ignore[import-untyped]
@@ -26,6 +26,7 @@ from docker.models.containers import Container  # type: ignore[import-untyped]
 from docker.types import DriverConfig, Mount as DockerSDKMount  # type: ignore[import-untyped]
 from docker.utils import parse_repository_tag
 from pydantic import model_validator
+from typing_extensions import Self
 
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
@@ -1648,6 +1649,10 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         reused_existing_container = container is not None
         if container is not None:
             _assert_existing_container_path_grants_match(container, state.manifest)
+            _assert_existing_container_network_configuration_matches(
+                container,
+                state.network_mode,
+            )
         owns_replacement = container is None
         replacement_session_id = (
             uuid.uuid4()
@@ -1866,6 +1871,28 @@ def _validate_docker_path_grants(manifest: Manifest) -> None:
             raise ValueError(
                 f"Docker sandbox path grant target conflicts with a manifest mount: {grant.path}"
             )
+
+
+def _assert_existing_container_network_configuration_matches(
+    container: Container,
+    network_mode: Literal["none"] | None,
+) -> None:
+    if network_mode is None:
+        return
+
+    container.reload()
+    attrs = getattr(container, "attrs", {}) or {}
+    host_config = attrs.get("HostConfig")
+    network_settings = attrs.get("NetworkSettings")
+    actual_network_mode = host_config.get("NetworkMode") if isinstance(host_config, dict) else None
+    networks = network_settings.get("Networks") if isinstance(network_settings, dict) else None
+    attached_networks = set(networks) if isinstance(networks, dict) else None
+
+    if actual_network_mode != "none" or attached_networks is None or attached_networks - {"none"}:
+        raise ValueError(
+            "Existing Docker sandbox network configuration does not match persisted "
+            "network_mode='none'; create a fresh sandbox session"
+        )
 
 
 def _assert_existing_container_path_grants_match(
