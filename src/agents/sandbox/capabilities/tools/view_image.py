@@ -16,7 +16,6 @@ from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_SIZE_LABEL = "10MB"
-_SVG_SNIFF_BYTES = 2048
 
 
 def _consume_svg_prolog_construct(snippet: str) -> str | None:
@@ -49,7 +48,7 @@ def _consume_svg_prolog_construct(snippet: str) -> str | None:
 
 
 def _looks_like_svg(payload: bytes) -> bool:
-    snippet = payload[:_SVG_SNIFF_BYTES].decode("utf-8-sig", errors="ignore").lstrip()
+    snippet = payload.decode("utf-8-sig", errors="ignore").lstrip()
     while snippet:
         lowered = snippet.lower()
         if lowered.startswith("<svg"):
