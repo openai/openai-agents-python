@@ -7,11 +7,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ....run_context import RunContextWrapper
 from ....tool import FunctionTool
-from ...errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundError
+from ....util._approvals import evaluate_needs_approval_setting
+from ...errors import (
+    ExecTimeoutError,
+    ExecTransportError,
+    InvalidManifestPathError,
+    PtySessionNotFoundError,
+)
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 from ...util.token_truncation import formatted_truncate_text_with_token_count
@@ -66,6 +72,23 @@ def _normalize_output(stdout: bytes, stderr: bytes) -> str:
     return decoded_stdout or decoded_stderr
 
 
+def _resolve_workdir(
+    *,
+    session: BaseSandboxSession,
+    workspace_scope: SandboxWorkspaceScope,
+    workdir: str | None,
+) -> str | None:
+    if workdir is None or workdir.strip() == "":
+        if workspace_scope.cwd is None:
+            return None
+        workdir = "."
+
+    resolved_workdir = session.normalize_path(
+        sandbox_path_str(workspace_scope.anchor(coerce_posix_path(workdir)))
+    )
+    return sandbox_path_str(resolved_workdir)
+
+
 def _resolve_workdir_command(
     *,
     session: BaseSandboxSession,
@@ -74,15 +97,14 @@ def _resolve_workdir_command(
     workdir: str | None,
 ) -> str:
     workspace_scope = workspace_scope or SandboxWorkspaceScope()
-    if workdir is None or workdir.strip() == "":
-        if workspace_scope.cwd is None:
-            return command
-        workdir = "."
-
-    resolved_workdir = session.normalize_path(
-        sandbox_path_str(workspace_scope.anchor(coerce_posix_path(workdir)))
+    resolved_workdir = _resolve_workdir(
+        session=session,
+        workspace_scope=workspace_scope,
+        workdir=workdir,
     )
-    return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
+    if resolved_workdir is None:
+        return command
+    return f"cd {shlex.quote(resolved_workdir)} && {command}"
 
 
 def _resolve_shell(shell: str | None, login: bool) -> bool | list[str]:
@@ -185,13 +207,44 @@ class ExecCommandTool(FunctionTool):
         self.session = session
         self.user = user
         self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
+
+        runtime_needs_approval = needs_approval
+        if callable(needs_approval):
+            approval_setting = needs_approval
+            approval_session = self.session
+            approval_scope = self.workspace_scope
+
+            async def canonical_needs_approval(
+                ctx_wrapper: RunContextWrapper[Any],
+                tool_parameters: dict[str, Any],
+                call_id: str,
+            ) -> bool:
+                try:
+                    args = self.args_model.model_validate(tool_parameters)
+                    canonical_parameters = args.model_dump()
+                    canonical_parameters["workdir"] = _resolve_workdir(
+                        session=approval_session,
+                        workspace_scope=approval_scope,
+                        workdir=args.workdir,
+                    )
+                except (ValidationError, InvalidManifestPathError):
+                    return False
+                return await evaluate_needs_approval_setting(
+                    approval_setting,
+                    ctx_wrapper,
+                    canonical_parameters,
+                    call_id,
+                )
+
+            runtime_needs_approval = canonical_needs_approval
+
         super().__init__(
             name=self.tool_name,
             description=self.tool_description,
             params_json_schema=self.args_model.model_json_schema(),
             on_invoke_tool=self._invoke,
             strict_json_schema=False,
-            needs_approval=needs_approval,
+            needs_approval=runtime_needs_approval,
         )
 
     async def _invoke(self, _: object, raw_input: str) -> str:
