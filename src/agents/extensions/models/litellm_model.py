@@ -251,8 +251,14 @@ class LitellmModel(Model):
             )
 
             if not response.choices:
+                # The provider error object can carry prompt text or credentials, so it is only
+                # attached when model-data logging is explicitly enabled.
                 provider_error = getattr(response, "error", None)
-                error_details = f": {provider_error}" if provider_error is not None else ""
+                error_details = (
+                    f": {provider_error}"
+                    if provider_error is not None and not _debug.DONT_LOG_MODEL_DATA
+                    else ""
+                )
                 raise ModelBehaviorError(
                     f"LiteLLM response has no choices (possible provider error payload)"
                     f"{error_details}"

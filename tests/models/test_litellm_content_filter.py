@@ -108,7 +108,7 @@ async def test_provider_error_payload_without_choices_raises(monkeypatch) -> Non
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
 
-    with pytest.raises(ModelBehaviorError, match="no choices"):
+    with pytest.raises(ModelBehaviorError, match="no choices") as exc_info:
         await LitellmModel(model="test-model").get_response(
             system_instructions=None,
             input=[],
@@ -119,3 +119,6 @@ async def test_provider_error_payload_without_choices_raises(monkeypatch) -> Non
             tracing=ModelTracing.DISABLED,
             previous_response_id=None,
         )
+
+    # Model data is not logged by default, so the provider payload stays out of the message.
+    assert "upstream provider failed" not in str(exc_info.value)

@@ -2229,7 +2229,7 @@ async def test_provider_error_payload_without_choices_raises(monkeypatch) -> Non
     provider = FakeAnyLLMProvider(supports_responses=False, chat_response=empty)
     module, _create_calls = _import_any_llm_module(monkeypatch, provider)
 
-    with pytest.raises(ModelBehaviorError, match="no choices"):
+    with pytest.raises(ModelBehaviorError, match="no choices") as exc_info:
         await module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini").get_response(
             system_instructions=None,
             input=[],
@@ -2240,3 +2240,6 @@ async def test_provider_error_payload_without_choices_raises(monkeypatch) -> Non
             tracing=ModelTracing.DISABLED,
             previous_response_id=None,
         )
+
+    # Model data is not logged by default, so the provider payload stays out of the message.
+    assert "upstream provider failed" not in str(exc_info.value)
