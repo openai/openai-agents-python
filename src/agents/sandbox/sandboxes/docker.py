@@ -201,8 +201,8 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
         image: str,
         exposed_ports: tuple[int, ...] = (),
         *,
-        network_mode: Literal["none"] | None = None,
         type: Literal["docker"] = "docker",
+        network_mode: Literal["none"] | None = None,
     ) -> None:
         super().__init__(
             type=type,
