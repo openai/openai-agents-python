@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ....run_context import RunContextWrapper
 from ....tool import FunctionTool, ToolOutputImage
+from ....util._approvals import evaluate_needs_approval_setting
 from ...errors import InvalidManifestPathError, WorkspaceReadNotFoundError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
@@ -72,6 +73,17 @@ class ViewImageArgs(BaseModel):
     )
 
 
+def _resolve_view_image_path(
+    *,
+    session: BaseSandboxSession,
+    workspace_scope: SandboxWorkspaceScope,
+    input_path: str,
+) -> tuple[object, Path]:
+    scoped_path = workspace_scope.anchor(coerce_posix_path(input_path))
+    resolved_path = session._workspace_path_policy().normalize_path(scoped_path)
+    return scoped_path, resolved_path
+
+
 @dataclass(init=False)
 class ViewImageTool(FunctionTool):
     tool_name: ClassVar[str] = "view_image"
@@ -102,13 +114,45 @@ class ViewImageTool(FunctionTool):
         self.session = session
         self.user = user
         self.workspace_scope = workspace_scope or SandboxWorkspaceScope()
+
+        runtime_needs_approval = needs_approval
+        if callable(needs_approval):
+            approval_setting = needs_approval
+            approval_session = self.session
+            approval_scope = self.workspace_scope
+
+            async def canonical_needs_approval(
+                ctx_wrapper: RunContextWrapper[Any],
+                tool_parameters: dict[str, Any],
+                call_id: str,
+            ) -> bool:
+                try:
+                    args = self.args_model.model_validate(tool_parameters)
+                    _, resolved_path = _resolve_view_image_path(
+                        session=approval_session,
+                        workspace_scope=approval_scope,
+                        input_path=args.path,
+                    )
+                except (ValidationError, InvalidManifestPathError):
+                    return False
+                canonical_parameters = args.model_dump()
+                canonical_parameters["path"] = sandbox_path_str(resolved_path)
+                return await evaluate_needs_approval_setting(
+                    approval_setting,
+                    ctx_wrapper,
+                    canonical_parameters,
+                    call_id,
+                )
+
+            runtime_needs_approval = canonical_needs_approval
+
         super().__init__(
             name=self.tool_name,
             description=self.tool_description,
             params_json_schema=self.args_model.model_json_schema(),
             on_invoke_tool=self._invoke,
             strict_json_schema=False,
-            needs_approval=needs_approval,
+            needs_approval=runtime_needs_approval,
         )
 
     async def _invoke(self, _: object, raw_input: str) -> ToolOutputImage | str:
@@ -116,9 +160,12 @@ class ViewImageTool(FunctionTool):
 
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
         input_path = args.path
-        scoped_path = self.workspace_scope.anchor(coerce_posix_path(input_path))
+        scoped_path, resolved_path = _resolve_view_image_path(
+            session=self.session,
+            workspace_scope=self.workspace_scope,
+            input_path=input_path,
+        )
         path_policy = self.session._workspace_path_policy()
-        resolved_path = path_policy.normalize_path(scoped_path)
         try:
             workspace_relative_path = path_policy.relative_path(scoped_path)
             display_path = self.workspace_scope.display_path(
