@@ -32,14 +32,13 @@ async def test_view_image_rejects_non_image_bytes_with_raster_extension() -> Non
 
 @pytest.mark.asyncio
 async def test_view_image_accepts_raster_signature_without_image_extension() -> None:
-    session = scripted_sandbox_session(
-        [{"method": "read", "result": io.BytesIO(_PNG_BYTES)}]
-    )
+    session = scripted_sandbox_session([{"method": "read", "result": io.BytesIO(_PNG_BYTES)}])
     tool = ViewImageTool(session=session)
 
     output = await tool.run(ViewImageArgs(path="images/payload.bin"))
 
     assert isinstance(output, ToolOutputImage)
+    assert output.image_url is not None
     assert output.image_url.startswith("data:image/png;base64,")
     session.assert_complete()
 
@@ -56,14 +55,13 @@ async def test_view_image_accepts_raster_signature_without_image_extension() -> 
     ids=["utf8-bom", "comment", "doctype", "utf16"],
 )
 async def test_view_image_preserves_svg_filename_compatibility(svg_payload: bytes) -> None:
-    session = scripted_sandbox_session(
-        [{"method": "read", "result": io.BytesIO(svg_payload)}]
-    )
+    session = scripted_sandbox_session([{"method": "read", "result": io.BytesIO(svg_payload)}])
     tool = ViewImageTool(session=session)
 
     output = await tool.run(ViewImageArgs(path="images/vector.svg"))
 
     assert isinstance(output, ToolOutputImage)
+    assert output.image_url is not None
     assert output.image_url.startswith("data:image/svg+xml;base64,")
     session.assert_complete()
 
@@ -71,13 +69,12 @@ async def test_view_image_preserves_svg_filename_compatibility(svg_payload: byte
 @pytest.mark.asyncio
 async def test_view_image_preserves_svgz_filename_compatibility() -> None:
     svgz_payload = gzip.compress(_SVG_BODY)
-    session = scripted_sandbox_session(
-        [{"method": "read", "result": io.BytesIO(svgz_payload)}]
-    )
+    session = scripted_sandbox_session([{"method": "read", "result": io.BytesIO(svgz_payload)}])
     tool = ViewImageTool(session=session)
 
     output = await tool.run(ViewImageArgs(path="images/vector.svgz"))
 
     assert isinstance(output, ToolOutputImage)
+    assert output.image_url is not None
     assert output.image_url.startswith("data:image/svg+xml;base64,")
     session.assert_complete()
