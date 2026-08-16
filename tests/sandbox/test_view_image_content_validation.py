@@ -12,7 +12,8 @@ from agents.tool import ToolOutputImage
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a84QAAAAASUVORK5CYII="
 )
-_SVG_BODY = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+_SVG_TEXT = '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+_SVG_BODY = _SVG_TEXT.encode()
 
 
 @pytest.mark.asyncio
@@ -50,8 +51,10 @@ async def test_view_image_accepts_image_signature_without_image_extension() -> N
         b"<!-- generated -->\n" + _SVG_BODY,
         b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "svg11.dtd">\n' + _SVG_BODY,
         b"<!--" + (b"x" * 4096) + b"-->\n" + _SVG_BODY,
+        _SVG_TEXT.encode("utf-16"),
+        b"\xfe\xff" + _SVG_TEXT.encode("utf-16-be"),
     ],
-    ids=["utf8-bom", "comment", "doctype", "long-comment"],
+    ids=["utf8-bom", "comment", "doctype", "long-comment", "utf16-le", "utf16-be"],
 )
 async def test_view_image_accepts_svg_prolog_forms(svg_payload: bytes) -> None:
     session = scripted_sandbox_session(
