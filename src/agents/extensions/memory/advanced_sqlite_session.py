@@ -7,7 +7,7 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from agents.result import RunResult
 from agents.usage import Usage
@@ -72,7 +72,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 self._init_structure_tables()
             else:
                 with self._locked_connection() as conn:
-                    self._verify_structure_tables_scope(conn)
+                    self._claim_structure_tables(conn)
         except BaseException:
             try:
                 self.close()
@@ -111,46 +111,60 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._current_branch_id = branch_id
             return True
 
-    def _verify_structure_tables_scope(self, conn: sqlite3.Connection) -> None:
-        """Reject a database file whose structure tables belong to other base tables.
+    # The structure tables that record which base-table pair owns a database file, and the
+    # foreign keys that record it. `branch_reservations` and `session_clear_generations` carry no
+    # foreign keys, but enforcing one pair per file keeps them unambiguous too.
+    _STRUCTURE_TABLE_OWNERS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "message_structure": ("session_id", "message_id"),
+        "turn_usage": ("session_id",),
+    }
+
+    def _claim_structure_tables(self, conn: sqlite3.Connection) -> None:
+        """Require a complete structure-table layout owned by the configured base-table pair.
 
         The structure tables are not named after ``sessions_table``/``messages_table``, so a
-        database file can only hold the structure rows of a single base-table pair. ``CREATE
-        TABLE IF NOT EXISTS`` keeps the first pair's foreign keys, so a second session configured
-        with different base table names would join ``message_structure`` against the wrong
-        messages table and read back rows that belong to the other pair.
+        database file can only hold the structure rows of a single pair. ``CREATE TABLE IF NOT
+        EXISTS`` keeps the first pair's foreign keys, so a second session configured with
+        different base table names would join ``message_structure`` against the wrong messages
+        table and read back rows that belong to the other pair.
 
-        Both owner-bearing structure tables are checked, so a file whose two structure tables were
-        created for different pairs is rejected instead of being accepted by whichever one happens
-        to match.
+        An incomplete layout is rejected rather than accepted, so a ``create_tables=False``
+        session cannot open a file before any pair has claimed it and then have another pair
+        claim it underneath.
         """
-        expected = {
-            "message_structure": {
-                "session_id": self.sessions_table,
-                "message_id": self.messages_table,
-            },
-            "turn_usage": {"session_id": self.sessions_table},
-        }
-        for table, expected_owners in expected.items():
-            # SQLite resolves table names case-insensitively but `PRAGMA foreign_key_list` reports
-            # the spelling used at CREATE time, so compare case-folded.
-            owners = {
-                row[3].casefold(): row[2]
-                for row in conn.execute(f"PRAGMA foreign_key_list({table})")
-            }
-            if not owners:
-                continue
+        owned_by = {"session_id": self.sessions_table, "message_id": self.messages_table}
+        for table, columns in self._STRUCTURE_TABLE_OWNERS.items():
+            owners = {row[3]: row[2] for row in conn.execute(f"PRAGMA foreign_key_list({table})")}
+            missing = [column for column in columns if column not in owners]
+            if missing:
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} does not exist yet or does not record "
+                    "which sessions_table/messages_table pair owns it. Construct an "
+                    "AdvancedSQLiteSession with create_tables=True to create and claim the "
+                    "structure tables before opening the database without them."
+                )
             if any(
-                owners.get(column, "").casefold() != owner.casefold()
-                for column, owner in expected_owners.items()
+                not self._identifiers_equal(conn, owners[column], owned_by[column])
+                for column in columns
             ):
-                found = "/".join(owners.get(column, "?") for column in expected_owners)
-                configured = "/".join(expected_owners.values())
+                found = "/".join(owners[column] for column in columns)
+                configured = "/".join(owned_by[column] for column in columns)
                 raise ValueError(
                     f"The `{table}` table in {self.db_path} already belongs to '{found}', not to "
                     f"the configured '{configured}'. Structure tables are shared per database "
                     "file, so give each sessions_table/messages_table pair its own db_path."
                 )
+
+    @staticmethod
+    def _identifiers_equal(conn: sqlite3.Connection, left: str, right: str) -> bool:
+        """Compare two table names the way SQLite compares identifiers.
+
+        SQLite folds identifiers with ASCII rules only, so `NOCASE` is asked directly rather than
+        reimplemented. Python's ``casefold()`` would equate names SQLite keeps distinct, for
+        example ``ßsessions`` and ``sssessions``.
+        """
+        row = conn.execute("SELECT ? = ? COLLATE NOCASE", (left, right)).fetchone()
+        return bool(row[0])
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.
@@ -230,7 +244,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 ON turn_usage(session_id, branch_id, user_turn_number)
             """)
 
-            self._verify_structure_tables_scope(conn)
+            self._claim_structure_tables(conn)
 
             conn.commit()
 
