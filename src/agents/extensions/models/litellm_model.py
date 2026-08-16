@@ -250,6 +250,14 @@ class LitellmModel(Model):
                 prompt=prompt,
             )
 
+            if not response.choices:
+                provider_error = getattr(response, "error", None)
+                error_details = f": {provider_error}" if provider_error is not None else ""
+                raise ModelBehaviorError(
+                    f"LiteLLM response has no choices (possible provider error payload)"
+                    f"{error_details}"
+                )
+
             message: litellm.types.utils.Message | None = None
             first_choice: litellm.types.utils.Choices | None = None
             if response.choices and len(response.choices) > 0:

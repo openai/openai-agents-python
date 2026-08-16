@@ -87,3 +87,35 @@ async def test_normal_stop_is_unaffected(monkeypatch):
         if isinstance(content, ResponseOutputRefusal)
     ]
     assert not refusals
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_provider_error_payload_without_choices_raises(monkeypatch) -> None:
+    """A provider error payload must not read as a successful empty turn.
+
+    Providers behind LiteLLM can answer with an error object and no choices. Returning an empty
+    output for that is indistinguishable from a model that legitimately said nothing, so the run
+    continues on a response that never happened.
+    """
+    from agents.exceptions import ModelBehaviorError
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        response = ModelResponse(choices=[])
+        response.choices = []
+        response.error = {"message": "upstream provider failed"}
+        return response
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    with pytest.raises(ModelBehaviorError, match="no choices"):
+        await LitellmModel(model="test-model").get_response(
+            system_instructions=None,
+            input=[],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+        )

@@ -606,6 +606,14 @@ class AnyLLMModel(Model):
                 prompt=prompt,
             )
 
+            if not response.choices:
+                provider_error = getattr(response, "error", None)
+                error_details = f": {provider_error}" if provider_error is not None else ""
+                raise ModelBehaviorError(
+                    f"Chat completion response has no choices (possible provider error payload)"
+                    f"{error_details}"
+                )
+
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
             if response.choices:

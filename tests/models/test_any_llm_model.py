@@ -2205,3 +2205,38 @@ async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) ->
     assert isinstance(terminal, ResponseCompletedEvent)
     assert terminal.response.usage is not None
     assert _requests_for_response_without_usage(terminal.response) == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_provider_error_payload_without_choices_raises(monkeypatch) -> None:
+    """A provider error payload must not read as a successful empty turn.
+
+    Matches the OpenAI Chat Completions adapter, which already rejects a response with no
+    choices rather than handing back empty output.
+    """
+    from agents.exceptions import ModelBehaviorError
+
+    empty = ChatCompletion(
+        id="chatcmpl_empty",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[],
+    )
+    empty.error = {"message": "upstream provider failed"}
+
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=empty)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    with pytest.raises(ModelBehaviorError, match="no choices"):
+        await module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini").get_response(
+            system_instructions=None,
+            input=[],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+        )
