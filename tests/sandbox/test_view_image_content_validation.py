@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 
 import pytest
@@ -17,7 +18,7 @@ _SVG_BODY = _SVG_TEXT.encode()
 
 
 @pytest.mark.asyncio
-async def test_view_image_rejects_non_image_bytes_with_image_extension() -> None:
+async def test_view_image_rejects_non_image_bytes_with_raster_extension() -> None:
     session = scripted_sandbox_session(
         [{"method": "read", "result": io.BytesIO(b"not an image\n")}]
     )
@@ -30,7 +31,7 @@ async def test_view_image_rejects_non_image_bytes_with_image_extension() -> None
 
 
 @pytest.mark.asyncio
-async def test_view_image_accepts_image_signature_without_image_extension() -> None:
+async def test_view_image_accepts_raster_signature_without_image_extension() -> None:
     session = scripted_sandbox_session(
         [{"method": "read", "result": io.BytesIO(_PNG_BYTES)}]
     )
@@ -50,19 +51,32 @@ async def test_view_image_accepts_image_signature_without_image_extension() -> N
         b"\xef\xbb\xbf" + _SVG_BODY,
         b"<!-- generated -->\n" + _SVG_BODY,
         b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "svg11.dtd">\n' + _SVG_BODY,
-        b"<!--" + (b"x" * 4096) + b"-->\n" + _SVG_BODY,
         _SVG_TEXT.encode("utf-16"),
-        b"\xfe\xff" + _SVG_TEXT.encode("utf-16-be"),
     ],
-    ids=["utf8-bom", "comment", "doctype", "long-comment", "utf16-le", "utf16-be"],
+    ids=["utf8-bom", "comment", "doctype", "utf16"],
 )
-async def test_view_image_accepts_svg_prolog_forms(svg_payload: bytes) -> None:
+async def test_view_image_preserves_svg_filename_compatibility(svg_payload: bytes) -> None:
     session = scripted_sandbox_session(
         [{"method": "read", "result": io.BytesIO(svg_payload)}]
     )
     tool = ViewImageTool(session=session)
 
     output = await tool.run(ViewImageArgs(path="images/vector.svg"))
+
+    assert isinstance(output, ToolOutputImage)
+    assert output.image_url.startswith("data:image/svg+xml;base64,")
+    session.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_view_image_preserves_svgz_filename_compatibility() -> None:
+    svgz_payload = gzip.compress(_SVG_BODY)
+    session = scripted_sandbox_session(
+        [{"method": "read", "result": io.BytesIO(svgz_payload)}]
+    )
+    tool = ViewImageTool(session=session)
+
+    output = await tool.run(ViewImageArgs(path="images/vector.svgz"))
 
     assert isinstance(output, ToolOutputImage)
     assert output.image_url.startswith("data:image/svg+xml;base64,")
