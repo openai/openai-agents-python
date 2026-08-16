@@ -4,8 +4,9 @@ import asyncio
 import json
 import sqlite3
 import threading
+import time
 from collections.abc import Awaitable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar
 
@@ -98,15 +99,16 @@ class SQLiteSession(SessionABC):
         try:
             if self._is_memory_db:
                 self._shared_connection = sqlite3.connect(":memory:", check_same_thread=False)
-                self._shared_connection.execute("PRAGMA journal_mode=WAL")
+                self._configure_connection(self._shared_connection)
                 self._init_db_for_connection(self._shared_connection)
             else:
                 # For file databases, initialize the schema once since it persists
                 with self._lock:
-                    init_conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-                    init_conn.execute("PRAGMA journal_mode=WAL")
-                    self._init_db_for_connection(init_conn)
-                    init_conn.close()
+                    with closing(
+                        sqlite3.connect(str(self.db_path), check_same_thread=False)
+                    ) as init_conn:
+                        self._configure_connection(init_conn)
+                        self._init_db_for_connection(init_conn)
         except Exception:
             if self._lock_path is not None and not self._lock_released:
                 self._release_file_lock(self._lock_path)
@@ -197,7 +199,7 @@ class SQLiteSession(SessionABC):
                     str(self.db_path),
                     check_same_thread=False,
                 )
-                connection.execute("PRAGMA journal_mode=WAL")
+                self._configure_connection(connection)
                 self._local.connection = connection
                 with self._connections_lock:
                     self._connections.add(connection)
@@ -206,8 +208,28 @@ class SQLiteSession(SessionABC):
             )
             return self._local.connection
 
+    @staticmethod
+    def _configure_connection(conn: sqlite3.Connection) -> None:
+        """Enable WAL, retrying its transient cross-process initialization lock."""
+        timeout_row = conn.execute("PRAGMA busy_timeout").fetchone()
+        timeout_seconds = (timeout_row[0] if timeout_row is not None else 0) / 1000
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
         """Initialize the database schema for a specific connection."""
+        self._create_schema_for_connection(conn)
+        conn.commit()
+
+    def _create_schema_for_connection(self, conn: sqlite3.Connection) -> None:
+        """Create the database schema without committing the current transaction."""
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {self.sessions_table} (
@@ -237,8 +259,6 @@ class SQLiteSession(SessionABC):
             ON {self.messages_table} (session_id, id)
         """
         )
-
-        conn.commit()
 
     def _insert_items(self, conn: sqlite3.Connection, items: list[TResponseInputItem]) -> None:
         conn.execute(

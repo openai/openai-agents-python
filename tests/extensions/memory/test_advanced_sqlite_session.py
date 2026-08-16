@@ -33,6 +33,103 @@ from tests.test_responses import get_text_message
 pytestmark = pytest.mark.asyncio
 
 
+def _claim_structure_tables_in_process(
+    db_path: str,
+    sessions_table: str,
+    messages_table: str,
+    ready: Any,
+    start: Any,
+    results: Any,
+) -> None:
+    """Construct a create_tables session in a child process and report the outcome."""
+    pair = (sessions_table, messages_table)
+    ready.set()
+    start.wait(timeout=30)
+    try:
+        session = AdvancedSQLiteSession(
+            session_id="concurrent",
+            db_path=db_path,
+            create_tables=True,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+        )
+        session.close()
+    except ValueError:
+        results.put(("rejected", pair))
+    except BaseException as exc:  # pragma: no cover - surfaced in the assertion below
+        results.put((f"error:{type(exc).__name__}", pair))
+    else:
+        results.put(("claimed", pair))
+
+
+def _create_owner_bearing_structure_tables(
+    db_path: Path,
+    *,
+    create_base_tables: bool = True,
+    message_foreign_keys: str = "",
+    usage_foreign_key: str = "",
+    message_session_column: str = "session_id",
+    message_id_column: str = "message_id",
+    usage_session_column: str = "session_id",
+) -> None:
+    """Create structurally usable owner tables with caller-selected ownership metadata."""
+    message_constraints = f", {message_foreign_keys}" if message_foreign_keys else ""
+    usage_constraint = f", {usage_foreign_key}" if usage_foreign_key else ""
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        if create_base_tables:
+            conn.execute("""
+                CREATE TABLE agent_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE agent_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    message_data TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES agent_sessions (session_id)
+                        ON DELETE CASCADE
+                )
+            """)
+        conn.execute("CREATE TABLE wrong_sessions (session_id TEXT PRIMARY KEY)")
+        conn.execute(f"""
+            CREATE TABLE message_structure (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                {message_session_column} TEXT NOT NULL,
+                {message_id_column} INTEGER NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                message_type TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                user_turn_number INTEGER,
+                branch_turn_number INTEGER,
+                tool_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                {message_constraints}
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE turn_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                {usage_session_column} TEXT NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                user_turn_number INTEGER NOT NULL,
+                requests INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                input_tokens_details JSON,
+                output_tokens_details JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, branch_id, user_turn_number)
+                {usage_constraint}
+            )
+        """)
+        conn.commit()
+
+
 def _multiprocessing_context() -> Any:
     method = "spawn" if sys.platform == "win32" else "forkserver"
     return multiprocessing.get_context(method)
@@ -438,28 +535,16 @@ async def test_add_items_rollback_failure_invalidates_connection(
 
 async def test_structure_initialization_failure_invalidates_connection(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    """Initialization must release its write lock even when rollback also fails."""
+    """Initialization must close its transaction connection after a schema failure."""
 
-    class FailingRollbackConnection(sqlite3.Connection):
-        def rollback(self) -> None:
-            raise RuntimeError("rollback failed")
+    class TrackingConnection(sqlite3.Connection):
+        closed = False
 
-    captured_connections: list[sqlite3.Connection] = []
-
-    class FailingRollbackInitSession(AdvancedSQLiteSession):
-        def _get_connection(self) -> sqlite3.Connection:
-            if not hasattr(self, "_test_connection"):
-                connection = sqlite3.connect(
-                    str(self.db_path),
-                    check_same_thread=False,
-                    factory=FailingRollbackConnection,
-                )
-                self._test_connection = connection
-                captured_connections.append(connection)
-                with self._connections_lock:
-                    self._connections.add(connection)
-            return self._test_connection
+        def close(self) -> None:
+            self.closed = True
+            super().close()
 
     db_path = tmp_path / "advanced_init_failure.db"
     setup = AdvancedSQLiteSession(
@@ -481,18 +566,32 @@ async def test_structure_initialization_failure_invalidates_connection(
     finally:
         conflict.close()
 
+    captured_connections: list[TrackingConnection] = []
+    real_connect = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> TrackingConnection:
+        connection = cast(
+            TrackingConnection,
+            real_connect(*args, **kwargs, factory=TrackingConnection),
+        )
+        captured_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
     with pytest.raises(sqlite3.OperationalError, match="already a table"):
-        FailingRollbackInitSession(
+        AdvancedSQLiteSession(
             session_id="advanced_init_failure",
             db_path=db_path,
             create_tables=True,
         )
 
     assert len(captured_connections) == 1
+    assert captured_connections[0].closed is True
     with pytest.raises(sqlite3.ProgrammingError):
         captured_connections[0].execute("SELECT 1")
 
-    probe = sqlite3.connect(str(db_path), timeout=0)
+    monkeypatch.setattr(sqlite3, "connect", real_connect)
+    probe = real_connect(str(db_path), timeout=0)
     try:
         probe.execute("CREATE TABLE IF NOT EXISTS probe_lock (x INTEGER)")
         probe.commit()
@@ -3789,3 +3888,423 @@ async def test_clear_session_rolls_back_on_failure_after_earlier_delete(usage_da
         assert await session.get_items() == []
     finally:
         session.close()
+
+
+async def test_structure_tables_reject_a_second_base_table_pair(tmp_path: Path) -> None:
+    """A second base-table pair in one file would read the first pair's structure rows."""
+    db_path = tmp_path / "advanced_shared_structure.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="first_sessions",
+        messages_table="first_messages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+
+        with pytest.raises(ValueError, match="first_sessions"):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="second_sessions",
+                messages_table="second_messages",
+            )
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            rejected_objects = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE name IN (
+                    'second_sessions',
+                    'second_messages',
+                    'idx_second_messages_session_id'
+                )
+            """).fetchall()
+        assert rejected_objects == []
+        assert await first.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        first.close()
+
+
+async def test_structure_tables_reject_changed_sessions_with_shared_messages(
+    tmp_path: Path,
+) -> None:
+    """Canonicalization must not replace a changed caller-selected sessions table."""
+    db_path = tmp_path / "advanced_shared_messages.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="first_sessions",
+        messages_table="shared_messages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+
+        with pytest.raises(ValueError, match="first_sessions"):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="second_sessions",
+                messages_table="shared_messages",
+            )
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            assert (
+                conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'second_sessions'"
+                ).fetchall()
+                == []
+            )
+        assert await first.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        first.close()
+
+
+async def test_structure_tables_reject_changed_messages_with_shared_sessions(
+    tmp_path: Path,
+) -> None:
+    """A changed messages table must not share structure rows under one sessions table."""
+    db_path = tmp_path / "advanced_shared_sessions.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="shared_sessions",
+        messages_table="first_messages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+
+        with pytest.raises(ValueError, match="first_messages"):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="shared_sessions",
+                messages_table="second_messages",
+            )
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            rejected_objects = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE name IN (
+                    'second_messages',
+                    'idx_second_messages_session_id'
+                )
+            """).fetchall()
+        assert rejected_objects == []
+        assert await first.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        first.close()
+
+
+async def test_structure_tables_accept_equivalent_identifier_casing(tmp_path: Path) -> None:
+    """SQLite resolves table names case-insensitively, so a recased pair is the same pair."""
+    db_path = tmp_path / "advanced_recased_structure.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="FooSessions",
+        messages_table="FooMessages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+    finally:
+        first.close()
+
+    recased = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="foosessions",
+        messages_table="foomessages",
+    )
+    try:
+        assert await recased.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        recased.close()
+
+
+@pytest.mark.parametrize("create_tables", [False, True])
+async def test_structure_tables_accept_quoted_custom_session_table(
+    tmp_path: Path, create_tables: bool
+) -> None:
+    """Released SQLiteSession accepts SQL-quoted custom session-table identifiers."""
+    db_path = tmp_path / "advanced_quoted_session_table.db"
+    sessions_table = '"quoted_sessions"'
+    messages_table = "quoted_messages"
+
+    if not create_tables:
+        setup = AdvancedSQLiteSession(
+            session_id="shared",
+            db_path=db_path,
+            create_tables=True,
+            sessions_table=sessions_table,
+            messages_table=messages_table,
+        )
+        setup.close()
+
+    session = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=create_tables,
+        sessions_table=sessions_table,
+        messages_table=messages_table,
+    )
+    try:
+        await session.add_items([{"role": "user", "content": "quoted"}])
+        assert await session.get_items() == [{"role": "user", "content": "quoted"}]
+    finally:
+        session.close()
+
+
+async def test_identifier_resolution_leaves_connection_authorized() -> None:
+    """Temporary ownership resolution must not deny later SQL on supported Python versions."""
+    with contextlib.closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE FooSessions (session_id TEXT PRIMARY KEY)")
+        assert AdvancedSQLiteSession._resolve_table_identifier(conn, '"foosessions"') == (
+            "FooSessions"
+        )
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+async def test_structure_tables_reject_distinct_non_ascii_identifiers(tmp_path: Path) -> None:
+    """SQLite folds identifiers with ASCII rules, so these are two different pairs.
+
+    Python's `casefold()` equates `ßsessions` and `sssessions`, which would let the second pair
+    through and restore the cross-table mixing this change prevents.
+    """
+    assert "ßsessions".casefold() == "sssessions".casefold()
+
+    db_path = tmp_path / "advanced_non_ascii_structure.db"
+    first = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="ßsessions",
+        messages_table="ßmessages",
+    )
+    try:
+        await first.add_items([{"role": "user", "content": "first"}])
+
+        with pytest.raises(ValueError, match="ßsessions"):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="sssessions",
+                messages_table="ssmessages",
+            )
+
+        assert await first.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        first.close()
+
+
+async def test_no_create_session_rejects_a_database_without_an_owner(tmp_path: Path) -> None:
+    """A no-create session must not open a file before a pair has claimed the structure tables.
+
+    Accepting it would let another pair claim the tables afterwards, leaving this session writing
+    and reading structure rows owned by that other pair.
+    """
+    db_path = tmp_path / "advanced_unclaimed_structure.db"
+
+    with pytest.raises(ValueError, match="create_tables=True"):
+        AdvancedSQLiteSession(session_id="shared", db_path=db_path, create_tables=False)
+
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall() == []
+
+    owner = AdvancedSQLiteSession(session_id="shared", db_path=db_path, create_tables=True)
+    try:
+        await owner.add_items([{"role": "user", "content": "first"}])
+    finally:
+        owner.close()
+
+    # Once a pair owns the layout, the same pair may open it without creating anything.
+    reader = AdvancedSQLiteSession(session_id="shared", db_path=db_path, create_tables=False)
+    try:
+        assert await reader.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        reader.close()
+
+
+async def test_no_create_session_rejects_owner_metadata_without_base_tables(
+    tmp_path: Path,
+) -> None:
+    """Complete-looking owner metadata cannot substitute for the configured base tables."""
+    db_path = tmp_path / "advanced_missing_base_tables.db"
+    _create_owner_bearing_structure_tables(
+        db_path,
+        create_base_tables=False,
+        message_foreign_keys="FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id), "
+        "FOREIGN KEY (message_id) REFERENCES agent_messages(id)",
+        usage_foreign_key="FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)",
+    )
+
+    with pytest.raises(ValueError, match="configured base tables"):
+        AdvancedSQLiteSession(session_id="shared", db_path=db_path, create_tables=False)
+
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        base_tables = conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE name IN ('agent_sessions', 'agent_messages')
+        """).fetchall()
+    assert base_tables == []
+
+
+@pytest.mark.parametrize("create_tables", [False, True])
+async def test_structure_tables_reject_an_ownerless_layout(
+    tmp_path: Path, create_tables: bool
+) -> None:
+    """An existing structure table without owner foreign keys is not a usable layout."""
+    db_path = tmp_path / "advanced_ownerless_structure.db"
+    _create_owner_bearing_structure_tables(db_path)
+
+    with pytest.raises(ValueError, match="exactly one owner foreign key"):
+        AdvancedSQLiteSession(
+            session_id="shared",
+            db_path=db_path,
+            create_tables=create_tables,
+        )
+
+
+@pytest.mark.parametrize("create_tables", [False, True])
+@pytest.mark.parametrize(
+    ("message_foreign_keys", "usage_foreign_key", "error"),
+    [
+        (
+            "FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id), "
+            "FOREIGN KEY (session_id) REFERENCES wrong_sessions(session_id), "
+            "FOREIGN KEY (message_id) REFERENCES agent_messages(id)",
+            "FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)",
+            "exactly one owner foreign key",
+        ),
+        (
+            "FOREIGN KEY (session_id) REFERENCES agent_sessions(wrong_id), "
+            "FOREIGN KEY (message_id) REFERENCES agent_messages(id)",
+            "FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)",
+            "already belongs",
+        ),
+        (
+            "FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id), "
+            "FOREIGN KEY (message_id) REFERENCES agent_messages(id)",
+            "FOREIGN KEY (session_id) REFERENCES wrong_sessions(session_id)",
+            "already belongs",
+        ),
+    ],
+)
+async def test_structure_tables_reject_malformed_owner_layouts(
+    tmp_path: Path,
+    create_tables: bool,
+    message_foreign_keys: str,
+    usage_foreign_key: str,
+    error: str,
+) -> None:
+    """Owner tables must have exactly one complete foreign-key signature per owner."""
+    db_path = tmp_path / "advanced_malformed_structure.db"
+    _create_owner_bearing_structure_tables(
+        db_path,
+        message_foreign_keys=message_foreign_keys,
+        usage_foreign_key=usage_foreign_key,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        AdvancedSQLiteSession(
+            session_id="shared",
+            db_path=db_path,
+            create_tables=create_tables,
+        )
+
+
+@pytest.mark.parametrize("create_tables", [False, True])
+async def test_structure_tables_accept_equivalent_child_column_casing(
+    tmp_path: Path, create_tables: bool
+) -> None:
+    """SQLite resolves the child and referenced sides of foreign keys identically."""
+    db_path = tmp_path / "advanced_recased_owner_columns.db"
+    _create_owner_bearing_structure_tables(
+        db_path,
+        message_session_column="SESSION_ID",
+        message_id_column="MESSAGE_ID",
+        usage_session_column="SESSION_ID",
+        message_foreign_keys="FOREIGN KEY (SESSION_ID) REFERENCES agent_sessions(session_id), "
+        "FOREIGN KEY (MESSAGE_ID) REFERENCES agent_messages(id)",
+        usage_foreign_key="FOREIGN KEY (SESSION_ID) REFERENCES agent_sessions(session_id)",
+    )
+
+    session = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=create_tables,
+    )
+    session.close()
+
+
+@pytest.mark.review_optional
+async def test_concurrent_structure_table_claims_leave_one_coherent_owner(tmp_path: Path) -> None:
+    """Two processes claiming a fresh file with different pairs must not split the layout."""
+    db_path = tmp_path / "advanced_concurrent_claim.db"
+    pairs = [("a_sessions", "a_messages"), ("b_sessions", "b_messages")]
+
+    context = _multiprocessing_context()
+    start = context.Event()
+    results = context.Queue()
+    ready_events = [context.Event(), context.Event()]
+    processes = [
+        context.Process(
+            target=_claim_structure_tables_in_process,
+            args=(str(db_path), sessions_table, messages_table, ready, start, results),
+        )
+        for (sessions_table, messages_table), ready in zip(pairs, ready_events, strict=False)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        for ready in ready_events:
+            assert ready.wait(timeout=30)
+        start.set()
+        for process in processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+
+        outcomes = [results.get(timeout=5), results.get(timeout=5)]
+        claimed = [pair for status, pair in outcomes if status == "claimed"]
+        assert len(claimed) == 1, outcomes
+        assert all(status in {"claimed", "rejected"} for status, _ in outcomes), outcomes
+
+        # Every owner-bearing structure table must name the one pair that won.
+        winner_sessions, winner_messages = claimed[0]
+        loser_sessions, loser_messages = next(pair for pair in pairs if pair != claimed[0])
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            structure_owners = {
+                row[3]: row[2] for row in conn.execute("PRAGMA foreign_key_list(message_structure)")
+            }
+            usage_owners = {
+                row[3]: row[2] for row in conn.execute("PRAGMA foreign_key_list(turn_usage)")
+            }
+            assert structure_owners == {
+                "session_id": winner_sessions,
+                "message_id": winner_messages,
+            }
+            assert usage_owners == {"session_id": winner_sessions}
+            rejected_objects = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name IN (?, ?, ?)",
+                (
+                    loser_sessions,
+                    loser_messages,
+                    f"idx_{loser_messages}_session_id",
+                ),
+            ).fetchall()
+            assert rejected_objects == []
+    finally:
+        start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)

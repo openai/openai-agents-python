@@ -7,7 +7,7 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from agents.result import RunResult
 from agents.usage import Usage
@@ -23,6 +23,17 @@ from ...logger import (
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 from ...memory.sqlite_session import _await_mutation
+
+
+def _allow_all_sqlite_actions(
+    _action: int,
+    _arg1: str | None,
+    _arg2: str | None,
+    _database: str | None,
+    _source: str | None,
+) -> int:
+    """Keep SQL authorized when an older Python cannot remove an authorizer."""
+    return sqlite3.SQLITE_OK
 
 
 def _content_preview(content: Any, max_length: int | None = None) -> str:
@@ -61,27 +72,37 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
-        super().__init__(
-            session_id=session_id,
-            db_path=db_path,
-            session_settings=session_settings,
-            **kwargs,
-        )
-        if create_tables:
+        self._create_structure_tables_on_init = create_tables
+        try:
+            super().__init__(
+                session_id=session_id,
+                db_path=db_path,
+                session_settings=session_settings,
+                **kwargs,
+            )
+        except BaseException:
             try:
-                self._init_structure_tables()
+                self.close()
             except BaseException:
-                try:
-                    self.close()
-                except BaseException:
-                    pass
-                raise
+                pass
+            raise
         self._current_branch_id = "main"
         # Synchronized with the durable session_clear_generations row whenever a
         # branch pointer is established or a write begins. A mismatch means
         # another instance cleared the session, so the local pointer resets to main.
         self._generation = 0
         self._logger = logger if logger is not None else logging.getLogger(__name__)
+
+    def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
+        """Initialize base tables only after validating advanced-table ownership."""
+        if self._create_structure_tables_on_init:
+            conn.execute("BEGIN IMMEDIATE")
+            self._create_schema_for_connection(conn)
+            self._init_structure_tables(conn)
+        else:
+            self._claim_structure_tables(conn)
+            self._create_schema_for_connection(conn)
+        conn.commit()
 
     def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
         """Set the current-branch pointer unless a clear has committed meanwhile.
@@ -108,80 +129,219 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._current_branch_id = branch_id
             return True
 
-    def _init_structure_tables(self):
+    # The structure tables that record which base-table pair owns a database file, and the
+    # foreign keys that record it. `branch_reservations` and `session_clear_generations` carry no
+    # foreign keys, but enforcing one pair per file keeps them unambiguous too.
+    _STRUCTURE_TABLE_OWNERS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "message_structure": ("session_id", "message_id"),
+        "turn_usage": ("session_id",),
+    }
+    _OWNER_TARGET_COLUMNS: ClassVar[dict[str, str]] = {
+        "session_id": "session_id",
+        "message_id": "id",
+    }
+
+    def _claim_structure_tables(self, conn: sqlite3.Connection) -> None:
+        """Require a complete structure-table layout owned by the configured base-table pair.
+
+        The structure tables are not named after ``sessions_table``/``messages_table``, so a
+        database file can only hold the structure rows of a single pair. ``CREATE TABLE IF NOT
+        EXISTS`` keeps the first pair's foreign keys, so a second session configured with
+        different base table names would join ``message_structure`` against the wrong messages
+        table and read back rows that belong to the other pair.
+
+        Missing or ambiguous ownership is rejected rather than accepted, so a
+        ``create_tables=False`` session cannot open a file before any pair has claimed it and
+        then have another pair claim it underneath.
+        """
+        owners_by_table: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
+        for table, columns in self._STRUCTURE_TABLE_OWNERS.items():
+            foreign_keys = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            owner_rows = {
+                column: [
+                    row for row in foreign_keys if self._identifiers_equal(conn, row[3], column)
+                ]
+                for column in columns
+            }
+            if any(len(owner_rows[column]) != 1 for column in columns):
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} does not record exactly one owner "
+                    "foreign key for each required base-table column. Construct an "
+                    "AdvancedSQLiteSession with create_tables=True to create and claim the "
+                    "structure tables before opening the database without them."
+                )
+            owners_by_table[table] = owner_rows
+
+        owned_by = self._resolve_base_table_owners(conn)
+        for table, columns in self._STRUCTURE_TABLE_OWNERS.items():
+            owner_rows = owners_by_table[table]
+            if any(
+                not self._identifiers_equal(conn, owner_rows[column][0][2], owned_by[column])
+                or not self._identifiers_equal(
+                    conn, owner_rows[column][0][4], self._OWNER_TARGET_COLUMNS[column]
+                )
+                for column in columns
+            ):
+                found = "/".join(
+                    f"{owner_rows[column][0][2]}({owner_rows[column][0][4]})" for column in columns
+                )
+                configured = "/".join(owned_by[column] for column in columns)
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} already belongs to '{found}', not to "
+                    f"the configured '{configured}'. Structure tables are shared per database "
+                    "file, so give each sessions_table/messages_table pair its own db_path."
+                )
+
+    def _resolve_base_table_owners(self, conn: sqlite3.Connection) -> dict[str, str]:
+        """Return the base-table names after SQLite has resolved configured identifiers."""
+        try:
+            sessions_table = self._resolve_table_identifier(conn, self.sessions_table)
+            messages_table = self._resolve_table_identifier(conn, self.messages_table)
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            raise ValueError(
+                f"The configured base tables in {self.db_path} are missing. Construct an "
+                "AdvancedSQLiteSession with create_tables=True to initialize and claim the "
+                "database before opening it without table creation."
+            ) from exc
+
+        base_foreign_keys = conn.execute(
+            f"PRAGMA foreign_key_list({self.messages_table})"
+        ).fetchall()
+        sessions_rows = [
+            row
+            for row in base_foreign_keys
+            if self._identifiers_equal(conn, row[3], "session_id")
+            and self._identifiers_equal(conn, row[4], "session_id")
+        ]
+        if len(sessions_rows) != 1 or not self._identifiers_equal(
+            conn, sessions_rows[0][2], sessions_table
+        ):
+            found = sessions_rows[0][2] if len(sessions_rows) == 1 else "ambiguous ownership"
+            raise ValueError(
+                f"The configured messages table '{messages_table}' in {self.db_path} belongs to "
+                f"sessions table '{found}', not to the configured '{sessions_table}'. Give each "
+                "sessions_table/messages_table pair its own db_path."
+            )
+        return {"session_id": sessions_table, "message_id": messages_table}
+
+    @staticmethod
+    def _resolve_table_identifier(conn: sqlite3.Connection, identifier: str) -> str:
+        """Ask SQLite for the table object selected by a configured identifier token."""
+        tables: set[str] = set()
+
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_READ and arg1 is not None:
+                tables.add(arg1)
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorizer)
+        try:
+            conn.execute(f"SELECT * FROM {identifier} LIMIT 0").fetchall()
+        finally:
+            conn.set_authorizer(None)
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except sqlite3.DatabaseError as exc:
+                if "not authorized" not in str(exc).lower():
+                    raise
+                conn.set_authorizer(_allow_all_sqlite_actions)
+        if len(tables) != 1:
+            raise ValueError(f"The configured table identifier '{identifier}' is ambiguous.")
+        return tables.pop()
+
+    @staticmethod
+    def _identifiers_equal(conn: sqlite3.Connection, left: str, right: str) -> bool:
+        """Compare two table names the way SQLite compares identifiers.
+
+        SQLite folds identifiers with ASCII rules only, so `NOCASE` is asked directly rather than
+        reimplemented. Python's ``casefold()`` would equate names SQLite keeps distinct, for
+        example ``ßsessions`` and ``sssessions``.
+        """
+        row = conn.execute("SELECT ? = ? COLLATE NOCASE", (left, right)).fetchone()
+        return bool(row[0])
+
+    def _init_structure_tables(self, conn: sqlite3.Connection) -> None:
         """Add structure and usage tracking tables.
 
         Creates the message_structure, branch_reservations, session_clear_generations,
         and turn_usage tables with appropriate indexes for conversation branching
         and usage analytics.
         """
-        with self._write_connection() as conn:
-            # Message structure with branch support
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS message_structure (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    branch_id TEXT NOT NULL DEFAULT 'main',
-                    message_type TEXT NOT NULL,
-                    sequence_number INTEGER NOT NULL,
-                    user_turn_number INTEGER,
-                    branch_turn_number INTEGER,
-                    tool_name TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (session_id)
-                        REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
-                    FOREIGN KEY (message_id)
-                        REFERENCES {self.messages_table}(id) ON DELETE CASCADE
-                )
-            """)
+        # Message structure with branch support
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS message_structure (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                message_type TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                user_turn_number INTEGER,
+                branch_turn_number INTEGER,
+                tool_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id)
+                    REFERENCES {self.messages_table}(id) ON DELETE CASCADE
+            )
+        """)
 
-            # Turn-level usage tracking with branch support and full JSON details
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS turn_usage (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    branch_id TEXT NOT NULL DEFAULT 'main',
-                    user_turn_number INTEGER NOT NULL,
-                    requests INTEGER DEFAULT 0,
-                    input_tokens INTEGER DEFAULT 0,
-                    output_tokens INTEGER DEFAULT 0,
-                    total_tokens INTEGER DEFAULT 0,
-                    input_tokens_details JSON,
-                    output_tokens_details JSON,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (session_id)
-                        REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
-                    UNIQUE(session_id, branch_id, user_turn_number)
-                )
-            """)
+        # Turn-level usage tracking with branch support and full JSON details
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS turn_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                user_turn_number INTEGER NOT NULL,
+                requests INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                input_tokens_details JSON,
+                output_tokens_details JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                UNIQUE(session_id, branch_id, user_turn_number)
+            )
+        """)
 
-            self._ensure_branch_reservations_table(conn)
-            self._ensure_session_clear_generations_table(conn)
+        # Validate the owner-bearing tables before any helper queries or indexes consume them.
+        self._claim_structure_tables(conn)
 
-            # Indexes
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_structure_session_seq
-                ON message_structure(session_id, sequence_number)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_structure_branch
-                ON message_structure(session_id, branch_id)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_structure_turn
-                ON message_structure(session_id, branch_id, user_turn_number)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_structure_branch_seq
-                ON message_structure(session_id, branch_id, sequence_number)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_turn_usage_session_turn
-                ON turn_usage(session_id, branch_id, user_turn_number)
-            """)
+        self._ensure_branch_reservations_table(conn)
+        self._ensure_session_clear_generations_table(conn)
 
-            conn.commit()
+        # Indexes
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_session_seq
+            ON message_structure(session_id, sequence_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_branch
+            ON message_structure(session_id, branch_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_turn
+            ON message_structure(session_id, branch_id, user_turn_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_branch_seq
+            ON message_structure(session_id, branch_id, sequence_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_turn_usage_session_turn
+            ON turn_usage(session_id, branch_id, user_turn_number)
+        """)
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add items to the session.
