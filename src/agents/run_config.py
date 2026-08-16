@@ -224,8 +224,12 @@ class SandboxRunConfig:
 
     Relative paths used by the built-in `exec_command`, `view_image`, and `apply_patch` tools
     resolve from this directory. Custom path-bearing capabilities must apply their bound
-    `SandboxWorkspaceScope` explicitly. The directory must already exist when the run starts.
-    This setting does not change `Manifest.root` or direct `BaseSandboxSession` path behavior.
+    `SandboxWorkspaceScope` explicitly. The directory must exist and be accessible to the
+    configured sandbox user when the runner validates `cwd`; for a fresh session, the runner
+    materializes the manifest before that validation.
+    This setting changes relative-path resolution only. It does not confine the run to `cwd`,
+    prevent access to other paths allowed by the shared session's workspace policy, change
+    `Manifest.root`, or change direct `BaseSandboxSession` path behavior.
     """
 
     if TYPE_CHECKING:

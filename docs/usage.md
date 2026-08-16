@@ -30,6 +30,8 @@ print("Total tokens:", usage.total_tokens)
 
 Usage is aggregated across all model calls during the run, including model calls that produce tool calls or handoffs.
 
+When an [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] automatically compacts history before the run finishes, usage reported by that `responses.compact` request is also added to the same run totals. A manual `run_compaction()` call made outside a run has no enclosing run context, so it does not update the usage object returned by an earlier run. See [OpenAI Responses compaction sessions](sessions/index.md#openai-responses-compaction-sessions).
+
 ### Enabling usage with third-party adapters
 
 Usage reporting varies across third-party adapters and provider backends. If you access models through third-party adapters and need accurate `result.context_wrapper.usage` values:

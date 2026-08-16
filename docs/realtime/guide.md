@@ -32,6 +32,8 @@ Unlike text-only runs, `runner.run()` does not produce a final result immediatel
 
 By default, `RealtimeRunner` uses `OpenAIRealtimeWebSocketModel`, so the default Python path is a server-side WebSocket connection to the Realtime API. If you pass a different `RealtimeModel`, the same session lifecycle and agent features still apply, while the connection mechanics can change.
 
+When the Realtime API server closes the default WebSocket connection normally, the model transport emits a `disconnected` [`RealtimeModelConnectionStatusEvent`][agents.realtime.model_events.RealtimeModelConnectionStatusEvent] followed by a [`RealtimeModelEndOfStreamEvent`][agents.realtime.model_events.RealtimeModelEndOfStreamEvent]. `RealtimeSession` forwards both inside `raw_model_event`, drains events that are already queued, and then ends asynchronous iteration without raising an exception. A caller-initiated `session.close()` does not synthesize these server-disconnect events. Unexpected WebSocket failures continue through the session's exception path instead of ending iteration as a normal server close.
+
 ## Agent and session configuration
 
 `RealtimeAgent` is intentionally narrower than the regular `Agent` type:

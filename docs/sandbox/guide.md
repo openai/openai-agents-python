@@ -169,7 +169,7 @@ Good uses for `instructions` include:
 - [examples/sandbox/unix_local_pty.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_pty.py) keeps the agent in one interactive process when PTY state matters.
 - [examples/sandbox/handoffs.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py) forbids the sandbox reviewer from answering the user directly after inspection.
 - [examples/sandbox/tax_prep.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py) requires the final filled files to actually land in `output/`.
-- [examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) pins the exact verification command and clarifies workspace-root-relative patch paths.
+- [examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py) pins the exact verification command and clarifies that patch paths are workspace-root relative when `SandboxRunConfig.cwd` is unset.
 
 Avoid copying the user's one-off task into `instructions`, embedding long reference material that belongs in the manifest, restating tool docs that built-in capabilities already inject, or mixing in local installation notes the model does not need at run time.
 
@@ -186,7 +186,7 @@ Built-in capabilities include:
 | Capability | Add it when | Notes |
 | --- | --- | --- |
 | `Shell` | The agent needs shell access. | Adds `exec_command`, plus `write_stdin` when the sandbox client supports PTY interaction. |
-| `Filesystem` | The agent needs to edit files or inspect local images. | Adds `apply_patch` and `view_image`; patch paths are workspace-root-relative. |
+| `Filesystem` | The agent needs to edit files or inspect local images. | Adds `apply_patch` and `view_image`; relative paths use the workspace root by default and `SandboxRunConfig.cwd` when configured. |
 | `Skills` | You want skill discovery and materialization in the sandbox. | Prefer this over manually mounting `.agents` or `.agents/skills`; `Skills` indexes and materializes skills into the sandbox for you. |
 | `Memory` | Follow-on runs should read or generate memory artifacts. | Requires `Shell`; updating memory artifacts during a run also requires `Filesystem`. |
 | `Compaction` | Long-running flows need context trimming after compaction items. | Adjusts model sampling and input handling. |
@@ -194,6 +194,8 @@ Built-in capabilities include:
 </div>
 
 By default, `SandboxAgent.capabilities` uses `Capabilities.default()`, which includes `Filesystem()`, `Shell()`, and `Compaction()`. If you pass `capabilities=[...]`, that list replaces the default, so include any default capabilities you still want.
+
+The `view_image` tool identifies PNG, JPEG, GIF, WebP, BMP, and TIFF raster images from their file content, not from the filename extension. A filename with a raster-image extension is rejected when its content is unsupported, while supported raster content can be loaded even when the filename has no image extension. For `.svg` and `.svgz` files, the tool retains filename-based compatibility in addition to recognizing SVG markup from file content.
 
 For skills, choose the source based on how you want them materialized:
 
@@ -235,7 +237,7 @@ Use manifest entries for the material the agent needs before work begins:
 
 Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. See [Sandbox clients](clients.md#mounts-and-remote-storage) for mount options and provider support.
 
-Good manifest design usually means keeping the workspace contract narrow, putting long task recipes in workspace files such as `repo/task.md`, and using relative workspace paths in instructions, for example `repo/task.md` or `output/report.md`. If the agent edits files with the `Filesystem` capability's `apply_patch` tool, remember that patch paths are relative to the sandbox workspace root, not the shell `workdir`.
+Good manifest design usually means keeping the workspace contract narrow, putting long task recipes in workspace files such as `repo/task.md`, and using relative workspace paths in instructions, for example `repo/task.md` or `output/report.md`. If the agent edits files with the `Filesystem` capability's `apply_patch` tool, remember that patch paths use the sandbox workspace root by default or `SandboxRunConfig.cwd` when configured; they do not use the shell `workdir`.
 
 Use `extra_path_grants` only when the agent needs a concrete absolute path outside the workspace or the manifest needs to copy a trusted local source outside the SDK process working directory. Examples include `/tmp` for temporary tool output, `/opt/toolchain` for a read-only runtime, or a generated skills directory that should be materialized into the sandbox. A grant applies to local source materialization and SDK file APIs. It also applies to shell execution when the backend can enforce filesystem policy:
 
@@ -472,6 +474,31 @@ These options only matter when the runner is creating a fresh sandbox session:
 
 </div>
 
+### Model-facing working directory
+
+Set `cwd` to a POSIX workspace-relative directory when several runs should share one sandbox session but operate in separate subdirectories. The directory must exist and be accessible to the configured sandbox user when the runner validates `cwd`. For a fresh session, the runner materializes the manifest first, so the manifest can create the directory before this validation.
+
+```python
+from agents import Runner
+from agents.run import RunConfig
+from agents.sandbox import SandboxRunConfig
+
+result = await Runner.run(
+    agent,
+    "Work only on task A.",
+    run_config=RunConfig(
+        sandbox=SandboxRunConfig(
+            session=shared_sandbox,
+            cwd="tasks/task-a",
+        ),
+    ),
+)
+```
+
+Relative paths used by the built-in `exec_command`, `view_image`, and `apply_patch` tools resolve from `cwd`. For the `cwd` value itself, absolute paths, parent segments such as `..`, and empty values are rejected. String values must use forward slashes. Relative `PurePath` values are normalized to POSIX form, while absolute `PurePath` values remain invalid. Direct `BaseSandboxSession` file APIs remain workspace-root relative, so `cwd` does not change `Manifest.root` or the session's underlying workspace boundary. The setting changes relative-path resolution only: it does not confine the run to `cwd` or prevent access to other paths allowed by the shared session's workspace policy.
+
+Custom path-bearing capabilities must apply their bound [`SandboxWorkspaceScope`][agents.sandbox.workspace_paths.SandboxWorkspaceScope] when resolving model-provided relative paths. See [examples/sandbox/shared_session_workdirs.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/shared_session_workdirs.py) for two concurrent runs that share one sandbox session while keeping their model-facing working directories separate.
+
 ### Materialization controls
 
 `concurrency_limits` controls how much sandbox materialization work can run in parallel. Use `SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)` when large manifests or local directory copies need tighter resource control. Set either value to `None` to disable that specific limit.
@@ -520,9 +547,9 @@ def build_agent(model: str) -> SandboxAgent[None]:
             "and summarize the file changes and risks. "
             "Read `repo/task.md` before editing files. Stay grounded in the repository, preserve "
             "existing behavior, and mention the exact verification command you ran. "
-            "Use the `$credit-note-fixer` skill before editing files. If the repo lives under "
-            "`repo/`, remember that `apply_patch` paths stay relative to the sandbox workspace "
-            "root, so edits still target `repo/...`."
+            "Use the `$credit-note-fixer` skill before editing files. "
+            "This example leaves `SandboxRunConfig.cwd` unset, so `apply_patch` paths stay "
+            "relative to the sandbox workspace root and edits still target `repo/...`."
         ),
         # Put repos and task files in the manifest.
         default_manifest=Manifest(

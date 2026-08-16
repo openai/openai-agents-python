@@ -589,6 +589,7 @@ The SDK raises exceptions in certain cases. The full list is in [`agents.excepti
 
 -   [`AgentsException`][agents.exceptions.AgentsException]: This is the base class for all exceptions that the SDK raises. It serves as a generic type from which all other specific exceptions are derived.
 -   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of agent-loop turns (LLM calls). Set `max_turns=None` to disable the limit.
+-   [`ModelTimeoutError`][agents.exceptions.ModelTimeoutError]: This exception is raised when a model-call attempt exceeds [`ModelSettings.timeout`][agents.model_settings.ModelSettings.timeout]. See [Model-call timeouts](models/index.md#model-call-timeouts) for scope and retry behavior.
 -   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]: This exception occurs when the underlying model (LLM) produces unexpected or invalid outputs. This can include:
     -   Malformed JSON: When the model provides a malformed JSON structure for tool calls or in its direct output, especially if a specific `output_type` is defined.
     -   Unexpected tool-related failures: When the model fails to use tools in an expected manner

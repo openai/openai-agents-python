@@ -54,6 +54,19 @@ run_config = RunConfig(
 
 Use this when you want container isolation or want the sandbox image to match the image used in another environment. See [examples/sandbox/docker/docker_runner.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py).
 
+### Disable Docker networking
+
+Set `network_mode="none"` when a Docker sandbox must not have network access:
+
+```python
+options = DockerSandboxClientOptions(
+    image="python:3.14-slim",
+    network_mode="none",
+)
+```
+
+The only supported explicit network mode is `"none"`; omit `network_mode` to preserve Docker's default behavior. A network-disabled sandbox cannot expose ports, so combining `network_mode="none"` with a non-empty `exposed_ports` tuple fails during option validation. The setting is stored in sandbox session state and reapplied if the SDK must create a replacement container while resuming that state.
+
 ## Mounts and remote storage
 
 Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. Import the built-in mount entries and generic strategies from `agents.sandbox.entries`. Hosted-provider strategies are available from `agents.extensions.sandbox` or the provider-specific extension package.
@@ -101,6 +114,22 @@ For provider-specific setup notes and links for the checked-in extension example
 | `VercelSandboxClient` | `openai-agents[vercel]` | [Vercel runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/vercel_runner.py) |
 
 </div>
+
+### Size Modal sandboxes
+
+Use `ModalSandboxClientOptions.cpu` and `ModalSandboxClientOptions.memory` to request resources for a new Modal sandbox. A single value requests that amount. A two-item `(request, limit)` tuple uses the first item as the request and the second item as the limit. Memory values are in MiB.
+
+```python
+from agents.extensions.sandbox import ModalSandboxClientOptions
+
+options = ModalSandboxClientOptions(
+    app_name="agents-sandbox",
+    cpu=(1.0, 4.0),
+    memory=(2048, 8192),
+)
+```
+
+Leave `cpu`, `memory`, or both as `None` to use Modal's default for each omitted resource. The selected values are preserved in sandbox session state so replacement sandboxes use the same resource configuration.
 
 Hosted sandbox clients expose provider-specific mount strategies. Choose the backend and mount strategy that best fit your storage provider:
 

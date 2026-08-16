@@ -494,6 +494,21 @@ english_agent = Agent(
 )
 ```
 
+## Model-call timeouts
+
+Set [`ModelSettings.timeout`][agents.model_settings.ModelSettings.timeout] to a positive number of seconds to bound each model-call attempt. The timeout applies to streaming and non-streaming calls and covers the complete attempt, including transport waits. It does not limit the full agent run, function-tool execution, or retry backoff.
+
+```python
+from agents import Agent, ModelSettings
+
+agent = Agent(
+    name="Assistant",
+    model_settings=ModelSettings(timeout=30.0),
+)
+```
+
+If an attempt exceeds the limit, the SDK cancels the attempt and waits for its cleanup to finish before raising [`ModelTimeoutError`][agents.exceptions.ModelTimeoutError]. When runner-managed retries are enabled, the SDK passes the timeout failure to the retry policy with `context.normalized.is_timeout` set to `True`; for example, `retry_policies.network_error()` matches that classification. Each permitted retry receives a new per-attempt timeout. The SDK still applies the normal [replay-safety rules](#safety-boundaries) before retrying.
+
 ## Runner-managed retries
 
 Retries are runtime-only and opt in. The SDK does not retry general model requests unless you set `ModelSettings(retry=...)` and your retry policy chooses to retry.
