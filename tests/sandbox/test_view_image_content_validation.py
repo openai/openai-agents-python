@@ -49,8 +49,9 @@ async def test_view_image_accepts_image_signature_without_image_extension() -> N
         b"\xef\xbb\xbf" + _SVG_BODY,
         b"<!-- generated -->\n" + _SVG_BODY,
         b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "svg11.dtd">\n' + _SVG_BODY,
+        b"<!--" + (b"x" * 4096) + b"-->\n" + _SVG_BODY,
     ],
-    ids=["utf8-bom", "comment", "doctype"],
+    ids=["utf8-bom", "comment", "doctype", "long-comment"],
 )
 async def test_view_image_accepts_svg_prolog_forms(svg_payload: bytes) -> None:
     session = scripted_sandbox_session(
