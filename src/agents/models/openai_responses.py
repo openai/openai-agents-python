@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import json
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -78,7 +78,9 @@ from ..tracing import SpanError, response_span
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
+    _mark_request_completed_without_usage,
     _raw_usage_snapshot,
+    _requests_for_response_without_usage,
     _response_usage_to_usage,
     model_usage_to_span_usage,
 )
@@ -229,6 +231,23 @@ class OpenAIResponsesWebSocketOptions(TypedDict):
     """
 
 
+def _mark_transport_request_without_usage(response: object) -> None:
+    """Mark one adapter-owned request when its completed response omits usage."""
+    if isinstance(response, Response) and response.usage is None:
+        _mark_request_completed_without_usage(response)
+
+
+def _usage_from_response(response: Response) -> Usage:
+    """Convert provider usage while preserving an adapter-owned request marker."""
+    if response.usage is not None:
+        return _response_usage_to_usage(response.usage)
+    return Usage(requests=_requests_for_response_without_usage(response))
+
+
+async def _no_stream_cleanup() -> None:
+    """Provide a no-op cleanup callback for an externally owned stream."""
+
+
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
 
@@ -241,18 +260,20 @@ class _ResponseStreamWithRequestId:
 
     def __init__(
         self,
-        stream: AsyncIterator[ResponseStreamEvent],
+        stream: AsyncIterator[ResponseStreamEvent] | AsyncIterable[ResponseStreamEvent],
         *,
         request_id: str | None,
         cleanup: Callable[[], Awaitable[object]],
     ) -> None:
-        self._stream = stream
+        self._source = stream
+        self._stream: AsyncIterator[ResponseStreamEvent] | None = None
         self.request_id = request_id
         self._cleanup = cleanup
         self._closed = False
         self._stream_close_complete = False
         self._cleanup_complete = False
         self._yielded_terminal_event = False
+        self._close_task: asyncio.Future[None] | None = None
 
     def __aiter__(self) -> _ResponseStreamWithRequestId:
         return self
@@ -261,8 +282,13 @@ class _ResponseStreamWithRequestId:
         if self._closed:
             raise StopAsyncIteration
 
+        stream = self._stream
+        if stream is None:
+            stream = self._source.__aiter__()
+            self._stream = stream
+
         try:
-            event = await self._stream.__anext__()
+            event = await stream.__anext__()
         except StopAsyncIteration:
             self._closed = True
             await self._cleanup_after_exhaustion()
@@ -272,14 +298,13 @@ class _ResponseStreamWithRequestId:
         event_type = getattr(event, "type", None)
         if event_type in self._TERMINAL_EVENT_TYPES:
             self._yielded_terminal_event = True
+        if event_type == "response.completed":
+            _mark_transport_request_without_usage(getattr(event, "response", None))
         return event
 
     async def aclose(self) -> None:
         self._closed = True
-        try:
-            await self._close_stream_once()
-        finally:
-            await self._cleanup_once()
+        await self._close_stream_and_cleanup()
 
     async def close(self) -> None:
         await self.aclose()
@@ -305,7 +330,7 @@ class _ResponseStreamWithRequestId:
 
     async def _cleanup_after_exhaustion(self) -> None:
         try:
-            await self._cleanup_once()
+            await self._close_stream_and_cleanup()
         except Exception as exc:
             if self._yielded_terminal_event:
                 log_model_action_debug(
@@ -314,17 +339,54 @@ class _ResponseStreamWithRequestId:
                 return
             raise
 
+    async def _close_stream_and_cleanup(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._finish_stream_close_and_cleanup())
+        await asyncio.shield(self._close_task)
+
+    async def _finish_stream_close_and_cleanup(self) -> None:
+        try:
+            await self._close_stream_once()
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await self._cleanup_once()
+            raise
+        await self._cleanup_once()
+
     async def _close_stream_once(self) -> None:
         if self._stream_close_complete:
             return
         self._stream_close_complete = True
 
-        aclose = getattr(self._stream, "aclose", None)
+        # An async iterable may create a separate iterator that owns its cleanup. Close both the
+        # resolved iterator and the source object, while avoiding duplicate close calls when they
+        # are the same object.
+        resolved = self._stream
+        if self._source is resolved:
+            await self._close_object(resolved)
+            return
+
+        try:
+            await self._close_object(resolved)
+        except BaseException:
+            # The source may own transport cleanup independently of its iterator. Preserve the
+            # iterator's original error while still making a best effort to release the source.
+            with contextlib.suppress(BaseException):
+                await self._close_object(self._source)
+            raise
+        await self._close_object(self._source)
+
+    @staticmethod
+    async def _close_object(target: object | None) -> None:
+        if target is None:
+            return
+
+        aclose = getattr(target, "aclose", None)
         if callable(aclose):
             await aclose()
             return
 
-        close = getattr(self._stream, "close", None)
+        close = getattr(target, "close", None)
         if callable(close):
             close_result = close()
             if inspect.isawaitable(close_result):
@@ -528,12 +590,8 @@ class OpenAIResponsesModel(Model):
                         ),
                     )
 
-                usage = (
-                    _response_usage_to_usage(response.usage)
-                    if response.usage is not None
-                    else Usage()
-                )
-                if response.usage is not None:
+                usage = _usage_from_response(response)
+                if response.usage is not None or usage.requests:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
 
                 if tracing.include_data():
@@ -610,6 +668,11 @@ class OpenAIResponsesModel(Model):
                             final_response = chunk.response
                             if model_settings.preserve_raw_usage is True:
                                 _attach_raw_usage_snapshot(chunk.response, chunk.response.usage)
+                            usage = _usage_from_response(chunk.response)
+                            if chunk.response.usage is not None or usage.requests:
+                                # Record before yielding the terminal event because consumers may
+                                # close the generator immediately after receiving it.
+                                span_response.span_data.usage = model_usage_to_span_usage(usage)
                         elif chunk_type in {
                             "response.failed",
                             "response.incomplete",
@@ -669,11 +732,6 @@ class OpenAIResponsesModel(Model):
                 if final_response is not None and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
-                if final_response is not None and final_response.usage is not None:
-                    span_response.span_data.usage = model_usage_to_span_usage(
-                        _response_usage_to_usage(final_response.usage)
-                    )
-
             except Exception as e:
                 span_response.set_error(
                     SpanError(
@@ -747,15 +805,21 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response = await client.responses.create(**create_kwargs)
+            _mark_transport_request_without_usage(response)
             return cast(Response, response)
 
         streaming_response = getattr(client.responses, "with_streaming_response", None)
         stream_create = getattr(streaming_response, "create", None)
         if not callable(stream_create):
             # Some tests and custom clients only implement `responses.create()`. Fall back to the
-            # older path in that case and simply omit request IDs for streamed calls.
+            # older path in that case and simply omit request IDs for streamed calls. Keep it in
+            # the existing stream wrapper so terminal request accounting stays transport-owned.
             response = await client.responses.create(**create_kwargs)
-            return cast(AsyncIterator[ResponseStreamEvent], response)
+            return _ResponseStreamWithRequestId(
+                cast(AsyncIterator[ResponseStreamEvent], response),
+                request_id=None,
+                cleanup=_no_stream_cleanup,
+            )
 
         # Keep the raw API response open while callers consume the SSE stream so we can expose
         # its request ID on terminal response payloads before cleanup closes the transport.
@@ -1277,6 +1341,8 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                         }
                         if is_terminal_event:
                             yielded_terminal_event = True
+                        if event_type == "response.completed":
+                            _mark_transport_request_without_usage(getattr(event, "response", None))
                         yield event
 
                         if is_terminal_event:

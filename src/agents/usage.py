@@ -321,16 +321,26 @@ def _mark_request_completed_without_usage(response: Any) -> None:
     Adapters call this instead of synthesizing a zero-filled usage payload, so the raw
     provider usage stays absent while the request itself is still counted.
     """
-    object.__setattr__(response, _REQUEST_WITHOUT_USAGE_ATTR, True)
+    _mark_requests_completed_without_usage(response, 1)
+
+
+def _mark_requests_completed_without_usage(response: Any, requests: int) -> None:
+    """Record an adapter-owned physical request count without provider usage."""
+    if requests < 1:
+        raise ValueError("Completed request count must be at least one.")
+    object.__setattr__(response, _REQUEST_WITHOUT_USAGE_ATTR, requests)
 
 
 def _requests_for_response_without_usage(response: Any) -> int:
     """How many requests a usage-less response represents.
 
-    Defaults to zero so adapters that multiplex several provider responses into one
-    response, and report their counts separately, are not double-counted.
+    Defaults to zero so adapters must explicitly opt in for both singular responses and
+    responses that aggregate several physical provider requests.
     """
-    return 1 if getattr(response, _REQUEST_WITHOUT_USAGE_ATTR, False) else 0
+    requests = getattr(response, _REQUEST_WITHOUT_USAGE_ATTR, 0)
+    if requests is True:
+        return 1
+    return requests if type(requests) is int and requests > 0 else 0
 
 
 def _response_usage_to_usage(response_usage: Any) -> Usage:

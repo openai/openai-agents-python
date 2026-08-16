@@ -510,8 +510,10 @@ async def test_runner_injects_two_subagent_calls_into_one_active_response() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("reports_usage", [False, True])
 async def test_injection_failure_after_completion_starts_continuation_response(
     streamed: bool,
+    reports_usage: bool,
 ) -> None:
     function_call = {
         "id": "fc_fallback",
@@ -528,13 +530,14 @@ async def test_injection_failure_after_completion_starts_continuation_response(
         "output": "document:alpha",
     }
     completed_first_response = _response("resp_old", [function_call])
-    completed_first_response.usage = _usage(
-        input_tokens=12,
-        cached_tokens=3,
-        cache_write_tokens=1,
-        output_tokens=4,
-        reasoning_tokens=2,
-    )
+    if reports_usage:
+        completed_first_response.usage = _usage(
+            input_tokens=12,
+            cached_tokens=3,
+            cache_write_tokens=1,
+            output_tokens=4,
+            reasoning_tokens=2,
+        )
     first_events = [
         _created("resp_old"),
         _done(function_call, sequence_number=2, output_index=0),
@@ -556,13 +559,14 @@ async def test_injection_failure_after_completion_starts_continuation_response(
     ]
     final_message = _root_final_message("continued")
     completed_second_response = _response("resp_new", [final_message])
-    completed_second_response.usage = _usage(
-        input_tokens=7,
-        cached_tokens=2,
-        cache_write_tokens=4,
-        output_tokens=3,
-        reasoning_tokens=1,
-    )
+    if reports_usage:
+        completed_second_response.usage = _usage(
+            input_tokens=7,
+            cached_tokens=2,
+            cache_write_tokens=4,
+            output_tokens=3,
+            reasoning_tokens=1,
+        )
     second_events = [
         _created("resp_new"),
         _done(final_message, sequence_number=2, output_index=0),
@@ -600,25 +604,30 @@ async def test_injection_failure_after_completion_starts_continuation_response(
         )
 
     assert result.final_output == "continued"
-    assert result.context_wrapper.usage.input_tokens == 19
-    assert result.context_wrapper.usage.input_tokens_details.cached_tokens == 5
-    assert (
-        getattr(
-            result.context_wrapper.usage.input_tokens_details,
-            "cache_write_tokens",
-            None,
+    if reports_usage:
+        assert result.context_wrapper.usage.input_tokens == 19
+        assert result.context_wrapper.usage.input_tokens_details.cached_tokens == 5
+        assert (
+            getattr(
+                result.context_wrapper.usage.input_tokens_details,
+                "cache_write_tokens",
+                None,
+            )
+            == 5
         )
-        == 5
-    )
-    assert result.context_wrapper.usage.output_tokens == 7
-    assert result.context_wrapper.usage.output_tokens_details.reasoning_tokens == 3
-    assert result.context_wrapper.usage.total_tokens == 26
+        assert result.context_wrapper.usage.output_tokens == 7
+        assert result.context_wrapper.usage.output_tokens_details.reasoning_tokens == 3
+        assert result.context_wrapper.usage.total_tokens == 26
+        assert len(result.context_wrapper.usage.request_usage_entries) == 2
+        assert [
+            entry.total_tokens for entry in result.context_wrapper.usage.request_usage_entries
+        ] == [16, 10]
+    else:
+        assert result.context_wrapper.usage.input_tokens == 0
+        assert result.context_wrapper.usage.output_tokens == 0
+        assert result.context_wrapper.usage.total_tokens == 0
+        assert result.context_wrapper.usage.request_usage_entries == []
     assert result.context_wrapper.usage.requests == 2
-    assert len(result.context_wrapper.usage.request_usage_entries) == 2
-    assert [entry.total_tokens for entry in result.context_wrapper.usage.request_usage_entries] == [
-        16,
-        10,
-    ]
 
     assert len(client.beta.responses.connections) == 1
     connection = client.beta.responses.connections[0]

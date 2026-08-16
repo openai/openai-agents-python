@@ -8,7 +8,7 @@ from typing import Any, cast
 import httpx2
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
-from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseErrorEvent
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.reasoning import Reasoning
@@ -40,6 +40,7 @@ from agents.models.openai_responses import (
     OpenAIResponsesModel,
     OpenAIResponsesWSModel,
     ResponsesWebSocketError,
+    _ResponseStreamWithRequestId,
     _should_retry_pre_event_websocket_disconnect,
 )
 from agents.retry import ModelRetryAdviceRequest
@@ -4424,3 +4425,393 @@ def test_websocket_get_retry_advice_reports_no_response_started_for_stateful_req
     assert advice is not None
     assert advice.replay_safety == "unsafe"
     assert advice.response_started is False
+
+
+def _response_without_usage() -> Response:
+    return Response(
+        id="resp-no-usage",
+        created_at=0,
+        model="fake",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        top_p=None,
+        parallel_tool_calls=False,
+        usage=None,
+    )
+
+
+def _completed_event_without_usage() -> ResponseCompletedEvent:
+    return ResponseCompletedEvent(
+        response=_response_without_usage(),
+        type="response.completed",
+        sequence_number=0,
+    )
+
+
+def _streaming_client_for(events: list[Any]) -> Any:
+    class IteratorStream:
+        def __init__(self) -> None:
+            self._remaining = list(events)
+
+        def __aiter__(self) -> IteratorStream:
+            return self
+
+        async def __anext__(self) -> Any:
+            if not self._remaining:
+                raise StopAsyncIteration
+            return self._remaining.pop(0)
+
+        async def close(self) -> None:
+            return None
+
+    stream = IteratorStream()
+
+    class APIResponse:
+        request_id = "req-1"
+
+        async def parse(self) -> Any:
+            return stream
+
+    class StreamingContextManager:
+        async def __aenter__(self) -> APIResponse:
+            return APIResponse()
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+    class Responses:
+        with_streaming_response = SimpleNamespace(create=lambda **kwargs: StreamingContextManager())
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    return Client()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_request_is_counted_when_responses_provider_omits_usage() -> None:
+    class Responses:
+        async def create(self, **kwargs: Any) -> Response:
+            return _response_without_usage()
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, Client()))
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(preserve_raw_usage=True),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert response.usage.requests == 1
+    assert response.usage.total_tokens == 0
+    assert response.raw_usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_request_is_counted_when_responses_provider_omits_usage() -> None:
+    completed = _completed_event_without_usage()
+    client = _streaming_client_for([completed])
+    agent = Agent(
+        name="test",
+        model=OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, client)),
+    )
+
+    result = Runner.run_streamed(agent, "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+    assert completed.response.usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_response_stream_counts_request_without_usage() -> None:
+    completed = _completed_event_without_usage()
+
+    class IteratorStream:
+        def __init__(self) -> None:
+            self._remaining = [completed]
+            self.close_calls = 0
+
+        def __aiter__(self) -> IteratorStream:
+            return self
+
+        async def __anext__(self) -> ResponseCompletedEvent:
+            if not self._remaining:
+                raise StopAsyncIteration
+            return self._remaining.pop()
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    stream = IteratorStream()
+
+    class Responses:
+        async def create(self, **kwargs: Any) -> IteratorStream:
+            return stream
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, Client()))
+    result = Runner.run_streamed(Agent(name="test", model=model), "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+    assert stream.close_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_response_stream_closes_resolved_iterable_iterator() -> None:
+    class IterableStream:
+        def __init__(self) -> None:
+            self.source_closed = False
+            self.iterator_closed = False
+
+        async def __aiter__(self) -> Any:
+            try:
+                yield _completed_event_without_usage()
+                yield _completed_event_without_usage()
+            finally:
+                self.iterator_closed = True
+
+        async def aclose(self) -> None:
+            self.source_closed = True
+
+    source = IterableStream()
+
+    class Responses:
+        async def create(self, **kwargs: Any) -> IterableStream:
+            return source
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, Client()))
+    stream = model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    async for _ in stream:
+        break
+    await stream.aclose()
+
+    assert source.iterator_closed
+    assert source.source_closed
+
+
+@pytest.mark.asyncio
+async def test_response_stream_closes_source_when_resolved_iterator_close_fails() -> None:
+    class FailingIterator:
+        def __init__(self) -> None:
+            self._remaining = [_completed_event_without_usage()]
+
+        def __aiter__(self) -> FailingIterator:
+            return self
+
+        async def __anext__(self) -> ResponseCompletedEvent:
+            if not self._remaining:
+                raise StopAsyncIteration
+            return self._remaining.pop()
+
+        async def aclose(self) -> None:
+            raise RuntimeError("iterator close failed")
+
+    iterator = FailingIterator()
+
+    class IterableSource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __aiter__(self) -> FailingIterator:
+            return iterator
+
+        async def aclose(self) -> None:
+            self.closed = True
+            raise RuntimeError("source close failed")
+
+    source = IterableSource()
+
+    async def cleanup() -> None:
+        return None
+
+    stream = _ResponseStreamWithRequestId(source, request_id=None, cleanup=cleanup)
+    await stream.__anext__()
+
+    with pytest.raises(RuntimeError, match="iterator close failed"):
+        await stream.aclose()
+    assert source.closed
+
+
+@pytest.mark.asyncio
+async def test_response_stream_closes_distinct_source_after_normal_exhaustion() -> None:
+    class IterableSource:
+        def __init__(self) -> None:
+            self.source_close_calls = 0
+            self.iterator_finalized = False
+
+        async def __aiter__(self) -> Any:
+            try:
+                yield _completed_event_without_usage()
+            finally:
+                self.iterator_finalized = True
+
+        async def aclose(self) -> None:
+            self.source_close_calls += 1
+
+    source = IterableSource()
+    cleanup_calls = 0
+
+    async def cleanup() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    stream = _ResponseStreamWithRequestId(source, request_id=None, cleanup=cleanup)
+    async for _ in stream:
+        pass
+
+    assert source.iterator_finalized
+    assert source.source_close_calls == 1
+    assert cleanup_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_request_is_counted_when_responses_provider_omits_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = json.dumps(
+        {
+            "type": "response.completed",
+            "response": _response_without_usage().model_dump(),
+            "sequence_number": 1,
+        }
+    )
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        return DummyWSConnection([frame])
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert response.usage.requests == 1
+    assert response.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_stream_counts_request_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = json.dumps(
+        {
+            "type": "response.completed",
+            "response": _response_without_usage().model_dump(),
+            "sequence_number": 1,
+        }
+    )
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        return DummyWSConnection([frame])
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+    result = Runner.run_streamed(Agent(name="test", model=model), "hi")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.context_wrapper.usage.requests == 1
+    assert result.context_wrapper.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_response_span_counts_request_without_usage() -> None:
+    class Responses:
+        async def create(self, **kwargs: Any) -> Response:
+            return _response_without_usage()
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, Client()))
+    with trace("test"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+
+    spans = [span.export() for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert len(spans) == 1
+    assert spans[0]["span_data"]["usage"]["requests"] == 1  # type: ignore[index]
+    assert spans[0]["span_data"]["usage"]["total_tokens"] == 0  # type: ignore[index]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_streamed_span_counts_request_before_terminal_event_close() -> None:
+    client = _streaming_client_for([_completed_event_without_usage()])
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, client))
+
+    with trace("test"):
+        stream = model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+        async for event in stream:
+            if event.type == "response.completed":
+                break
+        await stream.aclose()
+
+    spans = [span.export() for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert len(spans) == 1
+    assert spans[0]["span_data"]["usage"]["requests"] == 1  # type: ignore[index]
+    assert spans[0]["span_data"]["usage"]["total_tokens"] == 0  # type: ignore[index]

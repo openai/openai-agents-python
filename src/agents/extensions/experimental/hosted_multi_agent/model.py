@@ -39,6 +39,7 @@ from ....models._run_context import get_model_run_owner
 from ....models.openai_responses import OpenAIResponsesModel, _is_openai_omitted_value
 from ....tool import Tool
 from ....tool_context import ToolContext
+from ....usage import _mark_requests_completed_without_usage
 
 _BETA_ID = "responses_multi_agent=v1"
 _ROOT_AGENT_NAME = "/root"
@@ -784,6 +785,11 @@ class OpenAIHostedMultiAgentModel(OpenAIResponsesModel):
                             request_usages=active.request_usages,
                             request_count=active.request_count,
                         )
+                        if normalized_response.usage is None:
+                            _mark_requests_completed_without_usage(
+                                normalized_response,
+                                active.request_count,
+                            )
                         payload = _model_dump(completed_event)
                         payload["response"] = normalized_response
                         normalized_event = _construct_event("response.completed", payload)
