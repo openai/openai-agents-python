@@ -4668,20 +4668,25 @@ async def test_fallback_stream_counts_request_when_provider_omits_usage() -> Non
     final_response = _response_without_usage()
 
     class _AsyncIterableStream:
-        """Async iterable, not an iterator: no `__anext__` of its own."""
+        """Async iterable, not an iterator: `__aiter__` builds a separate generator."""
 
         def __init__(self) -> None:
-            self.closed = False
+            self.source_closed = False
+            self.iterator_finalized = False
 
         async def __aiter__(self) -> Any:
-            yield ResponseCompletedEvent(
-                response=final_response,
-                type="response.completed",
-                sequence_number=0,
-            )
+            try:
+                yield ResponseCompletedEvent(
+                    response=final_response,
+                    type="response.completed",
+                    sequence_number=0,
+                )
+            finally:
+                # Cleanup owned by the resolved iterator, not by the source object.
+                self.iterator_finalized = True
 
         async def aclose(self) -> None:
-            self.closed = True
+            self.source_closed = True
 
     stream = _AsyncIterableStream()
 
@@ -4746,3 +4751,64 @@ async def test_streamed_span_usage_survives_a_consumer_that_stops_at_the_termina
     span_data = response_spans[0]["span_data"]  # type: ignore[index]
     assert span_data["usage"]["requests"] == 1
     assert span_data["usage"]["total_tokens"] == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_stream_close_releases_the_resolved_iterator() -> None:
+    """Closing early must finalize the generator `__aiter__()` built, not just the source.
+
+    A fallback client can return an async iterable whose `__aiter__()` creates a separate
+    generator. That generator owns the `finally` blocks, so closing only the source object would
+    leave provider cleanup unrun.
+    """
+
+    class _AsyncIterableStream:
+        def __init__(self) -> None:
+            self.source_closed = False
+            self.iterator_finalized = False
+
+        async def __aiter__(self) -> Any:
+            try:
+                yield ResponseCompletedEvent(
+                    response=_response_without_usage(),
+                    type="response.completed",
+                    sequence_number=0,
+                )
+                yield ResponseCompletedEvent(
+                    response=_response_without_usage(),
+                    type="response.completed",
+                    sequence_number=1,
+                )
+            finally:
+                self.iterator_finalized = True
+
+        async def aclose(self) -> None:
+            self.source_closed = True
+
+    stream_source = _AsyncIterableStream()
+
+    class _Responses:
+        async def create(self, **kwargs: Any) -> Any:
+            return stream_source
+
+    class _Client:
+        responses = _Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, _Client()))
+    stream = model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    async for _ in stream:
+        break
+    await stream.aclose()
+
+    assert stream_source.iterator_finalized
+    assert stream_source.source_closed

@@ -352,12 +352,25 @@ class _ResponseStreamWithRequestId:
             return
         self._stream_close_complete = True
 
-        aclose = getattr(self._source, "aclose", None)
+        # When the source is an async iterable, `__aiter__()` may have produced a separate
+        # generator that owns the `finally` blocks, so close that as well as the object this
+        # wrapper was handed. They are the same object on the normal path.
+        resolved = self._stream
+        await self._close_object(resolved)
+        if self._source is not resolved:
+            await self._close_object(self._source)
+
+    @staticmethod
+    async def _close_object(target: object) -> None:
+        if target is None:
+            return
+
+        aclose = getattr(target, "aclose", None)
         if callable(aclose):
             await aclose()
             return
 
-        close = getattr(self._source, "close", None)
+        close = getattr(target, "close", None)
         if callable(close):
             close_result = close()
             if inspect.isawaitable(close_result):
