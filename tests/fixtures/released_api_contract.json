@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.21.0",
-  "baseline_commit": "1a0c08868aec2a18eba964e5a07da4270a490c25",
+  "baseline": "v0.21.1",
+  "baseline_commit": "2632043a4ed91fc819a7cfdee96958b54a00d247",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -5578,6 +5578,15 @@
           },
           "init": true,
           "name": "preserve_raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "timeout"
         }
       ],
       "kind": "class",
@@ -5822,6 +5831,29 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "preserve_raw_usage"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout"
+        }
+      ]
+    },
+    "ModelTimeoutError": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timeout_seconds"
         }
       ]
     },
@@ -6626,6 +6658,15 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "args"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "wrapper"
             }
           ]
         }
@@ -16840,6 +16881,22 @@
             "value": null
           },
           "name": "idle_timeout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "cpu"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "memory"
         }
       ],
       "parameters": [
@@ -16939,6 +16996,24 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "idle_timeout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "cpu"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "memory"
         },
         {
           "default": {
@@ -17814,6 +17889,22 @@
             "value": null
           },
           "name": "idle_timeout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "cpu"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "memory"
         }
       ],
       "parameters": [
@@ -17995,6 +18086,24 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "idle_timeout"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "cpu"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "memory"
         }
       ]
     },
@@ -23838,6 +23947,32 @@
         }
       ]
     },
+    "agents.realtime.RealtimeModelEndOfStreamEvent": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "end_of_stream"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "end_of_stream"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
     "agents.realtime.RealtimePlaybackTracker": {
       "dataclass_fields": [],
       "kind": "class",
@@ -25244,6 +25379,19 @@
             }
           ]
         },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
+            }
+          ]
+        },
         "clone": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -25334,6 +25482,13 @@
             "value": null
           },
           "name": "run_as"
+        },
+        {
+          "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
         }
       ],
       "parameters": [
@@ -25361,6 +25516,13 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "run_as"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
         }
       ]
     },
@@ -26805,6 +26967,15 @@
           },
           "init": true,
           "name": "archive_limits"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "cwd"
         }
       ],
       "kind": "class",
@@ -26879,6 +27050,121 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "archive_limits"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "cwd"
+        }
+      ]
+    },
+    "agents.sandbox.SandboxWorkspaceScope": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "cwd"
+        }
+      ],
+      "kind": "class",
+      "members": {
+        "anchor": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            }
+          ]
+        },
+        "display_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "original_path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "workspace_relative_path"
+            }
+          ]
+        },
+        "from_cwd": {
+          "binding": "class",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "cwd"
+            }
+          ]
+        },
+        "model_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "workspace_relative_path"
+            }
+          ]
+        },
+        "model_resource_path": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "workspace_root"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "workspace_relative_path"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "cwd"
         }
       ]
     },
@@ -27003,6 +27289,19 @@
             }
           ]
         },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
+            }
+          ]
+        },
         "clone": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -27098,6 +27397,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "kind": "literal",
             "type": "builtins.NoneType",
             "value": null
@@ -27135,6 +27441,13 @@
         },
         {
           "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "kind": "literal",
             "type": "builtins.NoneType",
             "value": null
@@ -27159,6 +27472,14 @@
           },
           "init": true,
           "name": "apply_patch"
+        },
+        {
+          "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "workspace_scope"
         }
       ],
       "kind": "class",
@@ -27177,6 +27498,13 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "apply_patch"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workspace_scope"
         }
       ]
     },
@@ -27291,6 +27619,19 @@
             }
           ]
         },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
+            }
+          ]
+        },
         "clone": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -27399,6 +27740,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "factory": "agents.sandbox.config.MemoryLayoutConfig",
             "kind": "factory"
           },
@@ -27452,6 +27800,13 @@
             "kind": "factory"
           },
           "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
           "name": "layout"
         },
         {
@@ -27497,6 +27852,19 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "user"
+            }
+          ]
+        },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
             }
           ]
         },
@@ -27595,6 +27963,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "kind": "literal",
             "type": "builtins.NoneType",
             "value": null
@@ -27629,6 +28004,13 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "run_as"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
         },
         {
           "default": {
@@ -27668,6 +28050,19 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "user"
+            }
+          ]
+        },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
             }
           ]
         },
@@ -27792,6 +28187,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "factory": "builtins.list",
             "kind": "factory"
           },
@@ -27849,6 +28251,13 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "run_as"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
         },
         {
           "default": {
@@ -27925,6 +28334,19 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "user"
+            }
+          ]
+        },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
             }
           ]
         },
@@ -28023,6 +28445,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "kind": "literal",
             "type": "builtins.NoneType",
             "value": null
@@ -28057,6 +28486,13 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "run_as"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
         },
         {
           "default": {
@@ -28096,6 +28532,19 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "user"
+            }
+          ]
+        },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
             }
           ]
         },
@@ -28207,6 +28656,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "factory": "agents.sandbox.config.MemoryLayoutConfig",
             "kind": "factory"
           },
@@ -28260,6 +28716,13 @@
             "kind": "factory"
           },
           "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
           "name": "layout"
         },
         {
@@ -28305,6 +28768,19 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "user"
+            }
+          ]
+        },
+        "bind_workspace_scope": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "scope"
             }
           ]
         },
@@ -28403,6 +28879,13 @@
         },
         {
           "default": {
+            "factory": "agents.sandbox.workspace_paths.SandboxWorkspaceScope",
+            "kind": "factory"
+          },
+          "name": "workspace_scope"
+        },
+        {
+          "default": {
             "kind": "literal",
             "type": "builtins.NoneType",
             "value": null
@@ -28437,6 +28920,13 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "run_as"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workspace_scope"
         },
         {
           "default": {
@@ -44282,6 +44772,7 @@
         "RealtimeModelAudioInterruptedEvent",
         "RealtimeModelCachedTokensDetails",
         "RealtimeModelConnectionStatusEvent",
+        "RealtimeModelEndOfStreamEvent",
         "RealtimeModelErrorEvent",
         "RealtimeModelEvent",
         "RealtimeModelExceptionEvent",
@@ -44407,6 +44898,7 @@
         "SandboxAgent",
         "SandboxArchiveLimits",
         "SandboxPathGrant",
+        "SandboxWorkspaceScope",
         "SandboxConcurrencyLimits",
         "SandboxError",
         "SandboxRunConfig",
@@ -44892,7 +45384,8 @@
     "default_tool_error_function",
     "sandbox",
     "__version__",
-    "InputItem"
+    "InputItem",
+    "ModelTimeoutError"
   ],
   "submodule_export_exclusions": [
     "agents.sandbox.sandboxes"
