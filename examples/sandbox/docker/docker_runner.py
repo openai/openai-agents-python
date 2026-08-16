@@ -107,7 +107,12 @@ async def main(model: str, question: str) -> None:
     # We pass the same manifest here so the container knows which files to materialize.
     sandbox = await docker_client.create(
         manifest=manifest,
-        options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+        options=DockerSandboxClientOptions(
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            # Uncomment to disable networking for the container.
+            # Do not combine network_mode="none" with exposed_ports.
+            # network_mode="none",
+        ),
     )
     try:
         # `async with sandbox` keeps the example on the public session lifecycle API.
