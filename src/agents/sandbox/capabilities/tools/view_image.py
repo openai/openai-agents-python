@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import mimetypes
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,10 +37,6 @@ def _detect_image_mime_type(path: Path, payload: bytes) -> str | None:
     snippet = payload[:_SVG_SNIFF_BYTES].lstrip().lower()
     if snippet.startswith(b"<svg") or (snippet.startswith(b"<?xml") and b"<svg" in snippet):
         return "image/svg+xml"
-
-    guessed_type, _ = mimetypes.guess_type(path.name)
-    if isinstance(guessed_type, str) and guessed_type.startswith("image/"):
-        return guessed_type
     return None
 
 
