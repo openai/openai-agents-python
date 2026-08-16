@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
@@ -16,69 +18,10 @@ from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_SIZE_LABEL = "10MB"
+_SVG_SNIFF_BYTES = 2048
 
 
-def _consume_svg_prolog_construct(snippet: str) -> str | None:
-    lowered = snippet.lower()
-    if snippet.startswith("<!--"):
-        end = snippet.find("-->")
-        return None if end < 0 else snippet[end + 3 :]
-    if snippet.startswith("<?"):
-        end = snippet.find("?>")
-        return None if end < 0 else snippet[end + 2 :]
-    if not lowered.startswith("<!doctype"):
-        return None
-
-    quote: str | None = None
-    subset_depth = 0
-    for index, character in enumerate(snippet[len("<!doctype") :], start=len("<!doctype")):
-        if quote is not None:
-            if character == quote:
-                quote = None
-            continue
-        if character in {'"', "'"}:
-            quote = character
-        elif character == "[":
-            subset_depth += 1
-        elif character == "]" and subset_depth > 0:
-            subset_depth -= 1
-        elif character == ">" and subset_depth == 0:
-            return snippet[index + 1 :]
-    return None
-
-
-def _decode_svg_text(payload: bytes) -> str | None:
-    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
-        encoding = "utf-16"
-    elif payload.startswith(b"<\x00"):
-        encoding = "utf-16-le"
-    elif payload.startswith(b"\x00<"):
-        encoding = "utf-16-be"
-    else:
-        encoding = "utf-8-sig"
-    try:
-        return payload.decode(encoding)
-    except UnicodeDecodeError:
-        return None
-
-
-def _looks_like_svg(payload: bytes) -> bool:
-    decoded = _decode_svg_text(payload)
-    if decoded is None:
-        return False
-    snippet = decoded.lstrip()
-    while snippet:
-        lowered = snippet.lower()
-        if lowered.startswith("<svg"):
-            return len(snippet) == 4 or snippet[4].isspace() or snippet[4] in "/>"
-        remainder = _consume_svg_prolog_construct(snippet)
-        if remainder is None:
-            return False
-        snippet = remainder.lstrip()
-    return False
-
-
-def _detect_image_mime_type(payload: bytes) -> str | None:
+def _detect_image_mime_type(path: Path, payload: bytes) -> str | None:
     if payload.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if payload.startswith(b"\xff\xd8\xff"):
@@ -91,8 +34,14 @@ def _detect_image_mime_type(payload: bytes) -> str | None:
         return "image/bmp"
     if payload.startswith((b"II*\x00", b"MM\x00*")):
         return "image/tiff"
-    if _looks_like_svg(payload):
+
+    snippet = payload[:_SVG_SNIFF_BYTES].lstrip().lower()
+    if snippet.startswith(b"<svg") or (snippet.startswith(b"<?xml") and b"<svg" in snippet):
         return "image/svg+xml"
+
+    guessed_type, _ = mimetypes.guess_type(path.name)
+    if guessed_type == "image/svg+xml":
+        return guessed_type
     return None
 
 
@@ -204,7 +153,7 @@ class ViewImageTool(FunctionTool):
                 f"{_MAX_IMAGE_SIZE_LABEL}; resize or compress the image and try again"
             )
 
-        mime_type = _detect_image_mime_type(payload)
+        mime_type = _detect_image_mime_type(resolved_path, payload)
         if mime_type is None:
             return f"image path `{display_path}` is not a supported image file"
 
