@@ -1070,7 +1070,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
         else:
             current_item_content_index = current_item_content_index or 0
-            if elapsed_ms > 0:
+            if elapsed_ms >= 0:
                 if not response_scoped:
                     try:
                         await self._emit_event(
