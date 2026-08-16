@@ -58,6 +58,11 @@ class _DockerClient:
         self.containers = _Containers()
 
 
+class _NoDockerProviderAccess:
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"unexpected Docker provider access: {name}")
+
+
 def _client() -> tuple[DockerSandboxClient, _DockerClient]:
     docker_client = _DockerClient()
     client = DockerSandboxClient(docker_client=cast(object, docker_client))
@@ -173,6 +178,15 @@ def test_docker_session_state_network_mode_round_trip() -> None:
 
     assert isinstance(restored, DockerSandboxSessionState)
     assert restored.network_mode == "none"
+
+
+def test_docker_session_state_rejects_invalid_network_mode_before_provider_access() -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _NoDockerProviderAccess()))
+    payload = _state().model_dump(mode="json")
+    payload["network_mode"] = "bridge"
+
+    with pytest.raises(ValueError):
+        client.deserialize_session_state(payload)
 
 
 def test_docker_session_state_without_network_mode_preserves_old_payloads() -> None:
