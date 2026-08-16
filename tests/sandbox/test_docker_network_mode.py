@@ -98,6 +98,15 @@ def test_docker_options_reject_other_network_modes() -> None:
         )
 
 
+def test_docker_options_reject_exposed_ports_with_network_mode_none() -> None:
+    with pytest.raises(ValueError, match="exposed_ports"):
+        DockerSandboxClientOptions(
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            exposed_ports=(8080,),
+            network_mode="none",
+        )
+
+
 def test_docker_options_network_mode_round_trip() -> None:
     options = DockerSandboxClientOptions(
         image=DEFAULT_PYTHON_SANDBOX_IMAGE,
@@ -184,6 +193,15 @@ def test_docker_session_state_rejects_invalid_network_mode_before_provider_acces
     client = DockerSandboxClient(docker_client=cast(object, _NoDockerProviderAccess()))
     payload = _state().model_dump(mode="json")
     payload["network_mode"] = "bridge"
+
+    with pytest.raises(ValueError):
+        client.deserialize_session_state(payload)
+
+
+def test_docker_state_rejects_no_network_exposed_ports_before_provider_access() -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _NoDockerProviderAccess()))
+    payload = _state(network_mode="none").model_dump(mode="json")
+    payload["exposed_ports"] = [8080]
 
     with pytest.raises(ValueError):
         client.deserialize_session_state(payload)

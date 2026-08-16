@@ -16,7 +16,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, Self, cast
 
 import docker.errors  # type: ignore[import-untyped]
 import docker.utils.socket as docker_socket  # type: ignore[import-untyped]
@@ -25,6 +25,7 @@ from docker.api.container import DEFAULT_DATA_CHUNK_SIZE  # type: ignore[import-
 from docker.models.containers import Container  # type: ignore[import-untyped]
 from docker.types import DriverConfig, Mount as DockerSDKMount  # type: ignore[import-untyped]
 from docker.utils import parse_repository_tag
+from pydantic import model_validator
 
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
@@ -169,11 +170,28 @@ _PREPARE_USER_PTY_PID_SCRIPT = (
 )
 
 
+def _validate_docker_network_configuration(
+    *,
+    network_mode: Literal["none"] | None,
+    exposed_ports: tuple[int, ...],
+) -> None:
+    if network_mode == "none" and exposed_ports:
+        raise ValueError("exposed_ports cannot be used when network_mode='none'")
+
+
 class DockerSandboxSessionState(SandboxSessionState):
     type: Literal["docker"] = "docker"
     image: str
     container_id: str
     network_mode: Literal["none"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_network_configuration(self) -> Self:
+        _validate_docker_network_configuration(
+            network_mode=self.network_mode,
+            exposed_ports=self.exposed_ports,
+        )
+        return self
 
     def _sanitize_persisted_provider_identity(
         self,
@@ -195,6 +213,14 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
     image: str
     exposed_ports: tuple[int, ...] = ()
     network_mode: Literal["none"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_network_configuration(self) -> Self:
+        _validate_docker_network_configuration(
+            network_mode=self.network_mode,
+            exposed_ports=self.exposed_ports,
+        )
+        return self
 
     def __init__(
         self,
