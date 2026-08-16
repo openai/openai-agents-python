@@ -126,6 +126,8 @@ from .model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelCachedTokensDetails,
+    RealtimeModelConnectionStatusEvent,
+    RealtimeModelEndOfStreamEvent,
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
@@ -552,6 +554,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._connection_attempt_active = False
+        self._close_requested = False
         self._response_create_tasks: set[asyncio.Task[None]] = set()
         self._user_input_lock = asyncio.Lock()
         self._listeners: list[RealtimeModelListener] = []
@@ -639,6 +642,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 headers=headers,
                 transport_config=self._transport_config,
             )
+            self._close_requested = False
             try:
                 self._websocket_task = asyncio.create_task(self._listen_for_messages())
                 await self._update_session_config(model_settings)
@@ -724,6 +728,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         for listener in list(self._listeners):
             await listener.on_event(event)
 
+    async def _emit_normal_disconnect(self) -> None:
+        logger.debug("WebSocket connection closed normally")
+        if not self._close_requested:
+            await self._emit_event(RealtimeModelConnectionStatusEvent(status="disconnected"))
+            await self._emit_event(RealtimeModelEndOfStreamEvent())
+
     async def _listen_for_messages(self):
         assert self._websocket is not None, "Not connected"
 
@@ -746,8 +756,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     )
 
         except websockets.exceptions.ConnectionClosedOK:
-            # Normal connection closure - no exception event needed
-            logger.debug("WebSocket connection closed normally")
+            await self._emit_normal_disconnect()
         except websockets.exceptions.ConnectionClosed as e:
             await self._emit_event(
                 RealtimeModelExceptionEvent(
@@ -760,6 +769,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     exception=e, context="WebSocket error in message listener"
                 )
             )
+        else:
+            # ClientConnection.__aiter__ consumes ConnectionClosedOK and returns normally.
+            await self._emit_normal_disconnect()
         finally:
             await self._cancel_response_create_tasks()
             await self._release_response_waiters()
@@ -1249,6 +1261,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             cleanup_error: BaseException | None = None
 
             if self._websocket:
+                self._close_requested = True
                 try:
                     await self._websocket.close()
                 except BaseException as exc:

@@ -27,6 +27,13 @@ def test_usage_event_types_are_publicly_exported() -> None:
         assert getattr(realtime, name) is not None
 
 
+def test_end_of_stream_event_is_publicly_exported() -> None:
+    assert "RealtimeModelEndOfStreamEvent" in realtime.__all__
+
+    event = realtime.RealtimeModelEndOfStreamEvent()
+    assert event.type == "end_of_stream"
+
+
 def test_custom_model_can_construct_typed_usage_without_openai_types() -> None:
     event = realtime.RealtimeModelUsageEvent(
         usage=Usage(requests=1, input_tokens=8, output_tokens=5, total_tokens=13),

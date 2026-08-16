@@ -80,6 +80,7 @@ from .items import (
 )
 from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
+    RealtimeModelEndOfStreamEvent,
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelOutputTextDeltaEvent,
@@ -227,6 +228,7 @@ class RealtimeSession(RealtimeModelListener):
         self._event_iterator_waiters = 0
         self._closing = False
         self._closed = False
+        self._model_stream_ended = False
         self._cleanup_task: asyncio.Task[None] | None = None
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
@@ -310,7 +312,7 @@ class RealtimeSession(RealtimeModelListener):
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
         while True:
-            if self._closed and self._event_queue.empty():
+            if (self._closed or self._model_stream_ended) and self._event_queue.empty():
                 return
 
             # Check if there's a stored exception to raise
@@ -576,6 +578,10 @@ class RealtimeSession(RealtimeModelListener):
             )
         elif event.type == "connection_status":
             pass
+        elif event.type == "end_of_stream":
+            assert isinstance(event, RealtimeModelEndOfStreamEvent)
+            self._model_stream_ended = True
+            self._wake_event_iterators()
         elif event.type == "turn_started":
             is_late_start_for_active_response = (
                 event.response_id is not None

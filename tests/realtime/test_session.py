@@ -51,6 +51,7 @@ from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelConnectionStatusEvent,
+    RealtimeModelEndOfStreamEvent,
     RealtimeModelErrorEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
@@ -1709,6 +1710,45 @@ class TestEventHandling:
         for _ in range(3):
             event = await session._event_queue.get()
             assert isinstance(event, RealtimeRawModelEvent)
+
+    @pytest.mark.asyncio
+    async def test_transient_disconnect_does_not_end_iteration(self, mock_model, mock_agent):
+        """A reconnecting model can emit more events after a disconnected status."""
+        session = RealtimeSession(mock_model, mock_agent, None)
+        event_iterator = session.__aiter__()
+
+        await session.on_event(RealtimeModelConnectionStatusEvent(status="disconnected"))
+        disconnected = await anext(event_iterator)
+        assert isinstance(disconnected, RealtimeRawModelEvent)
+
+        next_event = asyncio.create_task(anext(event_iterator))
+        await asyncio.sleep(0)
+        assert not next_event.done()
+
+        await session.on_event(RealtimeModelConnectionStatusEvent(status="connected"))
+        connected = await asyncio.wait_for(next_event, timeout=1)
+        assert isinstance(connected, RealtimeRawModelEvent)
+        assert connected.data == RealtimeModelConnectionStatusEvent(status="connected")
+
+        await event_iterator.aclose()
+
+    @pytest.mark.asyncio
+    async def test_end_of_stream_drains_events_then_ends_iteration(self, mock_model, mock_agent):
+        """An explicit end-of-stream signal terminates only after queued events drain."""
+        session = RealtimeSession(mock_model, mock_agent, None)
+        event_iterator = session.__aiter__()
+
+        await session.on_event(RealtimeModelConnectionStatusEvent(status="disconnected"))
+        await session.on_event(RealtimeModelEndOfStreamEvent())
+
+        disconnected = await anext(event_iterator)
+        end_of_stream = await anext(event_iterator)
+        assert isinstance(disconnected, RealtimeRawModelEvent)
+        assert isinstance(end_of_stream, RealtimeRawModelEvent)
+        assert isinstance(end_of_stream.data, RealtimeModelEndOfStreamEvent)
+
+        with pytest.raises(StopAsyncIteration):
+            await anext(event_iterator)
 
     @pytest.mark.asyncio
     async def test_function_call_event_triggers_tool_handling(self, mock_model, mock_agent):

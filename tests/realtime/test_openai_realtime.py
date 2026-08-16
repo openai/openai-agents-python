@@ -14,11 +14,12 @@ from pydantic import TypeAdapter
 from agents import Agent, WebSearchTool, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
-from agents.realtime import RealtimeSessionModelSettings
+from agents.realtime import RealtimeAgent, RealtimeSession, RealtimeSessionModelSettings
 from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
+    RealtimeModelConnectionStatusEvent,
     RealtimeModelErrorEvent,
     RealtimeModelOutputTextDeltaEvent,
     RealtimeModelRawServerEvent,
@@ -38,6 +39,10 @@ from agents.realtime.openai_realtime import (
     TransportConfig,
     _RealtimeInterruptError,
 )
+
+
+async def _collect_session_events(session: RealtimeSession) -> list[Any]:
+    return [event async for event in session]
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -3260,6 +3265,168 @@ class TestTransportIntegration:
             # Clean up
             await model.close()
             assert model._websocket is None
+
+    @pytest.mark.asyncio
+    async def test_normal_server_close_ends_session_iteration(self):
+        """A clean server close must end session iteration without an exception."""
+
+        async def handler(websocket):
+            await websocket.recv()
+            await websocket.close(code=1000, reason="session ended")
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            session = RealtimeSession(
+                OpenAIRealtimeWebSocketModel(),
+                RealtimeAgent(name="agent"),
+                None,
+                model_config={
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-realtime"},
+                },
+            )
+
+            await session.__aenter__()
+            try:
+                events = await asyncio.wait_for(
+                    _collect_session_events(session),
+                    timeout=1,
+                )
+                assert session._closed is False
+            finally:
+                await session.close()
+
+        disconnects = [
+            event.data
+            for event in events
+            if event.type == "raw_model_event" and event.data.type == "connection_status"
+        ]
+        assert disconnects == [RealtimeModelConnectionStatusEvent(status="disconnected")]
+        assert any(event.type == "history_updated" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_client_close_does_not_emit_server_disconnect(self):
+        """Caller-owned close must not look like a clean server disconnect."""
+
+        connection_count = 0
+
+        async def handler(websocket):
+            nonlocal connection_count
+            connection_count += 1
+            if connection_count == 1:
+                await websocket.wait_closed()
+            else:
+                await websocket.recv()
+                await websocket.close(code=1000, reason="session ended")
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            model = OpenAIRealtimeWebSocketModel()
+            listener = AsyncMock()
+            model.add_listener(listener)
+
+            await model.connect(
+                {
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-realtime"},
+                }
+            )
+            await model.close()
+
+            first_connection_events = [call.args[0] for call in listener.on_event.await_args_list]
+            assert not any(event.type == "connection_status" for event in first_connection_events)
+
+            await model.connect(
+                {
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-realtime"},
+                }
+            )
+            assert model._websocket_task is not None
+            await asyncio.wait_for(model._websocket_task, timeout=1)
+            await model.close()
+
+        emitted_events = [call.args[0] for call in listener.on_event.await_args_list]
+        disconnects = [event for event in emitted_events if event.type == "connection_status"]
+        assert disconnects == [RealtimeModelConnectionStatusEvent(status="disconnected")]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_close_before_websocket_handshake_preserves_server_disconnect(self):
+        """A cancelled preliminary close must not claim transport-close ownership."""
+        allow_server_close = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.recv()
+            await allow_server_close.wait()
+            await websocket.close(code=1000, reason="session ended")
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            model = OpenAIRealtimeWebSocketModel()
+            listener = AsyncMock()
+            model.add_listener(listener)
+
+            await model.connect(
+                {
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-realtime"},
+                }
+            )
+
+            cancellation_started = asyncio.Event()
+
+            async def wait_until_cancelled():
+                cancellation_started.set()
+                await asyncio.Future()
+
+            with patch.object(model, "_cancel_response_create_tasks", wait_until_cancelled):
+                close_task = asyncio.create_task(model.close())
+                await asyncio.wait_for(cancellation_started.wait(), timeout=1)
+                close_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await close_task
+
+            allow_server_close.set()
+            assert model._websocket_task is not None
+            await asyncio.wait_for(model._websocket_task, timeout=1)
+            await model.close()
+
+        emitted_events = [call.args[0] for call in listener.on_event.await_args_list]
+        disconnects = [event for event in emitted_events if event.type == "connection_status"]
+        assert disconnects == [RealtimeModelConnectionStatusEvent(status="disconnected")]
+
+    @pytest.mark.asyncio
+    async def test_abnormal_server_close_still_raises(self):
+        """An abnormal server close must retain the existing exception behavior."""
+
+        async def handler(websocket):
+            await websocket.recv()
+            await websocket.close(code=1011, reason="server failure")
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            session = RealtimeSession(
+                OpenAIRealtimeWebSocketModel(),
+                RealtimeAgent(name="agent"),
+                None,
+                model_config={
+                    "api_key": "test-key",
+                    "url": f"ws://127.0.0.1:{port}/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-realtime"},
+                },
+            )
+
+            with pytest.raises(websockets.exceptions.ConnectionClosedError):
+                async with session:
+                    await asyncio.wait_for(_collect_session_events(session), timeout=1)
 
     @pytest.mark.asyncio
     async def test_ping_timeout_success_when_server_responds_quickly(self):
