@@ -1243,6 +1243,14 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         """Interrupt should send response.cancel even when auto cancel is enabled."""
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        # Backdate the audio start so elapsed time is measurable regardless of host
+        # clock resolution: time.monotonic() advances in ~15.6ms steps on Windows, so
+        # a delta read within the same tick is exactly 0 and the truncate path under
+        # `if elapsed_ms > 0` never runs. Same idiom as
+        # test_speech_started_skips_truncate_when_audio_complete.
+        _audio_state = model._audio_state_tracker.get_state("item_1", 0)
+        assert _audio_state is not None
+        _audio_state.initial_received_time = time.monotonic() - 5
         await model._mark_response_created()
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
@@ -1284,6 +1292,14 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        # Backdate the audio start so elapsed time is measurable regardless of host
+        # clock resolution: time.monotonic() advances in ~15.6ms steps on Windows, so
+        # a delta read within the same tick is exactly 0 and the truncate path under
+        # `if elapsed_ms > 0` never runs. Same idiom as
+        # test_speech_started_skips_truncate_when_audio_complete.
+        _audio_state = model._audio_state_tracker.get_state("item_1", 0)
+        assert _audio_state is not None
+        _audio_state.initial_received_time = time.monotonic() - 5
         await model._mark_response_created()
         model._created_session = FalsySession.model_construct(
             type="realtime",
@@ -1494,6 +1510,14 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         model._audio_state_tracker.on_audio_delta(
             "audio_item", 0, b"\x00" * 4800, response_id="response_1"
         )
+        # Backdate the audio start so elapsed time is measurable regardless of host
+        # clock resolution: time.monotonic() advances in ~15.6ms steps on Windows, so
+        # a delta read within the same tick is exactly 0 and the truncate path under
+        # `if elapsed_ms > 0` never runs. Same idiom as
+        # test_speech_started_skips_truncate_when_audio_complete.
+        _audio_state = model._audio_state_tracker.get_state("audio_item", 0)
+        assert _audio_state is not None
+        _audio_state.initial_received_time = time.monotonic() - 5
         await model._mark_response_created()
 
         send_raw = AsyncMock()
@@ -1932,6 +1956,14 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         """Interrupt should avoid sending response.cancel when relying on automatic cancellation."""
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        # Backdate the audio start so elapsed time is measurable regardless of host
+        # clock resolution: time.monotonic() advances in ~15.6ms steps on Windows, so
+        # a delta read within the same tick is exactly 0 and the truncate path under
+        # `if elapsed_ms > 0` never runs. Same idiom as
+        # test_speech_started_skips_truncate_when_audio_complete.
+        _audio_state = model._audio_state_tracker.get_state("item_1", 0)
+        assert _audio_state is not None
+        _audio_state.initial_received_time = time.monotonic() - 5
         model._ongoing_response = True
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
