@@ -98,9 +98,12 @@ _ROOT_REF_NON_CONSTRAINING_SIBLINGS = _REF_NON_CONSTRAINING_SIBLINGS | {"$id"}
 class _NodeBudget:
     """Tracks conversion state across the recursion."""
 
-    def __init__(self, limit: int, *, reject_open_objects: bool = False) -> None:
+    def __init__(
+        self, limit: int, *, reject_open_objects: bool = False, strip_defaults: bool = False
+    ) -> None:
         self.remaining = limit
         self.reject_open_objects = reject_open_objects
+        self.strip_defaults = strip_defaults
 
     def spend(self) -> None:
         self.remaining -= 1
@@ -115,15 +118,29 @@ class _NodeBudget:
 def ensure_strict_json_schema(
     schema: dict[str, Any],
     *,
+    strip_defaults: bool = False,
     _reject_open_objects: bool = False,
 ) -> dict[str, Any]:
     """Mutates the given JSON schema to ensure it conforms to the `strict` standard
     that the OpenAI API expects.
+
+    Args:
+        schema: The JSON schema to convert in place.
+        strip_defaults: When True, remove every `default` keyword from the converted
+            schema, not just `None` defaults. Strict conversion forces all properties
+            into `required`, so a `default` can never take effect at runtime, and some
+            providers (for example Azure OpenAI deployments) reject strict schemas
+            that still carry one. Off by default to preserve the existing behavior of
+            keeping non-null defaults visible to the model.
     """
     _validate_json_schema_depth(schema)
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
-    budget = _NodeBudget(_MAX_SCHEMA_NODES, reject_open_objects=_reject_open_objects)
+    budget = _NodeBudget(
+        _MAX_SCHEMA_NODES,
+        reject_open_objects=_reject_open_objects,
+        strip_defaults=strip_defaults,
+    )
     return _ensure_strict_root(
         _ensure_strict_json_schema(
             schema,
@@ -401,6 +418,15 @@ def _ensure_strict_json_schema(
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)
+
+    # Opt-in: strip any remaining `default`, regardless of its value. Strict conversion
+    # forces every property into `required`, so the model must always emit an explicit
+    # value and a `default` can never take effect; some providers (for example Azure
+    # OpenAI) reject strict schemas that still carry one. This runs after `$ref`
+    # handling so a non-null `default` sibling still triggers ref expansion above
+    # instead of leaving a pure `$ref` behind.
+    if budget.strip_defaults:
+        json_schema.pop("default", None)
 
     return json_schema
 

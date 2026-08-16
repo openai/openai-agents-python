@@ -990,3 +990,90 @@ def test_ref_with_anchor_is_still_expanded():
         "$anchor": "value",
         "type": "string",
     }
+
+
+def test_non_null_defaults_kept_by_default():
+    # Without opting in, non-null defaults are preserved (current behavior).
+    schema = {
+        "type": "object",
+        "properties": {"limit": {"type": "integer", "default": 10}},
+    }
+    result = ensure_strict_json_schema(schema)
+    assert result["properties"]["limit"] == {"type": "integer", "default": 10}
+
+
+def test_strip_defaults_removes_non_null_default_on_property():
+    schema = {
+        "type": "object",
+        "properties": {
+            "currency": {"type": "string", "enum": ["EUR", "USD"], "default": "EUR"},
+        },
+    }
+    result = ensure_strict_json_schema(schema, strip_defaults=True)
+    assert result["properties"]["currency"] == {"type": "string", "enum": ["EUR", "USD"]}
+    assert result["required"] == ["currency"]
+
+
+def test_strip_defaults_still_strips_none_defaults():
+    schema = {
+        "type": "object",
+        "properties": {"note": {"type": ["string", "null"], "default": None}},
+    }
+    result = ensure_strict_json_schema(schema, strip_defaults=True)
+    assert "default" not in result["properties"]["note"]
+
+
+def test_strip_defaults_in_nested_object_and_defs():
+    schema = {
+        "$defs": {
+            "Invoice": {
+                "type": "object",
+                "properties": {
+                    "total": {"type": "number", "default": 1.5},
+                    "meta": {
+                        "type": "object",
+                        "properties": {"kind": {"type": "string", "default": "std"}},
+                    },
+                },
+            }
+        },
+        "type": "object",
+        "properties": {"data": {"$ref": "#/$defs/Invoice"}},
+    }
+    result = ensure_strict_json_schema(schema, strip_defaults=True)
+    invoice = result["$defs"]["Invoice"]
+    assert "default" not in invoice["properties"]["total"]
+    assert "default" not in invoice["properties"]["meta"]["properties"]["kind"]
+
+
+def test_strip_defaults_in_any_of_variant():
+    schema = {
+        "type": "object",
+        "properties": {
+            "quantity": {
+                "anyOf": [
+                    {"type": "number"},
+                    {"type": "string", "default": "1"},
+                ],
+                "default": "1",
+            }
+        },
+    }
+    result = ensure_strict_json_schema(schema, strip_defaults=True)
+    quantity = result["properties"]["quantity"]
+    assert "default" not in quantity
+    assert all("default" not in variant for variant in quantity["anyOf"])
+
+
+def test_strip_defaults_ref_with_default_sibling_still_expands():
+    # A non-null `default` sibling must still trigger `$ref` expansion; stripping the
+    # default too early would leave a pure `$ref` behind unexpanded.
+    schema = {
+        "$defs": {"Currency": {"type": "string", "enum": ["EUR", "USD"]}},
+        "type": "object",
+        "properties": {
+            "currency": {"$ref": "#/$defs/Currency", "default": "EUR"},
+        },
+    }
+    result = ensure_strict_json_schema(schema, strip_defaults=True)
+    assert result["properties"]["currency"] == {"type": "string", "enum": ["EUR", "USD"]}
