@@ -126,6 +126,7 @@ from .model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelCachedTokensDetails,
+    RealtimeModelConnectionStatusEvent,
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
@@ -746,8 +747,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     )
 
         except websockets.exceptions.ConnectionClosedOK:
-            # Normal connection closure - no exception event needed
+            # A normal closure is not an error, so no exception event is emitted. Consumers still
+            # have to learn the transport ended, otherwise nothing further can ever reach
+            # `RealtimeSession.__aiter__` and it waits forever. `close()` clears `_websocket`
+            # before cancelling this task, so this only reports a server-initiated close.
             logger.debug("WebSocket connection closed normally")
+            if self._websocket is not None:
+                await self._emit_event(RealtimeModelConnectionStatusEvent(status="disconnected"))
         except websockets.exceptions.ConnectionClosed as e:
             await self._emit_event(
                 RealtimeModelExceptionEvent(

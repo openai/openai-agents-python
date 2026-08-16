@@ -227,6 +227,7 @@ class RealtimeSession(RealtimeModelListener):
         self._event_iterator_waiters = 0
         self._closing = False
         self._closed = False
+        self._transport_disconnected = False
         self._cleanup_task: asyncio.Task[None] | None = None
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
@@ -310,7 +311,7 @@ class RealtimeSession(RealtimeModelListener):
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
         while True:
-            if self._closed and self._event_queue.empty():
+            if (self._closed or self._transport_disconnected) and self._event_queue.empty():
                 return
 
             # Check if there's a stored exception to raise
@@ -575,7 +576,12 @@ class RealtimeSession(RealtimeModelListener):
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
             )
         elif event.type == "connection_status":
-            pass
+            if event.status == "disconnected":
+                # The transport is gone, so no further model events can arrive. End iteration
+                # instead of leaving `__aiter__` parked on a queue nothing can fill. Closing the
+                # session stays the caller's job, so `close()` still releases everything.
+                self._transport_disconnected = True
+                self._wake_event_iterators()
         elif event.type == "turn_started":
             is_late_start_for_active_response = (
                 event.response_id is not None

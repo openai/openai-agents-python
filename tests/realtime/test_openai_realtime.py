@@ -3612,3 +3612,55 @@ class TestTransportIntegration:
         # Both should have completed successfully
         assert "fast" in connection_durations
         assert "slow" in connection_durations
+
+
+def _closing_websocket(closer: BaseException) -> AsyncMock:
+    """A websocket whose server hangs up as soon as the session is established."""
+    websocket = AsyncMock()
+    websocket.send = AsyncMock()
+    websocket.close = AsyncMock()
+
+    async def messages() -> Any:
+        await asyncio.sleep(0)
+        raise closer
+        yield  # pragma: no cover - never reached, keeps this an async generator
+
+    websocket.__aiter__ = lambda _self=None: messages()
+    return websocket
+
+
+@pytest.mark.asyncio
+async def test_normal_server_close_ends_session_iteration() -> None:
+    """A server that closes the socket normally must end iteration, not park it forever.
+
+    A normal closure is not an error, so no exception event is emitted for it. Without a
+    disconnect signal nothing further can reach the session queue, and `async for event in
+    session` waits on an event that can never arrive.
+    """
+    from agents.realtime import RealtimeAgent, RealtimeSession
+
+    websocket = _closing_websocket(websockets.exceptions.ConnectionClosedOK(None, None))
+
+    async def connect_websocket(*_args: Any, **_kwargs: Any) -> AsyncMock:
+        return websocket
+
+    with patch("websockets.connect", side_effect=connect_websocket):
+        session = RealtimeSession(
+            OpenAIRealtimeWebSocketModel(),
+            RealtimeAgent(name="agent"),
+            None,
+            model_config={
+                "api_key": "test-api-key",
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            },
+        )
+        await session.__aenter__()
+
+        async def consume() -> list[str]:
+            return [event.type async for event in session]
+
+        # Fails as a timeout rather than hanging the suite if the disconnect is ever dropped.
+        seen = await asyncio.wait_for(consume(), timeout=5)
+
+    assert "history_updated" in seen
+    await session.close()
