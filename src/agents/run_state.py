@@ -209,7 +209,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists canonical tool invocation identity plus sanitized mount authority and trusted "
         "rebind metadata, durable pending input, and resumable next-model-call state."
     ),
-    "1.16": "Lets an exact call approval decision override a sticky decision for the same tool.",
+    "1.16": (
+        "Persists Docker network-isolation state and lets an exact call approval decision "
+        "override a sticky decision for the same tool."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
