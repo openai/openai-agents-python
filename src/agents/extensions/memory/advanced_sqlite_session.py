@@ -39,6 +39,17 @@ def _content_preview(content: Any, max_length: int | None = None) -> str:
     return text
 
 
+def _existing_schema_names(db_path: str | Path) -> frozenset[str]:
+    """Names already present in a database file, before anything is created in it."""
+    if str(db_path) == ":memory:":
+        return frozenset()
+    path = Path(db_path)
+    if not path.exists():
+        return frozenset()
+    with closing(sqlite3.connect(str(path))) as conn:
+        return frozenset(row[0] for row in conn.execute("SELECT name FROM sqlite_master"))
+
+
 class AdvancedSQLiteSession(SQLiteSession):
     """Enhanced SQLite session with conversation branching and usage analytics."""
 
@@ -61,6 +72,9 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
+        # Captured before the base schema is created so a rejected construction can drop exactly
+        # what it added, rather than leaving the refused pair's tables behind.
+        preexisting_schema = _existing_schema_names(db_path)
         super().__init__(
             session_id=session_id,
             db_path=db_path,
@@ -74,6 +88,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                 with self._locked_connection() as conn:
                     self._claim_structure_tables(conn)
         except BaseException:
+            try:
+                self._drop_schema_added_by_this_construction(preexisting_schema)
+            except BaseException:
+                pass
             try:
                 self.close()
             except BaseException:
@@ -165,6 +183,26 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         row = conn.execute("SELECT ? = ? COLLATE NOCASE", (left, right)).fetchone()
         return bool(row[0])
+
+    def _drop_schema_added_by_this_construction(self, preexisting: frozenset[str]) -> None:
+        """Remove the base tables this rejected construction created, and nothing else.
+
+        Only names absent from the pre-construction snapshot are dropped, so a pair that already
+        owned tables in the file keeps them.
+        """
+        candidates = [
+            f"idx_{self.messages_table}_session_id",
+            self.messages_table,
+            self.sessions_table,
+        ]
+        added = [name for name in candidates if name not in preexisting]
+        if not added:
+            return
+        with self._write_connection() as conn:
+            for name in added:
+                kind = "INDEX" if name.startswith("idx_") else "TABLE"
+                conn.execute(f"DROP {kind} IF EXISTS {name}")
+            conn.commit()
 
     def _init_structure_tables(self):
         """Add structure and usage tracking tables.

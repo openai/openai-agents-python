@@ -3986,3 +3986,40 @@ async def test_concurrent_structure_table_claims_leave_one_coherent_owner(tmp_pa
             if process.is_alive():
                 process.terminate()
             process.join(timeout=5)
+
+
+async def test_rejected_construction_leaves_no_schema_behind(tmp_path: Path) -> None:
+    """A refused pair must not leave its base tables in a file it was never allowed to use."""
+    db_path = tmp_path / "advanced_rejected_schema.db"
+    owner = AdvancedSQLiteSession(
+        session_id="shared",
+        db_path=db_path,
+        create_tables=True,
+        sessions_table="first_sessions",
+        messages_table="first_messages",
+    )
+    try:
+        await owner.add_items([{"role": "user", "content": "first"}])
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            before = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+
+        with pytest.raises(ValueError):
+            AdvancedSQLiteSession(
+                session_id="shared",
+                db_path=db_path,
+                create_tables=True,
+                sessions_table="second_sessions",
+                messages_table="second_messages",
+            )
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            after = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+
+        assert after == before, sorted(after - before)
+        assert "second_sessions" not in after
+        assert "second_messages" not in after
+        # The owner is untouched.
+        assert await owner.get_items() == [{"role": "user", "content": "first"}]
+    finally:
+        owner.close()
