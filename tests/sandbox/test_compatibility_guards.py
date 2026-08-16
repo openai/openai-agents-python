@@ -416,7 +416,7 @@ def test_optional_sandbox_dataclass_constructor_field_order_is_stable(
         (
             "agents.sandbox.sandboxes.docker",
             "DockerSandboxClientOptions",
-            ("image", "exposed_ports"),
+            ("image", "exposed_ports", "network_mode"),
         ),
         (
             "agents.extensions.sandbox.e2b",
@@ -573,6 +573,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "workspace_root_ready",
                 "image",
                 "container_id",
+                "network_mode",
             ),
         ),
         (

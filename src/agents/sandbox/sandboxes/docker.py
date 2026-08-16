@@ -173,6 +173,7 @@ class DockerSandboxSessionState(SandboxSessionState):
     type: Literal["docker"] = "docker"
     image: str
     container_id: str
+    network_mode: Literal["none"] | None = None
 
     def _sanitize_persisted_provider_identity(
         self,
@@ -193,18 +194,21 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
     type: Literal["docker"] = "docker"
     image: str
     exposed_ports: tuple[int, ...] = ()
+    network_mode: Literal["none"] | None = None
 
     def __init__(
         self,
         image: str,
         exposed_ports: tuple[int, ...] = (),
         *,
+        network_mode: Literal["none"] | None = None,
         type: Literal["docker"] = "docker",
     ) -> None:
         super().__init__(
             type=type,
             image=image,
             exposed_ports=exposed_ports,
+            network_mode=network_mode,
         )
 
 
@@ -1502,6 +1506,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 image,
                 manifest=manifest,
                 exposed_ports=options.exposed_ports,
+                network_mode=options.network_mode,
                 session_id=session_id,
             )
             container.start()
@@ -1516,6 +1521,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 snapshot=snapshot_instance,
                 container_id=container_id,
                 exposed_ports=options.exposed_ports,
+                network_mode=options.network_mode,
             )
             inner = DockerSandboxSession(
                 docker_client=self.docker_client,
@@ -1642,6 +1648,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                     state.image,
                     manifest=state.manifest,
                     exposed_ports=state.exposed_ports,
+                    network_mode=state.network_mode,
                     session_id=replacement_session_id,
                 )
                 container_id = container.id
@@ -1675,6 +1682,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         *,
         manifest: Manifest | None = None,
         exposed_ports: tuple[int, ...] = (),
+        network_mode: Literal["none"] | None = None,
         session_id: uuid.UUID | None = None,
     ) -> Container:
         if manifest is not None:
@@ -1695,6 +1703,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             "command": ["-f", "/dev/null"],
             "environment": environment,
         }
+        if network_mode is not None:
+            create_kwargs["network_mode"] = network_mode
         if manifest is not None:
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
             if docker_mounts:

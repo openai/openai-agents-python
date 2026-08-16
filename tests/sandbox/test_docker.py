@@ -2809,9 +2809,11 @@ async def test_docker_resume_applies_current_authority_with_fresh_volume_identit
         *,
         manifest: Manifest | None = None,
         exposed_ports: tuple[int, ...] = (),
+        network_mode: str | None = None,
         session_id: uuid.UUID | None = None,
     ) -> _StartedContainer:
         _ = (image, exposed_ports)
+        assert network_mode is None
         assert session_id == replacement_session_id
         assert stale_volume.remove_calls == 0
         assert manifest is state.manifest
@@ -4139,17 +4141,18 @@ async def test_docker_resume_resets_workspace_readiness_when_container_is_recrea
         docker_client=cast(object, _ResumeDockerClient(docker.errors.NotFound("missing")))
     )
     replacement = _ResumeContainer(status="created", container_id="replacement")
-    create_calls: list[tuple[str, Manifest | None, tuple[int, ...]]] = []
+    create_calls: list[tuple[str, Manifest | None, tuple[int, ...], str | None]] = []
 
     async def _fake_create_container(
         image: str,
         *,
         manifest: Manifest | None = None,
         exposed_ports: tuple[int, ...] = (),
+        network_mode: str | None = None,
         session_id: uuid.UUID | None = None,
     ) -> object:
         _ = session_id
-        create_calls.append((image, manifest, exposed_ports))
+        create_calls.append((image, manifest, exposed_ports, network_mode))
         return replacement
 
     monkeypatch.setattr(client, "_create_container", _fake_create_container)
@@ -4171,7 +4174,7 @@ async def test_docker_resume_resets_workspace_readiness_when_container_is_recrea
     assert inner.state.workspace_root_ready is False
     assert inner._workspace_root_ready is False
     assert inner.should_provision_manifest_accounts_on_resume() is True
-    assert create_calls == [(DEFAULT_PYTHON_SANDBOX_IMAGE, inner.state.manifest, (8765,))]
+    assert create_calls == [(DEFAULT_PYTHON_SANDBOX_IMAGE, inner.state.manifest, (8765,), None)]
 
 
 @pytest.mark.asyncio
