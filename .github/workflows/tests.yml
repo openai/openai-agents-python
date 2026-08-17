@@ -30,6 +30,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
+          python-version: "3.14"
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -59,6 +60,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
+          python-version: "3.14"
       - name: Restore mypy cache
         if: steps.changes.outputs.run == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -109,10 +111,10 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run tests with coverage
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.12'
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.14'
         run: make coverage
       - name: Run tests
-        if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.12'
+        if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.14'
         run: make tests
       - name: Run async teardown stability tests
         if: steps.changes.outputs.run == 'true' && (matrix.python-version == '3.10' || matrix.python-version == '3.14')
@@ -139,7 +141,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Run packaged MCP v1 compatibility tests
         if: steps.changes.outputs.run == 'true'
         run: make integration-tests-mcp-v1
@@ -193,7 +195,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.13"
+      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.14"
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
@@ -209,7 +211,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Download prospective release contract
         if: steps.changes.outputs.run == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -229,7 +231,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.12"
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
@@ -244,7 +245,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install all optional dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -267,6 +268,13 @@ jobs:
   tests-windows:
     runs-on: windows-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep Python 3.13 here because Daytona's locked obstore dependency has no Windows Python 3.14 wheel, so 3.14 builds it from source and exceeds this job's timeout.
+        python-version:
+          - "3.10"
+          - "3.13"
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:
@@ -283,7 +291,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --all-extras --all-packages --group dev
@@ -312,6 +320,7 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
+          python-version: "3.14"
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync

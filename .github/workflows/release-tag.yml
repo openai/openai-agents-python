@@ -34,7 +34,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.11"
+          python-version: "3.14"
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
