@@ -497,6 +497,7 @@ class TraceImpl(Trace):
         "_prev_context_token",
         "_processor",
         "_started",
+        "_finished",
     )
 
     def __init__(
@@ -516,6 +517,7 @@ class TraceImpl(Trace):
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
         self._processor = processor
         self._started = False
+        self._finished = False
 
     @property
     def trace_id(self) -> str:
@@ -544,7 +546,9 @@ class TraceImpl(Trace):
         if not self._started:
             return
 
-        self._processor.on_trace_end(self)
+        if not self._finished:
+            self._processor.on_trace_end(self)
+            self._finished = True
 
         if reset_current and self._prev_context_token is not None:
             Scope.reset_current_trace(self._prev_context_token)
