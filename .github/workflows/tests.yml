@@ -79,6 +79,41 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping typecheck for non-code changes."
 
+  mypy-win32:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
+      - name: Restore mypy cache
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: make sync
+      - name: Run mypy for Windows
+        if: steps.changes.outputs.run == 'true'
+        run: uv run mypy --platform win32 src
+      - name: Skip Windows mypy
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping Windows mypy for non-code changes."
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10

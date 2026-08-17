@@ -336,8 +336,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             else:
                 with suppress(OSError):
                     os.close(secondary_fd)
-            entry = _UnixPtyProcessEntry(process=process, tty=True, primary_fd=primary_fd)
-            entry.pump_tasks = [asyncio.create_task(self._pump_pty_primary_fd(entry))]
+                entry = _UnixPtyProcessEntry(process=process, tty=True, primary_fd=primary_fd)
+                entry.pump_tasks = [asyncio.create_task(self._pump_pty_primary_fd(entry))]
         else:
             process = await asyncio.create_subprocess_exec(
                 *exec_command,
