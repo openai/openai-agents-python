@@ -73,12 +73,12 @@ def normalize_sandbox_cwd(cwd: str | PurePath) -> PurePosixPath:
     if isinstance(cwd, PurePath):
         raw_cwd = cwd.as_posix()
     elif isinstance(cwd, str):
-        if "\\" in cwd:
-            raise ValueError("sandbox.cwd must use POSIX path separators")
         raw_cwd = cwd
     else:
         raise ValueError("sandbox.cwd must be a string or Path")
 
+    if "\\" in raw_cwd:
+        raise ValueError("sandbox.cwd must use POSIX path separators")
     if not raw_cwd.strip():
         raise ValueError("sandbox.cwd must be non-empty")
     if windows_absolute_path(cwd) is not None:
