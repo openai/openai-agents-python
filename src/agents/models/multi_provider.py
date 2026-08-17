@@ -31,7 +31,7 @@ class MultiProviderMap:
 
     def set_mapping(self, mapping: dict[str, ModelProvider]):
         """Overwrites the current mapping with a new one."""
-        self._mapping = mapping
+        self._mapping = mapping.copy()
 
     def get_provider(self, prefix: str) -> ModelProvider | None:
         """Returns the ModelProvider for the given prefix.
