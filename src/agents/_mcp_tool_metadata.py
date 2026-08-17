@@ -20,7 +20,7 @@ def _get_mapping_or_attr(value: Any, key: str) -> Any:
 
 
 def _get_non_empty_string(value: Any) -> str | None:
-    if isinstance(value, str) and value:
+    if isinstance(value, str) and value.strip():
         return value
     return None
 
