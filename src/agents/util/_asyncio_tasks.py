@@ -139,7 +139,7 @@ async def run_producer_consumer(
         try:
             producer_result = producer_task.result()
         except BaseException:
-            await consumer_task
+            await asyncio.gather(consumer_task, return_exceptions=True)
             raise
 
         consumer_result = await consumer_task
