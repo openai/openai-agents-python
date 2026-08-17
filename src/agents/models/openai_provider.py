@@ -58,6 +58,7 @@ class OpenAIProvider(ModelProvider):
         agent_registration: OpenAIAgentRegistrationConfig | dict[str, Any] | None = None,
         responses_websocket_options: OpenAIResponsesWebSocketOptions | None = None,
         buffer_streamed_tool_calls: bool = False,
+        strip_tool_schema_defaults: bool = False,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -86,6 +87,10 @@ class OpenAIProvider(ModelProvider):
                 function tool-call deltas and emit them to the SDK only after the provider stream
                 finishes. This is useful for OpenAI-compatible providers whose streamed tool-call
                 chunk semantics are not reliable enough for incremental processing.
+            strip_tool_schema_defaults: Whether Chat Completions models should remove JSON Schema
+                `default` keywords from strict function-tool parameter schemas before sending the
+                request. Defaults to False. This opt-in compatibility mode is useful for providers
+                that reject strict schemas containing non-null defaults.
         """
         if openai_client is not None:
             if any(
@@ -121,6 +126,7 @@ class OpenAIProvider(ModelProvider):
         self._strict_feature_validation = strict_feature_validation
         self._responses_websocket_options = responses_websocket_options
         self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
+        self._strip_tool_schema_defaults = strip_tool_schema_defaults
 
         # Reuse websocket model wrappers so websocket transport can keep a persistent connection
         # when callers pass model names as strings through a shared provider.
@@ -248,6 +254,7 @@ class OpenAIProvider(ModelProvider):
                 openai_client=client,
                 strict_feature_validation=self._strict_feature_validation,
                 buffer_streamed_tool_calls=self._buffer_streamed_tool_calls,
+                strip_tool_schema_defaults=self._strip_tool_schema_defaults,
             )
 
         if use_websocket_transport:

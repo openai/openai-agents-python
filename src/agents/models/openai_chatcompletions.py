@@ -54,6 +54,92 @@ if TYPE_CHECKING:
     from ..model_settings import ModelSettings
 
 
+_SCHEMA_MAPPING_KEYWORDS = (
+    "$defs",
+    "definitions",
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+)
+_SCHEMA_SINGLE_KEYWORDS = (
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "propertyNames",
+    "items",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+)
+_SCHEMA_SEQUENCE_KEYWORDS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def _strip_json_schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a schema copy with `default` removed only from schema nodes."""
+    result = {key: value for key, value in schema.items() if key != "default"}
+
+    for keyword in _SCHEMA_MAPPING_KEYWORDS:
+        mapping = result.get(keyword)
+        if isinstance(mapping, dict):
+            result[keyword] = {
+                name: _strip_json_schema_defaults(value) if isinstance(value, dict) else value
+                for name, value in mapping.items()
+            }
+
+    for keyword in _SCHEMA_SINGLE_KEYWORDS:
+        child = result.get(keyword)
+        if isinstance(child, dict):
+            result[keyword] = _strip_json_schema_defaults(child)
+        elif keyword == "items" and isinstance(child, list):
+            result[keyword] = [
+                _strip_json_schema_defaults(value) if isinstance(value, dict) else value
+                for value in child
+            ]
+
+    for keyword in _SCHEMA_SEQUENCE_KEYWORDS:
+        children = result.get(keyword)
+        if isinstance(children, list):
+            result[keyword] = [
+                _strip_json_schema_defaults(value) if isinstance(value, dict) else value
+                for value in children
+            ]
+
+    return result
+
+
+def _strip_strict_tool_schema_defaults(converted_tools: list[Any]) -> list[Any]:
+    normalized_tools: list[Any] = []
+    for tool in converted_tools:
+        if not isinstance(tool, dict):
+            normalized_tools.append(tool)
+            continue
+
+        function = tool.get("function")
+        if not isinstance(function, dict) or function.get("strict") is not True:
+            normalized_tools.append(tool)
+            continue
+
+        parameters = function.get("parameters")
+        if not isinstance(parameters, dict):
+            normalized_tools.append(tool)
+            continue
+
+        normalized_tools.append(
+            {
+                **tool,
+                "function": {
+                    **function,
+                    "parameters": _strip_json_schema_defaults(parameters),
+                },
+            }
+        )
+
+    return normalized_tools
+
+
 class OpenAIChatCompletionsModel(Model):
     _OFFICIAL_OPENAI_SUPPORTED_INPUT_CONTENT_TYPES = frozenset(
         {"input_text", "input_image", "input_audio", "input_file"}
@@ -66,12 +152,14 @@ class OpenAIChatCompletionsModel(Model):
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
         strict_feature_validation: bool = False,
         buffer_streamed_tool_calls: bool = False,
+        strip_tool_schema_defaults: bool = False,
     ) -> None:
         self.model = model
         self._client = openai_client
         self.should_replay_reasoning_content = should_replay_reasoning_content
         self._strict_feature_validation = strict_feature_validation
         self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
+        self._strip_tool_schema_defaults = strip_tool_schema_defaults
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
         self._has_warned_unsupported_reasoning_settings = False
@@ -640,6 +728,8 @@ class OpenAIChatCompletionsModel(Model):
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
         converted_tools = _to_dump_compatible(converted_tools)
+        if self._strip_tool_schema_defaults:
+            converted_tools = _strip_strict_tool_schema_defaults(converted_tools)
         tools_param = converted_tools if converted_tools else omit
         # Chat Completions rejects parallel_tool_calls unless tools are present, so derive it
         # from the converted list, which also covers handoff-only turns.
