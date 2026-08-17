@@ -222,11 +222,12 @@ class NoOpSpan(Span[TSpanData]):
         span_data: The operation-specific data for this span.
     """
 
-    __slots__ = ("_span_data", "_prev_span_token")
+    __slots__ = ("_span_data", "_prev_span_token", "_started")
 
     def __init__(self, span_data: TSpanData):
         self._span_data = span_data
         self._prev_span_token: contextvars.Token[Span[TSpanData] | None] | None = None
+        self._started = False
 
     @property
     def trace_id(self) -> str:
@@ -245,6 +246,10 @@ class NoOpSpan(Span[TSpanData]):
         return None
 
     def start(self, mark_as_current: bool = False):
+        if self._started:
+            return
+
+        self._started = True
         if mark_as_current:
             self._prev_span_token = Scope.set_current_span(self)
 
