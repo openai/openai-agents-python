@@ -1,4 +1,4 @@
-from agents import Agent, function_tool, handoff
+from agents import Agent, ModelSettings, function_tool, handoff
 
 
 @function_tool
@@ -79,3 +79,32 @@ def test_agent_clone_shared_list_mutation_affects_both_agents():
 
     assert original.tools == cloned.tools
     assert len(original.tools) == 2
+
+
+def test_agent_clone_shares_non_list_mutable_attributes():
+    """`model_settings` and `mcp_config` are shared too, which the list wording does not cover."""
+    agent = Agent(
+        name="Original",
+        model="gpt-4o",
+        model_settings=ModelSettings(temperature=0.1),
+        mcp_config={"convert_schemas_to_strict": True},
+    )
+
+    cloned = agent.clone(instructions="Changed")
+
+    assert cloned.model_settings is agent.model_settings
+    assert cloned.mcp_config is agent.mcp_config
+
+    cloned.model_settings.temperature = 0.9
+    cloned.mcp_config["convert_schemas_to_strict"] = False
+    assert agent.model_settings.temperature == 0.9
+    assert agent.mcp_config["convert_schemas_to_strict"] is False
+
+
+def test_agent_clone_with_only_model_override_keeps_shared_model_settings():
+    """Overriding `model` alone does not detach explicit settings from the original."""
+    agent = Agent(name="Original", model="gpt-4o", model_settings=ModelSettings(temperature=0.1))
+
+    cloned = agent.clone(model="gpt-4o-mini")
+
+    assert cloned.model_settings is agent.model_settings

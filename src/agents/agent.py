@@ -560,6 +560,16 @@ class Agent(AgentBase, Generic[TContext]):
             - To give the clone a list that no other agent holds, pass a new one, for example
               `agent.clone(tools=[*agent.tools, extra_tool])`. The entries copied into it remain
               the same objects the original agent holds.
+            - The same applies to the mutable attributes that are not lists, `model_settings` and
+              `mcp_config`. An omitted one arrives as the original agent's own object, so
+              `cloned.model_settings.temperature = 0.9` also changes the original. Pass a
+              replacement to keep them separate, for example
+              `agent.clone(model_settings=dataclasses.replace(agent.model_settings,
+              temperature=0.9))`.
+            - Overriding `model` alone does not give the clone its own `model_settings`. Fresh
+              settings are substituted only when the current ones still match the implicit
+              defaults for the current model, so an agent carrying any explicit setting keeps
+              sharing that object across `agent.clone(model=...)`.
         Example:
             ```python
             new_agent = agent.clone(instructions="New instructions")
