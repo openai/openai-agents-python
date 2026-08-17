@@ -662,3 +662,60 @@ async def _execute_custom_tool_call(
         config=RunConfig(),
     )
     return result
+
+
+class TestApplyPatchDescriptionMatchesRuntime:
+    """The model-facing grammar must not advertise shapes the runtime rejects."""
+
+    def test_description_requires_at_least_one_file_operation(self) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        description = tool.tool_config["description"]
+        assert isinstance(description, str)
+        assert "Patch := Begin FileOp { FileOp } End" in description
+
+        grammar = cast(dict[str, Any], tool.tool_config["format"])["definition"]
+        assert isinstance(grammar, str)
+        start_rule = next(line for line in grammar.splitlines() if line.startswith("start:"))
+        assert start_rule == "start: begin_patch hunk+ end_patch"
+
+    def test_description_requires_at_least_one_add_line(self) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        description = tool.tool_config["description"]
+        assert isinstance(description, str)
+        assert (
+            'AddFile := "*** Add File: " path NEWLINE "+" line NEWLINE { "+" line NEWLINE }'
+            in description
+        )
+
+        grammar = cast(dict[str, Any], tool.tool_config["format"])["definition"]
+        assert isinstance(grammar, str)
+        add_rule = next(line for line in grammar.splitlines() if line.startswith("add_hunk:"))
+        assert add_rule == 'add_hunk: "*** Add File: " filename LF add_line+'
+
+    @pytest.mark.asyncio
+    async def test_runtime_rejects_a_patch_with_no_file_operations(self) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input="*** Begin Patch\n*** End Patch\n",
+        )
+
+        assert isinstance(result, ToolCallOutputItem)
+        assert "must include at least one file operation" in result.output
+
+    @pytest.mark.asyncio
+    async def test_runtime_rejects_an_add_file_without_lines(self) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input="*** Begin Patch\n*** Add File: notes.txt\n*** End Patch\n",
+        )
+
+        assert isinstance(result, ToolCallOutputItem)
+        assert "must include at least one + line" in result.output

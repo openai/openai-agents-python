@@ -88,11 +88,11 @@ jump to the right context. For instance:
 [3 lines of post-context]
 
 The full grammar definition is below:
-Patch := Begin { FileOp } End
+Patch := Begin FileOp { FileOp } End
 Begin := "*** Begin Patch" NEWLINE
 End := "*** End Patch" NEWLINE
 FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+AddFile := "*** Add File: " path NEWLINE "+" line NEWLINE { "+" line NEWLINE }
 DeleteFile := "*** Delete File: " path NEWLINE
 UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] Hunk { Hunk }
 MoveTo := "*** Move to: " newPath NEWLINE
