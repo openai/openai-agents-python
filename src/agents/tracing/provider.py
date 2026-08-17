@@ -507,10 +507,6 @@ class DefaultTraceProvider(TraceProvider):
             log_model_and_tool_action_error(logger, "Error flushing trace provider", e)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self._refresh_disabled_flag()
-        if self._disabled:
-            return
-
         try:
             _safe_debug("Shutting down trace provider")
             self._multi_processor.shutdown(timeout=timeout)
