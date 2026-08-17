@@ -210,7 +210,7 @@ def retry_policy_retries_all_transient_errors(policy: RetryPolicy | None) -> boo
 class ModelRetrySettings:
     """Opt-in runner-managed retry settings for model calls."""
 
-    max_retries: int | None = None
+    max_retries: int | None = Field(default=None, ge=0)
     """Retries allowed after the initial model request."""
 
     backoff: ModelRetryBackoffInput | None = None
