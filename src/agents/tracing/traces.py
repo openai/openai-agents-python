@@ -429,7 +429,6 @@ class NoOpTrace(Trace):
                 logger.error("Trace already started but no context token set")
             return self
 
-        self._started = True
         self.start(mark_as_current=True)
 
         return self
@@ -441,6 +440,10 @@ class NoOpTrace(Trace):
             self.finish(reset_current=True)
 
     def start(self, mark_as_current: bool = False):
+        if self._started:
+            return
+
+        self._started = True
         if mark_as_current:
             self._prev_context_token = Scope.set_current_trace(self)
 
