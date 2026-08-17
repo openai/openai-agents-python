@@ -6536,6 +6536,54 @@ class TestRunStateResumption:
         assert result1.raw_responses is not result2.raw_responses
 
     @pytest.mark.asyncio
+    async def test_resume_from_run_state_does_not_mutate_source_result_usage(self):
+        """Resuming from a state must not add its tokens to the usage already returned."""
+        model = ScriptedModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.enqueue([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+        requests_after_first_run = result1.context_wrapper.usage.requests
+
+        state = result1.to_state()
+
+        model.enqueue([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state)
+
+        # The resumed run carries the first run's totals forward, but the RunResult
+        # already handed back to the caller must keep only its own.
+        assert result2.context_wrapper.usage.requests > requests_after_first_run
+        assert result1.context_wrapper.usage.requests == requests_after_first_run
+        assert result1.context_wrapper.usage is not result2.context_wrapper.usage
+
+    @pytest.mark.asyncio
+    async def test_two_checkpoints_from_one_result_do_not_share_usage(self):
+        """Two checkpoints must bill their own resumed run, not each other's."""
+        model = ScriptedModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        model.enqueue([get_text_message("First response")])
+        result = await Runner.run(agent, "First input")
+
+        first_checkpoint = result.to_state()
+        second_checkpoint = result.to_state()
+
+        model.enqueue([get_text_message("Second response")])
+        first_resume = await Runner.run(agent, first_checkpoint)
+
+        model.enqueue([get_text_message("Third response")])
+        second_resume = await Runner.run(agent, second_checkpoint)
+
+        # Each checkpoint resumed exactly once from the same one-request run, so both
+        # must report the same total instead of the second inheriting the first's.
+        assert first_resume.context_wrapper.usage.requests == 2
+        assert second_resume.context_wrapper.usage.requests == 2
+        assert (
+            first_resume.context_wrapper.usage.request_usage_entries
+            is not second_resume.context_wrapper.usage.request_usage_entries
+        )
+
+    @pytest.mark.asyncio
     async def test_resume_does_not_append_to_the_state_it_resumed_from(self):
         """A resumed run must not accumulate its responses into the caller's checkpoint."""
         model = ScriptedModel()

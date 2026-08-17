@@ -117,6 +117,11 @@ class RunContextWrapper(Generic[TContext]):
     def _copy_for_run_state(self) -> RunContextWrapper[TContext]:
         """Copy SDK-owned tool state for an independently resumable checkpoint."""
         copied = copy.copy(self)
+        # Usage accrues in place through Usage.add, which also extends
+        # request_usage_entries, so a shared instance would let one resumed
+        # checkpoint's tokens land on every other checkpoint and on the result
+        # the checkpoints came from.
+        copied.usage = copy.deepcopy(self.usage)
         copied._approvals = copy.deepcopy(self._approvals)
         copied._tool_invocations = copy.deepcopy(self._tool_invocations)
         copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)
