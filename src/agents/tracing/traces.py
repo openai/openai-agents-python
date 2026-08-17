@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import contextvars
+import copy
 import hashlib
 import threading
 from collections import OrderedDict
@@ -178,7 +179,7 @@ class Trace(abc.ABC):
         exported = self.export()
         if exported is None:
             return None
-        payload = dict(exported)
+        payload = copy.deepcopy(exported)
         if include_tracing_api_key and self.tracing_api_key:
             payload["tracing_api_key"] = self.tracing_api_key
         return payload
