@@ -25,6 +25,10 @@ def set_default_openai_client(client: AsyncOpenAI, use_for_tracing: bool) -> Non
 
 
 def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> None:
+    if api not in {"chat_completions", "responses"}:
+        raise ValueError(
+            "Invalid OpenAI API. Expected one of: 'chat_completions', 'responses'."
+        )
     if api == "chat_completions":
         _openai_shared.set_use_responses_by_default(False)
     else:
