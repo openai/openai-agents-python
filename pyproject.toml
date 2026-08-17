@@ -149,6 +149,7 @@ convention = "google"
 "tests/**/*.py" = ["ASYNC", "RUF006", "RUF012", "RUF100"]
 
 [tool.mypy]
+platform = "linux"
 strict = true
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
