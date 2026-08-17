@@ -135,6 +135,27 @@ class WorkspaceEditor:
             path=operation.path,
         )
 
+    async def _move_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        if operation.move_to is None:
+            raise ApplyPatchDiffError(
+                message=f"Missing move destination for path {operation.path}",
+                path=operation.path,
+            )
+
+        relative_path, display_path = self._resolve_path(operation.path)
+        destination = self._session.normalize_path(relative_path)
+        moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
+        moved_destination = self._session.normalize_path(moved_relative_path)
+        payload = await self._read_payload(destination, op_path=operation.path)
+
+        if moved_destination != destination:
+            await self._session.mkdir(moved_destination.parent, parents=True, user=self._user)
+            data = io.StringIO(payload) if isinstance(payload, str) else io.BytesIO(payload)
+            await self._session.write(moved_destination, data, user=self._user)
+            await self._session.rm(destination, user=self._user)
+
+        return ApplyPatchResult(output=f"Moved {display_path} to {moved_display_path}")
+
     def normalize_operation(self, operation: ApplyPatchOperation) -> ApplyPatchOperation:
         """Return an operation whose paths use the workspace policy's canonical form."""
         normalized_path = self._validate_path(operation.path).as_posix()
@@ -187,6 +208,16 @@ class WorkspaceEditor:
             handle.close()
 
     async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
+        payload = await self._read_payload(destination, op_path=op_path)
+
+        if isinstance(payload, str):
+            return payload
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ApplyPatchDecodeError(path=decode_path, cause=exc) from exc
+
+    async def _read_payload(self, destination: Path, *, op_path: str) -> str | bytes:
         try:
             handle = await self._session.read(destination, user=self._user)
         except (FileNotFoundError, WorkspaceReadNotFoundError) as exc:
@@ -200,10 +231,7 @@ class WorkspaceEditor:
         if isinstance(payload, str):
             return payload
         if isinstance(payload, bytes | bytearray):
-            try:
-                return bytes(payload).decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ApplyPatchDecodeError(path=decode_path, cause=exc) from exc
+            return bytes(payload)
         raise ApplyPatchDiffError(
             message=f"apply_patch read() returned non-text content: {type(payload).__name__}",
             path=op_path,

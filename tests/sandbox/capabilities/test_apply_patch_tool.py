@@ -19,7 +19,11 @@ from agents.run_internal.run_steps import ToolRunCustom
 from agents.run_internal.tool_actions import CustomToolAction
 from agents.sandbox import SandboxWorkspaceScope
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
-from agents.sandbox.errors import ApplyPatchDecodeError, ApplyPatchFileNotFoundError
+from agents.sandbox.errors import (
+    ApplyPatchDecodeError,
+    ApplyPatchDiffError,
+    ApplyPatchFileNotFoundError,
+)
 from agents.sandbox.types import User
 from agents.testing import scripted_sandbox_session
 from tests.sandbox._apply_patch_test_session import (
@@ -40,6 +44,10 @@ class TestSandboxApplyPatchTool:
         assert tool.tool_config["name"] == "apply_patch"
         assert tool.tool_config["format"]["type"] == "grammar"
         assert tool.tool_config["format"]["syntax"] == "lark"
+        assert (
+            'update_hunk: "*** Update File: " filename LF (change_move change? | change)'
+            in tool.tool_config["format"]["definition"]
+        )
 
     def test_converter_uses_sandbox_custom_apply_patch_tool_config(self) -> None:
         tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
@@ -220,6 +228,22 @@ class TestSandboxApplyPatchTool:
 
         assert isinstance(result, ToolCallOutputItem)
         assert "apply_patch input must start with '*** Begin Patch'" in result.output
+
+    @pytest.mark.asyncio
+    async def test_empty_update_surfaces_tool_error_without_modifying_file(self) -> None:
+        session = ApplyPatchSession()
+        session.files[Path("/workspace/notes.txt")] = b"hello\n"
+        tool = SandboxApplyPatchTool(session=session)
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=("*** Begin Patch\n*** Update File: notes.txt\n*** End Patch\n"),
+        )
+
+        assert isinstance(result, ToolCallOutputItem)
+        assert "Update File patch for notes.txt must include a hunk" in result.output
+        assert session.files[Path("/workspace/notes.txt")] == b"hello\n"
 
     @pytest.mark.asyncio
     async def test_editor_create_update_delete_round_trip(self) -> None:
@@ -559,6 +583,27 @@ class TestSandboxApplyPatchTool:
         assert session.files[Path("/workspace/existing.txt")] == b"new\n"
 
     @pytest.mark.asyncio
+    async def test_editor_rejects_move_without_diff_before_filesystem_access(self) -> None:
+        session = ApplyPatchSession()
+        session.files[Path("/workspace/existing.txt")] = b"old\n"
+        tool = SandboxApplyPatchTool(session=session)
+
+        with pytest.raises(ApplyPatchDiffError, match="Missing diff"):
+            await cast(
+                Awaitable[ApplyPatchResult],
+                tool.editor.update_file(
+                    ApplyPatchOperation(
+                        type="update_file",
+                        path="existing.txt",
+                        diff=None,
+                        move_to="moved.txt",
+                    )
+                ),
+            )
+
+        assert session.files == {Path("/workspace/existing.txt"): b"old\n"}
+
+    @pytest.mark.asyncio
     async def test_custom_tool_input_create_update_move_delete(self) -> None:
         session = ApplyPatchSession()
         tool = SandboxApplyPatchTool(session=session)
@@ -599,6 +644,28 @@ class TestSandboxApplyPatchTool:
             raw_input="*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch\n",
         )
         assert Path("/workspace/moved.txt") not in session.files
+
+    @pytest.mark.asyncio
+    async def test_custom_tool_input_moves_file_without_content_hunk(self) -> None:
+        session = ApplyPatchSession()
+        original = b"\xffhello\r\nworld\n"
+        session.files[Path("/workspace/notes.txt")] = original
+        tool = SandboxApplyPatchTool(session=session)
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(
+                "*** Begin Patch\n"
+                "*** Update File: notes.txt\n"
+                "*** Move to: moved.txt\n"
+                "*** End Patch\n"
+            ),
+        )
+
+        assert result.output == "Moved notes.txt to moved.txt"
+        assert Path("/workspace/notes.txt") not in session.files
+        assert session.files[Path("/workspace/moved.txt")] == original
 
 
 async def _execute_custom_tool_call(

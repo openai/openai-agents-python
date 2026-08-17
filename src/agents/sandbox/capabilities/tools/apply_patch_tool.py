@@ -28,7 +28,7 @@ end_patch: "*** End Patch" LF?
 hunk: add_hunk | delete_hunk | update_hunk
 add_hunk: "*** Add File: " filename LF add_line+
 delete_hunk: "*** Delete File: " filename LF
-update_hunk: "*** Update File: " filename LF change_move? change?
+update_hunk: "*** Update File: " filename LF (change_move change? | change)
 
 filename: /(.+)/
 add_line: "+" /(.*)/ LF -> line
@@ -60,7 +60,8 @@ Each operation starts with one of three headers:
 *** Update File: <path> - patch an existing file in place (optionally with a rename).
 
 May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more hunks, each introduced by @@ (optionally followed by a hunk header).
+Content hunks are optional for a rename. Otherwise, include one or more hunks, each
+introduced by @@ (optionally followed by a hunk header).
 Within a hunk, each line starts with a space, -, or +.
 
 For context lines:
@@ -94,7 +95,7 @@ End := "*** End Patch" NEWLINE
 FileOp := AddFile | DeleteFile | UpdateFile
 AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
 DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+UpdateFile := "*** Update File: " path NEWLINE (MoveTo { Hunk } | Hunk { Hunk })
 MoveTo := "*** Move to: " newPath NEWLINE
 Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
 HunkLine := (" " | "-" | "+") text NEWLINE
@@ -265,7 +266,14 @@ class SandboxApplyPatchTool(CustomTool):
             if operation.type == "create_file":
                 result = await self.editor.create_file(operation)
             elif operation.type == "update_file":
-                result = await self.editor.update_file(operation)
+                if operation.diff is None and operation.move_to is not None:
+                    result = await WorkspaceEditor(
+                        self.session,
+                        user=self.editor.user,
+                        workspace_scope=self.workspace_scope,
+                    )._move_file(operation)
+                else:
+                    result = await self.editor.update_file(operation)
             elif operation.type == "delete_file":
                 result = await self.editor.delete_file(operation)
             else:
@@ -389,13 +397,13 @@ def _parse_update_file(lines: list[str], index: int) -> tuple[ApplyPatchOperatio
     while index < len(lines) - 1 and not _is_file_operation_header(lines[index]):
         diff_lines.append(lines[index])
         index += 1
-    if not diff_lines:
+    if not diff_lines and move_to is None:
         raise ValueError(f"Update File patch for {path} must include a hunk")
     return (
         ApplyPatchOperation(
             type="update_file",
             path=path,
-            diff=_join_diff(diff_lines),
+            diff=_join_diff(diff_lines) if diff_lines else None,
             move_to=move_to,
         ),
         index,
