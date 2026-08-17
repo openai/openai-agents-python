@@ -99,7 +99,10 @@ async def resolve_agent_tool_input(
             result = await result
         if isinstance(result, str) or isinstance(result, list):
             return result
-        return cast(StructuredToolInputResult, result)
+        raise TypeError(
+            "Agent tool input builder must return a string or list of response input items, "
+            f"got {type(result).__name__}"
+        )
 
     if is_agent_tool_input(params) and _has_only_input_field(params):
         return cast(str, params["input"])
