@@ -40,6 +40,8 @@ For voice support, install with the optional `voice` group: `pip install 'openai
 
 If you're familiar with [uv](https://docs.astral.sh/uv/), installing the package would be even easier:
 
+For repository development, use `uv` 0.9.25 or newer. Older versions cannot parse the repository's current project and lockfile configuration.
+
 ```bash
 uv init
 uv add openai-agents
