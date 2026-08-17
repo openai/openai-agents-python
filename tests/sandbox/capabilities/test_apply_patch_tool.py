@@ -41,6 +41,20 @@ class TestSandboxApplyPatchTool:
         assert tool.tool_config["format"]["type"] == "grammar"
         assert tool.tool_config["format"]["syntax"] == "lark"
 
+    def test_grammar_requires_update_diff_after_optional_move(self) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        grammar = cast(dict[str, Any], tool.tool_config["format"])["definition"]
+        assert isinstance(grammar, str)
+        update_rule = next(line for line in grammar.splitlines() if line.startswith("update_hunk:"))
+        assert update_rule == 'update_hunk: "*** Update File: " filename LF change_move? change'
+
+        description = tool.tool_config["description"]
+        assert isinstance(description, str)
+        assert (
+            'UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] Hunk { Hunk }' in description
+        )
+
     def test_converter_uses_sandbox_custom_apply_patch_tool_config(self) -> None:
         tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
 
@@ -54,6 +68,30 @@ class TestSandboxApplyPatchTool:
         assert "A full patch can combine several operations" in description
         tool_format = cast(dict[str, Any], converted.tools[0]["format"])
         assert tool_format["syntax"] == "lark"
+        assert tool_format["definition"] == tool.tool_config["format"]["definition"]
+
+    @pytest.mark.parametrize(
+        "update_body",
+        [
+            "",
+            "*** Move to: moved.txt\n",
+        ],
+        ids=["empty", "move-only"],
+    )
+    @pytest.mark.asyncio
+    async def test_runtime_rejects_updates_without_diff(self, update_body: str) -> None:
+        tool = SandboxApplyPatchTool(session=scripted_sandbox_session())
+
+        result = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(
+                f"*** Begin Patch\n*** Update File: notes.txt\n{update_body}*** End Patch\n"
+            ),
+        )
+
+        assert isinstance(result, ToolCallOutputItem)
+        assert "Update File patch for notes.txt must include a hunk" in result.output
 
     def test_needs_approval_exposes_operation_typed_setting(self) -> None:
         async def needs_approval(

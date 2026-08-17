@@ -28,7 +28,7 @@ end_patch: "*** End Patch" LF?
 hunk: add_hunk | delete_hunk | update_hunk
 add_hunk: "*** Add File: " filename LF add_line+
 delete_hunk: "*** Delete File: " filename LF
-update_hunk: "*** Update File: " filename LF change_move? change?
+update_hunk: "*** Update File: " filename LF change_move? change
 
 filename: /(.+)/
 add_line: "+" /(.*)/ LF -> line
@@ -94,7 +94,7 @@ End := "*** End Patch" NEWLINE
 FileOp := AddFile | DeleteFile | UpdateFile
 AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
 DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] Hunk { Hunk }
 MoveTo := "*** Move to: " newPath NEWLINE
 Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
 HunkLine := (" " | "-" | "+") text NEWLINE
