@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import cast
 
 
 class UnsafeTarMemberError(ValueError):
@@ -158,7 +159,7 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
         with tarfile.open(fileobj=out, mode="r:*") as tar:
             validate_tarfile(tar)
         out.seek(0)
-        return out
+        return cast(io.IOBase, out)
     except Exception:
         out.close()
         raise
