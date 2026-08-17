@@ -99,6 +99,13 @@ def _index_agent_tool_run_result(
 ) -> None:
     """Track tool call objects by signature for fallback lookup."""
     signature = _scoped_tool_call_signature(tool_call, scope_id=scope_id)
+    previous_signature = _agent_tool_run_result_signature_by_obj.get(scoped_object)
+    if previous_signature is not None and previous_signature != signature:
+        previous_candidates = _agent_tool_run_results_by_signature.get(previous_signature)
+        if previous_candidates:
+            previous_candidates.discard(scoped_object)
+            if not previous_candidates:
+                _agent_tool_run_results_by_signature.pop(previous_signature, None)
     _agent_tool_run_result_signature_by_obj[scoped_object] = signature
     _agent_tool_run_results_by_signature.setdefault(signature, set()).add(scoped_object)
 
