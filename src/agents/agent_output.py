@@ -1,4 +1,5 @@
 import abc
+import copy
 from dataclasses import dataclass
 from typing import Any, cast, get_args, get_origin
 
@@ -137,7 +138,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """The JSON schema of the output type."""
         if self.is_plain_text():
             raise UserError("Output type is plain text, so no JSON schema is available")
-        return self._output_schema
+        return copy.deepcopy(self._output_schema)
 
     def validate_json(self, json_str: str) -> Any:
         """Validate a JSON string against the output type. Returns the validated object, or raises
