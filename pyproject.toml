@@ -153,6 +153,7 @@ strict = true
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
 disallow_untyped_calls = false
+platform = "linux"
 
 [[tool.mypy.overrides]]
 module = "sounddevice.*"
