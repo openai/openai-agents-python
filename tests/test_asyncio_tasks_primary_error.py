@@ -16,6 +16,7 @@ async def test_run_producer_consumer_preserves_producer_failure_when_consumer_al
         pass
 
     producer_failed = asyncio.Event()
+    allow_consumer_failure = asyncio.Event()
     consumer_failed = asyncio.Event()
 
     async def producer() -> None:
@@ -23,11 +24,17 @@ async def test_run_producer_consumer_preserves_producer_failure_when_consumer_al
         raise ProducerError("producer failed")
 
     async def consumer() -> None:
-        await producer_failed.wait()
+        await allow_consumer_failure.wait()
         consumer_failed.set()
         raise ConsumerError("consumer failed while draining")
 
+    task = asyncio.create_task(run_producer_consumer(producer(), consumer()))
+    await producer_failed.wait()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    allow_consumer_failure.set()
     with pytest.raises(ProducerError, match="producer failed"):
-        await run_producer_consumer(producer(), consumer())
+        await task
 
     assert consumer_failed.is_set()
