@@ -31,6 +31,7 @@ async def test_run_producer_consumer_preserves_producer_failure_when_consumer_al
     task = asyncio.create_task(run_producer_consumer(producer(), consumer()))
     await producer_failed.wait()
     await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert not task.done()
 
     allow_consumer_failure.set()
