@@ -306,8 +306,8 @@ class Usage:
                 input_tokens=other.input_tokens,
                 output_tokens=other.output_tokens,
                 total_tokens=other.total_tokens,
-                input_tokens_details=input_details,
-                output_tokens_details=output_details,
+                input_tokens_details=copy.deepcopy(input_details),
+                output_tokens_details=copy.deepcopy(output_details),
             )
             self.request_usage_entries.append(request_usage)
 
