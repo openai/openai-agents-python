@@ -13,8 +13,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 from openai import APIConnectionError, BadRequestError, NotFoundError
-from openai.types.responses import ResponseFunctionShellToolCallOutput, ResponseFunctionToolCall
-from openai.types.responses.response_output_item import McpApprovalRequest, ProgramOutput
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_item import McpApprovalRequest
 from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.tool_param import Mcp
@@ -24,7 +24,6 @@ import agents._debug as _debug
 from agents import (
     Agent,
     AgentOutputSchema,
-    AgentsException,
     GuardrailFunctionOutput,
     Handoff,
     HandoffInputData,
@@ -70,6 +69,7 @@ from agents.items import (
 from agents.lifecycle import RunHooks
 from agents.memory import SessionSettings
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.result import RunResultStreaming
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal import run_loop
@@ -112,40 +112,9 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
-from .testing_processor import SPAN_PROCESSOR_TESTING, fetch_ordered_spans
 from .utils.factories import make_run_state
 from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
 from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
-
-_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
-
-
-def _sdk_exception_traceback_repr_locations(
-    error: BaseException, expected: str
-) -> list[tuple[str, str]]:
-    pending = [error]
-    seen: set[int] = set()
-    locations: list[tuple[str, str]] = []
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-
-        traceback = current.__traceback__
-        while traceback is not None:
-            if "/src/agents/" in traceback.tb_frame.f_code.co_filename:
-                locations.extend(
-                    (traceback.tb_frame.f_code.co_name, name)
-                    for name, value in traceback.tb_frame.f_locals.items()
-                    if expected in repr(value)
-                )
-            traceback = traceback.tb_next
-
-        for linked in (current.__cause__, current.__context__):
-            if linked is not None:
-                pending.append(linked)
-    return locations
 
 
 class _DummyRunItem:
@@ -157,430 +126,464 @@ class _DummyRunItem:
         return self._payload
 
 
-@pytest.mark.parametrize(
-    "raw_item",
-    [
-        {
-            "type": "function_call_output",
-            "call_id": "call-function",
-            "output": "secret",
-            "caller": {
-                "type": "program",
-                "caller_id": "program-1",
-                "duplicate": "secret",
-            },
+def test_blocked_function_batch_is_rebuilt_from_allowlisted_fields() -> None:
+    agent = Agent(name="test")
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "commit_tool",
+            "arguments": "{}",
+            "call_id": "call-commit",
+            "provider_data": {"secret": "call-secret"},
         },
-        {
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-commit",
+            "output": "raw-secret",
+            "provider_data": {"secret": "output-secret"},
+        },
+        output="sdk-secret",
+        custom_data={"secret": "custom-secret"},
+    )
+
+    retained = run_loop._retained_items_for_blocked_output([call, output])
+
+    assert [item.type for item in retained] == ["tool_call_item", "tool_call_output_item"]
+    retained_call = cast(ToolCallItem, retained[0])
+    retained_output = cast(ToolCallOutputItem, retained[1])
+    assert "provider_data" not in cast(dict[str, Any], retained_call.raw_item)
+    assert cast(dict[str, Any], retained_output.raw_item) == {
+        "type": "function_call_output",
+        "call_id": "call-commit",
+        "output": run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    }
+    assert retained_output.output == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    assert retained_output.custom_data is None
+
+
+def test_blocked_unknown_tool_variant_discards_the_complete_response() -> None:
+    agent = Agent(name="test")
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={"type": "custom_tool_call", "call_id": "call-custom", "secret": "call"},
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
             "type": "custom_tool_call_output",
             "call_id": "call-custom",
-            "output": "secret",
+            "output": "raw-secret",
         },
-        {
-            "type": "local_shell_call_output",
-            "call_id": "call-local-shell",
-            "output": "secret",
-        },
-        {
-            "type": "apply_patch_call_output",
-            "call_id": "call-apply-patch",
-            "output": "secret",
-            "status": "completed",
-        },
-        {
-            "type": "shell_call_output",
-            "call_id": "call-shell",
-            "output": [
-                {
-                    "stdout": "secret",
-                    "stderr": "",
-                    "outcome": {"type": "exit", "exit_code": 0},
-                }
-            ],
-            "status": "completed",
-            "shell_output": [{"stdout": "secret"}],
-            "provider_data": {"raw_output": "secret"},
-            "caller": {
-                "type": "program",
-                "caller_id": "program-1",
-                "duplicate": "secret",
-            },
-        },
-        ResponseFunctionShellToolCallOutput(
-            id="shell-output-in-progress",
-            call_id="call-shell-in-progress",
-            output=[
-                {
-                    "stdout": "secret",
-                    "stderr": "",
-                    "outcome": {"type": "exit", "exit_code": 0},
-                }
-            ],
-            status="in_progress",
-            type="shell_call_output",
-        ),
-        ResponseFunctionShellToolCallOutput(
-            id="shell-output-incomplete",
-            call_id="call-shell-incomplete",
-            output=[
-                {
-                    "stdout": "secret",
-                    "stderr": "",
-                    "outcome": {"type": "exit", "exit_code": 0},
-                }
-            ],
-            status="incomplete",
-            type="shell_call_output",
-        ),
-        {
-            "type": "computer_call_output",
-            "call_id": "call-computer",
-            "output": {
-                "type": "computer_screenshot",
-                "image_url": "data:image/png;base64,c2VjcmV0",
-            },
-            "acknowledged_safety_checks": [
-                {
-                    "id": "check-1",
-                    "code": "secret",
-                    "message": "secret",
-                    "duplicate": "secret",
-                }
-            ],
-        },
-        {
-            "type": "program_output",
-            "id": "program-output",
-            "call_id": "call-program",
-            "result": "secret",
-            "status": "completed",
-        },
-    ],
-)
-@pytest.mark.asyncio
-async def test_blocked_retained_tool_output_uses_replay_valid_payload(
-    raw_item: Any,
-) -> None:
-    raw_payload = (
-        raw_item if isinstance(raw_item, dict) else raw_item.model_dump(exclude_unset=True)
+        output="sdk-secret",
+        custom_data={"secret": "custom-secret"},
     )
+
+    assert run_loop._retained_items_for_blocked_output([call, output]) == []
+
+
+def test_blocked_reasoning_item_discards_the_complete_response() -> None:
     agent = Agent(name="test")
-    item = ToolCallOutputItem(
+    reasoning = ReasoningItem(
         agent=agent,
-        raw_item=cast(Any, raw_item),
-        output="secret",
-        custom_data={"duplicate": "secret"},
+        raw_item=ResponseReasoningItem(
+            id="reasoning-id",
+            type="reasoning",
+            summary=[],
+            encrypted_content="reasoning-secret",
+        ),
     )
-    retained_input: list[RunItem] = []
-    if raw_payload.get("caller") is not None or raw_payload["type"] == "program_output":
-        retained_input.append(
-            ToolCallItem(
-                agent=agent,
-                raw_item=cast(
-                    Any,
-                    {
-                        "type": "program",
-                        "call_id": (
-                            raw_payload["call_id"]
-                            if raw_payload["type"] == "program_output"
-                            else raw_payload["caller"]["caller_id"]
-                        ),
-                        "code": "return await tools.lookup({});",
-                    },
-                ),
-            )
-        )
-    retained_input.append(item)
-
-    retained = run_loop._retained_items_for_blocked_output(retained_input)
-
-    assert retained == retained_input
-    assert item.output == _BLOCKED_TOOL_OUTPUT
-    assert item.custom_data is None
-    payload = cast(dict[str, Any], item.to_input_item())
-    assert payload["type"] == raw_payload["type"]
-    assert "secret" not in json.dumps(payload)
-    if "caller" in raw_payload:
-        assert payload["caller"] == {"type": "program", "caller_id": "program-1"}
-    sanitized_raw_item = cast(dict[str, Any], item.raw_item)
-    if raw_payload["type"] == "shell_call_output" and "status" in raw_payload:
-        assert sanitized_raw_item["status"] == raw_payload["status"]
-
-    if payload["type"] == "computer_call_output":
-        assert payload["output"]["type"] == "computer_screenshot"
-        assert payload["output"]["image_url"].startswith("data:image/png;base64,")
-    elif payload["type"] == "shell_call_output":
-        assert payload["output"] == [
-            {
-                "stdout": "",
-                "stderr": _BLOCKED_TOOL_OUTPUT,
-                "outcome": {"type": "exit", "exit_code": 1},
-            }
-        ]
-    elif payload["type"] == "program_output":
-        assert payload["result"] == _BLOCKED_TOOL_OUTPUT
-    else:
-        assert payload["output"] == _BLOCKED_TOOL_OUTPUT
-
-    state = make_run_state(agent)
-    state._generated_items = retained_input
-    state._session_items = retained_input
-    state_json = state.to_json()
-    assert "secret" not in json.dumps(state_json)
-    restored = await RunState.from_json(agent, state_json)
-    restored_item = cast(ToolCallOutputItem, restored._generated_items[-1])
-    restored_payload = cast(dict[str, Any], restored_item.to_input_item())
-    assert restored_payload == payload
-
-
-@pytest.mark.parametrize(
-    "raw_item",
-    [
-        {
-            "type": "local_shell_call_output",
-            "id": "unsupported-provider-id",
-            "output": "secret",
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "commit_tool",
+            "arguments": "{}",
+            "call_id": "call-commit",
         },
-        {
-            "type": "function_call_output",
-            "call_id": "call-function",
-            "output": "secret",
-            "caller": {"type": "program", "duplicate": "secret"},
-        },
-        {
-            "type": "computer_call_output",
-            "call_id": "call-computer",
-            "output": {
-                "type": "computer_screenshot",
-                "image_url": "data:image/png;base64,c2VjcmV0",
-            },
-            "acknowledged_safety_checks": [{"id": ""}],
-        },
-        {
-            "type": "function_call_output",
-            "call_id": "call-function",
-            "output": "secret",
-            "status": "failed",
-        },
-    ],
-)
-def test_blocked_retained_tool_output_rejects_malformed_replay_identity(
-    raw_item: dict[str, Any],
-) -> None:
-    item = ToolCallOutputItem(
-        agent=Agent(name="test"),
-        raw_item=cast(Any, raw_item),
-        output="secret",
     )
-    model_response = ModelResponse(
-        output=[get_text_message("archived-secret")],
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-commit",
+            "output": "raw-secret",
+        },
+        output="sdk-secret",
+    )
+
+    assert run_loop._retained_items_for_blocked_output([reasoning, call, output]) == []
+
+
+def test_blocked_snapshot_preserves_accepted_prefix_with_reused_provider_id() -> None:
+    agent = Agent(name="test")
+    prior_call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "prior_tool",
+            "arguments": "{}",
+            "call_id": "reused-call-id",
+        },
+    )
+    prior_output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "reused-call-id",
+            "output": "accepted-prior-output",
+        },
+        output="accepted-prior-output",
+    )
+    current_call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "current_tool",
+            "arguments": "{}",
+            "call_id": "reused-call-id",
+        },
+    )
+    current_output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "reused-call-id",
+            "output": "rejected-current-output",
+        },
+        output="rejected-current-output",
+    )
+    prior_response = ModelResponse(
+        output=[cast(Any, prior_call.raw_item)],
         usage=Usage(),
-        response_id="response-malformed",
+        response_id="prior-response",
     )
-
-    with pytest.raises(
-        AgentsException, match="Cannot sanitize a blocked tool output for replay"
-    ) as exc_info:
-        run_loop._retained_items_for_blocked_output([item], model_response)
-
-    assert "secret" not in str(exc_info.value)
-    assert exc_info.value.run_data is None
-    assert exc_info.value.__cause__ is None
-    assert exc_info.value.__context__ is None
-    assert _sdk_exception_traceback_repr_locations(exc_info.value, "secret") == []
-    assert item.output == _BLOCKED_TOOL_OUTPUT
-    assert item.custom_data is None
-    assert item.to_input_item() == {
-        "type": "function_call_output",
-        "call_id": "blocked-tool-output",
-        "output": _BLOCKED_TOOL_OUTPUT,
-    }
-    assert model_response.output == []
-
-
-@pytest.mark.parametrize(
-    "raw_item",
-    [
-        {
-            "type": "function_call_output",
-            "call_id": "call-orphan",
-            "output": "secret",
-            "caller": {"type": "program", "caller_id": "program-orphan"},
-        },
-        {
-            "type": "program_output",
-            "id": "program-output-orphan",
-            "call_id": "program-orphan",
-            "result": "secret",
-            "status": "completed",
-        },
-    ],
-)
-def test_blocked_retained_tool_output_rejects_orphan_program_relationship(
-    raw_item: dict[str, Any],
-) -> None:
-    item = ToolCallOutputItem(
-        agent=Agent(name="test"),
-        raw_item=cast(Any, raw_item),
-        output="secret",
-        custom_data={"duplicate": "secret"},
+    current_response = ModelResponse(
+        output=[cast(Any, current_call.raw_item)],
+        usage=Usage(),
+        response_id="current-response",
     )
+    state = make_run_state(
+        agent,
+        context=make_context_wrapper(),
+        original_input="test",
+        max_turns=2,
+    )
+    state._generated_items = [prior_call, prior_output, current_call, current_output]
+    state._session_items = [prior_call, prior_output, current_call, current_output]
+    state._model_responses = [prior_response, current_response]
 
-    with pytest.raises(
-        AgentsException, match="Cannot sanitize a blocked tool output for replay"
-    ) as exc_info:
-        run_loop._retained_items_for_blocked_output([item])
-
-    assert "secret" not in str(exc_info.value)
-    assert exc_info.value.__cause__ is None
-    assert exc_info.value.__context__ is None
-    assert _sdk_exception_traceback_repr_locations(exc_info.value, "secret") == []
-    assert item.output == _BLOCKED_TOOL_OUTPUT
-    assert item.custom_data is None
-
-
-def test_blocked_retained_tool_output_accepts_program_parent_from_prior_history() -> None:
-    agent = Agent(name="test")
-    program_item = ToolCallItem(
-        agent=agent,
-        raw_item=cast(
-            Any,
-            {
-                "type": "program",
-                "call_id": "program-prior",
-                "code": "return await tools.lookup({});",
-            },
+    retained = run_loop._retained_items_for_blocked_response(
+        [current_call, current_output],
+        current_response,
+        run_state=state,
+        owner_starts=run_loop._BlockedOutputOwnerStarts(
+            run_state_generated_items=2,
+            run_state_session_items=2,
+            run_state_model_responses=1,
+            run_state_tool_output_guardrail_results=0,
         ),
     )
-    child_call = ToolCallItem(
-        agent=agent,
-        raw_item=cast(
-            Any,
-            {
-                "type": "function_call",
-                "call_id": "call-child",
-                "name": "lookup",
-                "arguments": "{}",
-                "caller": {"type": "program", "caller_id": "program-prior"},
-            },
-        ),
+
+    assert state._generated_items[:2] == [prior_call, prior_output]
+    assert state._generated_items[0] is prior_call
+    assert state._generated_items[1] is prior_output
+    assert state._session_items[:2] == [prior_call, prior_output]
+    assert state._model_responses[0] is prior_response
+    assert retained == state._generated_items[2:]
+    assert cast(ToolCallOutputItem, retained[1]).output == (
+        run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
     )
-    child_output = ToolCallOutputItem(
-        agent=agent,
-        raw_item=cast(
-            Any,
-            {
-                "type": "function_call_output",
-                "call_id": "call-child",
-                "output": "program-secret",
-                "caller": {"type": "program", "caller_id": "program-prior"},
-            },
-        ),
-        output="program-secret",
-    )
-
-    retained = run_loop._retained_items_for_blocked_output(
-        [child_call, child_output],
-        preceding_items=[program_item],
-    )
-
-    assert retained == [child_call, child_output]
-    assert child_output.output == _BLOCKED_TOOL_OUTPUT
-    assert program_item not in retained
+    assert prior_output.output == "accepted-prior-output"
 
 
-@pytest.mark.asyncio
-async def test_malformed_blocked_tool_output_failure_is_data_free_at_runner_boundary(
+def test_blocked_snapshot_cancellation_severs_replay_graph_and_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_sanitizer = run_loop._blocked_tool_output_payload
+    agent = Agent(name="test")
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "commit_tool",
+            "arguments": "{}",
+            "call_id": "call-commit",
+        },
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-commit",
+            "output": "raw-secret",
+        },
+        output="sdk-secret",
+        custom_data={"secret": "custom-secret"},
+    )
+    response = ModelResponse(
+        output=[cast(Any, call.raw_item)],
+        usage=Usage(),
+        response_id="response-id",
+    )
+    state = make_run_state(
+        agent,
+        context=make_context_wrapper(),
+        original_input="test",
+        max_turns=1,
+    )
+    state._generated_items = [call, output]
+    state._session_items = [call, output]
+    state._model_responses = [response]
+    cancellation = asyncio.CancelledError("original cancellation")
 
-    def reject_with_malformed_caller(_raw_item: Any) -> dict[str, Any]:
-        return original_sanitizer(
-            {
-                "type": "function_call_output",
-                "call_id": "call-malformed",
-                "output": "runner-boundary-secret",
-                "caller": {"type": "program", "duplicate": "runner-boundary-secret"},
-            }
+    def cancel_preparation(_raw_item: Any) -> dict[str, Any]:
+        raise cancellation
+
+    monkeypatch.setattr(run_loop, "_blocked_function_output_payload", cancel_preparation)
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        run_loop._retained_items_for_blocked_response(
+            [call, output],
+            response,
+            run_state=state,
         )
 
-    monkeypatch.setattr(run_loop, "_blocked_tool_output_payload", reject_with_malformed_caller)
+    assert exc_info.value is cancellation
+    assert state._generated_items == []
+    assert state._session_items == []
+    assert state._model_responses == []
+
+
+@pytest.mark.parametrize("fail_after_first_swap", [False, True])
+def test_blocked_snapshot_application_baseexception_severs_every_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_after_first_swap: bool,
+) -> None:
+    agent = Agent(name="test")
+    prior_call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "prior_tool",
+            "arguments": "{}",
+            "call_id": "prior-call",
+        },
+    )
+    prior_output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "prior-call",
+            "output": "accepted-prior-output",
+        },
+        output="accepted-prior-output",
+    )
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "commit_tool",
+            "arguments": "{}",
+            "call_id": "call-commit",
+        },
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-commit",
+            "output": "raw-secret",
+        },
+        output="sdk-secret",
+    )
+    prior_response = ModelResponse(
+        output=[cast(Any, prior_call.raw_item)],
+        usage=Usage(),
+        response_id="prior-response",
+    )
+    response = ModelResponse(
+        output=[cast(Any, call.raw_item)],
+        usage=Usage(),
+        response_id="response-id",
+    )
+    state = make_run_state(
+        agent,
+        context=make_context_wrapper(),
+        original_input="test",
+        max_turns=1,
+    )
+    prior_guardrail_result = cast(Any, object())
+    current_guardrail_result = cast(Any, object())
+    state._generated_items = [prior_call, prior_output, call, output]
+    state._session_items = [prior_call, prior_output, call, output]
+    state._model_responses = [prior_response, response]
+    state._tool_output_guardrail_results = [prior_guardrail_result, current_guardrail_result]
+    streamed_result = RunResultStreaming(
+        input="test",
+        new_items=[prior_call, prior_output, call, output],
+        raw_responses=[prior_response, response],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[prior_guardrail_result, current_guardrail_result],
+        context_wrapper=make_context_wrapper(),
+        current_agent=agent,
+        current_turn=2,
+        max_turns=2,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+    streamed_result._model_input_items = [prior_call, prior_output, call, output]
+    streamed_result._state = state
+    application_error = KeyboardInterrupt("application failed")
+
+    def fail_application(plan: Any) -> None:
+        if fail_after_first_swap:
+            owner, field, value = plan.assignments[0]
+            object.__setattr__(owner, field, value)
+        raise application_error
+
+    monkeypatch.setattr(run_loop, "_apply_blocked_output_owner_plan", fail_application)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        run_loop._retained_items_for_blocked_response(
+            [call, output],
+            response,
+            run_state=state,
+            streamed_result=streamed_result,
+            owner_starts=run_loop._BlockedOutputOwnerStarts(
+                run_state_generated_items=2,
+                run_state_session_items=2,
+                run_state_model_responses=1,
+                run_state_tool_output_guardrail_results=1,
+                streamed_new_items=2,
+                streamed_model_input_items=2,
+                streamed_raw_responses=1,
+                streamed_tool_output_guardrail_results=1,
+            ),
+        )
+
+    assert exc_info.value is application_error
+    assert state._generated_items == [prior_call, prior_output]
+    assert state._session_items == [prior_call, prior_output]
+    assert state._model_responses == [prior_response]
+    assert state._tool_output_guardrail_results == [prior_guardrail_result]
+    assert streamed_result.new_items == [prior_call, prior_output]
+    assert streamed_result._model_input_items == [prior_call, prior_output]
+    assert streamed_result.raw_responses == [prior_response]
+    assert streamed_result.tool_output_guardrail_results == [prior_guardrail_result]
+
+
+def test_blocked_snapshot_application_exception_becomes_fixed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="test")
+    call = ToolCallItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call",
+            "name": "commit_tool",
+            "arguments": "{}",
+            "call_id": "call-commit",
+        },
+    )
+    output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call-commit",
+            "output": "raw-secret",
+        },
+        output="sdk-secret",
+    )
+    state = make_run_state(
+        agent,
+        context=make_context_wrapper(),
+        original_input="test",
+        max_turns=1,
+    )
+    state._generated_items = [call, output]
+    state._session_items = [call, output]
+
+    def fail_application(_plan: Any) -> None:
+        raise ValueError("application-secret")
+
+    monkeypatch.setattr(run_loop, "_apply_blocked_output_owner_plan", fail_application)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        run_loop._retained_items_for_blocked_response(
+            [call, output],
+            None,
+            run_state=state,
+        )
+
+    assert "application-secret" not in str(exc_info.value)
+    assert state._generated_items == []
+    assert state._session_items == []
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_trip_preserves_prior_run_state_side_effect() -> None:
+    side_effects: list[str] = []
+
+    @function_tool(name_override="accepted_tool")
+    def accepted_tool() -> str:
+        side_effects.append("accepted")
+        return "accepted-output"
 
     @function_tool(name_override="terminal_tool")
     def terminal_tool() -> str:
-        return "runner-boundary-secret"
-
-    def output_guardrail(
-        _context: RunContextWrapper[Any],
-        _agent: Agent[Any],
-        output: Any,
-    ) -> GuardrailFunctionOutput:
-        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+        side_effects.append("terminal")
+        return "rejected-output"
 
     model = ScriptedModel(
-        [[get_function_tool_call("terminal_tool", "{}", call_id="call-terminal")]]
+        steps=[
+            [get_function_tool_call("accepted_tool", "{}", call_id="accepted-call")],
+            [get_text_message("accepted-final")],
+        ]
     )
-    agent = Agent(
-        name="test",
-        model=model,
-        tools=[terminal_tool],
-        tool_use_behavior="stop_on_first_tool",
-        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    agent = Agent(name="test", model=model, tools=[accepted_tool, terminal_tool])
+    first = await Runner.run(agent, "run accepted tool", max_turns=5)
+    state = first.to_state()
+    prior_generated = list(state._generated_items)
+    prior_session = list(state._session_items)
+    prior_responses = list(state._model_responses)
+
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    agent.tool_use_behavior = {"stop_at_tool_names": ["terminal_tool"]}
+    agent.output_guardrails = [OutputGuardrail(guardrail_function=reject_output)]
+    model.enqueue(
+        [
+            ResponseReasoningItem(
+                id="reasoning-current",
+                type="reasoning",
+                summary=[Summary(text="calling terminal tool", type="summary_text")],
+            ),
+            get_function_tool_call("terminal_tool", "{}", call_id="current-call"),
+        ]
     )
 
-    with pytest.raises(
-        AgentsException, match="Cannot sanitize a blocked tool output for replay"
-    ) as exc_info:
-        await Runner.run(agent, "Run terminal_tool")
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, state)
 
-    assert exc_info.value.run_data is None
-    assert exc_info.value.__cause__ is None
-    assert exc_info.value.__context__ is None
-    assert _sdk_exception_traceback_repr_locations(exc_info.value, "runner-boundary-secret") == []
-
-
-@pytest.mark.parametrize("shared_raw_item", [False, True])
-def test_blocked_retained_tool_output_sanitizes_archived_model_response(
-    shared_raw_item: bool,
-) -> None:
-    agent = Agent(name="test")
-    raw_output = ProgramOutput(
-        id="program-output",
-        call_id="call-program",
-        result="secret-program-result",
-        status="completed",
-        type="program_output",
-    )
-    item = ToolCallOutputItem(
-        agent=agent,
-        raw_item=raw_output if shared_raw_item else cast(Any, raw_output.model_dump()),
-        output=raw_output.result,
-    )
-    program_item = ToolCallItem(
-        agent=agent,
-        raw_item=cast(
-            Any,
-            {
-                "type": "program",
-                "call_id": "call-program",
-                "code": "return await tools.lookup({});",
-            },
-        ),
-    )
-    model_response = ModelResponse(output=[raw_output], usage=Usage(), response_id="response")
-    state = make_run_state(agent)
-    state._model_responses = [model_response]
-    state._generated_items = [program_item, item]
-    state._session_items = [program_item, item]
-
-    retained = run_loop._retained_items_for_blocked_output([program_item, item], model_response)
-
-    assert retained == [program_item, item]
-    assert "secret-program-result" not in json.dumps(state.to_json())
-    archived_output = cast(dict[str, Any], model_response.output[0])
-    assert archived_output["type"] == "program_output"
-    assert archived_output["call_id"] == "call-program"
-    assert archived_output["result"] == _BLOCKED_TOOL_OUTPUT
+    assert side_effects == ["accepted", "terminal"]
+    assert state._generated_items == prior_generated
+    assert state._session_items == prior_session
+    assert state._model_responses == prior_responses
+    serialized_state = json.dumps(state.to_json())
+    assert "accepted-output" in serialized_state
+    assert "rejected-output" not in serialized_state
+    assert "reasoning-current" not in serialized_state
 
 
 async def run_execute_approved_tools(
@@ -4891,7 +4894,7 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
     ) -> GuardrailFunctionOutput:
         return GuardrailFunctionOutput(
-            output_info="safe-info",
+            output_info=None,
             tripwire_triggered=True,
         )
 
@@ -4903,11 +4906,8 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
     )
     model.enqueue([get_text_message("user_message")])
 
-    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+    with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
-
-    assert exc_info.value.guardrail_result.agent_output == "user_message"
-    assert exc_info.value.guardrail_result.output.output_info == "safe-info"
 
 
 def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sync() -> None:
@@ -4936,7 +4936,7 @@ def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sy
 
 
 @pytest.mark.asyncio
-async def test_output_guardrail_error_preserves_final_output_in_session() -> None:
+async def test_output_guardrail_error_does_not_persist_unverdictable_output() -> None:
     def guardrail_function(
         _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
     ) -> GuardrailFunctionOutput:
@@ -4944,7 +4944,7 @@ async def test_output_guardrail_error_preserves_final_output_in_session() -> Non
 
     session = SimpleListSession()
     model = ScriptedModel()
-    model.enqueue([get_text_message("preserved_on_guardrail_error")])
+    model.enqueue([get_text_message("not_persisted_on_guardrail_error")])
     agent = Agent(
         name="test",
         model=model,
@@ -4958,11 +4958,11 @@ async def test_output_guardrail_error_preserves_final_output_in_session() -> Non
     assert [
         cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
         for item in items
-    ] == ["user", "message"]
+    ] == ["user"]
 
 
 @pytest.mark.asyncio
-async def test_output_guardrail_cancellation_preserves_final_output_in_session() -> None:
+async def test_output_guardrail_cancellation_does_not_start_a_final_session_write() -> None:
     guardrail_started = asyncio.Event()
 
     async def guardrail_function(
@@ -4974,7 +4974,7 @@ async def test_output_guardrail_cancellation_preserves_final_output_in_session()
 
     session = SimpleListSession()
     model = ScriptedModel()
-    model.enqueue([get_text_message("preserved_on_guardrail_cancellation")])
+    model.enqueue([get_text_message("not_persisted_on_guardrail_cancellation")])
     agent = Agent(
         name="test",
         model=model,
@@ -4992,7 +4992,7 @@ async def test_output_guardrail_cancellation_preserves_final_output_in_session()
     assert [
         cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
         for item in items
-    ] == ["user", "message"]
+    ] == ["user"]
 
 
 @pytest.mark.asyncio
@@ -5045,24 +5045,20 @@ async def test_resumed_final_output_persists_once_after_passing_output_guardrail
 
 @pytest.mark.parametrize("tripwire_triggered", [False, True])
 @pytest.mark.asyncio
-async def test_resumed_final_tool_sanitizes_output_after_output_guardrail_tripwire(
+async def test_resumed_final_tool_persists_call_and_output_after_output_guardrail(
     tripwire_triggered: bool,
 ) -> None:
-    tool_calls = 0
-
     def guardrail_function(
-        _context: RunContextWrapper[Any], _agent: Agent[Any], agent_output: Any
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
     ) -> GuardrailFunctionOutput:
         return GuardrailFunctionOutput(
-            output_info=agent_output,
+            output_info=None,
             tripwire_triggered=tripwire_triggered,
         )
 
     @function_tool(name_override="commit_tool")
     def commit_tool() -> str:
-        nonlocal tool_calls
-        tool_calls += 1
-        return f"committed-result-{tool_calls}"
+        return "committed-result"
 
     session = SimpleListSession()
     model = ScriptedModel()
@@ -5086,15 +5082,13 @@ async def test_resumed_final_tool_sanitizes_output_after_output_guardrail_tripwi
     model.enqueue([get_function_tool_call("commit_tool", "{}", call_id="call-second")])
 
     if tripwire_triggered:
-        with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
             await Runner.run(agent, state, session=session)
-        assert exc_info.value.guardrail_result.agent_output == _BLOCKED_TOOL_OUTPUT
-        assert exc_info.value.guardrail_result.output.output_info is None
     else:
         result = await Runner.run(agent, state, session=session)
-        assert result.final_output == "committed-result-2"
+        assert result.final_output == "committed-result"
 
-    assert state._current_turn_persisted_item_count == 4
+    assert state._current_turn_persisted_item_count == 2
     items = await session.get_items()
     assert [
         (
@@ -5109,215 +5103,11 @@ async def test_resumed_final_tool_sanitizes_output_after_output_guardrail_tripwi
         ("function_call", "call-second"),
         ("function_call_output", "call-second"),
     ]
-    second_output = cast(dict[str, Any], items[-1]).get("output")
-    assert second_output == (_BLOCKED_TOOL_OUTPUT if tripwire_triggered else "committed-result-2")
-
-    serialized_state = json.dumps(state.to_json())
+    assert cast(dict[str, Any], items[-1]).get("output") == (
+        run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT if tripwire_triggered else "committed-result"
+    )
     if tripwire_triggered:
-        assert "committed-result-2" not in serialized_state
-
-
-@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
-@pytest.mark.parametrize("tripwire_triggered", [False, True])
-@pytest.mark.asyncio
-async def test_terminal_tool_span_waits_for_output_guardrail_verdict(
-    mode: str,
-    tripwire_triggered: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    started_function_spans: list[Any] = []
-    original_on_span_start = SPAN_PROCESSOR_TESTING.on_span_start
-
-    def capture_span_start(span: Any) -> None:
-        original_on_span_start(span)
-        if span.span_data.type == "function":
-            started_function_spans.append(span)
-
-    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_start", capture_span_start)
-
-    @function_tool(name_override="trace_tool")
-    def trace_tool() -> str:
-        return "trace-secret"
-
-    def output_guardrail(
-        _context: RunContextWrapper[Any],
-        _agent: Agent[Any],
-        output: Any,
-    ) -> GuardrailFunctionOutput:
-        assert len(started_function_spans) == 1
-        assert cast(Any, started_function_spans[0].span_data).output is None
-        assert not [span for span in fetch_ordered_spans() if span.span_data.type == "function"]
-        return GuardrailFunctionOutput(
-            output_info=output,
-            tripwire_triggered=tripwire_triggered,
-        )
-
-    model_output = [get_function_tool_call("trace_tool", "{}", call_id="call-trace")]
-    model = ScriptedModel(
-        [model_output if mode == "non_streamed" else get_exact_output_stream_step(model_output)]
-    )
-    agent = Agent(
-        name="test",
-        model=model,
-        tools=[trace_tool],
-        tool_use_behavior="stop_on_first_tool",
-        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
-    )
-    run_config = RunConfig(trace_include_sensitive_data=True)
-
-    if tripwire_triggered:
-        with pytest.raises(OutputGuardrailTripwireTriggered):
-            if mode == "non_streamed":
-                await Runner.run(agent, "Use trace_tool", run_config=run_config)
-            else:
-                result = Runner.run_streamed(agent, "Use trace_tool", run_config=run_config)
-                async for _ in result.stream_events():
-                    pass
-    elif mode == "non_streamed":
-        await Runner.run(agent, "Use trace_tool", run_config=run_config)
-    else:
-        result = Runner.run_streamed(agent, "Use trace_tool", run_config=run_config)
-        async for _ in result.stream_events():
-            pass
-
-    function_spans = [span for span in fetch_ordered_spans() if span.span_data.type == "function"]
-    assert len(function_spans) == 1
-    expected_output = _BLOCKED_TOOL_OUTPUT if tripwire_triggered else "trace-secret"
-    assert cast(Any, function_spans[0].span_data).output == expected_output
-    assert cast(Any, started_function_spans[0].span_data).output == expected_output
-    if tripwire_triggered:
-        assert "trace-secret" not in json.dumps(function_spans[0].export())
-
-
-@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
-@pytest.mark.parametrize("tripwire_triggered", [False, True])
-@pytest.mark.asyncio
-async def test_blocked_terminal_tool_span_discards_deferred_error(
-    mode: str,
-    tripwire_triggered: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    started_function_spans: list[Any] = []
-    original_on_span_start = SPAN_PROCESSOR_TESTING.on_span_start
-
-    def capture_span_start(span: Any) -> None:
-        original_on_span_start(span)
-        if span.span_data.type == "function":
-            started_function_spans.append(span)
-
-    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_start", capture_span_start)
-
-    def expose_error(_context: RunContextWrapper[Any], error: Exception) -> str:
-        return str(error)
-
-    @function_tool(name_override="failing_tool", failure_error_function=expose_error)
-    def failing_tool() -> str:
-        raise ValueError("span-error-secret")
-
-    def output_guardrail(
-        _context: RunContextWrapper[Any],
-        _agent: Agent[Any],
-        output: Any,
-    ) -> GuardrailFunctionOutput:
-        assert output == "span-error-secret"
-        assert len(started_function_spans) == 1
-        assert started_function_spans[0].error is None
-        return GuardrailFunctionOutput(
-            output_info=output,
-            tripwire_triggered=tripwire_triggered,
-        )
-
-    model_output = [get_function_tool_call("failing_tool", "{}", call_id="call-failing")]
-    model = ScriptedModel(
-        [model_output if mode == "non_streamed" else get_exact_output_stream_step(model_output)]
-    )
-    agent = Agent(
-        name="test",
-        model=model,
-        tools=[failing_tool],
-        tool_use_behavior="stop_on_first_tool",
-        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
-    )
-
-    async def run_once() -> None:
-        if mode == "non_streamed":
-            await Runner.run(
-                agent,
-                "Use failing_tool",
-                run_config=RunConfig(trace_include_sensitive_data=True),
-            )
-        else:
-            result = Runner.run_streamed(
-                agent,
-                "Use failing_tool",
-                run_config=RunConfig(trace_include_sensitive_data=True),
-            )
-            async for _ in result.stream_events():
-                pass
-
-    if tripwire_triggered:
-        with pytest.raises(OutputGuardrailTripwireTriggered):
-            await run_once()
-    else:
-        await run_once()
-
-    function_spans = [span for span in fetch_ordered_spans() if span.span_data.type == "function"]
-    assert len(function_spans) == 1
-    if tripwire_triggered:
-        assert function_spans[0].error is None
-        assert cast(Any, function_spans[0].span_data).output == _BLOCKED_TOOL_OUTPUT
-        assert "span-error-secret" not in json.dumps(function_spans[0].export())
-    else:
-        assert function_spans[0].error is not None
-        assert "span-error-secret" in json.dumps(function_spans[0].export())
-
-
-@pytest.mark.parametrize("behavior_kind", ["stop_at_tools", "custom"])
-@pytest.mark.asyncio
-async def test_blocked_tool_output_is_sanitized_for_terminal_tool_behaviors(
-    behavior_kind: str,
-) -> None:
-    @function_tool(name_override="commit_tool")
-    def commit_tool() -> str:
-        return "sensitive-result"
-
-    def custom_behavior(
-        _context: RunContextWrapper[Any], results: list[FunctionToolResult]
-    ) -> ToolsToFinalOutputResult:
-        return ToolsToFinalOutputResult(is_final_output=True, final_output=results[0].output)
-
-    def output_guardrail(
-        _context: RunContextWrapper[Any], _agent: Agent[Any], _output: Any
-    ) -> GuardrailFunctionOutput:
-        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
-
-    tool_use_behavior: Any = (
-        {"stop_at_tool_names": ["commit_tool"]}
-        if behavior_kind == "stop_at_tools"
-        else custom_behavior
-    )
-    model = ScriptedModel([[get_function_tool_call("commit_tool", "{}", call_id="call-committed")]])
-    session = SimpleListSession()
-    agent = Agent(
-        name="test",
-        model=model,
-        tools=[commit_tool],
-        tool_use_behavior=tool_use_behavior,
-        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
-    )
-
-    with pytest.raises(OutputGuardrailTripwireTriggered):
-        await Runner.run(agent, "Use commit_tool", session=session)
-
-    items = await session.get_items()
-    tool_output = next(
-        item
-        for item in items
-        if isinstance(item, dict) and item.get("type") == "function_call_output"
-    )
-    assert tool_output.get("call_id") == "call-committed"
-    assert tool_output.get("output") == _BLOCKED_TOOL_OUTPUT
-    assert "sensitive-result" not in json.dumps(items)
+        assert "committed-result" not in json.dumps(items[-2:])
 
 
 @pytest.mark.asyncio

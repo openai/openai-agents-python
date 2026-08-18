@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import aclosing
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -45,7 +45,7 @@ from ..exceptions import (
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
 )
-from ..guardrail import OutputGuardrailResult
+from ..guardrail import GuardrailFunctionOutput, OutputGuardrailResult
 from ..handoffs import Handoff
 from ..items import (
     InputItem,
@@ -53,6 +53,7 @@ from ..items import (
     ModelResponse,
     RunItem,
     ToolApprovalItem,
+    ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
@@ -74,7 +75,7 @@ from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
-from ..run_state import RunState, _deserialize_tool_call_output_raw_item
+from ..run_state import RunState
 from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
     AgentUpdatedStreamEvent,
@@ -85,7 +86,7 @@ from ..tool import (
     Tool,
     dispose_resolved_computers,
 )
-from ..tool_guardrails import ToolOutputGuardrailResult
+from ..tool_guardrails import ToolGuardrailFunctionOutput, ToolOutputGuardrailResult
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
@@ -105,8 +106,14 @@ from .agent_runner_helpers import (
     get_unsent_tool_call_ids_for_interrupted_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_with_server_managed_conversation,
 )
 from .approvals import approvals_from_step
+from .blocked_output import (
+    OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT as _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    blocked_function_call_payload as _blocked_function_call_payload,
+    blocked_function_output_payload as _blocked_function_output_payload,
+)
 from .error_handlers import (
     attach_generic_agent_error,
     build_run_error_data,
@@ -141,7 +148,6 @@ from .model_retry import (
 from .oai_conversation import OpenAIServerConversationTracker
 from .prompt_cache_key import PromptCacheKeyResolver, model_settings_with_prompt_cache_key
 from .run_steps import (
-    DeferredToolSpan,
     NextStepFinalOutput,
     NextStepHandoff,
     NextStepInterruption,
@@ -175,15 +181,12 @@ from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
 from .tool_execution import (
     coerce_shell_call,
-    collect_deferred_tool_spans,
     execute_apply_patch_calls,
     execute_computer_actions,
     execute_function_tool_calls,
     execute_local_shell_calls,
     execute_shell_calls,
     extract_tool_call_id,
-    finish_deferred_tool_spans,
-    get_mapping_or_attr,
     initialize_computer_tools,
     maybe_reset_tool_choice,
     normalize_shell_output,
@@ -205,7 +208,6 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
-    _collect_program_parent_state,
     check_for_final_output_from_tools,
     execute_final_output,
     execute_handoffs,
@@ -466,467 +468,635 @@ async def _run_output_guardrails_for_stream(
 
 
 _SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
-_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
-_OUTPUT_GUARDRAIL_BLOCKED_TOOL_CALL_ID = "blocked-tool-output"
-_OUTPUT_GUARDRAIL_BLOCKED_COMPUTER_SCREENSHOT = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-)
-_RESPONSE_OUTPUT_STATUSES = frozenset({"in_progress", "completed", "incomplete"})
-_HOSTED_TOOL_OUTPUT_STATUSES = frozenset({"completed", "failed"})
-_SHELL_TOOL_OUTPUT_STATUSES = _RESPONSE_OUTPUT_STATUSES | _HOSTED_TOOL_OUTPUT_STATUSES
-_PROGRAM_OUTPUT_STATUSES = frozenset({"completed", "incomplete"})
-_KNOWN_TOOL_OUTPUT_TYPES = frozenset(
-    {
-        "function_call_output",
-        "custom_tool_call_output",
-        "local_shell_call_output",
-        "apply_patch_call_output",
-        "shell_call_output",
-        "computer_call_output",
-        "program_output",
-    }
-)
-
-
-async def _run_with_deferred_tool_spans(
-    *,
-    agent: Agent[TContext],
-    run_config: RunConfig,
-    run_turn: Callable[[], Awaitable[SingleStepResult]],
-) -> SingleStepResult:
-    """Delay terminal tool span publication until output guardrails select the payload."""
-    should_defer = (
-        run_config.trace_include_sensitive_data
-        and not run_config.tracing_disabled
-        and agent.tool_use_behavior != "run_llm_again"
-        and bool(agent.output_guardrails or run_config.output_guardrails)
-    )
-    with collect_deferred_tool_spans(should_defer) as deferred_spans:
-        try:
-            result = await run_turn()
-        except BaseException:
-            finish_deferred_tool_spans(deferred_spans)
-            raise
-
-    if isinstance(result.next_step, NextStepFinalOutput):
-        result.deferred_tool_spans = deferred_spans
-    else:
-        finish_deferred_tool_spans(deferred_spans)
-    return result
-
-
-def _tool_output_payload(raw_item: Any) -> dict[str, Any]:
-    """Convert a raw tool output into a mutable mapping."""
-    if isinstance(raw_item, dict):
-        return dict(raw_item)
-    model_dump = getattr(raw_item, "model_dump", None)
-    if callable(model_dump):
-        return cast(dict[str, Any], model_dump(exclude_unset=True))
-    raise AgentsException(f"Unexpected raw tool output type: {type(raw_item)}")
-
-
-def _tool_output_identity(raw_item: Any) -> tuple[str, str] | None:
-    """Return the raw output type and provider identity used to join replay copies."""
-    payload = _tool_output_payload(raw_item)
-    output_type = payload.get("type")
-    call_id = payload.get("call_id") or payload.get("id")
-    if not isinstance(output_type, str) or not isinstance(call_id, str):
-        return None
-    return output_type, call_id
-
-
-def _required_tool_output_string(
-    raw_payload: Mapping[str, Any],
-    field: str,
-    output_type: str,
-) -> str:
-    value = raw_payload.get(field)
-    if not isinstance(value, str) or not value:
-        raise AgentsException(f"Cannot sanitize {output_type} without a non-empty string {field}.")
-    return value
-
-
-def _copy_safe_status(
-    sanitized: dict[str, Any],
-    raw_payload: Mapping[str, Any],
-    output_type: str,
-    allowed: frozenset[str],
-    *,
-    required: bool = False,
-) -> None:
-    status = raw_payload.get("status")
-    if status is None and not required:
-        return
-    if not isinstance(status, str) or status not in allowed:
-        raise AgentsException(f"Cannot sanitize {output_type} with an invalid status.")
-    sanitized["status"] = status
-
-
-def _copy_safe_caller(
-    sanitized: dict[str, Any],
-    raw_payload: Mapping[str, Any],
-    output_type: str,
-) -> None:
-    caller = raw_payload.get("caller")
-    if caller is None:
-        return
-    if not isinstance(caller, Mapping):
-        raise AgentsException(f"Cannot sanitize {output_type} with an invalid caller.")
-    if caller.get("type") == "direct":
-        sanitized["caller"] = {"type": "direct"}
-        return
-    caller_id = caller.get("caller_id")
-    if caller.get("type") == "program" and isinstance(caller_id, str) and caller_id:
-        sanitized["caller"] = {"type": "program", "caller_id": caller_id}
-        return
-    raise AgentsException(f"Cannot sanitize {output_type} with an invalid caller.")
-
-
-def _copy_safe_safety_checks(
-    sanitized: dict[str, Any],
-    raw_payload: Mapping[str, Any],
-) -> None:
-    checks = raw_payload.get("acknowledged_safety_checks")
-    if checks is None:
-        return
-    if not isinstance(checks, Sequence) or isinstance(checks, str | bytes):
-        raise AgentsException(
-            "Cannot sanitize computer_call_output with invalid acknowledged safety checks."
-        )
-    safe_checks: list[dict[str, str]] = []
-    for check in checks:
-        if not isinstance(check, Mapping):
-            raise AgentsException(
-                "Cannot sanitize computer_call_output with invalid acknowledged safety checks."
-            )
-        check_id = check.get("id")
-        if not isinstance(check_id, str) or not check_id:
-            raise AgentsException(
-                "Cannot sanitize computer_call_output with invalid acknowledged safety checks."
-            )
-        safe_checks.append({"id": check_id})
-    sanitized["acknowledged_safety_checks"] = safe_checks
-
-
-def _blocked_tool_output_payload(raw_item: Any) -> dict[str, Any]:
-    """Build a data-free replay payload from validated protocol fields."""
-    raw_payload = _tool_output_payload(raw_item)
-    output_type = raw_payload.get("type")
-    if not isinstance(output_type, str) or not output_type:
-        raise AgentsException("Cannot sanitize a tool output without a non-empty string type.")
-
-    sanitized_raw_item: dict[str, Any] = {"type": output_type}
-    if output_type not in _KNOWN_TOOL_OUTPUT_TYPES:
-        call_id = raw_payload.get("call_id")
-        item_id = raw_payload.get("id")
-        if isinstance(call_id, str) and call_id:
-            sanitized_raw_item["call_id"] = call_id
-        elif isinstance(item_id, str) and item_id:
-            sanitized_raw_item["id"] = item_id
-        else:
-            raise AgentsException(
-                f"Cannot sanitize {output_type} without a non-empty string call_id or id."
-            )
-        sanitized_raw_item["output"] = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-        return sanitized_raw_item
-    if output_type == "program_output":
-        sanitized_raw_item["id"] = _required_tool_output_string(raw_payload, "id", output_type)
-        sanitized_raw_item["call_id"] = _required_tool_output_string(
-            raw_payload, "call_id", output_type
-        )
-        _copy_safe_status(
-            sanitized_raw_item,
-            raw_payload,
-            output_type,
-            _PROGRAM_OUTPUT_STATUSES,
-            required=True,
-        )
-        sanitized_raw_item["result"] = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-    else:
-        sanitized_raw_item["call_id"] = _required_tool_output_string(
-            raw_payload, "call_id", output_type
-        )
-
-        item_id = raw_payload.get("id")
-        if item_id is not None:
-            if not isinstance(item_id, str) or not item_id:
-                raise AgentsException(f"Cannot sanitize {output_type} with an invalid id.")
-            sanitized_raw_item["id"] = item_id
-
-        if output_type in {
-            "function_call_output",
-            "custom_tool_call_output",
-            "shell_call_output",
-            "apply_patch_call_output",
-        }:
-            _copy_safe_caller(sanitized_raw_item, raw_payload, output_type)
-
-        if output_type in {"function_call_output", "computer_call_output"}:
-            _copy_safe_status(
-                sanitized_raw_item,
-                raw_payload,
-                output_type,
-                _RESPONSE_OUTPUT_STATUSES,
-            )
-        elif output_type == "shell_call_output":
-            _copy_safe_status(
-                sanitized_raw_item,
-                raw_payload,
-                output_type,
-                _SHELL_TOOL_OUTPUT_STATUSES,
-            )
-        elif output_type == "apply_patch_call_output":
-            _copy_safe_status(
-                sanitized_raw_item,
-                raw_payload,
-                output_type,
-                _HOSTED_TOOL_OUTPUT_STATUSES,
-            )
-
-        if output_type == "computer_call_output":
-            _copy_safe_safety_checks(sanitized_raw_item, raw_payload)
-
-    if output_type == "computer_call_output":
-        sanitized_raw_item["output"] = {
-            "type": "computer_screenshot",
-            "image_url": _OUTPUT_GUARDRAIL_BLOCKED_COMPUTER_SCREENSHOT,
-        }
-    elif output_type == "shell_call_output":
-        sanitized_raw_item["output"] = [
-            {
-                "stdout": "",
-                "stderr": _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
-                "outcome": {"type": "exit", "exit_code": 1},
-            }
-        ]
-    elif output_type != "program_output":
-        sanitized_raw_item["output"] = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-
-    try:
-        restored = _deserialize_tool_call_output_raw_item(sanitized_raw_item)
-    except Exception:
-        raise AgentsException(f"Sanitized {output_type} is not valid for durable replay.") from None
-    if restored is None:
-        raise AgentsException(f"Sanitized {output_type} is not valid for durable replay.")
-    return sanitized_raw_item
 
 
 def _sanitize_blocked_output_guardrail_results(
     results: Sequence[OutputGuardrailResult],
     tripwire: OutputGuardrailTripwireTriggered,
-) -> None:
-    """Remove blocked output aliases from completed guardrail results and the exception."""
-    seen: set[int] = set()
-    for result in (*results, tripwire.guardrail_result):
-        if id(result) in seen:
-            continue
-        seen.add(id(result))
-        result.agent_output = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-        result.output.output_info = None
+) -> list[OutputGuardrailResult]:
+    """Build data-free guardrail results and detach the tripwire from raw output."""
+    sanitized_by_id: dict[int, OutputGuardrailResult] = {}
+
+    def sanitize(result: OutputGuardrailResult) -> OutputGuardrailResult:
+        existing = sanitized_by_id.get(id(result))
+        if existing is not None:
+            return existing
+        sanitized = OutputGuardrailResult(
+            guardrail=result.guardrail,
+            agent_output=_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+            agent=result.agent,
+            output=GuardrailFunctionOutput(
+                output_info=None,
+                tripwire_triggered=result.output.tripwire_triggered,
+            ),
+        )
+        sanitized_by_id[id(result)] = sanitized
+        return sanitized
+
+    sanitized_results = [sanitize(result) for result in results]
+    object.__setattr__(tripwire, "guardrail_result", sanitize(tripwire.guardrail_result))
     _mark_error_data_redacted(tripwire)
     _detach_data_redacted_error_traceback(tripwire)
+    return sanitized_results
 
 
-def _sanitize_blocked_tool_output_guardrail_results(
-    results: Sequence[ToolOutputGuardrailResult],
+@_dc.dataclass(frozen=True)
+class _CurrentResponseBoundary:
+    """A current-response suffix proven only by lifecycle position or object identity."""
+
+    items: tuple[RunItem, ...]
+    processed_items: tuple[RunItem, ...]
+    generated_start: int | None
+    session_start: int | None
+    proven: bool
+
+
+@_dc.dataclass(frozen=True)
+class _BlockedOutputSnapshot:
+    """Prepared data-free replacements for one complete current response."""
+
+    items: tuple[RunItem, ...]
+    processed_items: tuple[RunItem, ...]
+    model_response: ModelResponse | None
+
+
+@_dc.dataclass(frozen=True)
+class _BlockedOutputOwnerPlan:
+    """Prebuilt trusted-owner assignments for application or emergency cleanup."""
+
+    assignments: tuple[tuple[Any, str, Any], ...]
+
+
+@_dc.dataclass(frozen=True)
+class _BlockedOutputOwnerStarts:
+    """Owner-specific current-response starts captured at trusted lifecycle boundaries."""
+
+    run_state_generated_items: int | None = None
+    run_state_session_items: int | None = None
+    run_state_model_responses: int | None = None
+    run_state_tool_output_guardrail_results: int | None = None
+    streamed_new_items: int | None = None
+    streamed_model_input_items: int | None = None
+    streamed_raw_responses: int | None = None
+    streamed_tool_output_guardrail_results: int | None = None
+
+
+@_dc.dataclass(frozen=True)
+class _BlockedOutputOwnerPrefixes:
+    """Accepted owner prefixes allocated before any blocked-output replacement begins."""
+
+    run_state_generated_items: list[RunItem]
+    run_state_session_items: list[RunItem]
+    run_state_model_responses: list[ModelResponse]
+    run_state_tool_output_guardrail_results: list[ToolOutputGuardrailResult]
+    streamed_new_items: list[RunItem]
+    streamed_model_input_items: list[RunItem]
+    streamed_raw_responses: list[ModelResponse]
+    streamed_tool_output_guardrail_results: list[ToolOutputGuardrailResult]
+
+
+_OwnerItemT = TypeVar("_OwnerItemT")
+
+
+def _has_output_guardrails(agent: Agent[Any], run_config: RunConfig) -> bool:
+    return bool(agent.output_guardrails or run_config.output_guardrails)
+
+
+def _should_defer_interrupted_session_items(
+    agent: Agent[Any],
+    run_config: RunConfig,
+) -> bool:
+    """Keep pre-verdict approval state in RunState instead of durable Session history."""
+    return _has_output_guardrails(agent, run_config)
+
+
+def _validate_resumed_session_output_guardrail_safety(
+    *,
+    agent: Agent[Any],
+    run_config: RunConfig,
+    session: Session | None,
+    run_state: RunState[Any] | None,
 ) -> None:
-    """Remove blocked tool-output aliases from the current turn's guardrail results."""
-    for result in results:
-        result.output.output_info = None
-        if result.output.behavior["type"] == "reject_content":
-            result.output.behavior = {
-                "type": "reject_content",
-                "message": _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
-            }
-
-
-def _redact_blocked_output_state_step(run_state: RunState[Any] | None) -> None:
-    """Remove a rejected final output from the live resumable step before propagation."""
-    if run_state is not None and isinstance(run_state._current_step, NextStepFinalOutput):
-        run_state._current_step.output = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-
-
-def _finish_blocked_output_tool_spans(spans: list[DeferredToolSpan]) -> None:
-    """Publish terminal tool spans with the same placeholder used by replay state."""
-    finish_deferred_tool_spans(
-        spans,
-        output_override=_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    """Reject approval resumes whose current-response boundary is not structurally provable."""
+    del session
+    if run_state is None or not _has_output_guardrails(agent, run_config):
+        return
+    if not isinstance(run_state._current_step, NextStepInterruption):
+        return
+    if run_state._current_turn_persisted_item_count > 0:
+        raise UserError(
+            "Cannot resume an approval checkpoint with output guardrails after current-turn "
+            "items were persisted. Start a new run from safe input."
+        )
+    boundary = _current_response_boundary(
+        (),
+        run_state._last_processed_response,
+        run_state,
+    )
+    if boundary.proven:
+        return
+    raise UserError(
+        "Cannot resume a serialized approval checkpoint with output guardrails because the "
+        "current response boundary cannot be proven. Start a new run from safe input."
     )
 
 
-def _sanitize_retained_tool_outputs(
-    items: list[RunItem],
-    model_response: ModelResponse | None,
-) -> None:
-    """Sanitize retained run items and matching archived raw-response outputs."""
-    retained_identities: set[tuple[str, str]] = set()
-    retained_raw_item_ids: set[int] = set()
-    for item in items:
-        if not isinstance(item, ToolCallOutputItem):
-            continue
+def _identity_sequence_start(
+    container: Sequence[RunItem],
+    sequence: Sequence[RunItem],
+) -> int | None:
+    if not sequence or len(sequence) > len(container):
+        return None
+    for start in range(len(container) - len(sequence) + 1):
+        if all(container[start + offset] is item for offset, item in enumerate(sequence)):
+            return start
+    return None
 
-        original_raw_item = item.raw_item
-        identity = _tool_output_identity(original_raw_item)
-        if identity is not None:
-            retained_identities.add(identity)
-        retained_raw_item_ids.add(id(original_raw_item))
 
-        item.raw_item = cast(Any, _blocked_tool_output_payload(original_raw_item))
-        item.output = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-        # Custom data is SDK-only and may duplicate the blocked tool result.
-        item.custom_data = None
-
-    if model_response is None:
-        return
-
-    sanitized_response_output = []
-    for raw_output in model_response.output:
-        identity = _tool_output_identity(raw_output)
-        if id(raw_output) in retained_raw_item_ids or (
-            identity is not None and identity in retained_identities
+def _current_response_boundary(
+    new_items: Sequence[RunItem],
+    processed_response: ProcessedResponse | None,
+    run_state: RunState[Any] | None,
+) -> _CurrentResponseBoundary:
+    """Collect one response using only SDK lifecycle position and exact object identity."""
+    processed_items = tuple(processed_response.new_items) if processed_response is not None else ()
+    supplied_items = tuple(new_items)
+    supplied_start = _identity_sequence_start(supplied_items, processed_items)
+    response_items = (
+        supplied_items[supplied_start:] if supplied_start is not None else supplied_items
+    )
+    generated_start = None
+    session_start = None
+    proven = run_state is None or not processed_items or supplied_start is not None
+    suffixes: list[RunItem] = []
+    if run_state is not None:
+        anchor_items = processed_items or response_items
+        if anchor_items:
+            generated_start = _identity_sequence_start(run_state._generated_items, anchor_items)
+            session_start = _identity_sequence_start(run_state._session_items, anchor_items)
+            if generated_start is not None:
+                suffixes.extend(run_state._generated_items[generated_start:])
+                proven = True
+            if session_start is not None:
+                suffixes.extend(run_state._session_items[session_start:])
+                proven = True
+        if (
+            not supplied_items
+            and generated_start is None
+            and session_start is None
+            and run_state._current_turn == 1
         ):
-            sanitized_response_output.append(cast(Any, _blocked_tool_output_payload(raw_output)))
-        else:
-            sanitized_response_output.append(raw_output)
-    model_response.output = sanitized_response_output
+            generated_start = 0
+            session_start = 0
+            suffixes.extend(run_state._generated_items)
+            suffixes.extend(run_state._session_items)
+            proven = True
+
+    current_items: list[RunItem] = []
+    seen: set[int] = set()
+    for item in (*processed_items, *suffixes, *response_items):
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        current_items.append(item)
+    return _CurrentResponseBoundary(
+        items=tuple(current_items),
+        processed_items=processed_items,
+        generated_start=generated_start,
+        session_start=session_start,
+        proven=proven,
+    )
 
 
-def _validate_retained_program_relationships(
-    items: list[RunItem],
-    preceding_items: Sequence[RunItem],
-) -> None:
-    """Reject retained program relationships that cannot be replayed in order."""
-    preceding_items = list(preceding_items)
-    for item in items:
-        raw_item = getattr(item, "raw_item", item)
-        output_type = get_mapping_or_attr(raw_item, "type")
-        program_call_ids, completed_program_call_ids = _collect_program_parent_state(
-            preceding_items
+def _current_response_items_for_persistence(
+    items: Sequence[RunItem],
+    processed_response: ProcessedResponse | None,
+    run_state: RunState[Any] | None = None,
+) -> list[RunItem]:
+    """Return the complete current response or fail before using an ambiguous boundary."""
+    boundary = _current_response_boundary(items, processed_response, run_state)
+    if not boundary.proven:
+        raise UserError(
+            "Cannot persist an ambiguous resumed response with output guardrails. "
+            "Start a new run from safe input."
         )
-
-        caller = get_mapping_or_attr(raw_item, "caller")
-        if get_mapping_or_attr(caller, "type") == "program":
-            caller_id = get_mapping_or_attr(caller, "caller_id")
-            if (
-                not isinstance(caller_id, str)
-                or caller_id not in program_call_ids
-                or caller_id in completed_program_call_ids
-            ):
-                raise AgentsException(
-                    f"Cannot sanitize {output_type} with an invalid program caller."
-                )
-
-        if output_type == "program_output":
-            call_id = get_mapping_or_attr(raw_item, "call_id")
-            if (
-                not isinstance(call_id, str)
-                or call_id not in program_call_ids
-                or call_id in completed_program_call_ids
-            ):
-                raise AgentsException(
-                    "Cannot sanitize program_output without an active retained program parent."
-                )
-
-        preceding_items.append(item)
+    return list(boundary.items)
 
 
-def _scrub_failed_blocked_output_aliases(
-    items: list[RunItem],
+def _final_turn_items_for_persistence(
+    items: Sequence[RunItem],
+    processed_response: ProcessedResponse | None,
+    run_state: RunState[Any] | None,
+    agent: Agent[Any],
+    run_config: RunConfig,
+) -> list[RunItem]:
+    """Use released resumed suffix persistence unless output guardrails defer the response."""
+    if not _has_output_guardrails(agent, run_config):
+        return list(items)
+    return _current_response_items_for_persistence(items, processed_response, run_state)
+
+
+def _is_terminal_tool_output_response(
+    items: Sequence[RunItem],
+    processed_response: ProcessedResponse | None,
+    run_state: RunState[Any] | None = None,
+) -> bool:
+    """Return whether the structurally owned current response produced a tool final output."""
+    boundary = _current_response_boundary(items, processed_response, run_state)
+    return boundary.proven and any(isinstance(item, ToolCallOutputItem) for item in boundary.items)
+
+
+def _prepare_blocked_output_snapshot(
+    boundary: _CurrentResponseBoundary,
     model_response: ModelResponse | None,
-) -> None:
-    """Remove output data after replay-payload validation fails."""
-    for item in items:
-        if not isinstance(item, ToolCallOutputItem):
-            continue
-        item.raw_item = cast(
-            Any,
-            {
-                "type": "function_call_output",
-                "call_id": _OUTPUT_GUARDRAIL_BLOCKED_TOOL_CALL_ID,
-                "output": _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
-            },
-        )
-        item.output = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
-        item.custom_data = None
+) -> _BlockedOutputSnapshot:
+    """Build an allowlist-only function call/output snapshot before changing live state."""
+    current_items = list(boundary.items)
+    if any(item.type == "reasoning_item" for item in current_items):
+        raise AgentsException("Cannot sanitize a response containing reasoning items.")
+    retained_indexes = {
+        index for index, item in enumerate(current_items) if item.type in _SIDE_EFFECT_ITEM_TYPES
+    }
+    replacements: dict[int, RunItem] = {}
+    calls_by_id: dict[str, int] = {}
+    outputs_by_id: dict[str, int] = {}
+    for index in sorted(retained_indexes):
+        item = current_items[index]
+        if isinstance(item, ToolCallItem):
+            payload = _blocked_function_call_payload(item.raw_item)
+            call_id = cast(str, payload["call_id"])
+            if call_id in calls_by_id:
+                raise AgentsException("Cannot sanitize duplicate function calls.")
+            calls_by_id[call_id] = index
+            replacements[index] = ToolCallItem(
+                agent=item.agent,
+                raw_item=cast(Any, payload),
+                description=item.description,
+                title=item.title,
+                tool_origin=item.tool_origin,
+                _resolved_tool_name=item._resolved_tool_name,
+            )
+        elif isinstance(item, ToolCallOutputItem):
+            payload = _blocked_function_output_payload(item.raw_item)
+            call_id = cast(str, payload["call_id"])
+            if call_id in outputs_by_id:
+                raise AgentsException("Cannot sanitize duplicate function outputs.")
+            outputs_by_id[call_id] = index
+            replacements[index] = ToolCallOutputItem(
+                agent=item.agent,
+                raw_item=cast(Any, payload),
+                output=_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                tool_origin=item.tool_origin,
+                custom_data=None,
+            )
+        else:
+            raise AgentsException("Cannot sanitize an unsupported side-effect item.")
 
+    if not outputs_by_id or set(outputs_by_id) - set(calls_by_id):
+        raise AgentsException("Cannot sanitize an incomplete function call/output batch.")
+    retained_indexes = {
+        index
+        for call_id in outputs_by_id
+        for index in (calls_by_id[call_id], outputs_by_id[call_id])
+    }
+    retained_items = tuple(replacements[index] for index in sorted(retained_indexes))
+    processed_indexes = {id(item): index for index, item in enumerate(current_items)}
+    retained_processed_items = tuple(
+        replacements.get(processed_indexes[id(item)], item)
+        for item in boundary.processed_items
+        if processed_indexes.get(id(item)) in retained_indexes
+    )
+    sanitized_response = None
     if model_response is not None:
-        model_response.output = []
+        sanitized_response = ModelResponse(
+            output=cast(Any, [item.raw_item for item in retained_processed_items]),
+            usage=model_response.usage,
+            response_id=model_response.response_id,
+            request_id=model_response.request_id,
+            raw_usage=model_response.raw_usage,
+        )
+    return _BlockedOutputSnapshot(
+        items=retained_items,
+        processed_items=retained_processed_items,
+        model_response=sanitized_response,
+    )
 
 
-def _reasoning_indexes_tied_to_retained_items(
-    items: list[RunItem],
-    retained_indexes: set[int],
-) -> set[int]:
-    """Indexes of the reasoning items whose tied item is being retained.
+def _blocked_output_owner_prefix(items: list[_OwnerItemT], start: int | None) -> list[_OwnerItemT]:
+    """Copy a structurally captured prefix without consulting item values or identities."""
+    if start is None or start < 0 or start > len(items):
+        return []
+    return list.__getitem__(items, slice(0, start))
 
-    Applies the same association rule as
-    ``agents.run_internal.items._drop_reasoning_items_preceding_dropped_calls``: a reasoning item
-    is tied to the next *non-reasoning* model-emitted item. Keeping a group whose following item is
-    dropped would leave a dangling reasoning item, which the Responses API rejects on the next
-    request (``reasoning was provided without its required following item``); dropping a group
-    whose following item is retained would strip the context that call needs to be replayed.
 
-    A trailing reasoning group - one with no following non-reasoning item at all - is not tied to
-    anything retained, so it is dropped. Note this is stricter than the reference, which keeps such
-    a group because the item it belongs to may still arrive later in a longer history; here the
-    turn is complete, so there is nothing left to tie it to.
-    """
-    tied: set[int] = set()
-    for index in range(len(items) - 1, -1, -1):
-        if items[index].type != "reasoning_item":
+def _prepare_blocked_output_owner_prefixes(
+    run_state: RunState[Any] | None,
+    streamed_result: RunResultStreaming | None,
+    owner_starts: _BlockedOutputOwnerStarts,
+) -> _BlockedOutputOwnerPrefixes:
+    """Allocate every accepted owner prefix before snapshot application begins."""
+    return _BlockedOutputOwnerPrefixes(
+        run_state_generated_items=(
+            _blocked_output_owner_prefix(
+                run_state._generated_items,
+                owner_starts.run_state_generated_items,
+            )
+            if run_state is not None
+            else []
+        ),
+        run_state_session_items=(
+            _blocked_output_owner_prefix(
+                run_state._session_items,
+                owner_starts.run_state_session_items,
+            )
+            if run_state is not None
+            else []
+        ),
+        run_state_model_responses=(
+            _blocked_output_owner_prefix(
+                run_state._model_responses,
+                owner_starts.run_state_model_responses,
+            )
+            if run_state is not None
+            else []
+        ),
+        run_state_tool_output_guardrail_results=(
+            _blocked_output_owner_prefix(
+                run_state._tool_output_guardrail_results,
+                owner_starts.run_state_tool_output_guardrail_results,
+            )
+            if run_state is not None
+            else []
+        ),
+        streamed_new_items=(
+            _blocked_output_owner_prefix(
+                streamed_result.new_items,
+                owner_starts.streamed_new_items,
+            )
+            if streamed_result is not None
+            else []
+        ),
+        streamed_model_input_items=(
+            _blocked_output_owner_prefix(
+                streamed_result._model_input_items,
+                owner_starts.streamed_model_input_items,
+            )
+            if streamed_result is not None
+            else []
+        ),
+        streamed_raw_responses=(
+            _blocked_output_owner_prefix(
+                streamed_result.raw_responses,
+                owner_starts.streamed_raw_responses,
+            )
+            if streamed_result is not None
+            else []
+        ),
+        streamed_tool_output_guardrail_results=(
+            _blocked_output_owner_prefix(
+                streamed_result.tool_output_guardrail_results,
+                owner_starts.streamed_tool_output_guardrail_results,
+            )
+            if streamed_result is not None
+            else []
+        ),
+    )
+
+
+def _prepare_blocked_output_cleanup_plan(
+    run_state: RunState[Any] | None,
+    streamed_result: RunResultStreaming | None,
+    prefixes: _BlockedOutputOwnerPrefixes,
+) -> _BlockedOutputOwnerPlan:
+    """Prepare accepted-prefix cleanup containers before snapshot application begins."""
+    assignments: list[tuple[Any, str, Any]] = []
+    if run_state is not None:
+        assignments.extend(
+            [
+                (run_state, "_generated_items", prefixes.run_state_generated_items),
+                (run_state, "_session_items", prefixes.run_state_session_items),
+                (run_state, "_model_responses", prefixes.run_state_model_responses),
+                (run_state, "_last_processed_response", None),
+                (run_state, "_current_step", None),
+                (run_state, "_generated_items_last_processed_marker", None),
+                (
+                    run_state,
+                    "_tool_output_guardrail_results",
+                    prefixes.run_state_tool_output_guardrail_results,
+                ),
+            ]
+        )
+    if streamed_result is not None:
+        assignments.extend(
+            [
+                (streamed_result, "new_items", prefixes.streamed_new_items),
+                (streamed_result, "raw_responses", prefixes.streamed_raw_responses),
+                (
+                    streamed_result,
+                    "_model_input_items",
+                    prefixes.streamed_model_input_items,
+                ),
+                (streamed_result, "_last_processed_response", None),
+                (
+                    streamed_result,
+                    "tool_output_guardrail_results",
+                    prefixes.streamed_tool_output_guardrail_results,
+                ),
+            ]
+        )
+    return _BlockedOutputOwnerPlan(assignments=tuple(assignments))
+
+
+def _sever_blocked_output_replay_graph(cleanup_plan: _BlockedOutputOwnerPlan) -> None:
+    """Best-effort leaf cleanup using only containers allocated before application."""
+    for owner, field, value in cleanup_plan.assignments:
+        try:
+            object.__setattr__(owner, field, value)
+        except BaseException:
             continue
-        for next_index in range(index + 1, len(items)):
-            if items[next_index].type == "reasoning_item":
-                continue
-            if next_index in retained_indexes:
-                tied.add(index)
-            break
-    return tied
+
+
+def _data_free_tool_output_guardrail_results(
+    results: Sequence[ToolOutputGuardrailResult],
+) -> tuple[ToolOutputGuardrailResult, ...]:
+    """Rebuild current-turn tool guardrail results without retaining caller output data."""
+    replacements: list[ToolOutputGuardrailResult] = []
+    try:
+        for result in results:
+            if not isinstance(result, ToolOutputGuardrailResult):
+                return ()
+            replacements.append(
+                ToolOutputGuardrailResult(
+                    guardrail=object.__getattribute__(result, "guardrail"),
+                    output=ToolGuardrailFunctionOutput(
+                        output_info=_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                        behavior={"type": "allow"},
+                    ),
+                )
+            )
+    except Exception:
+        return ()
+    return tuple(replacements)
+
+
+def _prepare_blocked_output_owner_plan(
+    boundary: _CurrentResponseBoundary,
+    snapshot: _BlockedOutputSnapshot | None,
+    model_response: ModelResponse | None,
+    run_state: RunState[Any] | None,
+    streamed_result: RunResultStreaming | None,
+    prefixes: _BlockedOutputOwnerPrefixes,
+    cleanup_plan: _BlockedOutputOwnerPlan,
+) -> _BlockedOutputOwnerPlan:
+    """Build every owner replacement before applying any of them."""
+    safe_items = list(snapshot.items) if snapshot is not None else []
+    safe_response = snapshot.model_response if snapshot is not None else None
+    assignments: list[tuple[Any, str, Any]] = []
+    safe_tool_output_guardrail_results: tuple[ToolOutputGuardrailResult, ...] = ()
+    if streamed_result is not None:
+        public_results = streamed_result.tool_output_guardrail_results
+        current_results = list.__getitem__(
+            public_results,
+            slice(len(prefixes.streamed_tool_output_guardrail_results), None),
+        )
+        safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(
+            current_results
+        )
+        public_safe_results = [
+            *prefixes.streamed_tool_output_guardrail_results,
+            *safe_tool_output_guardrail_results,
+        ]
+    else:
+        public_safe_results = []
+
+    if run_state is not None:
+        if boundary.proven:
+            responses = [
+                *prefixes.run_state_model_responses,
+                *(
+                    [safe_response]
+                    if model_response is not None and safe_response is not None
+                    else []
+                ),
+            ]
+            if streamed_result is not None:
+                run_state_safe_results = [
+                    *prefixes.run_state_tool_output_guardrail_results,
+                    *safe_tool_output_guardrail_results,
+                ]
+            else:
+                run_state_safe_results = list(prefixes.run_state_tool_output_guardrail_results)
+            assignments.extend(
+                [
+                    (
+                        run_state,
+                        "_generated_items",
+                        [*prefixes.run_state_generated_items, *safe_items],
+                    ),
+                    (
+                        run_state,
+                        "_session_items",
+                        [*prefixes.run_state_session_items, *safe_items],
+                    ),
+                    (run_state, "_model_responses", responses),
+                    (run_state, "_last_processed_response", None),
+                    (run_state, "_current_step", None),
+                    (run_state, "_generated_items_last_processed_marker", None),
+                    (run_state, "_tool_output_guardrail_results", run_state_safe_results),
+                ]
+            )
+        else:
+            return cleanup_plan
+
+    if streamed_result is not None:
+        responses = [
+            *prefixes.streamed_raw_responses,
+            *([safe_response] if model_response is not None and safe_response is not None else []),
+        ]
+        assignments.extend(
+            [
+                (
+                    streamed_result,
+                    "new_items",
+                    [*prefixes.streamed_new_items, *safe_items],
+                ),
+                (
+                    streamed_result,
+                    "_model_input_items",
+                    [*prefixes.streamed_model_input_items, *safe_items],
+                ),
+                (streamed_result, "raw_responses", responses),
+                (streamed_result, "_last_processed_response", None),
+                (
+                    streamed_result,
+                    "tool_output_guardrail_results",
+                    public_safe_results,
+                ),
+            ]
+        )
+    return _BlockedOutputOwnerPlan(assignments=tuple(assignments))
+
+
+def _apply_blocked_output_owner_plan(plan: _BlockedOutputOwnerPlan) -> None:
+    """Apply only values that were fully constructed before the first owner swap."""
+    for owner, field, value in plan.assignments:
+        object.__setattr__(owner, field, value)
 
 
 def _retained_items_for_blocked_output(
     items: list[RunItem],
     model_response: ModelResponse | None = None,
-    preceding_items: Sequence[RunItem] = (),
 ) -> list[RunItem]:
-    """Pick out the items of a final turn to keep when its output is not deliverable.
+    """Return trusted retained items without consulting earlier provider identities."""
+    return _retained_items_for_blocked_response(
+        items,
+        model_response,
+    )
 
-    A tool that already ran has to stay in the session, together with the context needed to replay
-    its call. Everything else - the assistant message the guardrail rejected above all - is dropped,
-    including the reasoning that belongs to the rejected message rather than to a retained call.
 
-    ``_SIDE_EFFECT_ITEM_TYPES`` is enumerated rather than derived, so an item type added later is
-    *discarded* here by default and has to be classified deliberately. A record of a side effect
-    that goes unclassified is a bug, so the safer default is the one that surfaces as a missing item
-    rather than as a rejected message quietly reaching the session.
-    """
-    redacted_error: AgentsException | None = None
+def _retained_items_for_blocked_response(
+    items: list[RunItem],
+    model_response: ModelResponse | None,
+    run_state: RunState[Any] | None = None,
+    processed_response: ProcessedResponse | None = None,
+    streamed_result: RunResultStreaming | None = None,
+    owner_starts: _BlockedOutputOwnerStarts | None = None,
+) -> list[RunItem]:
+    """Return a complete data-free response or discard the entire unsupported suffix."""
+    boundary = _current_response_boundary(items, processed_response, run_state)
+    prefixes = _prepare_blocked_output_owner_prefixes(
+        run_state,
+        streamed_result,
+        owner_starts if owner_starts is not None else _BlockedOutputOwnerStarts(),
+    )
+    cleanup_plan = _prepare_blocked_output_cleanup_plan(run_state, streamed_result, prefixes)
+    snapshot: _BlockedOutputSnapshot | None = None
     try:
-        retained_indexes = {
-            index for index, item in enumerate(items) if item.type in _SIDE_EFFECT_ITEM_TYPES
-        }
-        if not retained_indexes:
-            return []
-        # Reasoning items are not side effects themselves, but a reasoning model requires the
-        # reasoning item tied to a function call to accompany it in the next request.
-        retained_indexes |= _reasoning_indexes_tied_to_retained_items(items, retained_indexes)
-        retained_items = [items[index] for index in sorted(retained_indexes)]
-        _validate_retained_program_relationships(retained_items, preceding_items)
-        _sanitize_retained_tool_outputs(retained_items, model_response)
-        # Indexed rather than filtered by type so the retained items keep the model's own order.
-        return [item for index, item in enumerate(items) if index in retained_indexes]
-    except AgentsException as error:
-        _scrub_failed_blocked_output_aliases(items, model_response)
-        _mark_error_data_redacted(error)
-        _detach_data_redacted_error_traceback(error)
-        redacted_error = AgentsException("Cannot sanitize a blocked tool output for replay.")
-        _mark_error_data_redacted(redacted_error)
-
-    items = []
-    model_response = None
-    assert redacted_error is not None
-    raise redacted_error from None
+        if boundary.proven:
+            snapshot = _prepare_blocked_output_snapshot(boundary, model_response)
+    except Exception:
+        snapshot = None
+    except BaseException:
+        _sever_blocked_output_replay_graph(cleanup_plan)
+        raise
+    try:
+        owner_plan = _prepare_blocked_output_owner_plan(
+            boundary,
+            snapshot,
+            model_response,
+            run_state,
+            streamed_result,
+            prefixes,
+            cleanup_plan,
+        )
+        _apply_blocked_output_owner_plan(owner_plan)
+    except Exception as error:
+        _sever_blocked_output_replay_graph(cleanup_plan)
+        raise _prepare_data_redacted_error(error) from None
+    except BaseException:
+        _sever_blocked_output_replay_graph(cleanup_plan)
+        raise
+    return list(snapshot.items) if snapshot is not None else []
 
 
 async def _finalize_streamed_final_output(
@@ -939,14 +1109,12 @@ async def _finalize_streamed_final_output(
     save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
     model_response: ModelResponse | None,
-    deferred_tool_spans: list[DeferredToolSpan],
-    preceding_items: Sequence[RunItem],
-    tool_output_guardrail_results: Sequence[ToolOutputGuardrailResult],
+    processed_response: ProcessedResponse | None,
+    owner_starts: _BlockedOutputOwnerStarts,
     response_id: str | None,
     store_setting: bool | None,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
 ) -> None:
-    redacted_persistence_error: BaseException | None = None
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     try:
         output_guardrail_results = await _run_output_guardrails_for_stream(
@@ -957,24 +1125,31 @@ async def _finalize_streamed_final_output(
             streamed_result=streamed_result,
         )
     except OutputGuardrailTripwireTriggered as exc:
+        if not _is_terminal_tool_output_response(
+            items,
+            processed_response,
+            streamed_result._state,
+        ):
+            raise
         # The blocked output itself is not persisted, but a tool that already ran is: the next run
         # has to see that side effect rather than re-issue it. This turn reaches here with tool
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
         # callable) turned a tool result straight into the final output.
-        has_tool_output = any(isinstance(item, ToolCallOutputItem) for item in items)
-        if has_tool_output:
-            _sanitize_blocked_output_guardrail_results(
-                streamed_result.output_guardrail_results[output_guardrail_result_start:],
-                exc,
-            )
-            _sanitize_blocked_tool_output_guardrail_results(tool_output_guardrail_results)
-        _finish_blocked_output_tool_spans(deferred_tool_spans)
-        if has_tool_output:
-            _redact_blocked_output_state_step(streamed_result._state)
-        retained_items = _retained_items_for_blocked_output(
+        sanitized_results = _sanitize_blocked_output_guardrail_results(
+            streamed_result.output_guardrail_results[output_guardrail_result_start:],
+            exc,
+        )
+        streamed_result.output_guardrail_results = [
+            *streamed_result.output_guardrail_results[:output_guardrail_result_start],
+            *sanitized_results,
+        ]
+        retained_items = _retained_items_for_blocked_response(
             items,
             model_response,
-            preceding_items,
+            streamed_result._state,
+            processed_response,
+            streamed_result,
+            owner_starts,
         )
         if retained_items:
             try:
@@ -988,75 +1163,28 @@ async def _finalize_streamed_final_output(
                 streamed_result.is_complete = True
                 streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                 return
-        if has_tool_output and streamed_result._state is not None:
-            streamed_result._state._current_step = None
         raise
-    except asyncio.CancelledError:
-        finish_deferred_tool_spans(deferred_tool_spans)
+    except (Exception, asyncio.CancelledError):
+        # Without a verdict, the SDK does not persist any part of the terminal response.
         raise
-    except Exception as guardrail_error:
-        finish_deferred_tool_spans(deferred_tool_spans)
-        # Only a tripwire means the output was judged undeliverable. A guardrail error leaves the
-        # verdict unknown, so the completed final turn is persisted whole and remains replayable.
-        # `asyncio.CancelledError` is deliberately not caught here: `cancel()` in its default
-        # immediate mode has to stay prompt, and awaiting a session write would block
-        # `stream_events()` on an arbitrary backend. `after_turn` is the mode that finishes the
-        # turn and saves.
-        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
-        if guardrail_error_is_redacted:
-            _detach_data_redacted_error_traceback(guardrail_error)
-        try:
-            await save_items(items, response_id, store_setting)
-        except BaseException as persistence_error:
-            if guardrail_error_is_redacted:
-                safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
-                if (
-                    isinstance(safe_persistence_error, asyncio.CancelledError)
-                    and streamed_result._cancel_mode != "immediate"
-                ):
-                    # A cancelled session write is distinct from the caller requesting
-                    # immediate cancellation. Retain a safe cancellation for `stream_events()`
-                    # without completing the run-loop task with the payload-bearing backend
-                    # exception.
-                    streamed_result._stored_exception = safe_persistence_error
-                    streamed_result.is_complete = True
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    return
-                if isinstance(safe_persistence_error, asyncio.CancelledError):
-                    # Public immediate cancellation already owns stream completion and must
-                    # not surface a recovery failure.
-                    return
-                redacted_persistence_error = safe_persistence_error
-            if (
-                isinstance(persistence_error, asyncio.CancelledError)
-                and streamed_result._cancel_mode != "immediate"
-            ):
-                # A cancelled session write is distinct from the caller requesting immediate
-                # cancellation. The run-loop task itself becomes cancelled, so retain the
-                # backend cancellation for `stream_events()` to surface.
-                streamed_result._stored_exception = persistence_error
-            if redacted_persistence_error is None:
-                raise
-        else:
-            if on_persisted_after_guardrails is not None:
-                on_persisted_after_guardrails(False)
-        if redacted_persistence_error is None:
-            raise
 
-    if redacted_persistence_error is not None:
-        raise redacted_persistence_error from None
-
-    finish_deferred_tool_spans(deferred_tool_spans)
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
+    final_turn_items = _final_turn_items_for_persistence(
+        items,
+        processed_response,
+        streamed_result._state,
+        agent,
+        run_config,
+    )
 
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
     # persisted-item count, make the second one a no-op.
     if on_persisted_after_guardrails is None:
-        await save_items(items, response_id, store_setting)
+        await save_items(final_turn_items, response_id, store_setting)
     else:
         try:
-            await save_items(items, response_id, store_setting)
+            await save_items(final_turn_items, response_id, store_setting)
         except asyncio.CancelledError as persistence_error:
             if streamed_result._cancel_mode == "immediate":
                 raise
@@ -1173,8 +1301,6 @@ async def finalize_max_turns_handler_output(
     output: Any,
     context_wrapper: RunContextWrapper[TContext],
     output_guardrail_results: list[OutputGuardrailResult],
-    save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
-    include_in_history: bool,
 ) -> tuple[Any, RunItem]:
     """Validate and finalize one synthesized max-turn handler output."""
     validated_output = validate_handler_final_output(agent, output)
@@ -1183,7 +1309,6 @@ async def finalize_max_turns_handler_output(
 
     await run_final_output_hooks(agent, hooks, context_wrapper, validated_output)
 
-    redacted_persistence_error: BaseException | None = None
     try:
         await run_output_guardrails(
             agent.output_guardrails + (run_config.output_guardrails or []),
@@ -1192,23 +1317,10 @@ async def finalize_max_turns_handler_output(
             context_wrapper,
             output_guardrail_results,
         )
-    except OutputGuardrailTripwireTriggered:
-        raise
     except Exception as guardrail_error:
-        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
-        if guardrail_error_is_redacted:
+        if _is_error_data_redacted(guardrail_error):
             _detach_data_redacted_error_traceback(guardrail_error)
-        try:
-            await save_items_after_guardrails([synthesized_item] if include_in_history else [])
-        except BaseException as persistence_error:
-            if not guardrail_error_is_redacted:
-                raise
-            redacted_persistence_error = _safe_redacted_persistence_error(persistence_error)
-        if redacted_persistence_error is None:
-            raise
-
-    if redacted_persistence_error is not None:
-        raise redacted_persistence_error from None
+        raise
     return validated_output, synthesized_item
 
 
@@ -1410,6 +1522,12 @@ async def start_streaming(
             current_agent = run_state._current_agent
         else:
             current_agent = starting_agent
+        _validate_resumed_session_output_guardrail_safety(
+            agent=current_agent,
+            run_config=run_config,
+            session=session,
+            run_state=run_state if is_resumed_state else None,
+        )
         if run_state is not None:
             current_turn = run_state._current_turn
         else:
@@ -1586,6 +1704,13 @@ async def start_streaming(
 
     try:
         while True:
+            validate_output_guardrails_with_server_managed_conversation(
+                current_agent,
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             all_input_guardrails = (
                 starting_agent.input_guardrails + (run_config.input_guardrails or [])
                 if current_turn == 0 and not is_resumed_state
@@ -1667,24 +1792,38 @@ async def start_streaming(
                         raise UserError("No processed response found in previous state")
 
                     last_model_response = run_state._model_responses[-1]
-
-                    turn_result = await _run_with_deferred_tool_spans(
-                        agent=current_agent,
-                        run_config=run_config,
-                        run_turn=partial(
-                            resolve_interrupted_turn,
-                            bindings=current_bindings,
-                            original_input=run_state._original_input,
-                            original_pre_step_items=run_state._generated_items,
-                            new_response=last_model_response,
-                            processed_response=run_state._last_processed_response,
-                            hooks=hooks,
-                            context_wrapper=context_wrapper,
-                            run_config=run_config,
-                            server_manages_conversation=server_conversation_tracker is not None,
-                            run_state=run_state,
-                            error_handlers=error_handlers,
+                    resumed_response_boundary = _current_response_boundary(
+                        (),
+                        run_state._last_processed_response,
+                        run_state,
+                    )
+                    blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                        run_state_generated_items=resumed_response_boundary.generated_start,
+                        run_state_session_items=resumed_response_boundary.session_start,
+                        run_state_model_responses=len(run_state._model_responses) - 1,
+                        run_state_tool_output_guardrail_results=len(
+                            run_state._tool_output_guardrail_results
                         ),
+                        streamed_new_items=resumed_response_boundary.session_start,
+                        streamed_model_input_items=resumed_response_boundary.generated_start,
+                        streamed_raw_responses=len(streamed_result.raw_responses) - 1,
+                        streamed_tool_output_guardrail_results=len(
+                            streamed_result.tool_output_guardrail_results
+                        ),
+                    )
+
+                    turn_result = await resolve_interrupted_turn(
+                        bindings=current_bindings,
+                        original_input=run_state._original_input,
+                        original_pre_step_items=run_state._generated_items,
+                        new_response=last_model_response,
+                        processed_response=run_state._last_processed_response,
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        run_config=run_config,
+                        server_manages_conversation=server_conversation_tracker is not None,
+                        run_state=run_state,
+                        error_handlers=error_handlers,
                     )
 
                     tool_use_tracker.record_processed_response(
@@ -1750,7 +1889,14 @@ async def start_streaming(
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
                             save_items=_save_resumed_items,
-                            items=list(turn_session_items),
+                            items=(
+                                []
+                                if _should_defer_interrupted_session_items(
+                                    current_agent,
+                                    run_config,
+                                )
+                                else list(turn_session_items)
+                            ),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
                             interruptions=approvals_from_step(turn_result.next_step),
@@ -1792,11 +1938,12 @@ async def start_streaming(
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
                             model_response=turn_result.model_response,
-                            deferred_tool_spans=turn_result.deferred_tool_spans,
-                            preceding_items=turn_result.pre_step_items,
-                            tool_output_guardrail_results=(
-                                turn_result.tool_output_guardrail_results
+                            processed_response=(
+                                turn_result.processed_response
+                                if turn_result.processed_response is not None
+                                else run_state._last_processed_response
                             ),
+                            owner_starts=blocked_output_owner_starts,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
                         )
@@ -1989,9 +2136,29 @@ async def start_streaming(
                     save_items=_save_max_turns_items,
                     items=[synthesized_item] if include_in_history else [],
                     model_response=None,
-                    deferred_tool_spans=[],
-                    preceding_items=[],
-                    tool_output_guardrail_results=[],
+                    processed_response=None,
+                    owner_starts=_BlockedOutputOwnerStarts(
+                        run_state_generated_items=(
+                            len(run_state._generated_items) if run_state is not None else None
+                        ),
+                        run_state_session_items=(
+                            len(run_state._session_items) if run_state is not None else None
+                        ),
+                        run_state_model_responses=(
+                            len(run_state._model_responses) if run_state is not None else None
+                        ),
+                        run_state_tool_output_guardrail_results=(
+                            len(run_state._tool_output_guardrail_results)
+                            if run_state is not None
+                            else None
+                        ),
+                        streamed_new_items=len(streamed_result.new_items),
+                        streamed_model_input_items=len(streamed_result._model_input_items),
+                        streamed_raw_responses=len(streamed_result.raw_responses),
+                        streamed_tool_output_guardrail_results=len(
+                            streamed_result.tool_output_guardrail_results
+                        ),
+                    ),
                     response_id=None,
                     store_setting=store_setting,
                     on_persisted_after_guardrails=_record_max_turns_handler_output,
@@ -2045,6 +2212,28 @@ async def start_streaming(
                         )
                     )
             try:
+                blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                    run_state_generated_items=(
+                        len(run_state._generated_items) if run_state is not None else None
+                    ),
+                    run_state_session_items=(
+                        len(run_state._session_items) if run_state is not None else None
+                    ),
+                    run_state_model_responses=(
+                        len(run_state._model_responses) if run_state is not None else None
+                    ),
+                    run_state_tool_output_guardrail_results=(
+                        len(run_state._tool_output_guardrail_results)
+                        if run_state is not None
+                        else None
+                    ),
+                    streamed_new_items=len(streamed_result.new_items),
+                    streamed_model_input_items=len(streamed_result._model_input_items),
+                    streamed_raw_responses=len(streamed_result.raw_responses),
+                    streamed_tool_output_guardrail_results=len(
+                        streamed_result.tool_output_guardrail_results
+                    ),
+                )
                 logger.debug(
                     "Starting turn %s, current_agent=%s",
                     current_turn,
@@ -2196,9 +2385,8 @@ async def start_streaming(
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
                         model_response=turn_result.model_response,
-                        deferred_tool_spans=turn_result.deferred_tool_spans,
-                        preceding_items=turn_result.pre_step_items,
-                        tool_output_guardrail_results=turn_result.tool_output_guardrail_results,
+                        processed_response=turn_result.processed_response,
+                        owner_starts=blocked_output_owner_starts,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
                     )
@@ -2225,7 +2413,14 @@ async def start_streaming(
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,
                         save_items=_save_stream_items_with_count,
-                        items=turn_session_items,
+                        items=(
+                            []
+                            if _should_defer_interrupted_session_items(
+                                current_agent,
+                                run_config,
+                            )
+                            else turn_session_items
+                        ),
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
                         interruptions=approvals_from_step(turn_result.next_step),
@@ -2648,28 +2843,23 @@ async def run_single_turn_streamed(
     async def check_input_guardrails_before_side_effects() -> None:
         await raise_if_input_guardrail_tripwire_known()
 
-    single_step_result = await _run_with_deferred_tool_spans(
-        agent=public_agent,
+    single_step_result = await get_single_step_result_from_response(
+        bindings=bindings,
+        original_input=streamed_result.input,
+        pre_step_items=streamed_result._model_input_items,
+        new_response=final_response,
+        output_schema=output_schema,
+        all_tools=all_tools,
+        handoffs=handoffs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
         run_config=run_config,
-        run_turn=partial(
-            get_single_step_result_from_response,
-            bindings=bindings,
-            original_input=streamed_result.input,
-            pre_step_items=streamed_result._model_input_items,
-            new_response=final_response,
-            output_schema=output_schema,
-            all_tools=all_tools,
-            handoffs=handoffs,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            run_config=run_config,
-            error_handlers=error_handlers,
-            tool_use_tracker=tool_use_tracker,
-            server_manages_conversation=server_conversation_tracker is not None,
-            after_invocation_validation=after_invocation_validation,
-            before_side_effects=check_input_guardrails_before_side_effects,
-            run_state=run_state,
-        ),
+        error_handlers=error_handlers,
+        tool_use_tracker=tool_use_tracker,
+        server_manages_conversation=server_conversation_tracker is not None,
+        after_invocation_validation=after_invocation_validation,
+        before_side_effects=check_input_guardrails_before_side_effects,
+        run_state=run_state,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -2797,27 +2987,22 @@ async def run_single_turn(
         )
         return response_accepted
 
-    return await _run_with_deferred_tool_spans(
-        agent=public_agent,
+    return await get_single_step_result_from_response(
+        bindings=bindings,
+        original_input=original_input,
+        pre_step_items=generated_items,
+        new_response=new_response,
+        output_schema=output_schema,
+        all_tools=all_tools,
+        handoffs=handoffs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
         run_config=run_config,
-        run_turn=partial(
-            get_single_step_result_from_response,
-            bindings=bindings,
-            original_input=original_input,
-            pre_step_items=generated_items,
-            new_response=new_response,
-            output_schema=output_schema,
-            all_tools=all_tools,
-            handoffs=handoffs,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            run_config=run_config,
-            error_handlers=error_handlers,
-            tool_use_tracker=tool_use_tracker,
-            server_manages_conversation=server_conversation_tracker is not None,
-            after_invocation_validation=after_invocation_validation,
-            run_state=run_state,
-        ),
+        error_handlers=error_handlers,
+        tool_use_tracker=tool_use_tracker,
+        server_manages_conversation=server_conversation_tracker is not None,
+        after_invocation_validation=after_invocation_validation,
+        run_state=run_state,
     )
 
 

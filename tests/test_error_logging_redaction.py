@@ -1532,28 +1532,24 @@ async def test_streamed_output_guardrail_omits_run_data_from_redacted_error(
 
 
 @pytest.mark.parametrize("redacted", [False, True])
-@pytest.mark.parametrize("persistence_failure", ["error", "cancelled"])
 @pytest.mark.asyncio
-async def test_streamed_session_error_after_output_guardrail_respects_redaction(
+async def test_streamed_output_guardrail_error_skips_final_session_write(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     redacted: bool,
-    persistence_failure: Literal["error", "cancelled"],
 ) -> None:
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
 
     class FailingFinalTurnSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
-                cause = RuntimeError(f"session save cause: {_MODEL_OUTPUT_SECRET}")
-                if persistence_failure == "cancelled":
-                    raise asyncio.CancelledError(
-                        f"session save cancelled: {_MODEL_OUTPUT_SECRET}"
-                    ) from cause
-                raise LookupError(f"session save failed: {_MODEL_OUTPUT_SECRET}") from cause
+                post_guardrail_save_calls += 1
+                raise AssertionError("the final Session write must not start without a verdict")
             await super().add_items(items)
 
     def output_guardrail(
@@ -1574,86 +1570,56 @@ async def test_streamed_session_error_after_output_guardrail_respects_redaction(
         output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
     )
     result = Runner.run_streamed(agent, "go", session=FailingFinalTurnSession())
-    run_loop_callback_errors: list[BaseException] = []
-    run_loop_done = asyncio.Event()
 
-    if redacted and persistence_failure == "cancelled":
-        assert result.run_loop_task is not None
-
-        def inspect_run_loop_task(task: asyncio.Task[Any]) -> None:
-            try:
-                task.result()
-            except BaseException as error:
-                run_loop_callback_errors.append(error)
-            finally:
-                run_loop_done.set()
-
-        result.run_loop_task.add_done_callback(inspect_run_loop_task)
-    expected_error_type = (
-        asyncio.CancelledError
-        if persistence_failure == "cancelled"
-        else UserError
-        if redacted
-        else LookupError
-    )
-    expected_message = (
-        "Error details are redacted."
-        if redacted
-        else "session save cancelled"
-        if persistence_failure == "cancelled"
-        else "session save failed"
-    )
-
-    with pytest.raises(expected_error_type, match=expected_message) as exc_info:
+    with pytest.raises(ModelBehaviorError) as exc_info:
         async for _ in result.stream_events():
             pass
 
     error = exc_info.value
-    guardrail_error = error.__context__
+    assert post_guardrail_save_calls == 0
+    assert result.run_loop_exception is error
+    assert result._stored_exception is error
 
     if redacted:
-        assert guardrail_error is None
+        assert error.run_data is None
         assert error.__cause__ is None
+        assert error.__context__ is None
         assert _MODEL_OUTPUT_SECRET not in str(error)
-        _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            _MODEL_OUTPUT_SECRET,
+            require_agents_frames=False,
+        )
         for record in caplog.records:
             assert _MODEL_OUTPUT_SECRET not in repr(record.__dict__)
             assert _MODEL_OUTPUT_SECRET not in logging.Formatter().format(record)
             assert record.exc_info is None
     else:
-        assert isinstance(guardrail_error, ModelBehaviorError)
-        assert error.__cause__ is not None
-        assert _MODEL_OUTPUT_SECRET in str(error.__cause__)
-        assert _MODEL_OUTPUT_SECRET in str(guardrail_error)
+        assert _MODEL_OUTPUT_SECRET in str(error)
+        assert isinstance(error.__cause__, ValidationError)
         assert any(
             _MODEL_OUTPUT_SECRET in repr(frame) for frame in _agents_traceback_frame_locals(error)
         )
-
-    if persistence_failure == "cancelled":
-        assert result._stored_exception is error
-        assert result.run_loop_exception is None
-        if redacted:
-            await asyncio.wait_for(run_loop_done.wait(), timeout=1)
-            assert run_loop_callback_errors == []
-    else:
-        assert result.run_loop_exception is error
-        if redacted:
-            assert error.__traceback__ is None
+    if redacted:
+        assert error.__traceback__ is None
 
 
 @pytest.mark.asyncio
-async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is_replaced(
+async def test_streamed_redacted_output_guardrail_does_not_invoke_hostile_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     persistence_secret = "HOSTILE_SESSION_FAILURE_SECRET"
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
 
     class FailingFinalTurnSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
+                post_guardrail_save_calls += 1
                 raise _HostileAttributeWriteException(persistence_secret)
             await super().add_items(items)
 
@@ -1674,11 +1640,13 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
     )
     result = Runner.run_streamed(agent, "go", session=FailingFinalTurnSession())
 
-    with pytest.raises(UserError, match="Error details are redacted.") as exc_info:
+    with pytest.raises(ModelBehaviorError) as exc_info:
         async for _ in result.stream_events():
             pass
 
     error = exc_info.value
+    assert post_guardrail_save_calls == 0
+    assert error.run_data is None
     assert error.__cause__ is None
     assert error.__context__ is None
     assert persistence_secret not in str(error)
@@ -1846,25 +1814,26 @@ async def test_sandbox_cleanup_wrapper_preserves_redaction_boundary(
 
 
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("failure_kind", ["exception", "cancelled", "direct_base", "group"])
 @pytest.mark.asyncio
-async def test_max_turns_recovery_session_failure_preserves_complete_redaction_boundary(
+async def test_max_turns_guardrail_error_skips_final_session_write(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     streamed: bool,
-    failure_kind: Literal["exception", "cancelled", "direct_base", "group"],
 ) -> None:
     persistence_secret = "MAX_TURNS_SESSION_FAILURE_SECRET"
     fallback_secret = "MAX_TURNS_HANDLER_OUTPUT_SECRET"
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     class FailingMaxTurnsSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
-                raise _persistence_failure(failure_kind, persistence_secret)
+                post_guardrail_save_calls += 1
+                raise AssertionError("the final Session write must not start without a verdict")
             await super().add_items(items)
 
     def output_guardrail(
@@ -1908,23 +1877,12 @@ async def test_max_turns_recovery_session_failure_preserves_complete_redaction_b
     except BaseException as error:
         captured_error = error
     else:  # pragma: no cover
-        raise AssertionError("the session failure must propagate")
+        raise AssertionError("the guardrail failure must propagate")
 
-    assert captured_error is not None
+    assert isinstance(captured_error, ModelBehaviorError)
+    assert post_guardrail_save_calls == 0
     error = captured_error
-    if failure_kind == "exception":
-        assert isinstance(error, UserError)
-    elif failure_kind == "cancelled":
-        assert isinstance(error, asyncio.CancelledError)
-    elif failure_kind == "direct_base":
-        assert type(error) is BaseException
-    else:
-        assert isinstance(error, BaseExceptionGroup)
-        assert not isinstance(error, Exception)
-        assert {type(child) for child in error.exceptions} == {
-            UserError,
-            asyncio.CancelledError,
-        }
+    assert error.run_data is None
 
     error_graph = _exception_graph(error)
     assert error_graph
@@ -2064,7 +2022,7 @@ def test_agent_runner_run_sync_detaches_all_marked_recovery_failures(
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
-async def test_max_turns_recovery_deep_exception_group_preserves_redaction_boundary(
+async def test_max_turns_guardrail_error_does_not_build_session_exception_group(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     streamed: bool,
@@ -2072,12 +2030,15 @@ async def test_max_turns_recovery_deep_exception_group_preserves_redaction_bound
     persistence_secret = "DEEP_MAX_TURNS_SESSION_FAILURE_SECRET"
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     class DeepGroupSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
+                post_guardrail_save_calls += 1
                 error: BaseException = asyncio.CancelledError(persistence_secret)
                 for _ in range(1200):
                     error = BaseExceptionGroup(persistence_secret, [error])
@@ -2125,23 +2086,14 @@ async def test_max_turns_recovery_deep_exception_group_preserves_redaction_bound
     except BaseException as error:
         captured_error = error
     else:  # pragma: no cover
-        raise AssertionError("the deep exception group must propagate")
+        raise AssertionError("the guardrail failure must propagate")
 
-    assert isinstance(captured_error, BaseExceptionGroup)
-    error_graph = _exception_graph(captured_error)
-    assert len(error_graph) == 1201
-    for current in error_graph:
-        assert current.__cause__ is None
-        assert current.__context__ is None
-        if isinstance(current, BaseExceptionGroup):
-            assert current.message == "Error details are redacted."
-        else:
-            assert isinstance(current, asyncio.CancelledError)
-            assert persistence_secret not in str(current)
-            assert persistence_secret not in repr(current)
-        for frame_locals in _agents_traceback_frame_locals(current):
-            _assert_secret_absent_from_value_graph(frame_locals, persistence_secret)
-            _assert_secret_absent_from_value_graph(frame_locals, _MODEL_OUTPUT_SECRET)
+    assert isinstance(captured_error, ModelBehaviorError)
+    assert captured_error.run_data is None
+    assert post_guardrail_save_calls == 0
+    assert captured_error.__cause__ is None
+    assert captured_error.__context__ is None
+    _assert_secret_absent_from_agents_traceback(captured_error, _MODEL_OUTPUT_SECRET)
 
     for record in caplog.records:
         assert persistence_secret not in logging.Formatter().format(record)
@@ -2152,24 +2104,25 @@ async def test_max_turns_recovery_deep_exception_group_preserves_redaction_bound
 
 
 @pytest.mark.parametrize("redacted", [False, True])
-@pytest.mark.parametrize("failure_kind", ["direct_base", "group"])
 @pytest.mark.asyncio
-async def test_max_turns_run_loop_exception_follows_redaction_policy_for_base_exceptions(
+async def test_max_turns_run_loop_guardrail_error_skips_final_session_write(
     monkeypatch: pytest.MonkeyPatch,
     redacted: bool,
-    failure_kind: Literal["direct_base", "group"],
 ) -> None:
     persistence_secret = "RUN_LOOP_EXCEPTION_PERSISTENCE_SECRET"
     fallback_secret = "RUN_LOOP_EXCEPTION_FALLBACK_SECRET"
     payload = f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}'
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     class FailingMaxTurnsSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
-                raise _persistence_failure(failure_kind, persistence_secret)
+                post_guardrail_save_calls += 1
+                raise _DirectBaseException(persistence_secret)
             await super().add_items(items)
 
     def output_guardrail(
@@ -2209,7 +2162,8 @@ async def test_max_turns_run_loop_exception_follows_redaction_policy_for_base_ex
     await asyncio.wait_for(run_loop_done.wait(), timeout=1)
 
     error = result.run_loop_exception
-    assert error is not None
+    assert isinstance(error, ModelBehaviorError)
+    assert post_guardrail_save_calls == 0
     frame_locals = _agents_traceback_frame_locals(error)
     if redacted:
         for traceback_locals in callback_frame_locals + frame_locals:
@@ -2229,7 +2183,7 @@ async def test_max_turns_run_loop_exception_follows_redaction_policy_for_base_ex
         assert any(fallback_secret in repr(frame) for frame in callback_frame_locals)
         assert frame_locals
         assert any(fallback_secret in repr(frame) for frame in frame_locals)
-        assert persistence_secret in str(error)
+        assert _MODEL_OUTPUT_SECRET in str(error)
 
     try:
         async for _ in result.stream_events():
@@ -2237,7 +2191,7 @@ async def test_max_turns_run_loop_exception_follows_redaction_policy_for_base_ex
     except BaseException as streamed_error:
         assert streamed_error is error
     else:  # pragma: no cover
-        raise AssertionError("the session failure must propagate through the stream")
+        raise AssertionError("the guardrail failure must propagate through the stream")
 
 
 @pytest.mark.parametrize(
@@ -2371,18 +2325,21 @@ def test_safe_redacted_persistence_error_preserves_hybrid_cancellation() -> None
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
-async def test_max_turns_recovery_session_failure_preserves_diagnostic_context(
+async def test_max_turns_guardrail_error_preserves_diagnostic_without_session_write(
     monkeypatch: pytest.MonkeyPatch,
     streamed: bool,
 ) -> None:
     persistence_secret = "DIAGNOSTIC_MAX_TURNS_SESSION_SECRET"
     guardrail_secret = "DIAGNOSTIC_MAX_TURNS_GUARDRAIL_SECRET"
     guardrail_failed = False
+    post_guardrail_save_calls = 0
     monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
 
     class FailingMaxTurnsSession(SimpleListSession):
         async def add_items(self, items: list[Any]) -> None:
+            nonlocal post_guardrail_save_calls
             if guardrail_failed:
+                post_guardrail_save_calls += 1
                 raise LookupError(persistence_secret)
             await super().add_items(items)
 
@@ -2410,11 +2367,11 @@ async def test_max_turns_recovery_session_failure_preserves_diagnostic_context(
             session=session,
             error_handlers={"max_turns": lambda data: "fallback"},
         )
-        with pytest.raises(LookupError, match=persistence_secret) as exc_info:
+        with pytest.raises(RuntimeError, match=guardrail_secret) as exc_info:
             async for _ in result.stream_events():
                 pass
     else:
-        with pytest.raises(LookupError, match=persistence_secret) as exc_info:
+        with pytest.raises(RuntimeError, match=guardrail_secret) as exc_info:
             await Runner.run(
                 agent,
                 "go",
@@ -2423,9 +2380,8 @@ async def test_max_turns_recovery_session_failure_preserves_diagnostic_context(
                 error_handlers={"max_turns": lambda data: "fallback"},
             )
 
-    guardrail_error = exc_info.value.__context__
-    assert isinstance(guardrail_error, RuntimeError)
-    assert guardrail_secret in str(guardrail_error)
+    assert post_guardrail_save_calls == 0
+    assert persistence_secret not in str(exc_info.value)
 
 
 @pytest.mark.asyncio

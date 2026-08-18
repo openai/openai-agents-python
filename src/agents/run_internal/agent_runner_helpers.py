@@ -55,6 +55,7 @@ __all__ = [
     "finalize_conversation_tracking",
     "get_unsent_tool_call_ids_for_interrupted_state",
     "input_guardrails_triggered",
+    "validate_output_guardrails_with_server_managed_conversation",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -254,6 +255,26 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_output_guardrails_with_server_managed_conversation(
+    agent: Agent[Any],
+    run_config: RunConfig,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    """Reject an output-guardrail run whose rejected history cannot be locally replaced."""
+    if conversation_id is None and previous_response_id is None and not auto_previous_response_id:
+        return
+    if not agent.output_guardrails and not run_config.output_guardrails:
+        return
+    raise UserError(
+        "Output guardrails cannot be combined with conversation_id, previous_response_id, "
+        "or auto_previous_response_id because rejected output cannot be removed from "
+        "server-managed conversation history."
     )
 
 
