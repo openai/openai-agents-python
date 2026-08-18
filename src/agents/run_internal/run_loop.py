@@ -531,6 +531,7 @@ class _BlockedOutputOwnerPlan:
 class _BlockedOutputOwnerStarts:
     """Owner-specific current-response starts captured at trusted lifecycle boundaries."""
 
+    nonstreamed_session_items: int | None = None
     run_state_generated_items: int | None = None
     run_state_session_items: int | None = None
     run_state_model_responses: int | None = None
@@ -787,6 +788,18 @@ def _blocked_output_owner_prefix(items: list[_OwnerItemT], start: int | None) ->
     if start is None or start < 0 or start > len(items):
         return []
     return list.__getitem__(items, slice(0, start))
+
+
+def _blocked_output_failure_items(
+    items: list[RunItem],
+    retained_items: Sequence[RunItem],
+    owner_starts: _BlockedOutputOwnerStarts,
+) -> list[RunItem]:
+    """Build the non-streamed accepted prefix plus the data-free current response."""
+    return [
+        *_blocked_output_owner_prefix(items, owner_starts.nonstreamed_session_items),
+        *retained_items,
+    ]
 
 
 def _prepare_blocked_output_owner_prefixes(
@@ -1154,15 +1167,17 @@ async def _finalize_streamed_final_output(
         if retained_items:
             try:
                 await save_items(retained_items, response_id, store_setting)
-            except asyncio.CancelledError as persistence_error:
-                if streamed_result._cancel_mode == "immediate":
-                    raise
-                streamed_result._stored_exception = _safe_redacted_persistence_error(
-                    persistence_error
-                )
-                streamed_result.is_complete = True
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                return
+            except BaseException as persistence_error:
+                safe_error = _safe_redacted_persistence_error(persistence_error)
+                if (
+                    isinstance(persistence_error, asyncio.CancelledError)
+                    and streamed_result._cancel_mode != "immediate"
+                ):
+                    streamed_result._stored_exception = safe_error
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    return
+                raise safe_error from None
         raise
     except (Exception, asyncio.CancelledError):
         # Without a verdict, the SDK does not persist any part of the terminal response.

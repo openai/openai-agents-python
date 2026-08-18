@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_function_tool_call import CallerDirect
 
 from ..exceptions import AgentsException
 
@@ -13,14 +14,25 @@ OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
 _RESPONSE_OUTPUT_STATUSES = frozenset({"in_progress", "completed", "incomplete"})
 
 
+def _exact_dict_field(values: dict[Any, Any], field: str) -> Any:
+    """Read one exact string key without invoking stored-key equality hooks."""
+    for key, value in dict.items(values):
+        if type(key) is str and str.__eq__(key, field) is True:
+            return value
+    return None
+
+
 def _payload_field(raw_item: Any, field: str) -> Any:
     """Read an allowlisted field without copying extras or invoking instance hooks."""
     if type(raw_item) is dict:
-        return dict.get(raw_item, field)
-    if type(raw_item) is ResponseFunctionToolCall:
+        values = raw_item
+    elif type(raw_item) is ResponseFunctionToolCall:
         values = object.__getattribute__(raw_item, "__dict__")
-        return dict.get(values, field)
-    raise AgentsException("Cannot sanitize an unsupported tool item variant.")
+    else:
+        raise AgentsException("Cannot sanitize an unsupported tool item variant.")
+    if type(values) is not dict:
+        raise AgentsException("Cannot sanitize an unsupported tool item representation.")
+    return _exact_dict_field(values, field)
 
 
 def _required_string(raw_item: Any, field: str) -> str:
@@ -56,7 +68,14 @@ def _copy_optional_direct_caller(sanitized: dict[str, Any], raw_item: Any) -> No
     caller = _payload_field(raw_item, "caller")
     if caller is None:
         return
-    if type(caller) is dict and dict.get(caller, "type") == "direct":
+    if type(caller) is CallerDirect:
+        values = object.__getattribute__(caller, "__dict__")
+        caller_type = _exact_dict_field(values, "type") if type(values) is dict else None
+    elif type(caller) is dict:
+        caller_type = _exact_dict_field(caller, "type")
+    else:
+        caller_type = None
+    if type(caller_type) is str and str.__eq__(caller_type, "direct") is True:
         sanitized["caller"] = {"type": "direct"}
         return
     raise AgentsException("Cannot sanitize a function tool item with a non-direct caller.")
@@ -64,7 +83,8 @@ def _copy_optional_direct_caller(sanitized: dict[str, Any], raw_item: Any) -> No
 
 def blocked_function_call_payload(raw_item: Any) -> dict[str, Any]:
     """Build a provider-valid function call from explicitly allowlisted fields."""
-    if _payload_field(raw_item, "type") != "function_call":
+    item_type = _payload_field(raw_item, "type")
+    if type(item_type) is not str or str.__eq__(item_type, "function_call") is not True:
         raise AgentsException("Cannot sanitize an unsupported tool call variant.")
     sanitized: dict[str, Any] = {
         "type": "function_call",
@@ -85,7 +105,8 @@ def blocked_function_call_payload(raw_item: Any) -> dict[str, Any]:
 
 def blocked_function_output_payload(raw_item: Any) -> dict[str, Any]:
     """Build a replay-valid function output from explicitly allowlisted fields."""
-    if _payload_field(raw_item, "type") != "function_call_output":
+    item_type = _payload_field(raw_item, "type")
+    if type(item_type) is not str or str.__eq__(item_type, "function_call_output") is not True:
         raise AgentsException("Cannot sanitize an unsupported tool output variant.")
     sanitized: dict[str, Any] = {
         "type": "function_call_output",

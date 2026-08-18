@@ -95,11 +95,13 @@ from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
+    _blocked_output_failure_items,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
     _final_turn_items_for_persistence,
     _is_terminal_tool_output_response,
     _retained_items_for_blocked_response,
+    _safe_redacted_persistence_error,
     _sanitize_blocked_output_guardrail_results,
     _should_defer_interrupted_session_items,
     _validate_resumed_session_output_guardrail_safety,
@@ -1067,6 +1069,7 @@ class AgentRunner:
                                 run_state,
                             )
                             blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                                nonstreamed_session_items=(resumed_response_boundary.session_start),
                                 run_state_generated_items=(
                                     resumed_response_boundary.generated_start
                                 ),
@@ -1244,6 +1247,11 @@ class AgentRunner:
                                     output_guardrail_results[output_guardrail_result_start:] = (
                                         sanitized_results
                                     )
+                                    session_items = _blocked_output_failure_items(
+                                        session_items,
+                                        (),
+                                        blocked_output_owner_starts,
+                                    )
                                     retained_items = _retained_items_for_blocked_response(
                                         turn_session_items,
                                         turn_result.model_response,
@@ -1251,18 +1259,26 @@ class AgentRunner:
                                         current_processed_response,
                                         owner_starts=blocked_output_owner_starts,
                                     )
-                                    await save_final_turn_items_after_guardrails(
-                                        session=session,
-                                        run_state=run_state,
-                                        session_persistence_enabled=session_persistence_enabled,
-                                        input_guardrail_results=(
-                                            _attempt_input_guardrail_results()
-                                        ),
-                                        items=retained_items,
-                                        response_id=turn_result.model_response.response_id,
-                                        store=store_setting,
-                                        wrapper=context_wrapper,
-                                    )
+                                    list.extend(session_items, retained_items)
+                                    try:
+                                        await save_final_turn_items_after_guardrails(
+                                            session=session,
+                                            run_state=run_state,
+                                            session_persistence_enabled=(
+                                                session_persistence_enabled
+                                            ),
+                                            input_guardrail_results=(
+                                                _attempt_input_guardrail_results()
+                                            ),
+                                            items=retained_items,
+                                            response_id=turn_result.model_response.response_id,
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
+                                    except BaseException as persistence_error:
+                                        raise _safe_redacted_persistence_error(
+                                            persistence_error
+                                        ) from None
                                     raise
                                 except (Exception, asyncio.CancelledError):
                                     # Without a verdict, do not persist any part of this response.
@@ -1501,6 +1517,7 @@ class AgentRunner:
                             last_saved_input_snapshot_for_rewind = None
 
                     blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                        nonstreamed_session_items=len(session_items),
                         run_state_generated_items=(
                             len(run_state._generated_items) if run_state is not None else None
                         ),
@@ -1800,6 +1817,11 @@ class AgentRunner:
                                 output_guardrail_results[output_guardrail_result_start:] = (
                                     sanitized_results
                                 )
+                                session_items = _blocked_output_failure_items(
+                                    session_items,
+                                    (),
+                                    blocked_output_owner_starts,
+                                )
                                 retained_items = _retained_items_for_blocked_response(
                                     turn_session_items,
                                     turn_result.model_response,
@@ -1807,16 +1829,24 @@ class AgentRunner:
                                     turn_result.processed_response,
                                     owner_starts=blocked_output_owner_starts,
                                 )
-                                await save_final_turn_items_after_guardrails(
-                                    session=session,
-                                    run_state=run_state,
-                                    session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=_attempt_input_guardrail_results(),
-                                    items=retained_items,
-                                    response_id=turn_result.model_response.response_id,
-                                    store=store_setting,
-                                    wrapper=context_wrapper,
-                                )
+                                list.extend(session_items, retained_items)
+                                try:
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=(session_persistence_enabled),
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=retained_items,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
+                                except BaseException as persistence_error:
+                                    raise _safe_redacted_persistence_error(
+                                        persistence_error
+                                    ) from None
                                 raise
                             except (Exception, asyncio.CancelledError):
                                 # Without a verdict, do not persist any part of this response.
