@@ -3781,6 +3781,166 @@ async def test_buffer_tool_call_stream_forwards_content_filter_finish_reason() -
 
 
 @pytest.mark.asyncio
+async def test_handler_stream_synthesizes_refusal_on_length_truncation() -> None:
+    """A stream that terminates with finish_reason == "length" and no emitted
+    content must synthesize a ResponseOutputRefusal instead of an empty turn,
+    matching the non-streaming path."""
+    terminal = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
+    )
+
+    output_events = await _collect_handler_events(terminal)
+
+    types = [e.type for e in output_events]
+    assert "response.refusal.delta" in types
+    assert types[-1] == "response.completed"
+
+    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
+    assert refusal_deltas and refusal_deltas[0].delta == (
+        "Response truncated because the provider's maximum token limit was reached."
+    )
+
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    assert len(assistant_msg.content) == 1
+    refusal_part = assistant_msg.content[0]
+    assert isinstance(refusal_part, ResponseOutputRefusal)
+    assert (
+        refusal_part.refusal
+        == "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_stream_length_does_not_clobber_text() -> None:
+    """A length finish_reason arriving after real text was streamed must not
+    synthesize a refusal."""
+    chunk1 = _chunk_with([Choice(index=0, delta=ChoiceDelta(content="answer"))])
+    chunk2 = _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="length")])
+
+    output_events = await _collect_handler_events(chunk1, chunk2)
+
+    assert "response.refusal.delta" not in [e.type for e in output_events]
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    text_part = assistant_msg.content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_buffered_stream_synthesizes_refusal_on_length_truncation(monkeypatch) -> None:
+    """With tool-call buffering enabled, a stream that terminates with
+    finish_reason == "length" and no emitted content must still synthesize a
+    ResponseOutputRefusal, mirroring the content_filter buffered behavior."""
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(role="assistant", content=""))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
+        usage=CompletionUsage(completion_tokens=0, prompt_tokens=7, total_tokens=7),
+    )
+
+    output_events = await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
+
+    types = [e.type for e in output_events]
+    assert "response.refusal.delta" in types
+    assert types[-1] == "response.completed"
+
+    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
+    assert refusal_deltas and refusal_deltas[0].delta
+
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    assert len(assistant_msg.content) == 1
+    refusal_part = assistant_msg.content[0]
+    assert isinstance(refusal_part, ResponseOutputRefusal)
+    assert (
+        refusal_part.refusal
+        == "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_buffered_stream_length_does_not_clobber_text(monkeypatch) -> None:
+    """A length finish_reason arriving after real text was streamed must not
+    synthesize a refusal, even with buffering enabled."""
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=7, total_tokens=8),
+    )
+
+    output_events = await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
+
+    assert "response.refusal.delta" not in [e.type for e in output_events]
+    completed_event = output_events[-1]
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    assistant_msg = completed_event.response.output[0]
+    assert isinstance(assistant_msg, ResponseOutputMessage)
+    text_part = assistant_msg.content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "answer"
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_forwards_length_finish_reason() -> None:
+    """The buffering layer must forward a length-truncated terminal choice even
+    though its delta is empty, so the finish_reason reaches the handler instead
+    of being swallowed (mirrors the content_filter forwarding behavior)."""
+    chunks = [
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(content=""))]),
+        _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="length")]),
+    ]
+
+    async def source() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in chunks:
+            yield chunk
+
+    buffered = [c async for c in ChatCmplStreamHandler.buffer_tool_call_stream(source())]
+
+    terminal_choices = [
+        choice
+        for chunk in buffered
+        for choice in chunk.choices
+        if choice.finish_reason == "length"
+    ]
+    assert len(terminal_choices) == 1
+    # The forwarded copy carries no delta output.
+    assert not ChatCmplStreamHandler._delta_has_passthrough_output(terminal_choices[0].delta)
+
+
+@pytest.mark.asyncio
 async def test_buffer_tool_call_stream_does_not_duplicate_tool_calls_finish() -> None:
     """finish_reason == "tool_calls" is still emitted only by the synthesized
     buffered chunk, so the terminal choice is not forwarded twice."""
