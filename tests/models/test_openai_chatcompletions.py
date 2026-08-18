@@ -428,6 +428,108 @@ async def test_get_response_preserves_empty_nonfiltered_output(monkeypatch) -> N
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_get_response_surfaces_truncated_empty_turn_as_refusal(monkeypatch) -> None:
+    resp = await _get_response_for_choice(
+        monkeypatch,
+        Choice(
+            index=0,
+            finish_reason="length",
+            message=ChatCompletionMessage(role="assistant", content=None),
+        ),
+    )
+
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], ResponseOutputMessage)
+    assert len(resp.output[0].content) == 1
+    assert isinstance(resp.output[0].content[0], ResponseOutputRefusal)
+    assert (
+        resp.output[0].content[0].refusal
+        == "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_traces_synthesized_truncation_refusal(monkeypatch) -> None:
+    with trace(workflow_name="truncation-refusal"):
+        await _get_response_for_choice(
+            monkeypatch,
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content=None),
+            ),
+            tracing=ModelTracing.ENABLED,
+        )
+
+    generation_spans = [
+        span for span in fetch_ordered_spans() if span.span_data.type == "generation"
+    ]
+    assert len(generation_spans) == 1
+    exported_span = generation_spans[0].export()
+    assert exported_span is not None
+    assert exported_span["span_data"]["output"][0]["refusal"] == (
+        "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_output_type", "expected_content_type"),
+    [
+        (
+            ChatCompletionMessage(role="assistant", content="partial"),
+            ResponseOutputMessage,
+            ResponseOutputText,
+        ),
+        (
+            ChatCompletionMessage(role="assistant", content=None, refusal="provider refusal"),
+            ResponseOutputMessage,
+            ResponseOutputRefusal,
+        ),
+        (
+            ChatCompletionMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ChatCompletionMessageFunctionToolCall(
+                        id="call-1",
+                        type="function",
+                        function=Function(name="do_thing", arguments="{}"),
+                    )
+                ],
+            ),
+            ResponseFunctionToolCall,
+            None,
+        ),
+    ],
+)
+async def test_get_response_preserves_nonempty_truncated_output(
+    monkeypatch,
+    message: ChatCompletionMessage,
+    expected_output_type: type[object],
+    expected_content_type: type[object] | None,
+) -> None:
+    resp = await _get_response_for_choice(
+        monkeypatch,
+        Choice(index=0, finish_reason="length", message=message),
+    )
+
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], expected_output_type)
+    if expected_content_type is not None:
+        assert isinstance(resp.output[0], ResponseOutputMessage)
+        assert len(resp.output[0].content) == 1
+        assert isinstance(resp.output[0].content[0], expected_content_type)
+    if isinstance(resp.output[0], ResponseOutputMessage) and isinstance(
+        resp.output[0].content[0], ResponseOutputRefusal
+    ):
+        assert resp.output[0].content[0].refusal == "provider refusal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("previous_response_id", "conversation_id", "expected_param"),
     [
