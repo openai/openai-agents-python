@@ -28,6 +28,7 @@ try:
     )
     from agents.voice.exceptions import STTWebsocketConnectionError
     from agents.voice.models.openai_stt import (
+        DEFAULT_TURN_DETECTION,
         EVENT_INACTIVITY_TIMEOUT,
         ErrorSentinel,
         WebsocketDoneSentinel,
@@ -838,3 +839,61 @@ async def test_stream_audio_buffers_turn_audio_only_for_audio_tracing(
         )
     else:
         assert session._turn_audio_buffer == []
+
+
+def test_transcription_session_snapshots_turn_detection() -> None:
+    """Caller and default turn_detection mappings must not alias session state."""
+    caller_turn_detection = {"type": "server_vad", "threshold": 0.5}
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(turn_detection=caller_turn_detection),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+
+    assert session._turn_detection == caller_turn_detection
+    assert session._turn_detection is not caller_turn_detection
+    caller_turn_detection["threshold"] = 0.9
+    assert session._turn_detection == {"type": "server_vad", "threshold": 0.5}
+
+    default_session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(turn_detection=None),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    original_default = dict(DEFAULT_TURN_DETECTION)
+
+    assert default_session._turn_detection == original_default
+    assert default_session._turn_detection is not DEFAULT_TURN_DETECTION
+    default_session._turn_detection["eagerness"] = "high"
+
+    later_session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    assert DEFAULT_TURN_DETECTION == original_default
+    assert later_session._turn_detection == original_default
+    assert later_session._turn_detection is not default_session._turn_detection
+
+
+def test_transcription_session_preserves_empty_turn_detection() -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="whisper-1",
+        settings=STTModelSettings(turn_detection={}),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+
+    assert session._turn_detection == {}
+    assert session._turn_detection is not DEFAULT_TURN_DETECTION

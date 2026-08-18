@@ -97,7 +97,10 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._client = client
         self._model = model
         self._settings = settings
-        self._turn_detection = settings.turn_detection or DEFAULT_TURN_DETECTION
+        if settings.turn_detection is None:
+            self._turn_detection = dict(DEFAULT_TURN_DETECTION)
+        else:
+            self._turn_detection = dict(settings.turn_detection)
         self._trace_include_sensitive_data = trace_include_sensitive_data
         self._trace_include_sensitive_audio_data = trace_include_sensitive_audio_data
 
