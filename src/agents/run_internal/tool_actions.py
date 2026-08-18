@@ -58,6 +58,8 @@ from .tool_execution import (
     resolve_approval_rejection_message,
     resolve_approval_status,
     serialize_shell_output,
+    set_tool_span_error,
+    set_tool_span_output,
     truncate_shell_outputs,
     with_tool_function_span,
 )
@@ -150,14 +152,15 @@ class ComputerAction:
                     error_message=error_text,
                 )
                 if span is not None:
-                    span.set_error(
+                    set_tool_span_error(
+                        span,
                         SpanError(
                             message="Error running tool",
                             data={
                                 "tool_name": trace_tool_name,
                                 "error": trace_error,
                             },
-                        )
+                        ),
                     )
                 log_tool_action_error("Failed to execute computer action", exc)
                 raise
@@ -201,7 +204,7 @@ class ComputerAction:
             )
 
             if span is not None and config.trace_include_sensitive_data:
-                span.span_data.output = image_url
+                set_tool_span_output(span, image_url)
 
             return output_item
 
@@ -590,14 +593,15 @@ class ShellAction:
                     error_message=output_text,
                 )
                 if span is not None:
-                    span.set_error(
+                    set_tool_span_error(
+                        span,
                         SpanError(
                             message="Error running tool",
                             data={
                                 "tool_name": shell_tool.name,
                                 "error": trace_error,
                             },
-                        )
+                        ),
                     )
                 if requested_max_output_length is not None:
                     max_output_length = requested_max_output_length
@@ -651,7 +655,7 @@ class ShellAction:
             )
 
             if span is not None and config.trace_include_sensitive_data:
-                span.span_data.output = output_text
+                set_tool_span_output(span, output_text)
 
             return output_item
 
@@ -777,14 +781,15 @@ class CustomToolAction:
                     error_message=output_text,
                 )
                 if span is not None:
-                    span.set_error(
+                    set_tool_span_error(
+                        span,
                         SpanError(
                             message="Error running tool",
                             data={
                                 "tool_name": custom_tool.name,
                                 "error": trace_error,
                             },
-                        )
+                        ),
                     )
                 log_tool_action_error("Custom tool failed", exc)
 
@@ -823,7 +828,7 @@ class CustomToolAction:
             )
 
             if span is not None and config.trace_include_sensitive_data:
-                span.span_data.output = output_text
+                set_tool_span_output(span, output_text)
             return output_item
 
         return await with_tool_function_span(
@@ -1009,14 +1014,15 @@ class ApplyPatchAction:
                     error_message=output_text,
                 )
                 if span is not None:
-                    span.set_error(
+                    set_tool_span_error(
+                        span,
                         SpanError(
                             message="Error running tool",
                             data={
                                 "tool_name": apply_patch_tool.name,
                                 "error": trace_error,
                             },
-                        )
+                        ),
                     )
                 log_tool_action_error("Apply patch editor failed", exc)
 
@@ -1060,7 +1066,7 @@ class ApplyPatchAction:
             )
 
             if span is not None and config.trace_include_sensitive_data:
-                span.span_data.output = output_text
+                set_tool_span_output(span, output_text)
 
             return output_item
 

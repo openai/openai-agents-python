@@ -26,6 +26,7 @@ from ..tool import (
     ShellTool,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from ..tracing import Span, SpanError
 from .items import NestedHistoryOwnedItem
 
 __all__ = [
@@ -182,6 +183,73 @@ class NextStepInterruption:
 
 
 @dataclass
+class DeferredToolSpan(Span[Any]):
+    """A tool span whose sensitive output is held until the terminal verdict."""
+
+    span: Span[Any]
+    output: Any = None
+    has_output: bool = False
+    deferred_error: SpanError | None = None
+    has_error: bool = False
+
+    @property
+    def trace_id(self) -> str:
+        return self.span.trace_id
+
+    @property
+    def span_id(self) -> str:
+        return self.span.span_id
+
+    @property
+    def span_data(self) -> Any:
+        return self.span.span_data
+
+    @property
+    def parent_id(self) -> str | None:
+        return self.span.parent_id
+
+    def start(self, mark_as_current: bool = False) -> None:
+        self.span.start(mark_as_current=mark_as_current)
+
+    def finish(self, reset_current: bool = False) -> None:
+        self.span.finish(reset_current=reset_current)
+
+    def __enter__(self) -> DeferredToolSpan:
+        self.start(mark_as_current=True)
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.finish(reset_current=True)
+
+    def set_error(self, error: SpanError) -> None:
+        self.deferred_error = error
+        self.has_error = True
+
+    @property
+    def error(self) -> SpanError | None:
+        return self.deferred_error if self.has_error else self.span.error
+
+    def export(self) -> dict[str, Any] | None:
+        return self.span.export()
+
+    @property
+    def started_at(self) -> str | None:
+        return self.span.started_at
+
+    @property
+    def ended_at(self) -> str | None:
+        return self.span.ended_at
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self.span.tracing_api_key
+
+    @property
+    def trace_metadata(self) -> dict[str, Any] | None:
+        return self.span.trace_metadata
+
+
+@dataclass
 class SingleStepResult:
     original_input: str | list[TResponseInputItem]
     """The input items i.e. the items before run() was called. May be mutated by handoff input
@@ -221,6 +289,9 @@ class SingleStepResult:
 
     processed_response: ProcessedResponse | None = None
     """The processed model response. This is needed for resuming from interruptions."""
+
+    deferred_tool_spans: list[DeferredToolSpan] = dataclasses.field(default_factory=list)
+    """Tool spans waiting for the terminal output-guardrail verdict before publication."""
 
     @property
     def generated_items(self) -> list[RunItem]:

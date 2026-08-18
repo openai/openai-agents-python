@@ -12,8 +12,10 @@ import pytest
 from openai import APIConnectionError, BadRequestError, NotFoundError
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseCustomToolCall,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
 )
@@ -52,12 +54,13 @@ from agents.models.interface import Model
 from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
+from agents.run_internal.run_steps import NextStepRunAgain
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, StreamEvent
 from agents.testing import ModelStep, ScriptedModel
-from agents.tool import FunctionTool
+from agents.tool import CustomTool, FunctionTool
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 from agents.usage import Usage, _attach_raw_usage_snapshot
-from tests.model_test_helpers import get_response_obj
+from tests.model_test_helpers import get_exact_output_stream_step, get_response_obj
 
 from .test_responses import (
     get_final_output_message,
@@ -76,6 +79,34 @@ from .utils.hitl import (
 from .utils.simple_session import CountingSession, SimpleListSession
 
 _BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
+
+
+def _sdk_exception_traceback_string_locations(
+    error: BaseException, expected: str
+) -> list[tuple[str, str]]:
+    pending = [error]
+    seen: set[int] = set()
+    locations: list[tuple[str, str]] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+
+        traceback = current.__traceback__
+        while traceback is not None:
+            if "/src/agents/" in traceback.tb_frame.f_code.co_filename:
+                locations.extend(
+                    (traceback.tb_frame.f_code.co_name, name)
+                    for name, value in traceback.tb_frame.f_locals.items()
+                    if isinstance(value, str) and value == expected
+                )
+            traceback = traceback.tb_next
+
+        for linked in (current.__cause__, current.__context__):
+            if linked is not None:
+                pending.append(linked)
+    return locations
 
 
 def _conversation_locked_error() -> BadRequestError:
@@ -1872,7 +1903,7 @@ async def test_output_guardrail_tripwire_triggered_causes_exception_streamed():
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
     ) -> GuardrailFunctionOutput:
         return GuardrailFunctionOutput(
-            output_info=None,
+            output_info="safe-info",
             tripwire_triggered=True,
         )
 
@@ -1884,10 +1915,15 @@ async def test_output_guardrail_tripwire_triggered_causes_exception_streamed():
         model=model,
     )
 
-    with pytest.raises(OutputGuardrailTripwireTriggered):
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
         result = Runner.run_streamed(agent, input="user_message")
         async for _ in result.stream_events():
             pass
+
+    assert exc_info.value.guardrail_result.agent_output == "first_test"
+    assert exc_info.value.guardrail_result.output.output_info == "safe-info"
+    assert result.output_guardrail_results[0].agent_output == "first_test"
+    assert result.output_guardrail_results[0].output.output_info == "safe-info"
 
 
 @pytest.mark.asyncio
@@ -2261,10 +2297,10 @@ async def test_resumed_approved_tool_final_persists_output_after_output_guardrai
     def output_guardrail(
         _context: RunContextWrapper[Any],
         _agent: Agent[Any],
-        _output: Any,
+        output: Any,
     ) -> GuardrailFunctionOutput:
         return GuardrailFunctionOutput(
-            output_info=None,
+            output_info=output,
             tripwire_triggered=guardrail_state["tripwire"],
         )
 
@@ -2292,8 +2328,10 @@ async def test_resumed_approved_tool_final_persists_output_after_output_guardrai
     state.approve(first.interruptions[0])
 
     if tripwire:
-        with pytest.raises(OutputGuardrailTripwireTriggered):
+        with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
             await run_once(state)
+        assert exc_info.value.guardrail_result.agent_output == _BLOCKED_TOOL_OUTPUT
+        assert exc_info.value.guardrail_result.output.output_info is None
     else:
         resumed = await run_once(state)
         assert resumed.final_output == "approved-result"
@@ -2319,6 +2357,7 @@ async def test_resumed_approved_tool_final_persists_output_after_output_guardrai
     if tripwire:
         assert "approved-result" not in serialized_state
         assert _BLOCKED_TOOL_OUTPUT in serialized_state
+        assert state._current_step is None
     else:
         assert "approved-result" in serialized_state
 
@@ -2345,6 +2384,155 @@ async def test_resumed_approved_tool_final_persists_output_after_output_guardrai
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.asyncio
+async def test_resumed_blocked_tool_redacts_live_state_before_failed_session_save(
+    mode: str,
+) -> None:
+    class FailingResumedTurnSession(SimpleListSession):
+        fail_writes = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if self.fail_writes:
+                raise LookupError("session save failed")
+            await super().add_items(items)
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "state-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        [[get_function_tool_call("approval_tool", "{}", call_id="call-approved")]]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = FailingResumedTurnSession()
+    first = await Runner.run(agent, "Use approval_tool", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    session.fail_writes = True
+
+    with pytest.raises(LookupError, match="session save failed"):
+        if mode == "non_streamed":
+            await Runner.run(agent, state, session=session)
+        else:
+            result = Runner.run_streamed(agent, state, session=session)
+            await consume_stream(result)
+
+    assert state._current_step is not None
+    assert getattr(state._current_step, "output", None) == _BLOCKED_TOOL_OUTPUT
+    assert "state-secret" not in json.dumps(state.to_json())
+
+
+@pytest.mark.asyncio
+async def test_resumed_blocked_tool_session_save_cancellation_remains_observable() -> None:
+    class CancellingResumedTurnSession(SimpleListSession):
+        cancel_writes = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if self.cancel_writes:
+                raise asyncio.CancelledError("session-secret")
+            await super().add_items(items)
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "state-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        [[get_function_tool_call("approval_tool", "{}", call_id="call-approved")]]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = CancellingResumedTurnSession()
+    first = await Runner.run(agent, "Use approval_tool", session=session)
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    session.cancel_writes = True
+
+    result = Runner.run_streamed(agent, state, session=session)
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await consume_stream(result)
+
+    assert result._cancel_mode == "none"
+    assert result._stored_exception is exc_info.value
+    assert "session-secret" not in str(exc_info.value)
+    assert state._current_step is not None
+    assert getattr(state._current_step, "output", None) == _BLOCKED_TOOL_OUTPUT
+    serialized_state = json.dumps(state.to_json())
+    assert "state-secret" not in serialized_state
+    assert "session-secret" not in serialized_state
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_resumed_non_tool_tripwire_preserves_live_final_step(mode: str) -> None:
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "approved"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    text_output = [get_text_message("blocked-text")]
+    second_step: Any = (
+        text_output if mode == "non_streamed" else get_exact_output_stream_step(text_output)
+    )
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-approved")],
+            second_step,
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    first = await Runner.run(agent, "Use approval_tool")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        if mode == "non_streamed":
+            await Runner.run(agent, state)
+        else:
+            result = Runner.run_streamed(agent, state)
+            await consume_stream(result)
+
+    assert isinstance(state._current_step, NextStepRunAgain)
+    assert exc_info.value.guardrail_result.agent_output == "blocked-text"
+    assert exc_info.value.guardrail_result.output.output_info == "blocked-text"
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
 async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwire(
     mode: str,
 ) -> None:
@@ -2360,9 +2548,9 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     def output_guardrail(
         _context: RunContextWrapper[Any],
         _agent: Agent[Any],
-        _output: Any,
+        output: Any,
     ) -> GuardrailFunctionOutput:
-        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
 
     model = ScriptedModel()
     model.enqueue([get_function_tool_call("commit_tool", "{}", call_id="call-committed")])
@@ -2375,14 +2563,26 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     )
     session = SimpleListSession()
 
-    with pytest.raises(OutputGuardrailTripwireTriggered):
+    streamed_result: Any = None
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
         if mode == "non_streamed":
             await Runner.run(agent, "Use commit_tool", session=session)
         else:
-            result = Runner.run_streamed(agent, "Use commit_tool", session=session)
-            await consume_stream(result)
+            streamed_result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+            await consume_stream(streamed_result)
 
     assert calls == ["ran"], "the tool never ran, so the test proves nothing"
+    assert exc_info.value.guardrail_result.agent_output == _BLOCKED_TOOL_OUTPUT
+    assert exc_info.value.guardrail_result.output.output_info is None
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert _sdk_exception_traceback_string_locations(exc_info.value, "sensitive-result") == []
+    if streamed_result is not None:
+        assert all(
+            result.agent_output == _BLOCKED_TOOL_OUTPUT
+            for result in streamed_result.output_guardrail_results
+        )
+        assert "sensitive-result" not in json.dumps(streamed_result.to_state().to_json())
 
     saved_items = await session.get_items()
     assert "sensitive-result" not in json.dumps(saved_items)
@@ -2427,6 +2627,216 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     )
     assert replayed_output == _BLOCKED_TOOL_OUTPUT
     assert "sensitive-result" not in json.dumps(model_input)
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_blocked_terminal_turn_sanitizes_concurrent_custom_tool_output(mode: str) -> None:
+    function_calls = 0
+    custom_calls = 0
+
+    @function_tool(name_override="terminal_tool")
+    def terminal_tool() -> str:
+        nonlocal function_calls
+        function_calls += 1
+        return "function-secret"
+
+    def run_custom_tool(_context: Any, _input: str) -> str:
+        nonlocal custom_calls
+        custom_calls += 1
+        return "custom-secret"
+
+    custom_tool = CustomTool(
+        name="custom_side_effect",
+        description="Return a custom result.",
+        on_invoke_tool=run_custom_tool,
+        format={"type": "text"},
+    )
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model_output = [
+        get_function_tool_call("terminal_tool", "{}", call_id="call-function"),
+        ResponseCustomToolCall(
+            type="custom_tool_call",
+            name="custom_side_effect",
+            call_id="call-custom",
+            input="custom input",
+        ),
+    ]
+    model = ScriptedModel(
+        [model_output if mode == "non_streamed" else get_exact_output_stream_step(model_output)]
+    )
+    session = SimpleListSession()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[terminal_tool, custom_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if mode == "non_streamed":
+            await Runner.run(agent, "Run both tools", session=session)
+        else:
+            result = Runner.run_streamed(agent, "Run both tools", session=session)
+            await consume_stream(result)
+
+    assert function_calls == 1
+    assert custom_calls == 1
+    saved_items = await session.get_items()
+    serialized_items = json.dumps(saved_items)
+    assert "function-secret" not in serialized_items
+    assert "custom-secret" not in serialized_items
+
+    saved_outputs = {
+        cast(dict[str, Any], item).get("type"): cast(dict[str, Any], item).get("output")
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") in {"function_call_output", "custom_tool_call_output"}
+    }
+    assert saved_outputs == {
+        "function_call_output": _BLOCKED_TOOL_OUTPUT,
+        "custom_tool_call_output": _BLOCKED_TOOL_OUTPUT,
+    }
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("behavior", ["allow", "reject_content"])
+@pytest.mark.asyncio
+async def test_blocked_terminal_tool_sanitizes_tool_output_guardrail_aliases(
+    mode: str,
+    behavior: str,
+) -> None:
+    guardrail_outputs: list[ToolGuardrailFunctionOutput] = []
+
+    @tool_output_guardrail
+    def retain_tool_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        if behavior == "allow":
+            output = ToolGuardrailFunctionOutput.allow(output_info=data.output)
+        else:
+            output = ToolGuardrailFunctionOutput.reject_content(
+                message=data.output,
+                output_info=data.output,
+            )
+        guardrail_outputs.append(output)
+        return output
+
+    @function_tool(
+        name_override="terminal_tool",
+        tool_output_guardrails=[retain_tool_output],
+    )
+    def terminal_tool() -> str:
+        return "tool-guardrail-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    model_output = [get_function_tool_call("terminal_tool", "{}", call_id="call-terminal")]
+    model = ScriptedModel(
+        [model_output if mode == "non_streamed" else get_exact_output_stream_step(model_output)]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[terminal_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    streamed_result: Any = None
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if mode == "non_streamed":
+            await Runner.run(agent, "Use terminal_tool")
+        else:
+            streamed_result = Runner.run_streamed(agent, "Use terminal_tool")
+            await consume_stream(streamed_result)
+
+    assert len(guardrail_outputs) == 1
+    assert guardrail_outputs[0].output_info is None
+    if behavior == "allow":
+        assert guardrail_outputs[0].behavior == {"type": "allow"}
+    else:
+        assert guardrail_outputs[0].behavior == {
+            "type": "reject_content",
+            "message": _BLOCKED_TOOL_OUTPUT,
+        }
+    if streamed_result is not None:
+        assert "tool-guardrail-secret" not in json.dumps(streamed_result.to_state().to_json())
+
+
+@pytest.mark.parametrize("status", ["in_progress", "incomplete"])
+@pytest.mark.asyncio
+async def test_blocked_streamed_terminal_turn_accepts_provider_shell_status(
+    status: str,
+) -> None:
+    @function_tool(name_override="terminal_tool")
+    def terminal_tool() -> str:
+        return "terminal-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    shell_output = ResponseFunctionShellToolCallOutput(
+        id=f"shell-output-{status}",
+        call_id="call-shell",
+        output=[
+            {
+                "stdout": "shell-secret",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
+            }
+        ],
+        status=cast(Any, status),
+        type="shell_call_output",
+    )
+    model_output = [
+        get_function_tool_call("terminal_tool", "{}", call_id="call-terminal"),
+        shell_output,
+    ]
+    model = ScriptedModel([get_exact_output_stream_step(model_output)])
+    session = SimpleListSession()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[terminal_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+
+    result = Runner.run_streamed(agent, "Run terminal_tool", session=session)
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        await consume_stream(result)
+
+    assert exc_info.value.guardrail_result.agent_output == _BLOCKED_TOOL_OUTPUT
+    assert exc_info.value.guardrail_result.output.output_info is None
+    assert all(
+        guardrail_result.agent_output == _BLOCKED_TOOL_OUTPUT
+        and guardrail_result.output.output_info is None
+        for guardrail_result in result.output_guardrail_results
+    )
+    serialized_state = json.dumps(result.to_state().to_json())
+    serialized_session = json.dumps(await session.get_items())
+    assert "terminal-secret" not in serialized_state
+    assert "shell-secret" not in serialized_state
+    assert "terminal-secret" not in serialized_session
+    assert "shell-secret" not in serialized_session
+    assert _BLOCKED_TOOL_OUTPUT in serialized_state
+    assert _BLOCKED_TOOL_OUTPUT in serialized_session
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
@@ -2741,6 +3151,48 @@ async def test_streamed_session_save_error_takes_precedence_over_output_guardrai
     assert str(exc_info.value.__context__) == "guardrail failed"
     assert result.run_loop_exception is exc_info.value
     assert await session.get_items() == [{"content": "Hello", "role": "user"}]
+
+
+@pytest.mark.asyncio
+async def test_blocked_tool_output_redacts_live_state_before_failed_session_save() -> None:
+    guardrail_tripped = False
+
+    class FailingBlockedTurnSession(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if guardrail_tripped:
+                raise LookupError("session save failed")
+            await super().add_items(items)
+
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "state-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_tripped
+        guardrail_tripped = True
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    model = ScriptedModel([[get_function_tool_call("commit_tool", "{}", call_id="call-committed")]])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = FailingBlockedTurnSession()
+    result = Runner.run_streamed(agent, "Use commit_tool", session=session)
+
+    with pytest.raises(LookupError, match="session save failed"):
+        await consume_stream(result)
+
+    assert result._state is not None
+    assert result._state._current_step is None
+    assert "state-secret" not in json.dumps(result.to_state().to_json())
 
 
 @pytest.mark.asyncio

@@ -6,12 +6,15 @@ approval plumbing, and payload coercion. Action classes live in tool_actions.py.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import dataclasses
 import functools
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import Token
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from openai.types.responses import ResponseFunctionToolCall
@@ -93,6 +96,7 @@ from ..tool_guardrails import (
     ToolOutputGuardrailResult,
 )
 from ..tracing import Span, SpanError, function_span, get_current_trace
+from ..tracing.scope import Scope
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
 from ..util._asyncio_tasks import gather_with_cancel
@@ -109,7 +113,7 @@ from .items import (
     function_rejection_item,
     function_tool_error_output,
 )
-from .run_steps import ToolRunFunction
+from .run_steps import DeferredToolSpan, ToolRunFunction
 from .tool_use_tracker import AgentToolUseTracker
 
 if TYPE_CHECKING:
@@ -122,6 +126,106 @@ if TYPE_CHECKING:
         ToolRunLocalShellCall,
         ToolRunShellCall,
     )
+
+
+_deferred_tool_spans: contextvars.ContextVar[list[DeferredToolSpan] | None] = (
+    contextvars.ContextVar(
+        "deferred_tool_spans",
+        default=None,
+    )
+)
+
+
+@contextmanager
+def collect_deferred_tool_spans(enabled: bool) -> Iterator[list[DeferredToolSpan]]:
+    """Collect tool spans without publishing their output until the turn verdict is known."""
+    spans: list[DeferredToolSpan] = []
+    token: Token[list[DeferredToolSpan] | None] = _deferred_tool_spans.set(
+        spans if enabled else None
+    )
+    try:
+        yield spans
+    finally:
+        _deferred_tool_spans.reset(token)
+
+
+def finish_deferred_tool_spans(
+    spans: list[DeferredToolSpan],
+    *,
+    output_override: Any | None = None,
+) -> None:
+    """Publish a deferred tool-span batch exactly once, optionally replacing its output."""
+    pending_spans = list(spans)
+    spans.clear()
+    for deferred_span in pending_spans:
+        span = deferred_span.span
+        if span.ended_at is not None:
+            continue
+        if output_override is not None:
+            cast(Any, span.span_data).output = output_override
+        elif deferred_span.has_output:
+            cast(Any, span.span_data).output = deferred_span.output
+        if output_override is None and deferred_span.has_error:
+            assert deferred_span.deferred_error is not None
+            span.set_error(deferred_span.deferred_error)
+        deferred_span.output = None
+        deferred_span.has_output = False
+        deferred_span.deferred_error = None
+        deferred_span.has_error = False
+        span.finish()
+
+
+def set_tool_span_output(span: Span[Any], output: Any) -> None:
+    """Store sensitive tool output outside a processor-visible span until finalization."""
+    deferred_spans = _deferred_tool_spans.get()
+    if deferred_spans is not None:
+        for deferred_span in reversed(deferred_spans):
+            if deferred_span.span is span:
+                deferred_span.output = output
+                deferred_span.has_output = True
+                return
+    cast(Any, span.span_data).output = output
+
+
+def set_tool_span_error(span: Span[Any], error: SpanError) -> None:
+    """Store a tool error outside a processor-visible span until finalization."""
+    deferred_spans = _deferred_tool_spans.get()
+    if deferred_spans is not None:
+        for deferred_span in reversed(deferred_spans):
+            if deferred_span is span or deferred_span.span is span:
+                deferred_span.set_error(error)
+                return
+    span.set_error(error)
+
+
+@contextmanager
+def _tool_function_span(tool_name: str) -> Iterator[Span[Any]]:
+    """Keep current-span ownership in the tool task while allowing deferred publication."""
+    span = function_span(tool_name)
+    span.start()
+    deferred_spans = _deferred_tool_spans.get()
+    if deferred_spans is None:
+        deferred_span = None
+    else:
+        deferred_span = DeferredToolSpan(span=span)
+        deferred_spans.append(deferred_span)
+    token = Scope.set_current_span(deferred_span or span)
+    try:
+        yield span
+    except BaseException:
+        Scope.reset_current_span(token)
+        if deferred_span is None:
+            span.finish()
+        else:
+            assert deferred_spans is not None
+            deferred_spans.remove(deferred_span)
+            finish_deferred_tool_spans([deferred_span])
+        raise
+    else:
+        Scope.reset_current_span(token)
+        if deferred_span is None:
+            span.finish()
+
 
 __all__ = [
     "maybe_reset_tool_choice",
@@ -146,6 +250,8 @@ __all__ = [
     "format_shell_error",
     "get_trace_tool_error",
     "with_tool_function_span",
+    "set_tool_span_output",
+    "set_tool_span_error",
     "build_litellm_json_tool_call",
     "collect_manual_mcp_approvals",
     "index_approval_items_by_call_id",
@@ -1131,7 +1237,7 @@ async def with_tool_function_span(
         direct_result: object = result
         return cast(TToolSpanResult, direct_result)
 
-    with function_span(tool_name) as span:
+    with _tool_function_span(tool_name) as span:
         result = fn(span)
         if inspect.isawaitable(result):
             return await result
@@ -1802,7 +1908,7 @@ class _FunctionToolBatchExecutor:
             or get_function_tool_trace_name(func_tool)
             or func_tool.name
         )
-        with function_span(trace_tool_name) as span_fn:
+        with _tool_function_span(trace_tool_name) as span_fn:
             tool_context_namespace = get_tool_call_namespace(raw_tool_call)
             if tool_context_namespace is None:
                 tool_context_namespace = get_tool_call_namespace(tool_call)
@@ -1852,7 +1958,7 @@ class _FunctionToolBatchExecutor:
                 raise UserError(f"Error running tool {func_tool.name}: {e}") from e
 
             if self.config.trace_include_sensitive_data:
-                span_fn.span_data.output = result
+                set_tool_span_output(span_fn, result)
             return result
 
     async def _maybe_execute_tool_approval(
@@ -1964,7 +2070,8 @@ class _FunctionToolBatchExecutor:
             tool_namespace=tool_namespace,
             tool_lookup_key=tool_lookup_key,
         )
-        span_fn.set_error(
+        set_tool_span_error(
+            span_fn,
             SpanError(
                 message=rejection_message,
                 data={
@@ -1973,9 +2080,9 @@ class _FunctionToolBatchExecutor:
                         f"Tool execution for {tool_call.call_id} was manually rejected by user."
                     ),
                 },
-            )
+            ),
         )
-        span_fn.span_data.output = rejection_message
+        set_tool_span_output(span_fn, rejection_message)
         return FunctionToolResult(
             tool=func_tool,
             output=rejection_message,
