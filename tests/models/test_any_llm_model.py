@@ -529,6 +529,12 @@ def _content_filtered_chat_completion(content: str) -> ChatCompletion:
     return completion
 
 
+def _length_truncated_chat_completion(content: str) -> ChatCompletion:
+    completion = _chat_completion(content)
+    completion.choices[0].finish_reason = "length"
+    return completion
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_any_llm_chat_path_surfaces_content_filter_refusal(monkeypatch) -> None:
@@ -571,6 +577,79 @@ async def test_any_llm_chat_path_content_filter_keeps_real_content(monkeypatch) 
     provider = FakeAnyLLMProvider(
         supports_responses=False,
         chat_response=_content_filtered_chat_completion("here is the answer"),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    refusals = [
+        content
+        for item in response.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert not refusals
+    assert response.output[0].content[0].text == "here is the answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_surfaces_length_truncation_refusal(monkeypatch) -> None:
+    """A zero-token truncated turn must become a refusal instead of an empty output,
+    mirroring the content_filter handling."""
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_length_truncated_chat_completion(""),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    refusals = [
+        content
+        for item in response.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert refusals, f"expected a refusal item, got: {response.output}"
+    assert refusals[0].refusal == (
+        "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_length_keeps_real_content(monkeypatch) -> None:
+    """A truncated turn that still carries text keeps the text and gains no refusal."""
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_length_truncated_chat_completion("here is the answer"),
     )
     module, _create_calls = _import_any_llm_module(monkeypatch, provider)
 

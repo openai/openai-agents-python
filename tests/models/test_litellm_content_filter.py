@@ -75,6 +75,44 @@ async def test_content_filter_does_not_clobber_real_content(monkeypatch):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_length_finish_reason_surfaces_refusal(monkeypatch):
+    """A zero-token truncated turn (empty message, finish_reason=length) must
+    become an explicit ResponseOutputRefusal, not zero output items, mirroring
+    the content_filter handling."""
+    resp = await _get_response(monkeypatch, finish_reason="length", content="")
+
+    refusals = [
+        content
+        for item in resp.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert refusals, f"expected a refusal item, got: {resp.output}"
+    assert refusals[0].refusal == (
+        "Response truncated because the provider's maximum token limit was reached."
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_length_does_not_clobber_real_content(monkeypatch):
+    """A length finish_reason that still carries text is left alone — we only
+    synthesize a refusal when the message is genuinely empty."""
+    resp = await _get_response(monkeypatch, finish_reason="length", content="here is the answer")
+
+    refusals = [
+        content
+        for item in resp.output
+        if isinstance(item, ResponseOutputMessage)
+        for content in item.content
+        if isinstance(content, ResponseOutputRefusal)
+    ]
+    assert not refusals, "should not synthesize a refusal when content is present"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_normal_stop_is_unaffected(monkeypatch):
     """A normal completion is unchanged — no spurious refusal."""
     resp = await _get_response(monkeypatch, finish_reason="stop", content="all good")

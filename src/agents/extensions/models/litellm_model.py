@@ -322,18 +322,25 @@ class LitellmModel(Model):
             # output items and the caller sees an indistinguishable "empty turn",
             # which drives agent loops into fruitless retries. Synthesize a
             # refusal so downstream handling (ResponseOutputRefusal) fires.
+            # A completion truncated before any visible token (``finish_reason ==
+            # "length"``) has the same shape and must not collapse into an empty
+            # turn either.
             if (
                 message is not None
                 and first_choice is not None
-                and getattr(first_choice, "finish_reason", None) == "content_filter"
+                and getattr(first_choice, "finish_reason", None) in {"content_filter", "length"}
                 and not message.content
                 and not getattr(message, "tool_calls", None)
             ):
                 provider_specific_fields = getattr(message, "provider_specific_fields", None) or {}
                 if not provider_specific_fields.get("refusal"):
-                    provider_specific_fields["refusal"] = (
+                    refusal_message = (
                         "Response withheld by the provider's content filter."
+                        if first_choice.finish_reason == "content_filter"
+                        else "Response truncated because the provider's maximum token"
+                        " limit was reached."
                     )
+                    provider_specific_fields["refusal"] = refusal_message
                     message.provider_specific_fields = provider_specific_fields
 
             # Build provider_data for provider specific fields
