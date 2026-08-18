@@ -9,6 +9,7 @@ import httpx2
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.reasoning import Reasoning
@@ -2130,6 +2131,32 @@ async def test_websocket_model_get_response_rejects_failed_terminal_response_pay
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
     with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["incomplete", "failed"])
+async def test_get_response_rejects_failed_terminal_response_status(status: str) -> None:
+    class Responses:
+        async def create(self, **kwargs: Any) -> Response:
+            return _response_with_terminal_status(status)
+
+    class Client:
+        responses = Responses()
+        base_url = httpx2.URL("https://custom.example.test/v1/")
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=cast(Any, Client()))
+
+    with pytest.raises(ModelBehaviorError, match=f"response.{status}"):
         await model.get_response(
             system_instructions=None,
             input="hi",
@@ -4439,6 +4466,25 @@ def _response_without_usage() -> Response:
         top_p=None,
         parallel_tool_calls=False,
         usage=None,
+    )
+
+
+def _response_with_terminal_status(status: str) -> Response:
+    return Response(
+        id="resp-terminal",
+        created_at=0,
+        model="fake",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        top_p=None,
+        parallel_tool_calls=False,
+        usage=None,
+        status=status,
+        incomplete_details=(
+            IncompleteDetails(reason="max_output_tokens") if status == "incomplete" else None
+        ),
     )
 
 

@@ -23,6 +23,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
 )
+from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_created_event import ResponseCreatedEvent
 from openai.types.responses.response_error_event import ResponseErrorEvent
 from openai.types.responses.response_failed_event import ResponseFailedEvent
@@ -172,6 +173,24 @@ def _response(text: str, response_id: str = "resp_123") -> Response:
                 {"cache_write_tokens": 0, "cached_tokens": 0}
             ),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        ),
+    )
+
+
+def _responses_response_with_terminal_status(status: str) -> Response:
+    return Response(
+        id="resp_terminal",
+        created_at=123,
+        model="fake-model",
+        object="response",
+        output=[],
+        tool_choice="none",
+        tools=[],
+        parallel_tool_calls=False,
+        usage=None,
+        status=status,
+        incomplete_details=(
+            IncompleteDetails(reason="max_output_tokens") if status == "incomplete" else None
         ),
     )
 
@@ -762,6 +781,34 @@ async def test_any_llm_responses_path_is_used_when_supported(monkeypatch) -> Non
     assert kwargs["extra_headers"]["User-Agent"] == f"Agents/Python {__version__}"
     assert response.response_id == "resp_123"
     assert response.output[0].content[0].text == "Hello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["incomplete", "failed"])
+async def test_any_llm_responses_path_rejects_failed_terminal_status(
+    monkeypatch, status: str
+) -> None:
+    provider = FakeAnyLLMProvider(
+        supports_responses=True,
+        responses_response=_responses_response_with_terminal_status(status),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openai/gpt-5.4-mini", api_key="openai-key")
+    with pytest.raises(ModelBehaviorError, match=f"response.{status}"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
 
 
 @pytest.mark.allow_call_model_methods

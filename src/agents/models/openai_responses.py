@@ -822,6 +822,8 @@ class OpenAIResponsesModel(Model):
 
         if not stream:
             response = await client.responses.create(**create_kwargs)
+            if getattr(response, "status", None) in {"failed", "incomplete"}:
+                raise response_terminal_failure_error(f"response.{response.status}", response)
             _mark_transport_request_without_usage(response)
             return cast(Response, response)
 
