@@ -12,9 +12,12 @@ Use this skill to investigate real runtime behavior, not to restate code or docu
 ## Core Rules
 
 - Treat this skill as manual-only. Do not rely on implicit invocation.
+- Invoking this skill authorizes planning only. Every runtime probe requires explicit user approval after the exact probe has been proposed. Do not infer execution approval from the skill invocation or a general request to investigate runtime behavior.
+- Before requesting approval, disclose the source identity, exact command, transitively executed material, known filesystem, environment, network, and host-service capabilities, expected side effects, and control for the proposed probe. Mark unknown capabilities as unknown rather than assuming that they are unavailable.
+- Wait for an affirmative response before executing the probe. Approval is bound to the disclosed source, command, executed material, and capability scope. Obtain new approval before changing any of those fields, adding another probe, or expanding the approved matrix.
 - A baseline success or smoke case is often the right entry point, but do not stop there when the real question involves edge cases, drift, or failure behavior.
 - Plan before running anything. Write the case matrix first, then fill it in with observed results. The matrix can live in a scratch note, a temporary file, or the probe script header.
-- Default to local or read-only probes. Consider a live service only when it is clearly relevant, then apply the lightweight gates below before you run it.
+- Default to proposing local or read-only probes. Consider a live service only when it is clearly relevant, then apply the lightweight gates below before requesting approval.
 - Size the probe to the decision. Start with the smallest matrix that can disqualify or validate the current hypothesis, then expand only when uncertainty remains.
 - Before a live probe, apply three lightweight gates:
   - Destination gate. Use only a live destination that is clearly allowed for the task.
@@ -58,11 +61,12 @@ Use this skill to investigate real runtime behavior, not to restate code or docu
    - Run Python probes from the repository root with `uv run python` when practical.
    - Record the current commit, working directory, Python executable, and Python version.
    - Avoid accidental imports from a different checkout or site-packages location. If you must deviate from `uv run python`, say exactly why and what interpreter or environment was used instead.
-13. Execute the matrix and capture evidence. Record request shape, setup, observation summary, unexpected or negative result, error details, timing, runtime context, approved environment-variable names, repeat counts, warm-up handling, variance when relevant, cleanup behavior, and for comparisons note what was held constant plus any response-shape or usage notes that affect interpretation.
-14. Update the matrix with actual outcomes, not guesses.
-15. Keep temporary artifacts until the final response is drafted. Then delete them unless the user asked to keep them or they are needed for follow-up. Benchmark and repeat-heavy probes often need follow-up, so keeping artifacts is normal when the result may be revisited. If deleted, retain and report a short run summary.
-16. Report findings first, with unexpected or negative findings first. Then summarize how the validation was performed and which cases were covered.
-17. If the probe isolates one clear defect, you may include a short implementation hypothesis or minimal repro direction. Do not expand into a larger next-step plan unless the user asked for it.
+13. Present the complete probe proposal with the disclosures required above, including the exact command for each case or approved matrix, then ask the user for explicit approval and wait.
+14. Execute only the approved matrix and capture evidence. Record request shape, setup, observation summary, unexpected or negative result, error details, timing, runtime context, approved environment-variable names, repeat counts, warm-up handling, variance when relevant, cleanup behavior, and for comparisons note what was held constant plus any response-shape or usage notes that affect interpretation.
+15. Update the matrix with actual outcomes, not guesses.
+16. Keep temporary artifacts until the final response is drafted. Then delete them unless the user asked to keep them or they are needed for follow-up. Benchmark and repeat-heavy probes often need follow-up, so keeping artifacts is normal when the result may be revisited. If deleted, retain and report a short run summary.
+17. Report findings first, with unexpected or negative findings first. Then summarize how the validation was performed and which cases were covered.
+18. If the probe isolates one clear defect, you may include a short implementation hypothesis or minimal repro direction. Do not expand into a larger next-step plan unless the user asked for it.
 
 ## Validation Matrix
 

@@ -93,7 +93,7 @@ Branch creation and committing identical content are repository bookkeeping and 
 
 ## 8. Validate and hand off
 
-Run `python .agents/skills/implementation-kickoff/scripts/validate_handoff.py --repo <worktree> --base <final-base> --expected-branch <branch> --shipped-path-manifest <manifest>`. For a takeover, also pass `--required-trailer-email <verified-email>` for each identity that must be credited. The manifest contains one exact repository-relative shipped path per line and excludes operational artifacts.
+Run `python .agents/skills/implementation-kickoff/scripts/validate_handoff.py --repo <worktree> --base <final-base> --expected-branch <branch> --shipped-path-manifest <manifest>`. For a takeover, also pass `--required-trailer-email <verified-email>` for each identity that must be credited. The shipped-path manifest must be a finite regular file whose type and content are read from one opened descriptor. It contains one exact repository-relative shipped path per line and excludes operational artifacts.
 
 Independently confirm that the committed diff has the reviewed content fingerprint when final review supplied one. The validator checks Git topology and repository cleanliness; it does not replace semantic review or fingerprint verification.
 

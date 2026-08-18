@@ -88,10 +88,13 @@ class OpenAIProvider(ModelProvider):
                 chunk semantics are not reliable enough for incremental processing.
         """
         if openai_client is not None:
-            if api_key is not None or base_url is not None or websocket_base_url is not None:
+            if any(
+                value is not None
+                for value in (api_key, base_url, websocket_base_url, organization, project)
+            ):
                 raise UserError(
-                    "Don't provide api_key, base_url, or websocket_base_url if you provide "
-                    "openai_client"
+                    "Don't provide api_key, base_url, websocket_base_url, organization, or project "
+                    "if you provide openai_client"
                 )
             self._client: AsyncOpenAI | None = openai_client
         else:

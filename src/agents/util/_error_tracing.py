@@ -5,7 +5,7 @@ from typing import Any
 
 from .. import _debug
 from ..exceptions import ModelTimeoutError
-from ..logger import logger
+from ..logger import log_model_action_warning, logger
 from ..tracing import Span, SpanError, get_current_span
 
 REDACTED_TRACE_ERROR_MESSAGE = "Error details are redacted."
@@ -114,8 +114,12 @@ def record_model_error_on_span(
                 },
             ),
         )
-    except Exception:
-        logger.warning("Could not record the model error on the span", exc_info=True)
+    except Exception as tracing_error:
+        log_model_action_warning(
+            logger,
+            "Could not record the model error on the span",
+            tracing_error,
+        )
 
 
 @contextlib.contextmanager

@@ -20,7 +20,7 @@ Use this reference when a claim is ambiguous, severity is disputed, or a PR is t
 
 ## Decision model
 
-Treat validity, severity, and merge-worthiness as separate results. Also distinguish a `Preliminary assessment`, which may still require approval-gated runtime work or other decision-relevant evidence, from a final `Maintainer decision`. Do not label a provisional positive result as a verdict or final decision.
+Treat validity, severity, and merge-worthiness as separate results. Also distinguish a `Preliminary assessment`, which may still require decision-relevant evidence, from a final `Maintainer decision`. Do not label a provisional positive result as a verdict or final decision.
 
 | Dimension | Questions | Strong evidence |
 |---|---|---|
@@ -301,9 +301,9 @@ I am going to close this <issue/PR> for now. If you can provide <specific scenar
 
 ## Compact report variants
 
-Use `Maintainer decision` for a concluded review. Use `Preliminary assessment` when a desk review is tentatively positive but approval-gated runtime work or another decision-relevant evidence gap remains. `Verdict` is intentionally avoided in the report headings because it does not communicate whether the result is provisional or final.
+Use `Maintainer decision` for a concluded review. Use `Preliminary assessment` when a desk review is tentatively positive but a decision-relevant evidence gap remains. `Verdict` is intentionally avoided in the report headings because it does not communicate whether the result is provisional or final.
 
-### Approval-gated runtime probe
+### Additional runtime investigation suggested
 
 ```markdown
 ## Preliminary assessment
@@ -313,14 +313,13 @@ Use `Maintainer decision` for a concluded review. Use `Preliminary assessment` w
 - <decisive code-path or test-inspection evidence>
 - <what remains uncertain at runtime>
 
-## Proposed runtime probe
-- Concern: <the uncertainty that could change the decision>
-- Probe: <smallest exact execution path>
+## Additional runtime investigation suggested
+- Unresolved question: <the runtime uncertainty that could change the decision>
+- Decision impact: <which validity, severity, scope, or recommendation could change>
+- Evidence needed: <the observable behavior or state needed to resolve the uncertainty>
 - Control: <base, release, or known-good comparison when relevant>
-- Approval boundary: <live API, credentials, external service, dependency installation, tracked repository or persistent external mutation, or materially broad, expensive, or long-running work>
 
-## Approval request
-<Ask whether to cross the stated boundary for this exact probe. Do not present a final positive recommendation yet.>
+<Suggest a separate runtime investigation without providing an exact command, requesting approval, executing code, or invoking another skill. Do not present a final positive recommendation yet.>
 ```
 
 ### Issue

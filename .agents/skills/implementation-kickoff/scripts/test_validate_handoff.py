@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 from validate_handoff import load_shipped_paths, validate
 
@@ -101,6 +103,194 @@ class ValidateHandoffTests(unittest.TestCase):
         manifest.write_text("../outside.txt\n")
         with self.assertRaisesRegex(ValueError, "normalized repository-relative paths"):
             load_shipped_paths(manifest)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "Requires POSIX FIFO support.")
+    def test_manifest_file_type_is_verified_after_open(self) -> None:
+        fifo = self.root / "shipped.paths"
+        os.mkfifo(fifo)
+
+        with (
+            mock.patch.object(Path, "read_text", return_value="src/change.py\n"),
+            self.assertRaisesRegex(ValueError, "regular file"),
+        ):
+            load_shipped_paths(fifo)
+
+    def test_body_line_is_not_accepted_as_coauthor_trailer(self) -> None:
+        path = self.repo / "src" / "change.py"
+        path.parent.mkdir()
+        path.write_text("value = 1\n")
+        self._git("add", "src/change.py")
+        self._git(
+            "commit",
+            "-qm",
+            "change workflow",
+            "-m",
+            "Co-authored-by: Example User <example@example.com>",
+            "-m",
+            "This paragraph makes the preceding line part of the body.",
+        )
+        manifest = self.root / "shipped.paths"
+        manifest.write_text("src/change.py\n")
+        args = self._args(manifest)
+        args.required_trailer_email = ["example@example.com"]
+
+        report, failures = validate(args)
+
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any("Missing required Co-authored-by trailer" in failure for failure in failures)
+        )
+
+    def test_terminal_coauthor_trailer_is_accepted(self) -> None:
+        path = self.repo / "src" / "change.py"
+        path.parent.mkdir()
+        path.write_text("value = 1\n")
+        self._git("add", "src/change.py")
+        self._git(
+            "commit",
+            "-qm",
+            "change workflow",
+            "-m",
+            "Commit body.",
+            "-m",
+            "Co-authored-by: Example User <example@example.com>",
+        )
+        manifest = self.root / "shipped.paths"
+        manifest.write_text("src/change.py\n")
+        args = self._args(manifest)
+        args.required_trailer_email = ["EXAMPLE@example.com"]
+
+        report, failures = validate(args)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(report["coauthor_trailer_emails"], ["example@example.com"])
+
+    def test_assume_unchanged_path_is_not_a_clean_handoff(self) -> None:
+        self._commit({"src/change.py": "value = 1\n"})
+        self._git("update-index", "--assume-unchanged", "README.md")
+        (self.repo / "README.md").write_text("hidden change\n")
+        manifest = self.root / "shipped.paths"
+        manifest.write_text("src/change.py\n")
+
+        report, failures = validate(self._args(manifest))
+
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("assume-unchanged" in failure for failure in failures))
+
+    def test_materialized_skip_worktree_path_is_not_a_clean_handoff(self) -> None:
+        self._commit({"src/change.py": "value = 1\n"})
+        self._git("update-index", "--skip-worktree", "README.md")
+        (self.repo / "README.md").write_text("hidden change\n")
+        manifest = self.root / "shipped.paths"
+        manifest.write_text("src/change.py\n")
+
+        report, failures = validate(self._args(manifest))
+
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("skip-worktree" in failure for failure in failures))
+
+    def test_ignored_dirty_submodule_is_not_a_clean_handoff(self) -> None:
+        source = self.root / "dependency-source"
+        source.mkdir()
+        subprocess.run(("git", "init", "-q", str(source)), check=True)
+        subprocess.run(
+            ("git", "-C", str(source), "config", "user.name", "Submodule Test"),
+            check=True,
+        )
+        subprocess.run(
+            ("git", "-C", str(source), "config", "user.email", "submodule@example.test"),
+            check=True,
+        )
+        (source / "tracked.txt").write_text("committed\n")
+        subprocess.run(("git", "-C", str(source), "add", "tracked.txt"), check=True)
+        subprocess.run(("git", "-C", str(source), "commit", "-qm", "initial"), check=True)
+        self._git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(source),
+            "vendor/dependency",
+        )
+        self._git(
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.vendor/dependency.ignore",
+            "all",
+        )
+        self._git("add", ".gitmodules", "vendor/dependency")
+        self._git("commit", "-qm", "add dependency")
+        manifest = self.root / "shipped.paths"
+        manifest.write_text(".gitmodules\nvendor/dependency\n")
+        (self.repo / "vendor" / "dependency" / "tracked.txt").write_text("dirty\n")
+
+        self.assertEqual(self._git("status", "--porcelain=v1").stdout, "")
+        report, failures = validate(self._args(manifest))
+
+        self.assertFalse(report["valid"])
+        self.assertIn("Worktree is not clean.", failures)
+
+    def test_submodule_hidden_index_path_is_not_a_clean_handoff(self) -> None:
+        source = self.root / "dependency-source"
+        source.mkdir()
+        subprocess.run(("git", "init", "-q", str(source)), check=True)
+        subprocess.run(
+            ("git", "-C", str(source), "config", "user.name", "Submodule Test"),
+            check=True,
+        )
+        subprocess.run(
+            ("git", "-C", str(source), "config", "user.email", "submodule@example.test"),
+            check=True,
+        )
+        (source / "tracked.txt").write_text("committed\n")
+        subprocess.run(("git", "-C", str(source), "add", "tracked.txt"), check=True)
+        subprocess.run(("git", "-C", str(source), "commit", "-qm", "initial"), check=True)
+        self._git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(source),
+            "vendor/dependency",
+        )
+        self._git("commit", "-qam", "add dependency")
+        manifest = self.root / "shipped.paths"
+        manifest.write_text(".gitmodules\nvendor/dependency\n")
+        self._git(
+            "-C",
+            "vendor/dependency",
+            "update-index",
+            "--assume-unchanged",
+            "tracked.txt",
+        )
+        (self.repo / "vendor" / "dependency" / "tracked.txt").write_text("hidden change\n")
+
+        self.assertEqual(
+            self._git("status", "--porcelain=v1", "--ignore-submodules=none").stdout,
+            "",
+        )
+        report, failures = validate(self._args(manifest))
+
+        self.assertFalse(report["valid"])
+        self.assertFalse(report["clean"])
+        self.assertTrue(
+            any("assume-unchanged=vendor/dependency/tracked.txt" in failure for failure in failures)
+        )
+
+    def test_missing_repository_report_is_explicitly_invalid(self) -> None:
+        args = self._args(self.root / "unused.paths")
+        args.repo = self.root / "missing"
+
+        report, failures = validate(args)
+
+        self.assertFalse(report["valid"])
+        self.assertEqual(
+            failures,
+            [f"Repository path does not exist: {args.repo.resolve()}"],
+        )
 
 
 if __name__ == "__main__":

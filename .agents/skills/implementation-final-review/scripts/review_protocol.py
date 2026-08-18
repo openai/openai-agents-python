@@ -6,11 +6,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
 
-from review_state import _content_fingerprint, _repository_fingerprint
+from review_state import (
+    _content_fingerprint,
+    _NonRegularFileError,
+    _read_regular_file,
+    _repository_fingerprint,
+)
 
 PACKET_SOFT_LIMIT_BYTES = 12 * 1024
 SENTINELS = {"none", "not applicable"}
@@ -36,7 +42,6 @@ REQUIRED_PACKET_TEXT = (
     "repository.complete_diff_command",
     "ledger.path",
     "manifests.task",
-    "manifests.dependency_map",
     "review_state.evidence_id",
     "review_state.revalidation_command",
     "verification.eligible_concurrent_gates",
@@ -109,6 +114,16 @@ def _object(value: Any, context: str) -> dict[str, Any]:
     return value
 
 
+def _require_exact_fields(value: dict[str, Any], expected: set[str], context: str) -> None:
+    missing = sorted(expected - value.keys())
+    unexpected = sorted(value.keys() - expected)
+    if missing or unexpected:
+        raise ProtocolError(
+            f"{context} does not match the exact schema: "
+            f"missing={missing}, unexpected={unexpected}."
+        )
+
+
 def _array(value: Any, context: str) -> list[Any]:
     if not isinstance(value, list):
         raise ProtocolError(f"{context} must be an array.")
@@ -148,43 +163,81 @@ def _at(value: dict[str, Any], dotted_path: str) -> Any:
     return current
 
 
-def _read_bytes(value: Any, context: str) -> tuple[Path, bytes]:
-    path = Path(_text(value, context, concrete=True))
-    if not path.is_absolute():
-        raise ProtocolError(f"{context} must be an absolute path: {path}.")
+FileIdentity = tuple[int, int]
+
+
+def _read_bytes(value: Any, context: str) -> tuple[Path, bytes, FileIdentity]:
+    requested_path = Path(_text(value, context, concrete=True))
+    if not requested_path.is_absolute():
+        raise ProtocolError(f"{context} must be an absolute path: {requested_path}.")
     try:
-        return path, path.read_bytes()
-    except OSError as error:
-        raise ProtocolError(f"Cannot read {context} {path}: {error}") from error
+        path = requested_path.resolve(strict=True)
+        data, file_stat = _read_regular_file(path)
+    except _NonRegularFileError as error:
+        raise ProtocolError(f"{context} must be a regular file: {requested_path}.") from error
+    except (OSError, ValueError) as error:
+        raise ProtocolError(f"Cannot read {context} {requested_path}: {error}") from error
+    return path, data, (file_stat.st_dev, file_stat.st_ino)
 
 
 def _json_bytes(data: bytes, context: str) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ProtocolError(f"Duplicate JSON key in {context}: {key!r}.")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ProtocolError(f"Non-finite JSON number in {context}: {value}.")
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ProtocolError(f"Non-finite JSON number in {context}: {value}.")
+        return parsed
+
     try:
-        value = json.loads(data)
-    except (UnicodeError, json.JSONDecodeError) as error:
+        value = json.loads(
+            data,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except ProtocolError:
+        raise
+    except (RecursionError, UnicodeError, ValueError) as error:
         raise ProtocolError(f"Cannot read JSON object from {context}: {error}") from error
     return _object(value, context)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    _, data = _read_bytes(str(path.resolve()), str(path))
+    _, data, _ = _read_bytes(str(path.resolve()), str(path))
     return _json_bytes(data, str(path))
 
 
-def _descriptor(value: Any, context: str) -> tuple[Path, bytes, str]:
+def _descriptor(value: Any, context: str) -> tuple[Path, bytes, str, FileIdentity]:
     descriptor = _object(value, context)
-    path, data = _read_bytes(descriptor.get("path"), f"{context}.path")
+    path, data, identity = _read_bytes(descriptor.get("path"), f"{context}.path")
     expected = _text(descriptor.get("sha256"), f"{context}.sha256")
     if not SHA256.fullmatch(expected):
         raise ProtocolError(f"{context}.sha256 must be a lowercase SHA-256 digest.")
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         raise ProtocolError(f"{context} digest mismatch for {path}.")
-    return path, data, actual
+    return path, data, actual, identity
+
+
+def _read_unchanged(path: Path, expected_digest: str, context: str) -> bytes:
+    _, data, _ = _read_bytes(str(path.resolve()), context)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise ProtocolError(f"{context} changed during protocol validation.")
+    return data
 
 
 def _pathspec_file(value: Any, context: str) -> list[str]:
-    _, data = _read_bytes(value, context)
+    _, data, _ = _read_bytes(value, context)
     try:
         lines = [line for line in data.decode().splitlines() if line]
     except UnicodeError as error:
@@ -194,8 +247,30 @@ def _pathspec_file(value: Any, context: str) -> list[str]:
     return lines
 
 
+def _dependency_map(value: Any, component_names: set[str]) -> None:
+    dependencies = _object(value, "manifests.dependency_map")
+    if set(dependencies) != component_names:
+        raise ProtocolError("manifests.dependency_map must cover the exact component names.")
+    for component_name in sorted(component_names):
+        context = f"manifests.dependency_map[{component_name!r}]"
+        entries = _array(dependencies[component_name], context)
+        if not entries:
+            raise ProtocolError(f"{context} must contain at least one dependency.")
+        pathspecs: set[str] = set()
+        for index, raw_entry in enumerate(entries):
+            entry_context = f"{context}[{index}]"
+            entry = _object(raw_entry, entry_context)
+            _require_exact_fields(entry, {"pathspec", "reason"}, entry_context)
+            pathspec = _text(entry.get("pathspec"), f"{entry_context}.pathspec", concrete=True)
+            _text(entry.get("reason"), f"{entry_context}.reason", concrete=True)
+            if pathspec in pathspecs:
+                raise ProtocolError(f"{context} contains duplicate pathspec {pathspec!r}.")
+            pathspecs.add(pathspec)
+
+
 def _command_result(value: Any, context: str) -> None:
     record = _object(value, context)
+    _require_exact_fields(record, {"command", "result"}, context)
     command = _text(record.get("command"), f"{context}.command", concrete=True)
     _text(record.get("result"), f"{context}.result", concrete=True)
     if PLACEHOLDER_TOKEN.search(command):
@@ -209,6 +284,27 @@ def _sha256(value: Any, context: str) -> str:
     return digest
 
 
+def _inventory_digest(row: dict[str, Any]) -> str:
+    content = {key: value for key, value in row.items() if key != "id"}
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _digest_map(value: Any, context: str, expected_ids: set[str]) -> dict[str, str]:
+    digests = {
+        _text(raw_id, f"{context} key", concrete=True): _sha256(digest, f"{context}.{raw_id}")
+        for raw_id, digest in _object(value, context).items()
+    }
+    actual_ids = set(digests)
+    if actual_ids != expected_ids:
+        raise ProtocolError(
+            f"{context} must bind the exact owned IDs: "
+            f"missing={sorted(expected_ids - actual_ids)}, "
+            f"unexpected={sorted(actual_ids - expected_ids)}."
+        )
+    return digests
+
+
 def _workspace_entries(value: Any, context: str) -> dict[str, dict[str, Any]]:
     entries: dict[str, dict[str, Any]] = {}
     for index, raw_entry in enumerate(_array(value, context)):
@@ -220,7 +316,7 @@ def _workspace_entries(value: Any, context: str) -> dict[str, dict[str, Any]]:
         required_fields = {
             "file": {"path", "kind", "executable", "sha256"},
             "symlink": {"path", "kind", "sha256"},
-            "gitlink": {"path", "kind", "head", "status_sha256"},
+            "gitlink": {"path", "kind", "head"},
             "directory": {"path", "kind"},
             "missing": {"path", "kind"},
         }
@@ -241,7 +337,6 @@ def _workspace_entries(value: Any, context: str) -> dict[str, dict[str, Any]]:
             head = _text(entry["head"], f"{context}[{index}].head")
             if not re.fullmatch(r"[0-9a-f]{40,64}", head):
                 raise ProtocolError(f"{context}[{index}].head must be a Git object ID.")
-            _sha256(entry["status_sha256"], f"{context}[{index}].status_sha256")
         entries[path] = entry
     if list(entries) != sorted(entries):
         raise ProtocolError(f"{context} must be sorted by path.")
@@ -254,6 +349,7 @@ def _workspace_paths(value: Any, context: str) -> set[str]:
 
 def _evidence_artifacts(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
     artifacts: dict[str, dict[str, Any]] = {}
+    artifact_identities: dict[FileIdentity, str] = {}
     role_ids: dict[str, set[str]] = {
         "complete-diff": set(),
         "review-state": set(),
@@ -266,7 +362,14 @@ def _evidence_artifacts(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
         artifact_id = _text(artifact.get("id"), f"evidence_artifacts[{index}].id")
         if artifact_id in artifacts:
             raise ProtocolError(f"Duplicate evidence artifact ID: {artifact_id}.")
-        path, data, digest = _descriptor(artifact, f"evidence artifact {artifact_id}")
+        path, data, digest, identity = _descriptor(artifact, f"evidence artifact {artifact_id}")
+        existing_artifact = artifact_identities.get(identity)
+        if existing_artifact is not None:
+            raise ProtocolError(
+                f"Duplicate evidence artifact file identity for "
+                f"{existing_artifact} and {artifact_id}."
+            )
+        artifact_identities[identity] = artifact_id
         role = artifact.get("role")
         if role not in {"complete-diff", "review-state", "repository-status", "supporting"}:
             raise ProtocolError(f"Evidence artifact {artifact_id} has an invalid role: {role!r}.")
@@ -394,9 +497,7 @@ def validate_receipt_data(
         "before",
         "after",
     }
-    missing = sorted(required - receipt.keys())
-    if missing:
-        raise ProtocolError(f"Verification receipt is missing fields: {missing}.")
+    _require_exact_fields(receipt, required, "Verification receipt")
     if type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1:
         raise ProtocolError("Verification receipt schema_version must be integer 1.")
     if type(receipt["exit_status"]) is not int or receipt["exit_status"] != 0:
@@ -429,7 +530,8 @@ def validate_packet(
     prior_ledger_path: Path | None = None,
     prior_ledger_sha256: str | None = None,
 ) -> dict[str, Any]:
-    packet = _load_json(path)
+    packet_path, packet_data, _ = _read_bytes(str(path.resolve()), "packet")
+    packet = _json_bytes(packet_data, str(packet_path))
     if type(packet.get("schema_version")) is not int or packet["schema_version"] != 1:
         raise ProtocolError("Packet schema_version must be integer 1.")
     for dotted_path in REQUIRED_PACKET_TEXT:
@@ -450,7 +552,7 @@ def validate_packet(
     if _at(packet, "task.id") != expected_task_id:
         raise ProtocolError("packet task.id must match the control-plane task ID.")
 
-    packet_size = path.stat().st_size
+    packet_size = len(packet_data)
     overage_reason = _text(packet.get("packet_overage_reason"), "packet_overage_reason")
     if packet_size > PACKET_SOFT_LIMIT_BYTES and overage_reason.strip().lower() in SENTINELS:
         raise ProtocolError(
@@ -506,6 +608,7 @@ def validate_packet(
     component_manifests = _object(manifests.get("components"), "manifests.components")
     if set(component_manifests) != set(components):
         raise ProtocolError("Component manifest and review-state names must match exactly.")
+    _dependency_map(manifests.get("dependency_map"), set(components))
     for name, manifest_path in component_manifests.items():
         if (
             _pathspec_file(manifest_path, f"manifests.components[{name!r}]")
@@ -514,6 +617,7 @@ def validate_packet(
             raise ProtocolError(f"Component manifest {name!r} must match review state exactly.")
 
     inventory_ids: set[str] = set()
+    inventory_digests: dict[str, str] = {}
     for index, raw_row in enumerate(_array(packet.get("inventory"), "inventory")):
         row = _object(raw_row, f"inventory[{index}]")
         row_id = _text(row.get("id"), f"inventory[{index}].id", concrete=True)
@@ -529,6 +633,7 @@ def validate_packet(
             raise ProtocolError(f"Inventory {row_id} is missing {kind} fields: {missing_fields}.")
         for field in INVENTORY_FIELDS[kind]:
             _text(row[field], f"inventory[{index}].{field}")
+        inventory_digests[row_id] = _inventory_digest(row)
     if not inventory_ids:
         raise ProtocolError("inventory must not be empty.")
 
@@ -545,13 +650,19 @@ def validate_packet(
         )
 
     ledger = _object(packet.get("ledger"), "ledger")
-    ledger_path, ledger_data = _read_bytes(ledger.get("path"), "ledger.path")
-    if ledger_path.resolve() != expected_ledger_path:
+    ledger_path, ledger_data, ledger_identity = _read_bytes(ledger.get("path"), "ledger.path")
+    if ledger_path != expected_ledger_path:
         raise ProtocolError("ledger.path must match the control-plane ledger path.")
     if _json_bytes(ledger_data, str(ledger_path)) != ledger:
         raise ProtocolError("ledger.path content must match the packet ledger exactly.")
     if ledger.get("task_id") != expected_task_id:
         raise ProtocolError("ledger.task_id must match the control-plane task ID.")
+    round_fingerprint = _sha256(
+        ledger.get("round_fingerprint"),
+        "ledger.round_fingerprint",
+    )
+    if round_fingerprint != combined:
+        raise ProtocolError("ledger.round_fingerprint must match the packet fingerprint.")
     authorized_budgets = [
         _integer(value, f"ledger.authorized_round_budgets[{index}]", minimum=1)
         for index, value in enumerate(
@@ -571,6 +682,7 @@ def validate_packet(
         )
     canonical_roots: dict[str, dict[str, Any]] = {}
     inventory_owners: dict[str, str] = {}
+    owned_evidence_ids: set[str] = set()
     for index, raw_root in enumerate(_array(ledger.get("root_causes"), "ledger.root_causes")):
         root = _object(raw_root, f"ledger.root_causes[{index}]")
         root_id = _text(root.get("id"), f"ledger.root_causes[{index}].id")
@@ -602,20 +714,39 @@ def validate_packet(
             "inventory_ids": root_inventory,
             "contract_evidence_ids": root_evidence,
         }
+        owned_evidence_ids.update(root_evidence)
     if set(inventory_owners) != inventory_ids:
         raise ProtocolError(
             "Every inventory ID must have exactly one canonical root owner; "
             f"unowned={sorted(inventory_ids - set(inventory_owners))}."
         )
+    evidence_bindings = _digest_map(
+        ledger.get("contract_evidence_sha256"),
+        "ledger.contract_evidence_sha256",
+        owned_evidence_ids,
+    )
+    inventory_bindings = _digest_map(
+        ledger.get("inventory_sha256"),
+        "ledger.inventory_sha256",
+        inventory_ids,
+    )
+    for evidence_id, digest in evidence_bindings.items():
+        if artifacts[evidence_id]["digest"] != digest:
+            raise ProtocolError(f"ledger evidence digest mismatch for {evidence_id}.")
+    for inventory_id, digest in inventory_bindings.items():
+        if inventory_digests[inventory_id] != digest:
+            raise ProtocolError(f"ledger inventory digest mismatch for {inventory_id}.")
 
     if current_round > 1 and (prior_ledger_path is None or prior_ledger_sha256 is None):
         raise ProtocolError("Rounds after 1 require a digest-bound prior ledger snapshot.")
     if prior_ledger_path is not None or prior_ledger_sha256 is not None:
         if prior_ledger_path is None or prior_ledger_sha256 is None:
             raise ProtocolError("Prior ledger path and SHA-256 must be supplied together.")
-        if prior_ledger_path.resolve() == expected_ledger_path:
+        prior_path, prior_data, prior_identity = _read_bytes(
+            str(prior_ledger_path), "prior ledger path"
+        )
+        if prior_identity == ledger_identity:
             raise ProtocolError("Prior ledger snapshot must be distinct from the current ledger.")
-        prior_path, prior_data = _read_bytes(str(prior_ledger_path), "prior ledger path")
         if not SHA256.fullmatch(prior_ledger_sha256):
             raise ProtocolError("Prior ledger SHA-256 must be a lowercase SHA-256 digest.")
         if hashlib.sha256(prior_data).hexdigest() != prior_ledger_sha256:
@@ -639,6 +770,10 @@ def validate_packet(
             )
         ]
         prior_round = _integer(prior.get("current_round"), "prior ledger.current_round", minimum=1)
+        prior_round_fingerprint = _sha256(
+            prior.get("round_fingerprint"),
+            "prior ledger.round_fingerprint",
+        )
         prior_remaining = _integer(
             prior.get("remaining_budget"), "prior ledger.remaining_budget", minimum=0
         )
@@ -650,7 +785,17 @@ def validate_packet(
             raise ProtocolError(
                 "ledger.current_round must match the prior round or advance by exactly one."
             )
+        if current_round == prior_round and authorized_budgets != prior_budgets:
+            raise ProtocolError(
+                "A same-round retry budget history must match the prior ledger snapshot."
+            )
+        if current_round == prior_round and round_fingerprint != prior_round_fingerprint:
+            raise ProtocolError(
+                "A same-round retry fingerprint must match the prior ledger snapshot."
+            )
         prior_roots: dict[str, dict[str, Any]] = {}
+        prior_owned_evidence_ids: set[str] = set()
+        prior_owned_inventory_ids: set[str] = set()
         for index, raw_root in enumerate(
             _array(prior.get("root_causes"), "prior ledger.root_causes")
         ):
@@ -672,6 +817,18 @@ def validate_packet(
                     )
                 ),
             }
+            prior_owned_evidence_ids.update(prior_roots[prior_id]["contract_evidence_ids"])
+            prior_owned_inventory_ids.update(prior_roots[prior_id]["inventory_ids"])
+        prior_evidence_bindings = _digest_map(
+            prior.get("contract_evidence_sha256"),
+            "prior ledger.contract_evidence_sha256",
+            prior_owned_evidence_ids,
+        )
+        prior_inventory_bindings = _digest_map(
+            prior.get("inventory_sha256"),
+            "prior ledger.inventory_sha256",
+            prior_owned_inventory_ids,
+        )
         for prior_id, prior_root in prior_roots.items():
             current_root = canonical_roots.get(prior_id)
             if current_root is None:
@@ -686,12 +843,38 @@ def validate_packet(
                 current_root["contract_evidence_ids"]
             ):
                 raise ProtocolError(f"ledger regressed ownership for prior root {prior_id}.")
+            for evidence_id in prior_root["contract_evidence_ids"]:
+                if evidence_bindings[evidence_id] != prior_evidence_bindings[evidence_id]:
+                    raise ProtocolError(f"ledger changed prior evidence {evidence_id}.")
+            for inventory_id in prior_root["inventory_ids"]:
+                if inventory_bindings[inventory_id] != prior_inventory_bindings[inventory_id]:
+                    raise ProtocolError(f"ledger changed prior inventory {inventory_id}.")
+            prior_evidence_digests = {
+                prior_evidence_bindings[evidence_id]
+                for evidence_id in prior_root["contract_evidence_ids"]
+            }
+            prior_inventory_digests = {
+                prior_inventory_bindings[inventory_id]
+                for inventory_id in prior_root["inventory_ids"]
+            }
+            content_new_evidence = {
+                evidence_id
+                for evidence_id in new_evidence
+                if artifacts[evidence_id]["digest"] not in prior_evidence_digests
+            }
+            content_new_inventory = {
+                inventory_id
+                for inventory_id in new_inventory
+                if inventory_bindings[inventory_id] not in prior_inventory_digests
+            }
             if (
                 prior_root["status"] == "closed"
                 and current_root["status"] == "open"
-                and not (new_inventory or new_evidence)
+                and not (content_new_inventory or content_new_evidence)
             ):
-                raise ProtocolError(f"ledger reopened prior root {prior_id} without new evidence.")
+                raise ProtocolError(
+                    f"ledger reopened prior root {prior_id} without content-new evidence."
+                )
 
     selected_dimensions = set(
         _strings(packet.get("selected_high_risk_dimensions"), "selected_high_risk_dimensions")
@@ -702,6 +885,8 @@ def validate_packet(
     reviewer_ids: set[str] = set()
     assigned_inventory: set[str] = set()
     assigned_dimensions: set[str] = set()
+    primary_specialty_owners: dict[str, str] = {}
+    high_risk_specialty_owners: dict[str, str] = {}
     for index, raw_assignment in enumerate(assignments):
         assignment = _object(raw_assignment, f"reviewer_assignments[{index}]")
         reviewer_id = _text(assignment.get("reviewer_id"), f"reviewer_assignments[{index}].id")
@@ -718,10 +903,28 @@ def validate_packet(
             raise ProtocolError(
                 f"Reviewer {reviewer_id} requires inventory and a primary specialty."
             )
+        for dimension in primary_dimensions:
+            normalized = dimension.strip().casefold()
+            existing_reviewer = primary_specialty_owners.get(normalized)
+            if existing_reviewer is not None:
+                raise ProtocolError(
+                    f"Reviewers {existing_reviewer} and {reviewer_id} have an overlapping "
+                    f"primary specialty: {dimension!r}."
+                )
+            primary_specialty_owners[normalized] = reviewer_id
         assigned_inventory.update(reviewer_inventory)
         reviewer_dimensions = set(
             _strings(assignment.get("high_risk_dimensions"), f"reviewer {reviewer_id} dimensions")
         )
+        for dimension in reviewer_dimensions:
+            normalized = dimension.strip().casefold()
+            existing_reviewer = high_risk_specialty_owners.get(normalized)
+            if existing_reviewer is not None:
+                raise ProtocolError(
+                    f"Reviewers {existing_reviewer} and {reviewer_id} have an overlapping "
+                    f"high-risk specialty: {dimension!r}."
+                )
+            high_risk_specialty_owners[normalized] = reviewer_id
         assigned_dimensions.update(reviewer_dimensions)
         reviewer_components = set(
             _strings(assignment.get("expected_components"), f"reviewer {reviewer_id} components")
@@ -752,39 +955,76 @@ def validate_packet(
         _array(verification.get("preflight_results"), "verification.preflight_results")
     ):
         _command_result(result, f"verification.preflight_results[{index}]")
-        preflight_commands.add(result["command"])
-    receipt_paths: set[Path] = set()
+        command = result["command"]
+        if command in preflight_commands:
+            raise ProtocolError(f"Duplicate preflight command: {command!r}.")
+        preflight_commands.add(command)
+    receipt_identities: set[FileIdentity] = set()
+    receipt_digests: set[str] = set()
+    receipt_digests_by_path: dict[str, str] = {}
+    receipt_commands: set[str] = set()
     for index, raw_receipt in enumerate(
         _array(verification.get("credited_receipts"), "verification.credited_receipts")
     ):
-        receipt_path, receipt_data, _ = _descriptor(
+        receipt_path, receipt_data, receipt_digest, receipt_identity = _descriptor(
             raw_receipt, f"verification.credited_receipts[{index}]"
         )
-        if receipt_path in receipt_paths:
-            raise ProtocolError(f"Duplicate credited receipt path: {receipt_path}.")
-        receipt_paths.add(receipt_path)
+        if receipt_identity in receipt_identities:
+            raise ProtocolError(f"Duplicate credited receipt file identity: {receipt_path}.")
+        if receipt_digest in receipt_digests:
+            raise ProtocolError(f"Duplicate credited receipt digest: {receipt_digest}.")
+        receipt_identities.add(receipt_identity)
+        receipt_digests.add(receipt_digest)
+        receipt_digests_by_path[str(receipt_path)] = receipt_digest
+        receipt = _json_bytes(receipt_data, str(receipt_path))
         validate_receipt_data(
-            _json_bytes(receipt_data, str(receipt_path)),
+            receipt,
             combined,
             components,
             state["repository_fingerprint"],
             preflight_commands,
         )
+        command = receipt["command"]
+        if command in receipt_commands:
+            raise ProtocolError(f"Duplicate credited receipt command: {command!r}.")
+        receipt_commands.add(command)
 
     _strings(packet.get("architecture_references"), "architecture_references")
     return {
-        "packet_path": str(path.resolve()),
+        "packet_path": str(packet_path),
         "packet_size_bytes": packet_size,
-        "packet_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "packet_sha256": hashlib.sha256(packet_data).hexdigest(),
+        "ledger_sha256": hashlib.sha256(ledger_data).hexdigest(),
         "review_state_path": str(artifacts[_at(packet, "review_state.evidence_id")]["path"]),
         "combined_fingerprint": combined,
         "components": components,
         "inventory_ids": sorted(inventory_ids),
         "reviewer_ids": sorted(reviewer_ids),
-        "credited_receipt_paths": sorted(
-            str(receipt_path.resolve()) for receipt_path in receipt_paths
-        ),
+        "credited_receipt_digests": dict(sorted(receipt_digests_by_path.items())),
+        "credited_receipt_paths": sorted(receipt_digests_by_path),
     }
+
+
+def _revalidate_control_files(
+    packet_path: Path,
+    expected_ledger_path: Path,
+    prior_ledger_path: Path | None,
+    prior_ledger_sha256: str | None,
+    summary: dict[str, Any],
+) -> tuple[dict[str, Any], bytes | None]:
+    packet_data = _read_unchanged(packet_path, summary["packet_sha256"], "Packet")
+    packet = _json_bytes(packet_data, str(packet_path.resolve()))
+    _read_unchanged(expected_ledger_path, summary["ledger_sha256"], "Current ledger")
+    if prior_ledger_path is None:
+        return packet, None
+    if prior_ledger_sha256 is None:
+        raise ProtocolError("Prior ledger path and SHA-256 must be supplied together.")
+    prior_ledger_data = _read_unchanged(
+        prior_ledger_path,
+        prior_ledger_sha256,
+        "Prior ledger",
+    )
+    return packet, prior_ledger_data
 
 
 def validate_reviewer_output(
@@ -803,11 +1043,15 @@ def validate_reviewer_output(
         prior_ledger_path,
         prior_ledger_sha256,
     )
-    packet = _load_json(packet_path)
+    packet, prior_ledger_data = _revalidate_control_files(
+        packet_path,
+        expected_ledger_path,
+        prior_ledger_path,
+        prior_ledger_sha256,
+        summary,
+    )
     output = _load_json(output_path)
-    missing = sorted(REVIEWER_OUTPUT_FIELDS - output.keys())
-    if missing:
-        raise ProtocolError(f"Reviewer output is missing fields: {missing}.")
+    _require_exact_fields(output, REVIEWER_OUTPUT_FIELDS, "Reviewer output")
     if output["verdict"] not in {
         "clean",
         "findings require fixes",
@@ -816,11 +1060,12 @@ def validate_reviewer_output(
     }:
         raise ProtocolError(f"Invalid reviewer verdict: {output['verdict']!r}.")
     expected_fingerprints = {
+        "packet": summary["packet_sha256"],
         "combined": summary["combined_fingerprint"],
         "components": summary["components"],
     }
     if output["reviewed_fingerprints"] != expected_fingerprints:
-        raise ProtocolError("Reviewer fingerprints do not match the packet exactly.")
+        raise ProtocolError("Reviewer packet digest or fingerprints do not match exactly.")
     assignment = next(
         (item for item in packet["reviewer_assignments"] if item.get("reviewer_id") == reviewer_id),
         None,
@@ -834,6 +1079,11 @@ def validate_reviewer_output(
         _array(output["unchecked_inventory_ids"], "unchecked_inventory_ids")
     ):
         item = _object(raw_item, f"unchecked_inventory_ids[{index}]")
+        _require_exact_fields(
+            item,
+            {"id", "reason"},
+            f"unchecked_inventory_ids[{index}]",
+        )
         unchecked_id = _text(item.get("id"), f"unchecked_inventory_ids[{index}].id")
         if unchecked_id in unchecked:
             raise ProtocolError(f"Duplicate unchecked inventory ID: {unchecked_id}.")
@@ -850,19 +1100,25 @@ def validate_reviewer_output(
 
     canonical_roots = {root["id"]: root for root in packet["ledger"]["root_causes"]}
     prior_canonical_roots: dict[str, dict[str, Any]] = {}
-    if prior_ledger_path is not None:
-        prior_ledger = _load_json(prior_ledger_path)
+    prior_evidence_bindings: dict[str, str] = {}
+    prior_inventory_bindings: dict[str, str] = {}
+    if prior_ledger_data is not None:
+        prior_ledger = _json_bytes(prior_ledger_data, str(prior_ledger_path))
         prior_canonical_roots = {root["id"]: root for root in prior_ledger["root_causes"]}
-    indexed_evidence = {artifact["id"] for artifact in packet["evidence_artifacts"]}
+        prior_evidence_bindings = prior_ledger["contract_evidence_sha256"]
+        prior_inventory_bindings = prior_ledger["inventory_sha256"]
+    evidence_digests = {
+        artifact["id"]: artifact["sha256"] for artifact in packet["evidence_artifacts"]
+    }
+    inventory_digests = packet["ledger"]["inventory_sha256"]
+    indexed_evidence = set(evidence_digests)
     indexed_inventory = {row["id"] for row in packet["inventory"]}
     owned_evidence = {
         evidence_id
         for root in canonical_roots.values()
         for evidence_id in root["contract_evidence_ids"]
     }
-    owned_inventory = {
-        inventory_id for root in canonical_roots.values() for inventory_id in root["inventory_ids"]
-    }
+    owned_evidence_digests = {evidence_digests[evidence_id] for evidence_id in owned_evidence}
     inventory_owners = {
         inventory_id: root_id
         for root_id, root in canonical_roots.items()
@@ -870,17 +1126,21 @@ def validate_reviewer_output(
     }
     findings = _array(output["findings"], "findings")
     proposed_roots: set[str] = set()
+    proposed_evidence_owners: dict[str, str] = {}
     for index, raw_finding in enumerate(findings):
         finding = _object(raw_finding, f"findings[{index}]")
-        missing_finding = sorted(FINDING_FIELDS - finding.keys())
-        if missing_finding:
-            raise ProtocolError(f"Finding {index} is missing fields: {missing_finding}.")
+        _require_exact_fields(finding, FINDING_FIELDS, f"Finding {index}")
         if finding["priority"] not in {"P0", "P1", "P2", "P3"}:
             raise ProtocolError(f"Finding {index} has an invalid priority.")
         for field in FINDING_FIELDS - {"priority", "root_cause_id", "root_cause_evidence"}:
             _text(finding[field], f"findings[{index}].{field}")
         root_id = _text(finding["root_cause_id"], f"findings[{index}].root_cause_id")
         evidence = _object(finding["root_cause_evidence"], f"findings[{index}].root_cause_evidence")
+        _require_exact_fields(
+            evidence,
+            {"new_contract_evidence_ids", "new_inventory_ids"},
+            f"findings[{index}].root_cause_evidence",
+        )
         new_evidence = set(
             _strings(evidence.get("new_contract_evidence_ids"), f"finding {index} evidence")
         )
@@ -914,20 +1174,64 @@ def validate_reviewer_output(
                 raise ProtocolError(
                     f"Finding {index} root evidence must be new in the current ledger round."
                 )
-            new_for_root = bool(new_evidence or new_inventory)
+            prior_evidence_digests = {
+                prior_evidence_bindings[evidence_id] for evidence_id in prior_evidence
+            }
+            prior_inventory_digests = {
+                prior_inventory_bindings[inventory_id] for inventory_id in prior_inventory
+            }
+            content_new_evidence = {
+                evidence_id
+                for evidence_id in new_evidence
+                if evidence_digests[evidence_id] not in prior_evidence_digests
+            }
+            content_new_inventory = {
+                inventory_id
+                for inventory_id in new_inventory
+                if inventory_digests[inventory_id] not in prior_inventory_digests
+            }
+            new_for_root = bool(content_new_evidence or content_new_inventory)
             if root["status"] == "closed" and not new_for_root:
                 raise ProtocolError(
-                    f"Finding {index} reopens closed root {root_id} without new evidence."
+                    f"Finding {index} reopens closed root {root_id} without content-new evidence."
                 )
         elif not NEW_ROOT_CAUSE_ID.fullmatch(root_id):
             raise ProtocolError(
                 f"Finding {index} must reuse a canonical root ID or propose NEW:<slug>."
             )
-        elif not (new_evidence - owned_evidence or new_inventory - owned_inventory):
-            raise ProtocolError(
-                f"Finding {index} proposes {root_id} without globally unowned evidence."
-            )
         else:
+            if new_inventory:
+                raise ProtocolError(
+                    f"Finding {index} new root proposal cannot reuse canonical inventory: "
+                    f"{sorted(new_inventory)}."
+                )
+            proposal_digests = {
+                evidence_digests[evidence_id]
+                for evidence_id in new_evidence
+                if evidence_digests[evidence_id] not in owned_evidence_digests
+            }
+            available_digests = {
+                digest
+                for digest in proposal_digests
+                if proposed_evidence_owners.get(digest) in {None, root_id}
+            }
+            if not available_digests:
+                existing_owners = sorted(
+                    {
+                        proposed_evidence_owners[digest]
+                        for digest in proposal_digests
+                        if digest in proposed_evidence_owners
+                    }
+                )
+                if existing_owners:
+                    raise ProtocolError(
+                        f"Finding {index} reuses evidence owned by proposed root {existing_owners}."
+                    )
+                raise ProtocolError(
+                    f"Finding {index} proposes {root_id} without content-new evidence."
+                )
+            for digest in available_digests:
+                proposed_evidence_owners.setdefault(digest, root_id)
             proposed_roots.add(root_id)
 
     uncertainty = _strings(output["remaining_uncertainty"], "remaining_uncertainty")
@@ -946,6 +1250,11 @@ def validate_reviewer_output(
         _array(output["sibling_scenario_scan"], "sibling_scenario_scan")
     ):
         scan = _object(raw_scan, f"sibling_scenario_scan[{index}]")
+        _require_exact_fields(
+            scan,
+            {"root_cause_id", "inventory_ids", "result"},
+            f"sibling_scenario_scan[{index}]",
+        )
         root_id = _text(scan.get("root_cause_id"), f"sibling_scenario_scan[{index}].root_cause_id")
         if root_id not in canonical_roots and root_id not in proposed_roots:
             raise ProtocolError(
@@ -961,6 +1270,41 @@ def validate_reviewer_output(
         "verdict": output["verdict"],
         "combined_fingerprint": summary["combined_fingerprint"],
         "finding_count": len(findings),
+    }
+
+
+def _validate_credited_receipt(
+    packet_path: Path,
+    receipt_path: Path,
+    expected_task_id: str,
+    expected_ledger_path: Path,
+    prior_ledger_path: Path | None = None,
+    prior_ledger_sha256: str | None = None,
+) -> dict[str, Any]:
+    summary = validate_packet(
+        packet_path,
+        expected_task_id,
+        expected_ledger_path,
+        prior_ledger_path,
+        prior_ledger_sha256,
+    )
+    _revalidate_control_files(
+        packet_path,
+        expected_ledger_path,
+        prior_ledger_path,
+        prior_ledger_sha256,
+        summary,
+    )
+    canonical_receipt_path = receipt_path.resolve()
+    expected_digest = summary["credited_receipt_digests"].get(str(canonical_receipt_path))
+    if expected_digest is None:
+        raise ProtocolError("The receipt path is not indexed by the validated packet.")
+    _read_unchanged(canonical_receipt_path, expected_digest, "Receipt")
+    return {
+        "receipt_path": str(canonical_receipt_path),
+        "receipt_sha256": expected_digest,
+        "combined_fingerprint": summary["combined_fingerprint"],
+        "reusable": True,
     }
 
 
@@ -1002,21 +1346,14 @@ def main() -> None:
                 args.prior_ledger_sha256,
             )
         else:
-            summary = validate_packet(
+            result = _validate_credited_receipt(
                 args.packet,
+                args.receipt,
                 args.task_id,
                 args.ledger,
                 args.prior_ledger,
                 args.prior_ledger_sha256,
             )
-            receipt_path = str(args.receipt.resolve())
-            if receipt_path not in summary["credited_receipt_paths"]:
-                raise ProtocolError("The receipt path is not indexed by the validated packet.")
-            result = {
-                "receipt_path": receipt_path,
-                "combined_fingerprint": summary["combined_fingerprint"],
-                "reusable": True,
-            }
     except ProtocolError as error:
         parser.error(str(error))
     print(json.dumps(result, indent=2, sort_keys=True))

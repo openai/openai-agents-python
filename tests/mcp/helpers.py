@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
+import sys
 from typing import Any
 
 from mcp import Tool as MCPToolType
@@ -24,8 +24,7 @@ from agents.tool import ToolErrorFunction
 
 from .model_compat import ListResourceTemplatesResult, Tool as MCPTool
 
-tee = shutil.which("tee") or ""
-assert tee, "tee not found"
+tee = sys.executable
 
 
 # Added dummy stream classes for patching stdio_client to avoid real I/O during tests

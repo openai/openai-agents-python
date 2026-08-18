@@ -139,7 +139,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 def _suppress_griffe_logging():
     # Suppresses warnings about missing annotations for params
     logger = logging.getLogger("griffe")
-    previous_level = logger.getEffectiveLevel()
+    previous_level = logger.level
     logger.setLevel(logging.ERROR)
     try:
         yield

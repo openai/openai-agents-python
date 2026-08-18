@@ -1,6 +1,6 @@
 interface:
   display_name: "Runtime Behavior Probe"
   short_description: "Plan and run runtime behavior probes"
-  default_prompt: "Use $runtime-behavior-probe to investigate actual runtime behavior with a validation matrix, explicit state controls, and a findings-first report."
+  default_prompt: "Use $runtime-behavior-probe to plan an investigation of actual runtime behavior with a validation matrix and explicit state controls. Before executing every probe, disclose the source identity, exact command, transitively executed material, available filesystem, environment, network, and host-service capabilities, side effects, and control, then wait for explicit user approval of that exact probe or matrix. Invoking this skill is not execution approval. After approval, run only the approved scope and produce a findings-first report."
 policy:
   allow_implicit_invocation: false

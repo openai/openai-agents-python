@@ -1427,7 +1427,7 @@ class DockerSandboxSession(BaseSandboxSession):
             archive.seek(0)
             await self._stream_into_exec(
                 cmd=["tar", "-x", "-C", root.as_posix()],
-                stream=archive,
+                stream=cast(io.IOBase, archive),
                 error_path=error_root,
             )
 

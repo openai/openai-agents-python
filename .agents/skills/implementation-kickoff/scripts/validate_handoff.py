@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -22,6 +24,7 @@ def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedP
         check=False,
         capture_output=True,
         text=True,
+        errors="surrogateescape",
     )
     if check and result.returncode != 0:
         command = "git " + " ".join(args)
@@ -63,8 +66,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _nonblocking_opener(path: str, flags: int) -> int:
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
 def load_shipped_paths(path: Path) -> set[str]:
-    lines = path.read_text().splitlines()
+    with open(path, "rb", opener=_nonblocking_opener) as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            raise ValueError(f"Shipped-path manifest must be a regular file: {path}")
+        lines = file.read().decode().splitlines()
     if not lines:
         raise ValueError(f"Shipped-path manifest is empty: {path}")
 
@@ -84,20 +94,78 @@ def load_shipped_paths(path: Path) -> set[str]:
     return shipped_paths
 
 
+def is_repository_root(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    result = run_git(path, "rev-parse", "--show-toplevel", check=False)
+    return result.returncode == 0 and Path(result.stdout.strip()).resolve() == path.resolve()
+
+
+def hidden_index_paths(
+    repo: Path,
+    prefix: str = "",
+    seen_repositories: frozenset[Path] = frozenset(),
+) -> list[str]:
+    resolved_repo = repo.resolve()
+    if resolved_repo in seen_repositories:
+        return []
+    seen_repositories |= {resolved_repo}
+
+    def display_path(relative_path: str) -> str:
+        return f"{prefix}/{relative_path}" if prefix else relative_path
+
+    hidden_paths: list[str] = []
+    for entry in run_git(repo, "ls-files", "-v", "-z").stdout.split("\0"):
+        if len(entry) < 3 or entry[1] != " ":
+            continue
+        tag = entry[0]
+        relative_path = entry[2:]
+        if tag.islower():
+            hidden_paths.append(f"assume-unchanged={display_path(relative_path)}")
+        elif tag == "S":
+            candidate = repo / relative_path
+            if candidate.exists() or candidate.is_symlink():
+                hidden_paths.append(f"materialized skip-worktree={display_path(relative_path)}")
+    for entry in run_git(repo, "ls-files", "--stage", "-z").stdout.split("\0"):
+        metadata, separator, relative_path = entry.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[0] != "160000" or fields[2] != "0":
+            continue
+        submodule_path = repo / relative_path
+        if is_repository_root(submodule_path):
+            hidden_paths.extend(
+                hidden_index_paths(
+                    submodule_path,
+                    display_path(relative_path),
+                    seen_repositories,
+                )
+            )
+    return sorted(hidden_paths)
+
+
 def validate(args: argparse.Namespace) -> tuple[dict[str, object], list[str]]:
     repo = args.repo.expanduser().resolve()
     failures: list[str] = []
 
     if not repo.is_dir():
-        return {"repo": str(repo)}, [f"Repository path does not exist: {repo}"]
+        return {"repo": str(repo), "valid": False}, [f"Repository path does not exist: {repo}"]
 
     top_level = Path(run_git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
     if top_level != repo:
         failures.append(f"--repo must be the worktree root: expected {top_level}, got {repo}")
 
-    status = run_git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout
+    status = run_git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ).stdout
     if status:
         failures.append("Worktree is not clean.")
+    hidden_paths = hidden_index_paths(repo)
+    if hidden_paths:
+        failures.append(f"Index flags can hide worktree changes: {hidden_paths}.")
 
     branch_result = run_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
@@ -151,12 +219,18 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, object], list[str]]:
     if not subject:
         failures.append("HEAD commit subject is empty.")
 
-    body = run_git(repo, "show", "-s", "--format=%B", "HEAD").stdout
-    trailer_pattern = re.compile(r"^Co-authored-by:\s*.+\s+<([^>]+)>\s*$", re.IGNORECASE)
+    trailer_values = run_git(
+        repo,
+        "show",
+        "-s",
+        "--format=%(trailers:key=Co-authored-by,valueonly,unfold,separator=%x00)",
+        "HEAD",
+    ).stdout.rstrip("\n")
+    email_pattern = re.compile(r"^.+\s+<([^>\n]+)>$")
     trailer_emails = {
         match.group(1).strip().casefold()
-        for line in body.splitlines()
-        if (match := trailer_pattern.match(line)) is not None
+        for value in trailer_values.split("\0")
+        if (match := email_pattern.match(value)) is not None
     }
     for email in args.required_trailer_email:
         if email.strip().casefold() not in trailer_emails:
@@ -169,7 +243,7 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, object], list[str]]:
         "branch": branch,
         "subject": subject,
         "ahead": ahead,
-        "clean": not status,
+        "clean": not status and not hidden_paths,
         "coauthor_trailer_emails": sorted(trailer_emails),
         "shipped_path_manifest": shipped_manifest,
         "shipped_paths": shipped_paths,
