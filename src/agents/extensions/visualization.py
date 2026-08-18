@@ -22,6 +22,15 @@ def _escape_label(name: str) -> str:
     )
 
 
+def _handoff_target_agent(handoff: Handoff) -> Agent | None:
+    """Return the live Agent target for a ``handoff()`` object, if available."""
+    agent_ref = handoff._agent_ref
+    if agent_ref is None:
+        return None
+    target = agent_ref()
+    return target if isinstance(target, Agent) else None
+
+
 def get_main_graph(agent: Agent) -> str:
     """
     Generates the main graph structure in DOT format for the given agent.
@@ -99,13 +108,6 @@ def get_all_nodes(
         )
 
     for handoff in agent.handoffs:
-        if isinstance(handoff, Handoff):
-            name = _escape_label(handoff.agent_name)
-            parts.append(
-                f'"{name}" [label="{name}", '
-                f'shape=box, style="filled,rounded", '
-                f"fillcolor=lightyellow, width=1.5, height=0.8];"
-            )
         if isinstance(handoff, Agent):
             if handoff.name not in visited:
                 name = _escape_label(handoff.name)
@@ -115,6 +117,26 @@ def get_all_nodes(
                     f"fillcolor=lightyellow, width=1.5, height=0.8];"
                 )
             parts.append(get_all_nodes(handoff, agent, visited))
+            continue
+
+        if isinstance(handoff, Handoff):
+            target = _handoff_target_agent(handoff)
+            if target is not None:
+                if target.name not in visited:
+                    name = _escape_label(target.name)
+                    parts.append(
+                        f'"{name}" [label="{name}", '
+                        f'shape=box, style="filled,rounded", '
+                        f"fillcolor=lightyellow, width=1.5, height=0.8];"
+                    )
+                parts.append(get_all_nodes(target, agent, visited))
+            else:
+                name = _escape_label(handoff.agent_name)
+                parts.append(
+                    f'"{name}" [label="{name}", '
+                    f'shape=box, style="filled,rounded", '
+                    f"fillcolor=lightyellow, width=1.5, height=0.8];"
+                )
 
     return "".join(parts)
 
@@ -158,13 +180,21 @@ def get_all_edges(
         "{server_name}" -> "{agent_name}" [style=dashed, penwidth=1.5];""")
 
     for handoff in agent.handoffs:
-        if isinstance(handoff, Handoff):
-            parts.append(f"""
-            "{agent_name}" -> "{_escape_label(handoff.agent_name)}";""")
         if isinstance(handoff, Agent):
             parts.append(f"""
             "{agent_name}" -> "{_escape_label(handoff.name)}";""")
             parts.append(get_all_edges(handoff, agent, visited))
+            continue
+
+        if isinstance(handoff, Handoff):
+            target = _handoff_target_agent(handoff)
+            if target is not None:
+                parts.append(f"""
+            "{agent_name}" -> "{_escape_label(target.name)}";""")
+                parts.append(get_all_edges(target, agent, visited))
+            else:
+                parts.append(f"""
+            "{agent_name}" -> "{_escape_label(handoff.agent_name)}";""")
 
     if not agent.handoffs:
         parts.append(f'"{agent_name}" -> "__end__";')

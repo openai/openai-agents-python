@@ -270,7 +270,13 @@ def test_draw_graph_with_real_handoff_object():
     get_all_edges (rather than the ``isinstance(handoff, Agent)`` branches),
     using the public ``handoff()`` factory rather than ``Mock(spec=Handoff)``.
     """
-    child_agent = Agent(name="ChildAgent", instructions="Child instructions")
+    child_tool = Mock()
+    child_tool.name = "ChildTool"
+    child_agent = Agent(
+        name="ChildAgent",
+        instructions="Child instructions",
+        tools=[child_tool],
+    )
     real_handoff = handoff(child_agent)
     assert isinstance(real_handoff, Handoff)
 
@@ -284,12 +290,40 @@ def test_draw_graph_with_real_handoff_object():
 
     assert isinstance(graph, graphviz.Source)
     assert '"ParentAgent"' in graph.source
-    # Node uses agent_name from the Handoff object
+    # Node uses the live handoff target agent, matching Agent-in-handoffs graphs.
     assert (
         '"ChildAgent" [label="ChildAgent", shape=box, style="filled,rounded", '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
     )
-    # Edge points from parent to handoff agent_name
+    assert (
+        '"ChildTool" [label="ChildTool", shape=ellipse, style=filled, '
+        "fillcolor=lightgreen, width=0.5, height=0.3];" in graph.source
+    )
+    # Edge points from parent to handoff target
     assert '"ParentAgent" -> "ChildAgent";' in graph.source
     # Parent has handoffs, so should NOT connect directly to __end__
     assert '"ParentAgent" -> "__end__"' not in graph.source
+    # Child has no handoffs, so should connect to __end__ like Agent handoffs.
+    assert '"ChildAgent" -> "__end__"' in graph.source
+
+
+def test_draw_graph_keeps_stub_for_handoff_without_agent_ref():
+    """Handoff objects without a recoverable agent remain name-only stubs."""
+    stub_handoff = Mock(spec=Handoff)
+    stub_handoff.agent_name = "ExternalHandoff"
+    stub_handoff._agent_ref = None
+
+    parent_agent = Agent(
+        name="ParentAgent",
+        instructions="Parent instructions",
+        handoffs=[stub_handoff],
+    )
+
+    graph = draw_graph(parent_agent)
+
+    assert (
+        '"ExternalHandoff" [label="ExternalHandoff", shape=box, style="filled,rounded", '
+        "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
+    )
+    assert '"ParentAgent" -> "ExternalHandoff";' in graph.source
+    assert '"ExternalHandoff" -> "__end__"' not in graph.source
