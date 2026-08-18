@@ -114,6 +114,8 @@ from .utils.factories import make_run_state
 from .utils.hitl import make_context_wrapper, make_model_and_agent, make_shell_call
 from .utils.simple_session import CountingSession, IdStrippingSession, SimpleListSession
 
+_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
+
 
 class _DummyRunItem:
     def __init__(self, payload: dict[str, Any], item_type: str = "tool_call_output_item"):
@@ -4583,9 +4585,11 @@ async def test_resumed_final_output_persists_once_after_passing_output_guardrail
 
 @pytest.mark.parametrize("tripwire_triggered", [False, True])
 @pytest.mark.asyncio
-async def test_resumed_final_tool_persists_call_and_output_after_output_guardrail(
+async def test_resumed_final_tool_sanitizes_output_after_output_guardrail_tripwire(
     tripwire_triggered: bool,
 ) -> None:
+    tool_calls = 0
+
     def guardrail_function(
         _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
     ) -> GuardrailFunctionOutput:
@@ -4596,7 +4600,9 @@ async def test_resumed_final_tool_persists_call_and_output_after_output_guardrai
 
     @function_tool(name_override="commit_tool")
     def commit_tool() -> str:
-        return "committed-result"
+        nonlocal tool_calls
+        tool_calls += 1
+        return f"committed-result-{tool_calls}"
 
     session = SimpleListSession()
     model = ScriptedModel()
@@ -4624,7 +4630,7 @@ async def test_resumed_final_tool_persists_call_and_output_after_output_guardrai
             await Runner.run(agent, state, session=session)
     else:
         result = await Runner.run(agent, state, session=session)
-        assert result.final_output == "committed-result"
+        assert result.final_output == "committed-result-2"
 
     assert state._current_turn_persisted_item_count == 4
     items = await session.get_items()
@@ -4641,6 +4647,60 @@ async def test_resumed_final_tool_persists_call_and_output_after_output_guardrai
         ("function_call", "call-second"),
         ("function_call_output", "call-second"),
     ]
+    second_output = cast(dict[str, Any], items[-1]).get("output")
+    assert second_output == (_BLOCKED_TOOL_OUTPUT if tripwire_triggered else "committed-result-2")
+
+    serialized_state = json.dumps(state.to_json())
+    if tripwire_triggered:
+        assert "committed-result-2" not in serialized_state
+
+
+@pytest.mark.parametrize("behavior_kind", ["stop_at_tools", "custom"])
+@pytest.mark.asyncio
+async def test_blocked_tool_output_is_sanitized_for_terminal_tool_behaviors(
+    behavior_kind: str,
+) -> None:
+    @function_tool(name_override="commit_tool")
+    def commit_tool() -> str:
+        return "sensitive-result"
+
+    def custom_behavior(
+        _context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    ) -> ToolsToFinalOutputResult:
+        return ToolsToFinalOutputResult(is_final_output=True, final_output=results[0].output)
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], _output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    tool_use_behavior: Any = (
+        {"stop_at_tool_names": ["commit_tool"]}
+        if behavior_kind == "stop_at_tools"
+        else custom_behavior
+    )
+    model = ScriptedModel([[get_function_tool_call("commit_tool", "{}", call_id="call-committed")]])
+    session = SimpleListSession()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[commit_tool],
+        tool_use_behavior=tool_use_behavior,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await Runner.run(agent, "Use commit_tool", session=session)
+
+    items = await session.get_items()
+    tool_output = next(
+        item
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    )
+    assert tool_output.get("call_id") == "call-committed"
+    assert tool_output.get("output") == _BLOCKED_TOOL_OUTPUT
+    assert "sensitive-result" not in json.dumps(items)
 
 
 @pytest.mark.asyncio

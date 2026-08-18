@@ -75,6 +75,8 @@ from .utils.hitl import (
 )
 from .utils.simple_session import CountingSession, SimpleListSession
 
+_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
+
 
 def _conversation_locked_error() -> BadRequestError:
     request = httpx.Request("POST", "https://example.com")
@@ -2239,13 +2241,20 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
 @pytest.mark.asyncio
-async def test_resumed_approved_tool_final_persists_call_output_before_output_guardrails(
+async def test_resumed_approved_tool_final_persists_output_after_output_guardrail_verdict(
     mode: str,
     tripwire: bool,
 ) -> None:
     guardrail_state = {"tripwire": tripwire}
 
-    @function_tool(name_override="approval_tool", needs_approval=True)
+    def extract_custom_data(_context: Any) -> dict[str, str]:
+        return {"duplicate": "approved-result"}
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        custom_data_extractor=extract_custom_data,
+    )
     def approval_tool() -> str:
         return "approved-result"
 
@@ -2303,7 +2312,15 @@ async def test_resumed_approved_tool_final_persists_call_output_before_output_gu
         ("function_call", "call-approved"),
         ("function_call_output", "call-approved"),
     ]
-    assert saved_tool_items[1].get("output") == "approved-result"
+    expected_output = _BLOCKED_TOOL_OUTPUT if tripwire else "approved-result"
+    assert saved_tool_items[1].get("output") == expected_output
+
+    serialized_state = json.dumps(state.to_json())
+    if tripwire:
+        assert "approved-result" not in serialized_state
+        assert _BLOCKED_TOOL_OUTPUT in serialized_state
+    else:
+        assert "approved-result" in serialized_state
 
     if tripwire:
         guardrail_state["tripwire"] = False
@@ -2323,7 +2340,7 @@ async def test_resumed_approved_tool_final_persists_call_output_before_output_gu
             ("function_call", "call-approved"),
             ("function_call_output", "call-approved"),
         ]
-        assert replayed_tool_items[1].get("output") == "approved-result"
+        assert replayed_tool_items[1].get("output") == _BLOCKED_TOOL_OUTPUT
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
@@ -2338,7 +2355,7 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     @function_tool(name_override="commit_tool")
     def commit_tool() -> str:
         calls.append("ran")
-        return "committed-result"
+        return "sensitive-result"
 
     def output_guardrail(
         _context: RunContextWrapper[Any],
@@ -2368,6 +2385,7 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     assert calls == ["ran"], "the tool never ran, so the test proves nothing"
 
     saved_items = await session.get_items()
+    assert "sensitive-result" not in json.dumps(saved_items)
     saved = [
         (item.get("type") or item.get("role"), item.get("call_id"))
         for item in saved_items
@@ -2378,6 +2396,7 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
         ("function_call", "call-committed"),
         ("function_call_output", "call-committed"),
     ]
+    assert cast(dict[str, Any], saved_items[-1]).get("output") == _BLOCKED_TOOL_OUTPUT
 
     # The next run must see the completed call instead of re-issuing the same side effect.
     agent.output_guardrails = []
@@ -2401,6 +2420,90 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
         ("function_call", "call-committed"),
         ("function_call_output", "call-committed"),
     ]
+    replayed_output = next(
+        item.get("output")
+        for item in model_input
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    )
+    assert replayed_output == _BLOCKED_TOOL_OUTPUT
+    assert "sensitive-result" not in json.dumps(model_input)
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_blocked_tool_output_cannot_be_forwarded_by_a_later_tool(mode: str) -> None:
+    secret_calls = 0
+    forwarded_values: list[str] = []
+    guardrail_outputs: list[Any] = []
+
+    @function_tool(name_override="secret_tool")
+    def secret_tool() -> str:
+        nonlocal secret_calls
+        secret_calls += 1
+        return "private-value"
+
+    @function_tool(name_override="record_replay")
+    def record_replay(value: str) -> str:
+        forwarded_values.append(value)
+        return "recorded"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        guardrail_outputs.append(output)
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=output == "private-value",
+        )
+
+    def forward_replayed_output(call: Any) -> list[Any]:
+        assert isinstance(call.input, list)
+        replayed_output = next(
+            item.get("output")
+            for item in call.input
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        )
+        return [
+            get_function_tool_call(
+                "record_replay",
+                json.dumps({"value": replayed_output}),
+                call_id="call-record",
+            )
+        ]
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("secret_tool", "{}", call_id="call-secret")],
+            ModelStep.respond(forward_replayed_output),
+        ]
+    )
+    session = SimpleListSession()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[secret_tool, record_replay],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+
+    async def run_once(input_value: str) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await run_once("Read the secret")
+
+    followup = await run_once("Forward the previous result")
+    assert followup.final_output == "recorded"
+    assert secret_calls == 1
+    assert forwarded_values == [_BLOCKED_TOOL_OUTPUT]
+    assert guardrail_outputs == ["private-value", "recorded"]
+    assert "private-value" not in json.dumps(await session.get_items())
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])

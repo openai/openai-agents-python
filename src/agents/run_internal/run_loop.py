@@ -53,6 +53,7 @@ from ..items import (
     ModelResponse,
     RunItem,
     ToolApprovalItem,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from ..lifecycle import RunHooks
@@ -459,6 +460,26 @@ async def _run_output_guardrails_for_stream(
 
 
 _SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
+_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
+
+
+def _sanitize_retained_function_tool_output(item: RunItem) -> None:
+    """Replace a blocked function-tool result before it enters replayable state."""
+    if not isinstance(item, ToolCallOutputItem) or not isinstance(item.raw_item, dict):
+        return
+    if item.raw_item.get("type") != "function_call_output":
+        return
+
+    item.raw_item = cast(
+        dict[str, Any],
+        {
+            **item.raw_item,
+            "output": _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+        },
+    )
+    item.output = _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    # Custom data is SDK-only and may duplicate the rejected tool result.
+    item.custom_data = None
 
 
 def _reasoning_indexes_tied_to_retained_items(
@@ -512,6 +533,8 @@ def _retained_items_for_blocked_output(items: list[RunItem]) -> list[RunItem]:
     # Reasoning items are not side effects themselves, but a reasoning model requires the reasoning
     # item tied to a function call to accompany it in the next request.
     retained_indexes |= _reasoning_indexes_tied_to_retained_items(items, retained_indexes)
+    for index in retained_indexes:
+        _sanitize_retained_function_tool_output(items[index])
     # Indexed rather than filtered by type so the retained items keep the model's own order.
     return [item for index, item in enumerate(items) if index in retained_indexes]
 
@@ -527,15 +550,9 @@ async def _finalize_streamed_final_output(
     items: list[RunItem],
     response_id: str | None,
     store_setting: bool | None,
-    persist_before_output_guardrails: bool,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
 ) -> None:
     redacted_persistence_error: BaseException | None = None
-    if persist_before_output_guardrails:
-        # A resumed approval has already committed the tool side effect, so keep its call/output
-        # pair even when an agent output guardrail blocks delivery of the final result.
-        await save_items(items, response_id, store_setting)
-
     try:
         output_guardrail_results = await _run_output_guardrails_for_stream(
             agent=agent,
@@ -549,10 +566,9 @@ async def _finalize_streamed_final_output(
         # has to see that side effect rather than re-issue it. This turn reaches here with tool
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
         # callable) turned a tool result straight into the final output.
-        if not persist_before_output_guardrails:
-            retained_items = _retained_items_for_blocked_output(items)
-            if retained_items:
-                await save_items(retained_items, response_id, store_setting)
+        retained_items = _retained_items_for_blocked_output(items)
+        if retained_items:
+            await save_items(retained_items, response_id, store_setting)
         raise
     except Exception as guardrail_error:
         # Only a tripwire means the output was judged undeliverable. A guardrail error leaves the
@@ -564,42 +580,41 @@ async def _finalize_streamed_final_output(
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
-        if not persist_before_output_guardrails:
-            try:
-                await save_items(items, response_id, store_setting)
-            except BaseException as persistence_error:
-                if guardrail_error_is_redacted:
-                    safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
-                    if (
-                        isinstance(safe_persistence_error, asyncio.CancelledError)
-                        and streamed_result._cancel_mode != "immediate"
-                    ):
-                        # A cancelled session write is distinct from the caller requesting
-                        # immediate cancellation. Retain a safe cancellation for `stream_events()`
-                        # without completing the run-loop task with the payload-bearing backend
-                        # exception.
-                        streamed_result._stored_exception = safe_persistence_error
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                        return
-                    if isinstance(safe_persistence_error, asyncio.CancelledError):
-                        # Public immediate cancellation already owns stream completion and must
-                        # not surface a recovery failure.
-                        return
-                    redacted_persistence_error = safe_persistence_error
+        try:
+            await save_items(items, response_id, store_setting)
+        except BaseException as persistence_error:
+            if guardrail_error_is_redacted:
+                safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
                 if (
-                    isinstance(persistence_error, asyncio.CancelledError)
+                    isinstance(safe_persistence_error, asyncio.CancelledError)
                     and streamed_result._cancel_mode != "immediate"
                 ):
-                    # A cancelled session write is distinct from the caller requesting immediate
-                    # cancellation. The run-loop task itself becomes cancelled, so retain the
-                    # backend cancellation for `stream_events()` to surface.
-                    streamed_result._stored_exception = persistence_error
-                if redacted_persistence_error is None:
-                    raise
-            else:
-                if on_persisted_after_guardrails is not None:
-                    on_persisted_after_guardrails(False)
+                    # A cancelled session write is distinct from the caller requesting
+                    # immediate cancellation. Retain a safe cancellation for `stream_events()`
+                    # without completing the run-loop task with the payload-bearing backend
+                    # exception.
+                    streamed_result._stored_exception = safe_persistence_error
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    return
+                if isinstance(safe_persistence_error, asyncio.CancelledError):
+                    # Public immediate cancellation already owns stream completion and must
+                    # not surface a recovery failure.
+                    return
+                redacted_persistence_error = safe_persistence_error
+            if (
+                isinstance(persistence_error, asyncio.CancelledError)
+                and streamed_result._cancel_mode != "immediate"
+            ):
+                # A cancelled session write is distinct from the caller requesting immediate
+                # cancellation. The run-loop task itself becomes cancelled, so retain the
+                # backend cancellation for `stream_events()` to surface.
+                streamed_result._stored_exception = persistence_error
+            if redacted_persistence_error is None:
+                raise
+        else:
+            if on_persisted_after_guardrails is not None:
+                on_persisted_after_guardrails(False)
         if redacted_persistence_error is None:
             raise
 
@@ -608,22 +623,21 @@ async def _finalize_streamed_final_output(
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
 
-    if not persist_before_output_guardrails:
-        # Saved as one ordered batch so the session mirrors the model response. Doing it in two
-        # halves would both reorder the turn and, because the first save advances the turn's
-        # persisted-item count, make the second one a no-op.
-        if on_persisted_after_guardrails is None:
+    # Saved as one ordered batch so the session mirrors the model response. Doing it in two
+    # halves would both reorder the turn and, because the first save advances the turn's
+    # persisted-item count, make the second one a no-op.
+    if on_persisted_after_guardrails is None:
+        await save_items(items, response_id, store_setting)
+    else:
+        try:
             await save_items(items, response_id, store_setting)
-        else:
-            try:
-                await save_items(items, response_id, store_setting)
-            except asyncio.CancelledError as persistence_error:
-                if streamed_result._cancel_mode == "immediate":
-                    raise
-                streamed_result._stored_exception = persistence_error
-                streamed_result.is_complete = True
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                return
+        except asyncio.CancelledError as persistence_error:
+            if streamed_result._cancel_mode == "immediate":
+                raise
+            streamed_result._stored_exception = persistence_error
+            streamed_result.is_complete = True
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            return
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -1348,7 +1362,6 @@ async def start_streaming(
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
-                            persist_before_output_guardrails=True,
                         )
                         run_state._current_step = None
                         break
@@ -1538,7 +1551,6 @@ async def start_streaming(
                     items=[synthesized_item] if include_in_history else [],
                     response_id=None,
                     store_setting=store_setting,
-                    persist_before_output_guardrails=False,
                     on_persisted_after_guardrails=_record_max_turns_handler_output,
                 )
                 streamed_result._max_turns_handled = True
@@ -1740,7 +1752,6 @@ async def start_streaming(
                         items=turn_session_items,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
-                        persist_before_output_guardrails=False,
                     )
                     if run_state is not None:
                         run_state._current_step = None

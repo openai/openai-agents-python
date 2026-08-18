@@ -1086,6 +1086,7 @@ class AgentRunner:
                                 session_persistence_enabled
                                 and turn_session_items
                                 and run_state is not None
+                                and not isinstance(turn_result.next_step, NextStepFinalOutput)
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
@@ -1168,13 +1169,57 @@ class AgentRunner:
                             )
 
                             if isinstance(turn_result.next_step, NextStepFinalOutput):
-                                await run_output_guardrails(
-                                    current_agent.output_guardrails
-                                    + (run_config.output_guardrails or []),
-                                    current_agent,
-                                    turn_result.next_step.output,
-                                    context_wrapper,
-                                    output_guardrail_results,
+                                try:
+                                    await run_output_guardrails(
+                                        current_agent.output_guardrails
+                                        + (run_config.output_guardrails or []),
+                                        current_agent,
+                                        turn_result.next_step.output,
+                                        context_wrapper,
+                                        output_guardrail_results,
+                                    )
+                                except OutputGuardrailTripwireTriggered:
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=session_persistence_enabled,
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=_retained_items_for_blocked_output(
+                                            turn_session_items
+                                        ),
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
+                                    raise
+                                except (Exception, asyncio.CancelledError):
+                                    # An ordinary guardrail failure leaves the verdict unknown, so
+                                    # preserve the completed turn exactly as fresh execution does.
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=session_persistence_enabled,
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=turn_session_items,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
+                                    raise
+
+                                await save_final_turn_items_after_guardrails(
+                                    session=session,
+                                    run_state=run_state,
+                                    session_persistence_enabled=session_persistence_enabled,
+                                    input_guardrail_results=_attempt_input_guardrail_results(),
+                                    items=turn_session_items,
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
+                                    wrapper=context_wrapper,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
@@ -1202,21 +1247,6 @@ class AgentRunner:
                                 ) != list(session_items)
                                 if run_state is not None:
                                     result._trace_state = run_state._trace_state
-                                if session_persistence_enabled:
-                                    input_items_for_save_1: list[TResponseInputItem] = (
-                                        session_input_items_for_persistence
-                                        if session_input_items_for_persistence is not None
-                                        else []
-                                    )
-                                    await save_result_to_session(
-                                        session,
-                                        input_items_for_save_1,
-                                        session_items_for_turn(turn_result),
-                                        run_state,
-                                        response_id=turn_result.model_response.response_id,
-                                        store=store_setting,
-                                        wrapper=context_wrapper,
-                                    )
                                 result._original_input = copy_input_items(original_input)
                                 run_state._current_step = None
                                 return _finalize_result(result)
