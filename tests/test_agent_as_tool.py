@@ -41,6 +41,7 @@ from agents._tool_identity import resolve_tool_name_collisions
 from agents.agent_tool_input import StructuredToolInputBuilderOptions
 from agents.agent_tool_state import (
     get_agent_tool_state_scope,
+    record_agent_tool_resume_state,
     record_agent_tool_run_result,
     set_agent_tool_state_scope,
 )
@@ -1538,6 +1539,84 @@ async def test_agent_as_tool_rejected_nested_approval_resumes_run(
 
     assert output == "from_resume"
     assert run_inputs == [resume_state]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_cached_resume_rebinds_usage_to_outer_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached nested resume must bill its post-resume turns on the outer run's usage.
+
+    _copy_for_run_state now deep-copies usage so top-level checkpoints stay isolated.
+    That also detaches the nested Agent.as_tool() resume checkpoint, so the cached
+    resume path has to rebind usage onto the current outer ToolContext or the nested
+    model turns go missing from the outer RunResult.
+    """
+
+    agent = Agent(name="outer")
+    tool_call = make_function_tool_call(
+        "outer_tool",
+        call_id="outer-1",
+        arguments='{"input": "hello"}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="outer_tool",
+        tool_call_id="outer-1",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    tool_context.usage.requests = 3
+
+    class DummyState:
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
+
+    detached_context = ToolContext(
+        context=None,
+        tool_name=tool_call.name,
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    resume_state = DummyState(detached_context)
+    assert resume_state._context.usage is not tool_context.usage
+
+    # Store it as an in-flight resume checkpoint so the cached resume branch fires.
+    record_agent_tool_resume_state(tool_call, cast(Any, resume_state))
+
+    class DummyResumedResult:
+        def __init__(self) -> None:
+            self.interruptions: list[Any] = []
+            self.final_output = "done"
+
+    resumed_result = DummyResumedResult()
+    seen_usage: list[Any] = []
+
+    async def run_resume(cls, /, starting_agent, input, **kwargs) -> DummyResumedResult:
+        assert input is resume_state
+        # The rebind must land before the nested run so its turns accrue on the outer usage.
+        seen_usage.append(input._context.usage)
+        return resumed_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(run_resume))
+
+    async def extractor(result: Any) -> str:
+        assert result is resumed_result
+        return "from_resume"
+
+    tool = agent.as_tool(
+        tool_name="outer_tool",
+        tool_description="Outer agent tool",
+        custom_output_extractor=extractor,
+        is_enabled=True,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    assert output == "from_resume"
+    assert seen_usage == [tool_context.usage]
+    assert resume_state._context.usage is tool_context.usage
 
 
 @pytest.mark.asyncio
