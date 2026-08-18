@@ -74,9 +74,9 @@ from agents.sandbox.memory.storage import (
     _updated_at_sort_key,
 )
 from agents.sandbox.runtime import _stream_memory_input_override
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.workspace_paths import SandboxWorkspaceScope
 from agents.testing import ScriptedModel
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxClient
 from tests.test_responses import get_final_output_message, get_text_message
 from tests.utils.hitl import make_shell_call
 
@@ -92,7 +92,7 @@ class _DeclaredProviderMemoryGenerateConfig(MemoryGenerateConfig):
     phase_two_model_settings: _DeclaredProviderModelSettings | None = None
 
 
-class _DeleteTrackingUnixLocalSandboxClient(UnixLocalSandboxClient):
+class _DeleteTrackingFilesystemTestSandboxClient(FilesystemTestSandboxClient):
     def __init__(self) -> None:
         super().__init__()
         self.deleted_roots: list[Path] = []
@@ -215,7 +215,7 @@ def _raw_memory_record(
 
 
 async def _cleanup_session(
-    client: UnixLocalSandboxClient,
+    client: FilesystemTestSandboxClient,
     session: Any,
     *,
     close: bool = True,
@@ -600,7 +600,7 @@ def test_updated_at_sort_key_places_unknown_timestamps_last() -> None:
 
 @pytest.mark.asyncio
 async def test_phase_two_selection_tracks_added_retained_and_removed_rollouts() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
 
     try:
@@ -649,7 +649,7 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(phase_one_module, "_PHASE_ONE_ROLLOUT_TOKEN_LIMIT", 1000)
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
     memory = _memory_config(phase_one_model=phase_one_model)
@@ -721,7 +721,7 @@ async def test_runner_memory_generation_sanitizes_and_truncates_phase_one_prompt
 
 @pytest.mark.asyncio
 async def test_sandbox_agent_without_memory_capability_skips_memory_generation() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     agent = SandboxAgent(
         name="worker",
@@ -746,7 +746,7 @@ async def test_sandbox_agent_without_memory_capability_skips_memory_generation()
 
 @pytest.mark.asyncio
 async def test_memory_capability_returns_none_without_memory_summary() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(generate=None)
 
@@ -937,7 +937,7 @@ def test_memory_generate_config_rejects_too_many_raw_memories() -> None:
 async def test_memory_capability_injects_truncated_memory_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(generate=None)
 
@@ -966,7 +966,7 @@ async def test_memory_capability_injects_truncated_memory_summary(
 
 @pytest.mark.asyncio
 async def test_memory_capability_live_update_instructions() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(generate=None)
 
@@ -992,7 +992,7 @@ async def test_memory_capability_live_update_instructions() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_capability_renders_session_owned_paths_as_absolute_with_run_cwd() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(generate=None)
 
@@ -1025,7 +1025,7 @@ async def test_memory_capability_renders_session_owned_paths_as_absolute_with_ru
 async def test_memory_capability_preserves_layout_spelling_without_run_cwd(
     memories_dir: str,
 ) -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(
         layout=MemoryLayoutConfig(memories_dir=memories_dir),
@@ -1053,7 +1053,7 @@ async def test_memory_capability_preserves_layout_spelling_without_run_cwd(
 @pytest.mark.asyncio
 async def test_memory_capability_uses_typed_layout_path_with_run_cwd() -> None:
     memories_dir = r"team\memory"
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     capability = Memory(
         layout=MemoryLayoutConfig(memories_dir=memories_dir),
@@ -1085,7 +1085,7 @@ async def test_memory_capability_uses_typed_layout_path_with_run_cwd() -> None:
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
     phase_two_model = ScriptedModel(
@@ -1161,7 +1161,7 @@ async def test_sandbox_memory_writes_rollouts_and_memory_files() -> None:
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_uses_custom_layout() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_two_model = ScriptedModel(
         steps=[
@@ -1211,7 +1211,7 @@ async def test_sandbox_memory_uses_custom_layout() -> None:
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_supports_multiple_generating_layouts_in_one_session() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_two_model_a = ScriptedModel(
         steps=[
@@ -1282,7 +1282,7 @@ async def test_sandbox_memory_supports_multiple_generating_layouts_in_one_sessio
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_rejects_different_generate_configs_for_same_layout() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
     different_memory = _memory_config(
@@ -1300,7 +1300,7 @@ async def test_sandbox_memory_rejects_different_generate_configs_for_same_layout
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_rollout_payload_uses_validated_rollout_id() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
 
@@ -1327,7 +1327,7 @@ async def test_sandbox_memory_rollout_payload_uses_validated_rollout_id() -> Non
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_rejects_different_sessions_dirs_for_same_memories_dir() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     first_memory = _memory_config(
         layout=MemoryLayoutConfig(memories_dir="shared_memory", sessions_dir="sessions_a")
@@ -1347,7 +1347,7 @@ async def test_sandbox_memory_rejects_different_sessions_dirs_for_same_memories_
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_rejects_shared_sessions_dir_for_different_memories_dirs() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     first_memory = _memory_config(
         layout=MemoryLayoutConfig(memories_dir="memory_a", sessions_dir="shared_sessions")
@@ -1367,7 +1367,7 @@ async def test_sandbox_memory_rejects_shared_sessions_dir_for_different_memories
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_groups_segments_by_sdk_session_until_close() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel(steps=[[_phase_one_message(raw_memory="joined raw\n")]])
     phase_two_model = ScriptedModel(
@@ -1450,7 +1450,7 @@ async def test_sandbox_memory_groups_segments_by_sdk_session_until_close() -> No
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_fallback_does_not_mutate_run_config() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     agent_model = ScriptedModel()
     agent_model.extend(
@@ -1490,7 +1490,7 @@ async def test_sandbox_memory_fallback_does_not_mutate_run_config() -> None:
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_uses_conversation_id_when_sdk_session_is_absent() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     agent = SandboxAgent(
         name="worker",
@@ -1518,7 +1518,7 @@ async def test_sandbox_memory_uses_conversation_id_when_sdk_session_is_absent() 
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_uses_group_id_when_sdk_session_is_absent() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     agent_model = ScriptedModel()
     agent_model.extend(
@@ -1555,7 +1555,7 @@ async def test_sandbox_memory_uses_group_id_when_sdk_session_is_absent() -> None
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_uses_per_run_conversation_when_no_conversation_id() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     agent_model = ScriptedModel()
     agent_model.extend(
@@ -1588,7 +1588,7 @@ async def test_sandbox_memory_uses_per_run_conversation_when_no_conversation_id(
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_rollouts() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel()
     phase_one_model.extend(
@@ -1670,7 +1670,7 @@ async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_roll
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_runs_phase_one_and_phase_two_on_session_close() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
     phase_two_model = ScriptedModel(
@@ -1712,7 +1712,7 @@ async def test_sandbox_memory_runs_phase_one_and_phase_two_on_session_close() ->
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_unregisters_manager_on_session_close() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
 
@@ -1744,7 +1744,7 @@ async def test_sandbox_memory_flush_propagates_worker_base_exception_without_han
     monkeypatch: pytest.MonkeyPatch,
     worker_error: BaseException,
 ) -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
     manager = get_or_create_memory_generation_manager(session=session, memory=memory)
@@ -1781,7 +1781,7 @@ async def test_sandbox_memory_flush_propagates_worker_base_exception_without_han
 async def test_sandbox_memory_flush_parent_cancellation_stops_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     memory = _memory_config()
     manager = get_or_create_memory_generation_manager(session=session, memory=memory)
@@ -1862,7 +1862,7 @@ async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", tool_redacted)
     caplog.set_level(logging.WARNING)
 
-    client = _DeleteTrackingUnixLocalSandboxClient()
+    client = _DeleteTrackingFilesystemTestSandboxClient()
     agent = SandboxAgent(
         name="worker",
         model=ScriptedModel(steps=[[get_final_output_message("done")]]),
@@ -1907,7 +1907,7 @@ async def test_sandbox_memory_enqueue_failure_follows_both_data_policies(
 
 @pytest.mark.asyncio
 async def test_sandbox_memory_marks_interrupted_runs_in_phase_one_prompt() -> None:
-    client = UnixLocalSandboxClient()
+    client = FilesystemTestSandboxClient()
     session = await client.create(manifest=Manifest())
     phase_one_model = ScriptedModel(steps=[[_phase_one_message()]])
     phase_two_model = ScriptedModel(

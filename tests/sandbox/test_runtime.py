@@ -2809,20 +2809,23 @@ async def test_unix_local_persist_workspace_excludes_mounted_directory_contents(
 
 
 @pytest.mark.asyncio
-async def test_runner_allows_fresh_unix_local_sessions_without_options() -> None:
+async def test_runner_allows_fresh_sessions_for_clients_with_default_options() -> None:
     agent = SandboxAgent(
         name="sandbox",
         model=ScriptedModel(steps=[[get_final_output_message("done")]]),
         instructions="Base instructions.",
+        default_manifest=Manifest(),
     )
+    client = _ManifestSessionClient()
 
     result = await Runner.run(
         agent,
         "hello",
-        run_config=_unix_local_run_config(),
+        run_config=RunConfig(sandbox=SandboxRunConfig(client=client)),
     )
 
     assert result.final_output == "done"
+    assert len(client.created_manifests) == 1
 
 
 @pytest.mark.asyncio
@@ -3139,6 +3142,7 @@ async def test_runner_rejects_unix_local_manifest_user_and_group_provisioning() 
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_resume() -> None:
     client = UnixLocalSandboxClient()
     file_capability = _SessionFileCapability()
@@ -3239,6 +3243,7 @@ async def test_runner_persists_workspace_and_tool_choice_state_across_sandbox_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs() -> None:
     client = UnixLocalSandboxClient()
     file_capability = _SessionFileCapability()
@@ -3345,6 +3350,7 @@ async def test_runner_restores_all_sandbox_agents_from_run_state_across_handoffs
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_serializes_unique_sandbox_resume_keys_for_duplicate_agent_names() -> None:
     client = UnixLocalSandboxClient()
     file_capability = _SessionFileCapability()
@@ -4818,6 +4824,7 @@ async def test_session_manager_restores_duplicate_name_sessions_when_only_sandbo
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundtrip() -> None:
     client = UnixLocalSandboxClient()
     file_capability = _SessionFileCapability()
@@ -4917,6 +4924,7 @@ async def test_runner_restores_duplicate_name_sandbox_sessions_after_json_roundt
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtrip() -> None:
     client = UnixLocalSandboxClient()
 
@@ -4995,6 +5003,7 @@ async def test_runner_restores_legacy_current_sandbox_payload_after_json_roundtr
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
 @pytest.mark.skipif(
     sys.platform != "darwin" or shutil.which("sandbox-exec") is None,
     reason="sandbox-exec is only available on macOS when installed",

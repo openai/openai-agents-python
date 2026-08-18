@@ -23,16 +23,22 @@ from tests.sandbox.integration_tests.test_model import TestModel
 
 @pytest.mark.asyncio
 @pytest.mark.review_optional
+@pytest.mark.requires_native_macos_sandbox
 async def test_runner_preserves_unix_local_lifecycle_state_across_pause_and_resume(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    install_mock_external_tools(monkeypatch, tmp_path)
     source_root = create_local_sources(tmp_path)
+    mock_tools = install_mock_external_tools(
+        monkeypatch,
+        tmp_path,
+        writable_root=source_root,
+    )
     manifest = build_manifest_with_all_entry_types(
         workspace_root=Path("/workspace"),
         source_root=source_root,
     )
+    assert mock_tools.log_path.parent == source_root
     events: list[SandboxSessionEvent] = []
     client = UnixLocalSandboxClient(
         instrumentation=Instrumentation(

@@ -111,6 +111,7 @@ class TestUnixLocalPty:
         assert session._fd_close_tasks == set()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_pty_exec_write_poll_and_unknown_session_errors(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()
         manifest = Manifest(root=str(tmp_path / "workspace"))
@@ -144,6 +145,7 @@ class TestUnixLocalPty:
                 await session.pty_write_stdin(session_id=999_999, chars="")
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_pty_ctrl_c_interrupts_long_running_process(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()
         manifest = Manifest(root=str(tmp_path / "workspace"))
@@ -188,6 +190,7 @@ class TestUnixLocalPty:
         ],
     )
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_pty_terminal_signals_interrupt_even_if_parent_ignores_signal(
         self, tmp_path: Path, signum: signal.Signals, chars: str
     ) -> None:
@@ -221,6 +224,7 @@ class TestUnixLocalPty:
             signal.signal(signum, previous_handler)
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_non_tty_pty_session_rejects_stdin_and_can_still_be_polled(
         self, tmp_path: Path
     ) -> None:
@@ -260,6 +264,7 @@ class TestUnixLocalPty:
                 await session.pty_write_stdin(session_id=started.process_id, chars="")
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_stop_terminates_active_pty_sessions(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()
         manifest = Manifest(root=str(tmp_path / "workspace"))

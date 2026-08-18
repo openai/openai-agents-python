@@ -145,10 +145,12 @@ class MockExternalTools:
 def install_mock_external_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    writable_root: Path,
 ) -> MockExternalTools:
     bin_dir = tmp_path / "mock-bin"
     bin_dir.mkdir()
-    log_path = tmp_path / "mock-tool-calls.tsv"
+    log_path = writable_root / "mock-tool-calls.tsv"
     log_path.write_text("", encoding="utf-8")
 
     for name in MOCK_TOOL_NAMES:

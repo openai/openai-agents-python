@@ -221,6 +221,7 @@ filterwarnings = [
 ]
 markers = [
   "allow_call_model_methods: mark test as allowing calls to real model implementations",
+  "requires_native_macos_sandbox: mark test as requiring its own macOS sandbox-exec process",
   "review_optional: mark a slow subsystem-specific test that an unrelated iterative review check may omit",
   "serial: mark test as requiring exclusive execution after all xdist workers exit",
 ]

@@ -41,6 +41,8 @@ _IMAGE_BY_TASK = {
     "task-b": ("image/svg+xml", _SVG_BYTES),
 }
 
+pytestmark = pytest.mark.requires_native_macos_sandbox
+
 
 async def _read_bytes(session: BaseSandboxSession, path: str) -> bytes:
     file_obj = await session.read(Path(path))

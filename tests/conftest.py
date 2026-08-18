@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 
 import pytest
 
@@ -24,6 +24,8 @@ _PROXY_ENVIRONMENT_VARIABLES = (
     "https_proxy",
 )
 _PROXY_OPT_IN_ENVIRONMENT_VARIABLE = "OPENAI_AGENTS_TEST_USE_PROXY"
+_CODEX_SANDBOX_ENVIRONMENT_VARIABLE = "OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX"
+_NATIVE_MACOS_SANDBOX_MARKER = "requires_native_macos_sandbox"
 
 
 def _remove_ambient_proxy_environment(environment: MutableMapping[str, str]) -> None:
@@ -40,6 +42,25 @@ def _remove_ambient_proxy_environment(environment: MutableMapping[str, str]) -> 
 
 
 _remove_ambient_proxy_environment(os.environ)
+
+
+def _running_in_nested_codex_macos_sandbox(
+    *, platform: str, environment: Mapping[str, str]
+) -> bool:
+    return platform == "darwin" and environment.get(_CODEX_SANDBOX_ENVIRONMENT_VARIABLE) == "1"
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    if not _running_in_nested_codex_macos_sandbox(platform=sys.platform, environment=os.environ):
+        return
+
+    skip_native_macos_sandbox = pytest.mark.skip(
+        reason="requires a native macOS sandbox and cannot run inside the Codex outer sandbox"
+    )
+    for item in items:
+        if item.get_closest_marker(_NATIVE_MACOS_SANDBOX_MARKER) is not None:
+            item.add_marker(skip_native_macos_sandbox)
+
 
 collect_ignore: list[str] = []
 

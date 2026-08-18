@@ -12,12 +12,13 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 ## Quick start
 
 1. Keep this skill at `./.agents/skills/code-change-verification` so it loads automatically for the repository.
-2. macOS/Linux: `env UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
-3. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
-4. The scripts run `make format` first, then run `make lint`, `make typecheck`, and `make tests` in parallel with fail-fast semantics.
-5. While the parallel steps are still running, the scripts emit periodic heartbeat updates so you can tell that work is still in progress.
-6. If any command fails, fix the issue, rerun the script, and report the failing output.
-7. Confirm completion only when all commands succeed with no remaining issues.
+2. Codex on macOS/Linux: `/usr/bin/env -u OPENAI_API_KEY OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
+3. Other macOS/Linux environments: `env UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
+4. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
+5. The scripts run `make format` first, then run `make lint`, `make typecheck`, and `make tests` in parallel with fail-fast semantics.
+6. While the parallel steps are still running, the scripts emit periodic heartbeat updates so you can tell that work is still in progress.
+7. If any command fails, fix the issue, rerun the script, and report the failing output.
+8. Confirm completion only when all commands succeed with no remaining issues.
 
 ## Start condition and host capacity
 
@@ -28,20 +29,11 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 
 ## Codex execution policy
 
-The full test suite exercises `UnixLocalSandboxSession`, which starts its own macOS sandbox. A
-nested run inside the Codex filesystem sandbox fails with
-`sandbox-exec: sandbox_apply: Operation not permitted` even when the implementation is correct.
+Repository verification and all child processes must remain in the normal Codex workspace sandbox. Never request elevated sandbox permissions for the verification wrapper, and never retry the wrapper with broader host access after a failure.
 
-When Codex invokes the macOS/Linux verification command:
+On macOS, tests marked `requires_native_macos_sandbox` need to start their own `sandbox-exec` process. The Codex command sets `OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1`, which skips only that marker before nested sandbox creation. All other tests remain enabled. Ordinary local and CI runs do not set this variable and therefore keep the marked tests enabled.
 
-- Use the exact command from Quick start so it matches the persistent command allow rule.
-- Set `sandbox_permissions=require_escalated` on the first invocation. The matching allow rule makes
-  this non-interactive; it does not require a new user approval.
-- Do not first run the suite inside the Codex sandbox and retry after the expected UnixLocal
-  failures.
-
-This execution policy changes only where the verification process runs. The SDK sandbox tests must
-remain enabled and unchanged.
+The marked tests run separately on a disposable GitHub-hosted macOS runner. If that trusted runner is unavailable, report the missing native-macOS coverage; do not compensate by weakening the Codex sandbox boundary.
 
 ## Environment setup
 

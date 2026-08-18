@@ -1,4 +1,4 @@
 interface:
   display_name: "Code Change Verification"
   short_description: "Run the required local verification stack"
-  default_prompt: "Use $code-change-verification to run the required local verification stack. On macOS/Linux, invoke its canonical env command outside the Codex sandbox on the first attempt so nested UnixLocal sandbox tests run without an approval retry. Report any failures."
+  default_prompt: "Use $code-change-verification to run the required local verification stack inside the normal Codex workspace sandbox. On macOS/Linux, use the documented Codex command so only tests that require a native macOS sandbox are skipped locally. Never request elevated sandbox permissions or retry with broader host access. Report any failures."
