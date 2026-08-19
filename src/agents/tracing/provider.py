@@ -497,6 +497,7 @@ class DefaultTraceProvider(TraceProvider):
 
     def force_flush(self) -> None:
         """Force all processors to flush their buffers immediately."""
+        self._refresh_disabled_flag()
         try:
             self._multi_processor.force_flush()
         except Exception as e:
