@@ -1039,10 +1039,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         )
 
         filtered_tools = []
-        for tool in tools:
+        for tool, detached in zip(tools, _snapshot_tools(tools), strict=True):
             try:
-                # Call the filter function with context
-                result = tool_filter_func(filter_context, tool)
+                # Inspect a detached copy so a mutating filter cannot corrupt the cache.
+                result = tool_filter_func(filter_context, detached)
 
                 if inspect.isawaitable(result):
                     should_include = await result

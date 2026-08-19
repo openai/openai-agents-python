@@ -159,10 +159,20 @@ async def test_list_tools_does_not_expose_the_cache_with_a_no_op_static_filter(
 async def test_cached_tools_returns_a_snapshot(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
-    """`cached_tools` must not hand out the live cache: appending to it would inject a tool."""
+    """`cached_tools` must not hand out the live cache: mutating it must not leak into listings."""
     server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
     mock_list_tools.return_value = ListToolsResult(
-        tools=[MCPTool(name="tool1", inputSchema={}), MCPTool(name="tool2", inputSchema={})]
+        tools=[
+            MCPTool(
+                name="tool1",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            ),
+            MCPTool(name="tool2", inputSchema={}),
+        ]
     )
 
     async with server:
@@ -173,12 +183,17 @@ async def test_cached_tools_returns_a_snapshot(
         snapshot = server.cached_tools
         assert snapshot is not None
         snapshot.append(MCPTool(name="injected", inputSchema={}))
+        snapshot[0].description = "mutated"
+        snapshot[0].input_schema["required"] = []
 
-        assert [tool.name for tool in (server.cached_tools or [])] == ["tool1", "tool2"]
-        assert [tool.name for tool in await server.list_tools(run_context, agent)] == [
-            "tool1",
-            "tool2",
-        ]
+        later_cached = server.cached_tools
+        later_listed = await server.list_tools(run_context, agent)
+        assert [tool.name for tool in (later_cached or [])] == ["tool1", "tool2"]
+        assert [tool.name for tool in later_listed] == ["tool1", "tool2"]
+        assert (later_cached or [])[0].description is None
+        assert later_listed[0].description is None
+        assert (later_cached or [])[0].input_schema.get("required") == ["q"]
+        assert later_listed[0].input_schema.get("required") == ["q"]
 
 
 @pytest.mark.asyncio
@@ -251,6 +266,63 @@ async def test_list_tools_mutation_cannot_bypass_required_parameter_validation(
         agent = Agent(name="test_agent", instructions="Test agent")
         returned = await server.list_tools(run_context, agent)
         returned[0].input_schema["required"] = []
+
+        with pytest.raises(UserError, match="missing required parameters: q"):
+            await server.call_tool("tool1", {})
+        assert mock_call_tool.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.call_tool", new_callable=AsyncMock)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_dynamic_filter_mutation_cannot_corrupt_cached_tool_schemas(
+    mock_list_tools: AsyncMock,
+    mock_call_tool: AsyncMock,
+    mock_initialize: AsyncMock,
+    mock_stdio_client,
+):
+    """A callable filter that mutates nested schemas must not affect later listings or calls."""
+    from mcp.types import CallToolResult, TextContent
+
+    from agents.exceptions import UserError
+
+    schema = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"],
+    }
+
+    def mutating_filter(_context, tool: MCPTool) -> bool:
+        tool.input_schema["required"] = []
+        tool.description = "mutated"
+        return True
+
+    server = MCPServerStdio(
+        params={"command": tee},
+        cache_tools_list=True,
+        tool_filter=mutating_filter,
+    )
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema=schema)]
+    )
+    mock_call_tool.return_value = CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+        first = await server.list_tools(run_context, agent)
+        later = await server.list_tools(run_context, agent)
+        cached = server.cached_tools
+
+        assert first[0].input_schema.get("required") == ["q"]
+        assert later[0].input_schema.get("required") == ["q"]
+        assert cached is not None
+        assert cached[0].input_schema.get("required") == ["q"]
+        assert first[0].description is None
+        assert later[0].description is None
+        assert cached[0].description is None
 
         with pytest.raises(UserError, match="missing required parameters: q"):
             await server.call_tool("tool1", {})
