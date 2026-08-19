@@ -3472,14 +3472,23 @@ async def test_streamed_run_reports_tool_guardrail_results():
     assert result.tool_output_guardrail_results[0].output.output_info == "output-checked"
 
 
+@pytest.mark.parametrize("tool_guardrail_behavior", ["allow", "reject_content"])
 @pytest.mark.asyncio
-async def test_streamed_trip_replaces_current_tool_output_guardrail_results() -> None:
+async def test_streamed_trip_replaces_current_tool_output_guardrail_results(
+    tool_guardrail_behavior: str,
+) -> None:
     """A copied terminal tool result is replaced in public and RunState guardrail results."""
     original_outputs: list[ToolGuardrailFunctionOutput] = []
 
     @tool_output_guardrail
     def retain_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
-        output = ToolGuardrailFunctionOutput.allow(output_info=data.output)
+        if tool_guardrail_behavior == "reject_content":
+            output = ToolGuardrailFunctionOutput.reject_content(
+                message=f"Rejected sensitive tool output: {data.output}",
+                output_info=data.output,
+            )
+        else:
+            output = ToolGuardrailFunctionOutput.allow(output_info=data.output)
         original_outputs.append(output)
         return output
 
@@ -3518,6 +3527,11 @@ async def test_streamed_trip_replaces_current_tool_output_guardrail_results() ->
     public_output = result.tool_output_guardrail_results[1].output
     assert public_output is not original_outputs[0]
     assert public_output.output_info == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    assert public_output.behavior["type"] == tool_guardrail_behavior
+    if public_output.behavior["type"] == "reject_content":
+        assert public_output.behavior["message"] == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+        assert original_outputs[0].behavior["type"] == "reject_content"
+        assert "blocked-secret" in original_outputs[0].behavior["message"]
     assert result._state is not None
     # The caller-added public result was never owned by RunState, so only the current
     # data-free result is added to that owner.
@@ -3525,6 +3539,15 @@ async def test_streamed_trip_replaces_current_tool_output_guardrail_results() ->
     state_output = result._state._tool_output_guardrail_results[0].output
     assert state_output is public_output
     assert state_output.output_info == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    assert state_output.behavior["type"] == tool_guardrail_behavior
+    serialized_state = result.to_state().to_json()
+    serialized_results = serialized_state["tool_output_guardrail_results"]
+    assert serialized_results[0]["output"]["behavior"]["type"] == "allow"
+    serialized_behavior = serialized_results[-1]["output"]["behavior"]
+    assert serialized_behavior["type"] == tool_guardrail_behavior
+    if tool_guardrail_behavior == "reject_content":
+        assert serialized_behavior["message"] == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    assert "blocked-secret" not in json.dumps(serialized_state)
 
 
 @pytest.mark.asyncio

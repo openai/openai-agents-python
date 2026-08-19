@@ -619,13 +619,32 @@ def _data_free_tool_output_guardrail_results(
         for result in results:
             if not isinstance(result, ToolOutputGuardrailResult):
                 return ()
+            original_output = object.__getattribute__(result, "output")
+            behavior = object.__getattribute__(original_output, "behavior")
+            if type(behavior) is not dict:
+                return ()
+            behavior_type = _exact_dict_field(behavior, "type")
+            if type(behavior_type) is not str:
+                return ()
+            if str.__eq__(behavior_type, "allow") is True:
+                sanitized_output = ToolGuardrailFunctionOutput.allow(
+                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                )
+            elif str.__eq__(behavior_type, "reject_content") is True:
+                sanitized_output = ToolGuardrailFunctionOutput.reject_content(
+                    message=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                )
+            elif str.__eq__(behavior_type, "raise_exception") is True:
+                sanitized_output = ToolGuardrailFunctionOutput.raise_exception(
+                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                )
+            else:
+                return ()
             replacements.append(
                 ToolOutputGuardrailResult(
                     guardrail=object.__getattribute__(result, "guardrail"),
-                    output=ToolGuardrailFunctionOutput(
-                        output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
-                        behavior={"type": "allow"},
-                    ),
+                    output=sanitized_output,
                 )
             )
     except Exception:
