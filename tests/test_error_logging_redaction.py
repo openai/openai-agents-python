@@ -1686,6 +1686,69 @@ async def test_streamed_session_hostile_error_after_redacted_output_guardrail_is
     _assert_secret_absent_from_agents_traceback(error, _MODEL_OUTPUT_SECRET)
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_blocked_terminal_tool_session_failure_is_data_redacted(
+    streamed: bool,
+) -> None:
+    tool_output_secret = "BLOCKED_TERMINAL_TOOL_OUTPUT_SECRET"
+    persistence_secret = "BLOCKED_TERMINAL_SESSION_FAILURE_SECRET"
+
+    @function_tool(name_override="terminal_tool")
+    def terminal_tool() -> str:
+        return tool_output_secret
+
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    class FailingBlockedSession(SimpleListSession):
+        async def add_items(self, items: list[Any]) -> None:
+            if any(
+                type(item) is dict and item.get("type") == "function_call_output" for item in items
+            ):
+                error = LookupError(f"session save failed: {persistence_secret}")
+                error.run_data = items  # type: ignore[attr-defined]
+                raise error
+            await super().add_items(items)
+
+    agent = Agent(
+        name="test",
+        model=ScriptedModel(
+            steps=[[get_function_tool_call("terminal_tool", "{}", call_id="terminal-call")]]
+        ),
+        tools=[terminal_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=reject_output)],
+    )
+    session = FailingBlockedSession()
+
+    if streamed:
+        result = Runner.run_streamed(agent, "run terminal tool", session=session)
+        with pytest.raises(UserError) as exc_info:
+            async for _ in result.stream_events():
+                pass
+    else:
+        with pytest.raises(UserError) as exc_info:
+            await Runner.run(agent, "run terminal tool", session=session)
+
+    error = exc_info.value
+    assert str(error) == "Error details are redacted."
+    assert error.run_data is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    for secret in (tool_output_secret, persistence_secret):
+        assert secret not in repr(error)
+        _assert_secret_absent_from_agents_traceback(
+            error,
+            secret,
+            require_agents_frames=False,
+        )
+
+
 def _persistence_failure(
     kind: Literal["exception", "cancelled", "direct_base", "exception_group", "group"],
     secret: str,

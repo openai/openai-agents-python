@@ -77,9 +77,23 @@ from .run_internal.agent_runner_helpers import (
     snapshot_usage,
     update_run_state_for_interruption,
     usage_delta,
+    validate_output_guardrails_with_server_managed_conversation,
     validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
+from .run_internal.blocked_output import (
+    _blocked_output_failure_items,
+    _BlockedOutputOwnerStarts,
+    _current_response_boundary,
+    _final_turn_items_for_persistence,
+    _has_output_guardrails,
+    _is_terminal_tool_output_response,
+    _retained_items_for_blocked_response,
+    _sanitize_blocked_output_guardrail_results,
+    _should_defer_interrupted_session_items,
+    _synchronize_accepted_run_state,
+    _validate_resumed_session_output_guardrail_safety,
+)
 from .run_internal.error_handlers import (
     attach_generic_agent_error,
     build_run_error_data,
@@ -94,7 +108,7 @@ from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
-    _retained_items_for_blocked_output,
+    _safe_redacted_persistence_error,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
     get_all_tools,
@@ -892,6 +906,12 @@ class AgentRunner:
                     current_agent = run_state._current_agent
                 else:
                     current_agent = starting_agent
+                _validate_resumed_session_output_guardrail_safety(
+                    agent=current_agent,
+                    run_config=run_config,
+                    session=session,
+                    run_state=run_state if is_resumed_state else None,
+                )
                 sandbox_runtime.assert_agent_supported(current_agent)
                 should_run_agent_start_hooks = True
                 store_setting = current_agent.model_settings.resolve(
@@ -937,6 +957,13 @@ class AgentRunner:
 
             try:
                 while True:
+                    validate_output_guardrails_with_server_managed_conversation(
+                        current_agent,
+                        run_config,
+                        conversation_id=conversation_id,
+                        previous_response_id=previous_response_id,
+                        auto_previous_response_id=auto_previous_response_id,
+                    )
                     if TYPE_CHECKING:
                         # Keep loop-carried types explicit to bound Pyright's flow analysis.
                         original_input = cast(  # type: ignore[redundant-cast]
@@ -1040,6 +1067,23 @@ class AgentRunner:
                                     )
                                 raise UserError("No processed response found in previous state")
 
+                            resumed_response_boundary = _current_response_boundary(
+                                (),
+                                run_state._last_processed_response,
+                                run_state,
+                            )
+                            blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                                nonstreamed_session_items=(resumed_response_boundary.session_start),
+                                run_state_generated_items=(
+                                    resumed_response_boundary.generated_start
+                                ),
+                                run_state_session_items=resumed_response_boundary.session_start,
+                                run_state_model_responses=len(run_state._model_responses) - 1,
+                                run_state_tool_output_guardrail_results=len(
+                                    run_state._tool_output_guardrail_results
+                                ),
+                            )
+
                             turn_result = await resolve_interrupted_turn(
                                 bindings=current_bindings,
                                 original_input=original_input,
@@ -1049,7 +1093,9 @@ class AgentRunner:
                                 hooks=hooks,
                                 context_wrapper=context_wrapper,
                                 run_config=run_config,
-                                server_manages_conversation=server_conversation_tracker is not None,
+                                server_manages_conversation=(
+                                    server_conversation_tracker is not None
+                                ),
                                 run_state=run_state,
                                 error_handlers=error_handlers,
                             )
@@ -1086,6 +1132,14 @@ class AgentRunner:
                                 session_persistence_enabled
                                 and turn_session_items
                                 and run_state is not None
+                                and not isinstance(turn_result.next_step, NextStepFinalOutput)
+                                and not (
+                                    isinstance(turn_result.next_step, NextStepInterruption)
+                                    and _should_defer_interrupted_session_items(
+                                        current_agent,
+                                        run_config,
+                                    )
+                                )
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
@@ -1168,13 +1222,119 @@ class AgentRunner:
                             )
 
                             if isinstance(turn_result.next_step, NextStepFinalOutput):
-                                await run_output_guardrails(
-                                    current_agent.output_guardrails
-                                    + (run_config.output_guardrails or []),
+                                if run_state is not None and _has_output_guardrails(
+                                    current_agent, run_config
+                                ):
+                                    run_state._tool_output_guardrail_results = list(
+                                        tool_output_guardrail_results
+                                    )
+                                current_processed_response = (
+                                    turn_result.processed_response
+                                    if turn_result.processed_response is not None
+                                    else run_state._last_processed_response
+                                )
+                                output_guardrail_result_start = len(output_guardrail_results)
+                                try:
+                                    await run_output_guardrails(
+                                        current_agent.output_guardrails
+                                        + (run_config.output_guardrails or []),
+                                        current_agent,
+                                        turn_result.next_step.output,
+                                        context_wrapper,
+                                        output_guardrail_results,
+                                    )
+                                except OutputGuardrailTripwireTriggered as exc:
+                                    if not _is_terminal_tool_output_response(
+                                        turn_session_items,
+                                        current_processed_response,
+                                        run_state,
+                                    ):
+                                        raise
+                                    sanitized_results = _sanitize_blocked_output_guardrail_results(
+                                        output_guardrail_results[output_guardrail_result_start:],
+                                        exc,
+                                    )
+                                    output_guardrail_results[output_guardrail_result_start:] = (
+                                        sanitized_results
+                                    )
+                                    session_items = _blocked_output_failure_items(
+                                        session_items,
+                                        (),
+                                        blocked_output_owner_starts,
+                                    )
+                                    retained_items = _retained_items_for_blocked_response(
+                                        turn_session_items,
+                                        turn_result.model_response,
+                                        run_state,
+                                        current_processed_response,
+                                        owner_starts=blocked_output_owner_starts,
+                                    )
+                                    list.extend(session_items, retained_items)
+                                    try:
+                                        await save_final_turn_items_after_guardrails(
+                                            session=session,
+                                            run_state=run_state,
+                                            session_persistence_enabled=(
+                                                session_persistence_enabled
+                                            ),
+                                            input_guardrail_results=(
+                                                _attempt_input_guardrail_results()
+                                            ),
+                                            items=retained_items,
+                                            response_id=turn_result.model_response.response_id,
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
+                                    except BaseException as persistence_error:
+                                        raise _safe_redacted_persistence_error(
+                                            persistence_error
+                                        ) from None
+                                    raise
+                                except (Exception, asyncio.CancelledError) as guardrail_error:
+                                    if not isinstance(
+                                        guardrail_error, asyncio.CancelledError
+                                    ) or not _is_terminal_tool_output_response(
+                                        turn_session_items,
+                                        current_processed_response,
+                                        run_state,
+                                    ):
+                                        final_turn_items = _final_turn_items_for_persistence(
+                                            turn_session_items,
+                                            current_processed_response,
+                                            run_state,
+                                            current_agent,
+                                            run_config,
+                                        )
+                                        await save_final_turn_items_after_guardrails(
+                                            session=session,
+                                            run_state=run_state,
+                                            session_persistence_enabled=session_persistence_enabled,
+                                            input_guardrail_results=(
+                                                _attempt_input_guardrail_results()
+                                            ),
+                                            items=final_turn_items,
+                                            response_id=turn_result.model_response.response_id,
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
+                                    raise
+
+                                final_turn_items = _final_turn_items_for_persistence(
+                                    turn_session_items,
+                                    current_processed_response,
+                                    run_state,
                                     current_agent,
-                                    turn_result.next_step.output,
-                                    context_wrapper,
-                                    output_guardrail_results,
+                                    run_config,
+                                )
+                                await save_final_turn_items_after_guardrails(
+                                    session=session,
+                                    run_state=run_state,
+                                    session_persistence_enabled=session_persistence_enabled,
+                                    input_guardrail_results=_attempt_input_guardrail_results(),
+                                    items=final_turn_items,
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
+                                    wrapper=context_wrapper,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
@@ -1202,21 +1362,6 @@ class AgentRunner:
                                 ) != list(session_items)
                                 if run_state is not None:
                                     result._trace_state = run_state._trace_state
-                                if session_persistence_enabled:
-                                    input_items_for_save_1: list[TResponseInputItem] = (
-                                        session_input_items_for_persistence
-                                        if session_input_items_for_persistence is not None
-                                        else []
-                                    )
-                                    await save_result_to_session(
-                                        session,
-                                        input_items_for_save_1,
-                                        session_items_for_turn(turn_result),
-                                        run_state,
-                                        response_id=turn_result.model_response.response_id,
-                                        store=store_setting,
-                                        wrapper=context_wrapper,
-                                    )
                                 result._original_input = copy_input_items(original_input)
                                 run_state._current_step = None
                                 return _finalize_result(result)
@@ -1393,7 +1538,9 @@ class AgentRunner:
                         result._original_input = copy_input_items(original_input)
                         return _finalize_result(result)
 
-                    if run_state is not None and not resuming_turn:
+                    if run_state is not None and (
+                        not resuming_turn or isinstance(run_state._current_step, NextStepRunAgain)
+                    ):
                         run_state._current_turn_persisted_item_count = 0
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
@@ -1405,6 +1552,35 @@ class AgentRunner:
                             )
                         except Exception:
                             last_saved_input_snapshot_for_rewind = None
+
+                    if run_state is not None and _has_output_guardrails(current_agent, run_config):
+                        _synchronize_accepted_run_state(
+                            run_state,
+                            generated_items=generated_items,
+                            session_items=session_items,
+                            model_responses=model_responses,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            current_turn=current_turn,
+                        )
+
+                    blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                        nonstreamed_session_items=len(session_items),
+                        run_state_generated_items=(
+                            len(run_state._generated_items) if run_state is not None else None
+                        ),
+                        run_state_session_items=(
+                            len(run_state._session_items) if run_state is not None else None
+                        ),
+                        run_state_model_responses=(
+                            len(run_state._model_responses) if run_state is not None else None
+                        ),
+                        run_state_tool_output_guardrail_results=(
+                            len(run_state._tool_output_guardrail_results)
+                            if run_state is not None
+                            else None
+                        ),
+                    )
 
                     items_for_model = (
                         pending_server_items
@@ -1665,6 +1841,13 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            if run_state is not None and _has_output_guardrails(
+                                current_agent, run_config
+                            ):
+                                run_state._tool_output_guardrail_results = list(
+                                    tool_output_guardrail_results
+                                )
+                            output_guardrail_result_start = len(output_guardrail_results)
                             try:
                                 await run_output_guardrails(
                                     current_agent.output_guardrails
@@ -1674,39 +1857,93 @@ class AgentRunner:
                                     context_wrapper,
                                     output_guardrail_results,
                                 )
-                            except OutputGuardrailTripwireTriggered:
-                                await save_final_turn_items_after_guardrails(
-                                    session=session,
-                                    run_state=run_state,
-                                    session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=_attempt_input_guardrail_results(),
-                                    items=_retained_items_for_blocked_output(items_to_save_turn),
-                                    response_id=turn_result.model_response.response_id,
-                                    store=store_setting,
-                                    wrapper=context_wrapper,
+                            except OutputGuardrailTripwireTriggered as exc:
+                                if not _is_terminal_tool_output_response(
+                                    turn_session_items,
+                                    turn_result.processed_response,
+                                    run_state,
+                                ):
+                                    raise
+                                sanitized_results = _sanitize_blocked_output_guardrail_results(
+                                    output_guardrail_results[output_guardrail_result_start:],
+                                    exc,
                                 )
+                                output_guardrail_results[output_guardrail_result_start:] = (
+                                    sanitized_results
+                                )
+                                session_items = _blocked_output_failure_items(
+                                    session_items,
+                                    (),
+                                    blocked_output_owner_starts,
+                                )
+                                retained_items = _retained_items_for_blocked_response(
+                                    turn_session_items,
+                                    turn_result.model_response,
+                                    run_state,
+                                    turn_result.processed_response,
+                                    owner_starts=blocked_output_owner_starts,
+                                )
+                                list.extend(session_items, retained_items)
+                                try:
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=(session_persistence_enabled),
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=retained_items,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
+                                except BaseException as persistence_error:
+                                    raise _safe_redacted_persistence_error(
+                                        persistence_error
+                                    ) from None
                                 raise
-                            except (Exception, asyncio.CancelledError):
-                                # Preserve the released non-stream behavior for guardrail errors
-                                # and cancellation: the completed final turn remains replayable.
-                                await save_final_turn_items_after_guardrails(
-                                    session=session,
-                                    run_state=run_state,
-                                    session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=_attempt_input_guardrail_results(),
-                                    items=items_to_save_turn,
-                                    response_id=turn_result.model_response.response_id,
-                                    store=store_setting,
-                                    wrapper=context_wrapper,
-                                )
+                            except (Exception, asyncio.CancelledError) as guardrail_error:
+                                if not isinstance(
+                                    guardrail_error, asyncio.CancelledError
+                                ) or not _is_terminal_tool_output_response(
+                                    turn_session_items,
+                                    turn_result.processed_response,
+                                    run_state,
+                                ):
+                                    final_turn_items = _final_turn_items_for_persistence(
+                                        turn_session_items,
+                                        turn_result.processed_response,
+                                        run_state,
+                                        current_agent,
+                                        run_config,
+                                    )
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=session_persistence_enabled,
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=final_turn_items,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
                                 raise
 
+                            final_turn_items = _final_turn_items_for_persistence(
+                                turn_session_items,
+                                turn_result.processed_response,
+                                run_state,
+                                current_agent,
+                                run_config,
+                            )
                             await save_final_turn_items_after_guardrails(
                                 session=session,
                                 run_state=run_state,
                                 session_persistence_enabled=session_persistence_enabled,
                                 input_guardrail_results=_attempt_input_guardrail_results(),
-                                items=items_to_save_turn,
+                                items=final_turn_items,
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                                 wrapper=context_wrapper,
@@ -1745,7 +1982,12 @@ class AgentRunner:
                                 run_state._current_step = None
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
-                            if session_persistence_enabled:
+                            if session_persistence_enabled and not (
+                                _should_defer_interrupted_session_items(
+                                    current_agent,
+                                    run_config,
+                                )
+                            ):
                                 if not input_guardrails_triggered(
                                     _attempt_input_guardrail_results()
                                 ):
@@ -2141,6 +2383,19 @@ class AgentRunner:
         if run_state is not None:
             run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
+        schema_agent = (
+            run_state._current_agent
+            if run_state is not None and run_state._current_agent is not None
+            else starting_agent
+        )
+        validate_output_guardrails_with_server_managed_conversation(
+            schema_agent,
+            run_config,
+            conversation_id=conversation_id,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+        )
+
         (
             trace_workflow_name,
             trace_id,
@@ -2176,11 +2431,6 @@ class AgentRunner:
             run_state=run_state,
         )
 
-        schema_agent = (
-            run_state._current_agent
-            if run_state is not None and run_state._current_agent is not None
-            else starting_agent
-        )
         sandbox_runtime.assert_agent_supported(schema_agent)
         output_schema = get_output_schema(schema_agent)
 

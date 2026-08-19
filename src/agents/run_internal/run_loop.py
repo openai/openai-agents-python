@@ -84,6 +84,7 @@ from ..tool import (
     Tool,
     dispose_resolved_computers,
 )
+from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
@@ -103,8 +104,22 @@ from .agent_runner_helpers import (
     get_unsent_tool_call_ids_for_interrupted_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_with_server_managed_conversation,
 )
 from .approvals import approvals_from_step
+from .blocked_output import (
+    OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    _BlockedOutputOwnerStarts,
+    _current_response_boundary,
+    _final_turn_items_for_persistence,
+    _has_output_guardrails,
+    _is_terminal_tool_output_response,
+    _retained_items_for_blocked_response,
+    _sanitize_blocked_output_guardrail_results,
+    _should_defer_interrupted_session_items,
+    _synchronize_accepted_run_state,
+    _validate_resumed_session_output_guardrail_safety,
+)
 from .error_handlers import (
     attach_generic_agent_error,
     build_run_error_data,
@@ -273,6 +288,7 @@ __all__ = [
     "input_guardrail_tripwire_triggered_for_stream",
 ]
 
+_OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
 _STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
 
 
@@ -450,70 +466,23 @@ async def _run_output_guardrails_for_stream(
         # Publish at a single boundary so no failure path can omit results that already
         # finished. A guardrail raising a non-tripwire error reports the same completed
         # results a tripwire does.
+        if not isinstance(exc, OutputGuardrailTripwireTriggered):
+            log_model_action_error(logger, "Unexpected error in output guardrails", exc)
         streamed_result.output_guardrail_results = (
             streamed_result.output_guardrail_results + completed_results
         )
-        if not isinstance(exc, OutputGuardrailTripwireTriggered):
-            log_model_action_error(logger, "Unexpected error in output guardrails", exc)
         raise
 
 
-_SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
-
-
-def _reasoning_indexes_tied_to_retained_items(
+def _retained_items_for_blocked_output(
     items: list[RunItem],
-    retained_indexes: set[int],
-) -> set[int]:
-    """Indexes of the reasoning items whose tied item is being retained.
-
-    Applies the same association rule as
-    ``agents.run_internal.items._drop_reasoning_items_preceding_dropped_calls``: a reasoning item
-    is tied to the next *non-reasoning* model-emitted item. Keeping a group whose following item is
-    dropped would leave a dangling reasoning item, which the Responses API rejects on the next
-    request (``reasoning was provided without its required following item``); dropping a group
-    whose following item is retained would strip the context that call needs to be replayed.
-
-    A trailing reasoning group - one with no following non-reasoning item at all - is not tied to
-    anything retained, so it is dropped. Note this is stricter than the reference, which keeps such
-    a group because the item it belongs to may still arrive later in a longer history; here the
-    turn is complete, so there is nothing left to tie it to.
-    """
-    tied: set[int] = set()
-    for index in range(len(items) - 1, -1, -1):
-        if items[index].type != "reasoning_item":
-            continue
-        for next_index in range(index + 1, len(items)):
-            if items[next_index].type == "reasoning_item":
-                continue
-            if next_index in retained_indexes:
-                tied.add(index)
-            break
-    return tied
-
-
-def _retained_items_for_blocked_output(items: list[RunItem]) -> list[RunItem]:
-    """Pick out the items of a final turn to keep when its output is not deliverable.
-
-    A tool that already ran has to stay in the session, together with the context needed to replay
-    its call. Everything else - the assistant message the guardrail rejected above all - is dropped,
-    including the reasoning that belongs to the rejected message rather than to a retained call.
-
-    ``_SIDE_EFFECT_ITEM_TYPES`` is enumerated rather than derived, so an item type added later is
-    *discarded* here by default and has to be classified deliberately. A record of a side effect
-    that goes unclassified is a bug, so the safer default is the one that surfaces as a missing item
-    rather than as a rejected message quietly reaching the session.
-    """
-    retained_indexes = {
-        index for index, item in enumerate(items) if item.type in _SIDE_EFFECT_ITEM_TYPES
-    }
-    if not retained_indexes:
-        return []
-    # Reasoning items are not side effects themselves, but a reasoning model requires the reasoning
-    # item tied to a function call to accompany it in the next request.
-    retained_indexes |= _reasoning_indexes_tied_to_retained_items(items, retained_indexes)
-    # Indexed rather than filtered by type so the retained items keep the model's own order.
-    return [item for index, item in enumerate(items) if index in retained_indexes]
+    model_response: ModelResponse | None = None,
+) -> list[RunItem]:
+    """Return trusted retained items without consulting earlier provider identities."""
+    return _retained_items_for_blocked_response(
+        items,
+        model_response,
+    )
 
 
 async def _finalize_streamed_final_output(
@@ -525,17 +494,15 @@ async def _finalize_streamed_final_output(
     context_wrapper: RunContextWrapper[TContext],
     save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
+    model_response: ModelResponse | None,
+    processed_response: ProcessedResponse | None,
+    owner_starts: _BlockedOutputOwnerStarts,
     response_id: str | None,
     store_setting: bool | None,
-    persist_before_output_guardrails: bool,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
 ) -> None:
+    output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
-    if persist_before_output_guardrails:
-        # A resumed approval has already committed the tool side effect, so keep its call/output
-        # pair even when an agent output guardrail blocks delivery of the final result.
-        await save_items(items, response_id, store_setting)
-
     try:
         output_guardrail_results = await _run_output_guardrails_for_stream(
             agent=agent,
@@ -544,62 +511,85 @@ async def _finalize_streamed_final_output(
             context_wrapper=context_wrapper,
             streamed_result=streamed_result,
         )
-    except OutputGuardrailTripwireTriggered:
+    except OutputGuardrailTripwireTriggered as exc:
+        if not _is_terminal_tool_output_response(
+            items,
+            processed_response,
+            streamed_result._state,
+        ):
+            raise
         # The blocked output itself is not persisted, but a tool that already ran is: the next run
         # has to see that side effect rather than re-issue it. This turn reaches here with tool
         # items when `tool_use_behavior="stop_on_first_tool"` (or `stop_at_tool_names`, or a custom
         # callable) turned a tool result straight into the final output.
-        if not persist_before_output_guardrails:
-            retained_items = _retained_items_for_blocked_output(items)
-            if retained_items:
-                await save_items(retained_items, response_id, store_setting)
-        raise
-    except Exception as guardrail_error:
-        # Only a tripwire means the output was judged undeliverable. A guardrail error leaves the
-        # verdict unknown, so the completed final turn is persisted whole and remains replayable.
-        # `asyncio.CancelledError` is deliberately not caught here: `cancel()` in its default
-        # immediate mode has to stay prompt, and awaiting a session write would block
-        # `stream_events()` on an arbitrary backend. `after_turn` is the mode that finishes the
-        # turn and saves.
-        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
-        if guardrail_error_is_redacted:
-            _detach_data_redacted_error_traceback(guardrail_error)
-        if not persist_before_output_guardrails:
+        sanitized_results = _sanitize_blocked_output_guardrail_results(
+            streamed_result.output_guardrail_results[output_guardrail_result_start:],
+            exc,
+        )
+        streamed_result.output_guardrail_results = [
+            *streamed_result.output_guardrail_results[:output_guardrail_result_start],
+            *sanitized_results,
+        ]
+        retained_items = _retained_items_for_blocked_response(
+            items,
+            model_response,
+            streamed_result._state,
+            processed_response,
+            streamed_result,
+            owner_starts,
+        )
+        if retained_items:
             try:
-                await save_items(items, response_id, store_setting)
+                await save_items(retained_items, response_id, store_setting)
             except BaseException as persistence_error:
-                if guardrail_error_is_redacted:
-                    safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
-                    if (
-                        isinstance(safe_persistence_error, asyncio.CancelledError)
-                        and streamed_result._cancel_mode != "immediate"
-                    ):
-                        # A cancelled session write is distinct from the caller requesting
-                        # immediate cancellation. Retain a safe cancellation for `stream_events()`
-                        # without completing the run-loop task with the payload-bearing backend
-                        # exception.
-                        streamed_result._stored_exception = safe_persistence_error
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                        return
-                    if isinstance(safe_persistence_error, asyncio.CancelledError):
-                        # Public immediate cancellation already owns stream completion and must
-                        # not surface a recovery failure.
-                        return
-                    redacted_persistence_error = safe_persistence_error
+                safe_error = _safe_redacted_persistence_error(persistence_error)
                 if (
                     isinstance(persistence_error, asyncio.CancelledError)
                     and streamed_result._cancel_mode != "immediate"
                 ):
-                    # A cancelled session write is distinct from the caller requesting immediate
-                    # cancellation. The run-loop task itself becomes cancelled, so retain the
-                    # backend cancellation for `stream_events()` to surface.
-                    streamed_result._stored_exception = persistence_error
-                if redacted_persistence_error is None:
-                    raise
-            else:
-                if on_persisted_after_guardrails is not None:
-                    on_persisted_after_guardrails(False)
+                    streamed_result._stored_exception = safe_error
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    return
+                raise safe_error from None
+        raise
+    except Exception as guardrail_error:
+        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
+        if guardrail_error_is_redacted:
+            _detach_data_redacted_error_traceback(guardrail_error)
+        try:
+            final_turn_items = _final_turn_items_for_persistence(
+                items,
+                processed_response,
+                streamed_result._state,
+                agent,
+                run_config,
+            )
+            await save_items(final_turn_items, response_id, store_setting)
+        except BaseException as persistence_error:
+            if guardrail_error_is_redacted:
+                safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
+                if (
+                    isinstance(safe_persistence_error, asyncio.CancelledError)
+                    and streamed_result._cancel_mode != "immediate"
+                ):
+                    streamed_result._stored_exception = safe_persistence_error
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    return
+                if isinstance(safe_persistence_error, asyncio.CancelledError):
+                    return
+                redacted_persistence_error = safe_persistence_error
+            if (
+                isinstance(persistence_error, asyncio.CancelledError)
+                and streamed_result._cancel_mode != "immediate"
+            ):
+                streamed_result._stored_exception = persistence_error
+            if redacted_persistence_error is None:
+                raise
+        else:
+            if on_persisted_after_guardrails is not None:
+                on_persisted_after_guardrails(False)
         if redacted_persistence_error is None:
             raise
 
@@ -607,23 +597,29 @@ async def _finalize_streamed_final_output(
         raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
+    final_turn_items = _final_turn_items_for_persistence(
+        items,
+        processed_response,
+        streamed_result._state,
+        agent,
+        run_config,
+    )
 
-    if not persist_before_output_guardrails:
-        # Saved as one ordered batch so the session mirrors the model response. Doing it in two
-        # halves would both reorder the turn and, because the first save advances the turn's
-        # persisted-item count, make the second one a no-op.
-        if on_persisted_after_guardrails is None:
-            await save_items(items, response_id, store_setting)
-        else:
-            try:
-                await save_items(items, response_id, store_setting)
-            except asyncio.CancelledError as persistence_error:
-                if streamed_result._cancel_mode == "immediate":
-                    raise
-                streamed_result._stored_exception = persistence_error
-                streamed_result.is_complete = True
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                return
+    # Saved as one ordered batch so the session mirrors the model response. Doing it in two
+    # halves would both reorder the turn and, because the first save advances the turn's
+    # persisted-item count, make the second one a no-op.
+    if on_persisted_after_guardrails is None:
+        await save_items(final_turn_items, response_id, store_setting)
+    else:
+        try:
+            await save_items(final_turn_items, response_id, store_setting)
+        except asyncio.CancelledError as persistence_error:
+            if streamed_result._cancel_mode == "immediate":
+                raise
+            streamed_result._stored_exception = persistence_error
+            streamed_result.is_complete = True
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            return
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -808,6 +804,9 @@ async def _persist_stream_input_if_needed(
 def _accumulate_tool_guardrail_results(
     streamed_result: RunResultStreaming,
     turn_result: SingleStepResult,
+    *,
+    accepted_input_results: list[ToolInputGuardrailResult],
+    accepted_output_results: list[ToolOutputGuardrailResult],
 ) -> None:
     """Carry a turn's tool guardrail results onto the streamed result.
 
@@ -820,6 +819,9 @@ def _accumulate_tool_guardrail_results(
     streamed_result.tool_output_guardrail_results = (
         streamed_result.tool_output_guardrail_results + turn_result.tool_output_guardrail_results
     )
+    if isinstance(turn_result.next_step, NextStepRunAgain | NextStepHandoff):
+        accepted_input_results.extend(turn_result.tool_input_guardrail_results)
+        accepted_output_results.extend(turn_result.tool_output_guardrail_results)
 
 
 async def _finalize_streamed_interruption(
@@ -970,10 +972,26 @@ async def start_streaming(
             current_agent = run_state._current_agent
         else:
             current_agent = starting_agent
+        _validate_resumed_session_output_guardrail_safety(
+            agent=current_agent,
+            run_config=run_config,
+            session=session,
+            run_state=run_state if is_resumed_state else None,
+        )
+        if run_state is not None and session is None:
+            streamed_result._current_turn_persisted_item_count = (
+                run_state._current_turn_persisted_item_count
+            )
         if run_state is not None:
             current_turn = run_state._current_turn
         else:
             current_turn = 0
+        accepted_tool_input_guardrail_results = (
+            list(run_state._tool_input_guardrail_results) if run_state is not None else []
+        )
+        accepted_tool_output_guardrail_results = (
+            list(run_state._tool_output_guardrail_results) if run_state is not None else []
+        )
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
         if run_state is not None:
@@ -1146,6 +1164,13 @@ async def start_streaming(
 
     try:
         while True:
+            validate_output_guardrails_with_server_managed_conversation(
+                current_agent,
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             all_input_guardrails = (
                 starting_agent.input_guardrails + (run_config.input_guardrails or [])
                 if current_turn == 0 and not is_resumed_state
@@ -1227,6 +1252,25 @@ async def start_streaming(
                         raise UserError("No processed response found in previous state")
 
                     last_model_response = run_state._model_responses[-1]
+                    resumed_response_boundary = _current_response_boundary(
+                        (),
+                        run_state._last_processed_response,
+                        run_state,
+                    )
+                    blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                        run_state_generated_items=resumed_response_boundary.generated_start,
+                        run_state_session_items=resumed_response_boundary.session_start,
+                        run_state_model_responses=len(run_state._model_responses) - 1,
+                        run_state_tool_output_guardrail_results=len(
+                            run_state._tool_output_guardrail_results
+                        ),
+                        streamed_new_items=resumed_response_boundary.session_start,
+                        streamed_model_input_items=resumed_response_boundary.generated_start,
+                        streamed_raw_responses=len(streamed_result.raw_responses) - 1,
+                        streamed_tool_output_guardrail_results=len(
+                            streamed_result.tool_output_guardrail_results
+                        ),
+                    )
 
                     turn_result = await resolve_interrupted_turn(
                         bindings=current_bindings,
@@ -1299,13 +1343,25 @@ async def start_streaming(
                     # but skips a resumed turn that loops back to the model, so a guardrail that
                     # re-runs for the same tool call on resume is not counted twice.
                     if not isinstance(turn_result.next_step, NextStepRunAgain):
-                        _accumulate_tool_guardrail_results(streamed_result, turn_result)
+                        _accumulate_tool_guardrail_results(
+                            streamed_result,
+                            turn_result,
+                            accepted_input_results=accepted_tool_input_guardrail_results,
+                            accepted_output_results=accepted_tool_output_guardrail_results,
+                        )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
                             save_items=_save_resumed_items,
-                            items=list(turn_session_items),
+                            items=(
+                                []
+                                if _should_defer_interrupted_session_items(
+                                    current_agent,
+                                    run_config,
+                                )
+                                else list(turn_session_items)
+                            ),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
                             interruptions=approvals_from_step(turn_result.next_step),
@@ -1346,10 +1402,18 @@ async def start_streaming(
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
+                            model_response=turn_result.model_response,
+                            processed_response=(
+                                turn_result.processed_response
+                                if turn_result.processed_response is not None
+                                else run_state._last_processed_response
+                            ),
+                            owner_starts=blocked_output_owner_starts,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
-                            persist_before_output_guardrails=True,
                         )
+                        if streamed_result._stored_exception is not None:
+                            break
                         run_state._current_step = None
                         break
 
@@ -1536,11 +1600,36 @@ async def start_streaming(
                     context_wrapper=context_wrapper,
                     save_items=_save_max_turns_items,
                     items=[synthesized_item] if include_in_history else [],
+                    model_response=None,
+                    processed_response=None,
+                    owner_starts=_BlockedOutputOwnerStarts(
+                        run_state_generated_items=(
+                            len(run_state._generated_items) if run_state is not None else None
+                        ),
+                        run_state_session_items=(
+                            len(run_state._session_items) if run_state is not None else None
+                        ),
+                        run_state_model_responses=(
+                            len(run_state._model_responses) if run_state is not None else None
+                        ),
+                        run_state_tool_output_guardrail_results=(
+                            len(run_state._tool_output_guardrail_results)
+                            if run_state is not None
+                            else None
+                        ),
+                        streamed_new_items=len(streamed_result.new_items),
+                        streamed_model_input_items=len(streamed_result._model_input_items),
+                        streamed_raw_responses=len(streamed_result.raw_responses),
+                        streamed_tool_output_guardrail_results=len(
+                            streamed_result.tool_output_guardrail_results
+                        ),
+                    ),
                     response_id=None,
                     store_setting=store_setting,
-                    persist_before_output_guardrails=False,
                     on_persisted_after_guardrails=_record_max_turns_handler_output,
                 )
+                if streamed_result._stored_exception is not None:
+                    break
                 streamed_result._max_turns_handled = True
                 streamed_result.current_turn = max_turns
                 if run_state is not None and not is_resumed_state:
@@ -1588,6 +1677,39 @@ async def start_streaming(
                         )
                     )
             try:
+                if run_state is not None and _has_output_guardrails(current_agent, run_config):
+                    _synchronize_accepted_run_state(
+                        run_state,
+                        generated_items=streamed_result._model_input_items,
+                        session_items=streamed_result.new_items,
+                        model_responses=streamed_result.raw_responses,
+                        tool_input_guardrail_results=accepted_tool_input_guardrail_results,
+                        tool_output_guardrail_results=accepted_tool_output_guardrail_results,
+                        current_turn=current_turn,
+                    )
+
+                blocked_output_owner_starts = _BlockedOutputOwnerStarts(
+                    run_state_generated_items=(
+                        len(run_state._generated_items) if run_state is not None else None
+                    ),
+                    run_state_session_items=(
+                        len(run_state._session_items) if run_state is not None else None
+                    ),
+                    run_state_model_responses=(
+                        len(run_state._model_responses) if run_state is not None else None
+                    ),
+                    run_state_tool_output_guardrail_results=(
+                        len(run_state._tool_output_guardrail_results)
+                        if run_state is not None
+                        else None
+                    ),
+                    streamed_new_items=len(streamed_result.new_items),
+                    streamed_model_input_items=len(streamed_result._model_input_items),
+                    streamed_raw_responses=len(streamed_result.raw_responses),
+                    streamed_tool_output_guardrail_results=len(
+                        streamed_result.tool_output_guardrail_results
+                    ),
+                )
                 logger.debug(
                     "Starting turn %s, current_agent=%s",
                     current_turn,
@@ -1660,7 +1782,12 @@ async def start_streaming(
                 streamed_result.raw_responses = streamed_result.raw_responses + [
                     turn_result.model_response
                 ]
-                _accumulate_tool_guardrail_results(streamed_result, turn_result)
+                _accumulate_tool_guardrail_results(
+                    streamed_result,
+                    turn_result,
+                    accepted_input_results=accepted_tool_input_guardrail_results,
+                    accepted_output_results=accepted_tool_output_guardrail_results,
+                )
                 input_before_turn_rewrite = streamed_result.input
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
@@ -1738,10 +1865,14 @@ async def start_streaming(
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
                         items=turn_session_items,
+                        model_response=turn_result.model_response,
+                        processed_response=turn_result.processed_response,
+                        owner_starts=blocked_output_owner_starts,
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
-                        persist_before_output_guardrails=False,
                     )
+                    if streamed_result._stored_exception is not None:
+                        break
                     if run_state is not None:
                         run_state._current_step = None
                     break
@@ -1763,7 +1894,14 @@ async def start_streaming(
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,
                         save_items=_save_stream_items_with_count,
-                        items=turn_session_items,
+                        items=(
+                            []
+                            if _should_defer_interrupted_session_items(
+                                current_agent,
+                                run_config,
+                            )
+                            else turn_session_items
+                        ),
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
                         interruptions=approvals_from_step(turn_result.next_step),

@@ -100,6 +100,9 @@ def bootstrap_in_uv(
     child_env = dict(environ)
     child_env[BOOTSTRAPPED_ENV] = "1"
     command = ["uv", "run", "python", str(Path(__file__).resolve()), *arguments]
+    if sys.platform == "win32":
+        completed = subprocess.run(command, env=child_env, check=False)
+        raise SystemExit(completed.returncode)
     exec_function(command[0], command, child_env)
     raise RuntimeError("The uv integration runner bootstrap returned unexpectedly.")
 
