@@ -128,14 +128,15 @@ class _DummyRunItem:
         return self._payload
 
 
-def test_blocked_function_batch_is_rebuilt_from_allowlisted_fields() -> None:
+@pytest.mark.parametrize("arguments", ["{}", ""], ids=["json-object", "empty"])
+def test_blocked_function_batch_is_rebuilt_from_allowlisted_fields(arguments: str) -> None:
     agent = Agent(name="test")
     call = ToolCallItem(
         agent=agent,
         raw_item={
             "type": "function_call",
             "name": "commit_tool",
-            "arguments": "{}",
+            "arguments": arguments,
             "call_id": "call-commit",
             "provider_data": {"secret": "call-secret"},
         },
@@ -158,6 +159,7 @@ def test_blocked_function_batch_is_rebuilt_from_allowlisted_fields() -> None:
     retained_call = cast(ToolCallItem, retained[0])
     retained_output = cast(ToolCallOutputItem, retained[1])
     assert "provider_data" not in cast(dict[str, Any], retained_call.raw_item)
+    assert cast(dict[str, Any], retained_call.raw_item)["arguments"] == arguments
     assert cast(dict[str, Any], retained_output.raw_item) == {
         "type": "function_call_output",
         "call_id": "call-commit",

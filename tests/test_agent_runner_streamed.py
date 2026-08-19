@@ -2410,10 +2410,12 @@ async def test_output_guardrails_fail_closed_with_server_managed_history(mode: s
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize("session_kind", ["simple", "openai_conversations"])
+@pytest.mark.parametrize("arguments", ["{}", ""], ids=["json-object", "empty"])
 @pytest.mark.asyncio
 async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwire(
     mode: str,
     session_kind: str,
+    arguments: str,
 ) -> None:
     """A blocked final output must not discard the session record of a tool that already ran."""
 
@@ -2432,7 +2434,7 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
 
     model = ScriptedModel()
-    model.enqueue([get_function_tool_call("commit_tool", "{}", call_id="call-committed")])
+    model.enqueue([get_function_tool_call("commit_tool", arguments, call_id="call-committed")])
     agent = Agent(
         name="test",
         model=model,

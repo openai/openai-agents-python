@@ -86,10 +86,13 @@ def blocked_function_call_payload(raw_item: Any) -> dict[str, Any]:
     item_type = _payload_field(raw_item, "type")
     if type(item_type) is not str or str.__eq__(item_type, "function_call") is not True:
         raise AgentsException("Cannot sanitize an unsupported tool call variant.")
+    arguments = _payload_field(raw_item, "arguments")
+    if type(arguments) is not str:
+        raise AgentsException("Cannot sanitize a function tool item without arguments.")
     sanitized: dict[str, Any] = {
         "type": "function_call",
         "name": _required_string(raw_item, "name"),
-        "arguments": _required_string(raw_item, "arguments"),
+        "arguments": arguments,
         "call_id": _required_string(raw_item, "call_id"),
     }
     _copy_optional_string(sanitized, raw_item, "id")
