@@ -366,6 +366,58 @@ def test_usage_add_preserves_existing_entries_when_top_level_also_set():
     assert entry.output_tokens_details.reasoning_tokens == 5
 
 
+def test_usage_add_detaches_pre_existing_request_usage_entries():
+    source_entry = RequestUsage(
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 10}
+        ),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
+    )
+    source = Usage(
+        requests=1,
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        request_usage_entries=[source_entry],
+    )
+    aggregate = Usage()
+
+    aggregate.add(source)
+    source_entry.input_tokens = 999
+    source_entry.input_tokens_details.cached_tokens = 99
+    source_entry.output_tokens_details.reasoning_tokens = 99
+
+    aggregate_entry = aggregate.request_usage_entries[0]
+    assert aggregate_entry.input_tokens == 100
+    assert aggregate_entry.input_tokens_details.cached_tokens == 10
+    assert aggregate_entry.output_tokens_details.reasoning_tokens == 5
+
+
+def test_usage_add_detaches_synthesized_request_usage_details():
+    source = Usage(
+        requests=1,
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 10}
+        ),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=5),
+    )
+    aggregate = Usage()
+
+    aggregate.add(source)
+    source.input_tokens_details.cached_tokens = 99
+    source.output_tokens_details.reasoning_tokens = 99
+
+    aggregate_entry = aggregate.request_usage_entries[0]
+    assert aggregate_entry.input_tokens_details.cached_tokens == 10
+    assert aggregate_entry.output_tokens_details.reasoning_tokens == 5
+
+
 def test_usage_request_usage_entries_default_empty():
     """Test that request_usage_entries defaults to an empty list."""
     u = Usage()

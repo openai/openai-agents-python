@@ -297,7 +297,7 @@ class Usage:
         # (this preserves nested token details that would otherwise be discarded
         # when synthesizing an entry from only the top-level fields).
         if other.request_usage_entries:
-            self.request_usage_entries.extend(other.request_usage_entries)
+            self.request_usage_entries.extend(copy.deepcopy(other.request_usage_entries))
         elif other.requests == 1 and other.total_tokens > 0:
             # Otherwise, if the other Usage represents a single request with tokens, record it.
             input_details = other.input_tokens_details or _make_input_tokens_details()
@@ -306,8 +306,8 @@ class Usage:
                 input_tokens=other.input_tokens,
                 output_tokens=other.output_tokens,
                 total_tokens=other.total_tokens,
-                input_tokens_details=input_details,
-                output_tokens_details=output_details,
+                input_tokens_details=copy.deepcopy(input_details),
+                output_tokens_details=copy.deepcopy(output_details),
             )
             self.request_usage_entries.append(request_usage)
 
