@@ -51,6 +51,8 @@ custom_client = AsyncOpenAI(base_url="...", api_key="...")
 set_default_openai_client(custom_client)
 ```
 
+When you pass an explicit client to [`OpenAIProvider`][agents.models.openai_provider.OpenAIProvider], that client owns its connection and account settings. Do not also pass `api_key`, `base_url`, `websocket_base_url`, `organization`, or `project` to `OpenAIProvider`; combining `openai_client` with any of those arguments raises [`UserError`][agents.exceptions.UserError] instead of silently ignoring the duplicate value. Set the intended values when constructing `AsyncOpenAI`.
+
 ### Custom HTTP clients with `openai` v3
 
 Version 0.21.0 requires `openai>=3.0.0,<4`. The default OpenAI provider uses HTTPX2, so most applications do not need to configure an HTTP client directly. If your application passes `http_client=` to `AsyncOpenAI`, use HTTPX2 types for the custom client and its transport-facing options:

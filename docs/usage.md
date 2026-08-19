@@ -91,6 +91,24 @@ print(second.context_wrapper.usage.total_tokens)  # Usage for second run
 
 Note that while sessions preserve conversation context between runs, the usage metrics returned by each `Runner.run()` call represent only that particular execution. In sessions, previous messages may be re-fed as input to each run, which affects the input token count in subsequent turns.
 
+## Usage in RunState checkpoints
+
+[`RunResult.to_state()`][agents.result.RunResult.to_state] captures an independent snapshot of the usage accumulated so far. A run resumed from that checkpoint starts with the captured totals and adds usage from its own model calls. The resumed run does not add those new totals to the original `RunResult` or to another checkpoint created from that result.
+
+```python
+first = await Runner.run(agent, "First request")
+checkpoint_a = first.to_state()
+checkpoint_b = first.to_state()
+
+resumed_a = await Runner.run(agent, checkpoint_a)
+resumed_b = await Runner.run(agent, checkpoint_b)
+
+assert resumed_a.context_wrapper.usage is not first.context_wrapper.usage
+assert resumed_b.context_wrapper.usage is not resumed_a.context_wrapper.usage
+```
+
+This isolation also applies to the `request_usage_entries` list inside [`Usage`][agents.usage.Usage]. A resumed nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] run is the exception to independent top-level accounting: its post-resume model usage is deliberately aggregated into the active outer run's usage, just like the nested run's earlier model calls.
+
 ## Using usage in hooks
 
 If you're using `RunHooks`, the `context` object passed to each hook contains `usage`. This lets you log usage at key lifecycle moments.

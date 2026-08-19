@@ -24,7 +24,7 @@ You can generate an agent visualization using the `draw_graph` function. This fu
 ```python
 import os
 
-from agents import Agent
+from agents import Agent, handoff
 from agents.decorators import tool
 from agents.mcp.server import MCPServerStdio
 from agents.extensions.visualization import draw_graph
@@ -56,7 +56,7 @@ mcp_server = MCPServerStdio(
 triage_agent = Agent(
     name="Triage agent",
     instructions="Handoff to the appropriate agent based on the language of the request.",
-    handoffs=[spanish_agent, english_agent],
+    handoffs=[handoff(spanish_agent), handoff(english_agent)],
     tools=[get_weather],
     mcp_servers=[mcp_server],
 )
@@ -67,6 +67,8 @@ draw_graph(triage_agent)
 ![Agent Graph](./assets/images/graph.png)
 
 This generates a graph that visually represents the structure of the **triage agent** and its connections to sub-agents and tools.
+
+`draw_graph()` recursively expands target agents supplied directly in `handoffs` or registered through `handoff(agent)`. In both forms, the graph includes each target's tools, MCP servers, and downstream handoffs. A custom `Handoff` without an available target `Agent` is rendered as a named destination only, so the graph cannot expand resources behind that destination.
 
 
 ## Understanding the visualization

@@ -211,6 +211,8 @@ Tool guardrails are exposed separately as [`tool_input_guardrail_results`][agent
 
 These arrays accumulate across the run, so they are useful for logging decisions, storing extra guardrail metadata, or debugging why a run was blocked.
 
+One redaction rule applies when an agent-level output guardrail blocks final output produced directly by a terminal function tool. For the blocked current response, `output_guardrail_results` replaces the rejected agent output and clears payload-bearing output metadata, while `tool_output_guardrail_results` replaces payload-bearing tool metadata. Earlier accepted results remain unchanged. The sanitized output-guardrail result is exposed as `guardrail_result` on [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]. Sanitized output-guardrail and tool-output-guardrail results are also exposed through streamed result state and `RunState`; see [Output guardrails](guardrails.md#output-guardrails).
+
 ### Context and usage
 
 [`context_wrapper`][agents.result.RunResultBase.context_wrapper] exposes your app context together with SDK-managed runtime metadata such as approvals, usage, and nested `tool_input`.

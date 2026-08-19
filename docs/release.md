@@ -19,6 +19,19 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.22.0
+
+Version 0.22.0 tightens failure handling and data isolation for several existing APIs. Applications that construct `OpenAIProvider` with an explicit client and also pass `organization` or `project` to the provider must remove those duplicate arguments.
+
+Highlights:
+
+-   When an agent-level output guardrail blocks final output produced directly by a terminal function tool, the SDK retains a replay-valid call/output pair only when validated fields permit safe reconstruction. The original `function_call_output` payload is replaced with the fixed text `"Output withheld by an output guardrail."` in session history, `RunState`, and streamed result state, and payload-bearing current-response guardrail metadata is cleared or replaced. If the current response contains reasoning or another unsupported shape, the SDK discards the complete current-response suffix instead. Earlier accepted turns and guardrail results remain available. See [Output guardrails](guardrails.md#output-guardrails).
+-   Non-streaming OpenAI Responses calls now raise `ModelBehaviorError` when the returned response has terminal status `failed` or `incomplete`, matching the existing streamed terminal-event handling. This applies to `OpenAIResponsesModel` and the Responses path in `AnyLLMModel`. See [Exceptions](running_agents.md#exceptions).
+-   [`OpenAIProvider`][agents.models.openai_provider.OpenAIProvider] now also raises `UserError` when `openai_client` is combined with `organization` or `project`. The existing conflicts with `api_key`, `base_url`, and `websocket_base_url` are unchanged. Configure these values on the explicit `AsyncOpenAI` client instead. See [API keys and clients](config.md#api-keys-and-clients).
+-   Each `RunResult.to_state()` checkpoint now owns an independent usage snapshot. A resumed result starts with the checkpoint totals and adds its own model calls without mutating the source result or sibling checkpoints. Nested `Agent.as_tool()` resumes continue to aggregate post-resume usage into the active outer run. See [Usage in RunState checkpoints](usage.md#usage-in-runstate-checkpoints).
+-   Agent visualization now recursively expands the tools, MCP servers, and downstream handoffs of a target registered with `handoff(agent)`, matching direct `Agent` entries in an agent's `handoffs` list. See [Generating a graph](visualization.md#generating-a-graph).
+-   The `Agent.clone()` and `RealtimeAgent.clone()` API guidance now states their existing shallow-copy behavior precisely: list attributes that are not overridden remain the same list objects. Pass a new list when the clone must own the container independently. See [Cloning/copying agents](agents.md#cloningcopying-agents).
+
 ### 0.21.0
 
 Version 0.21.0 requires `openai` v3 and moves the Agents SDK's OpenAI HTTP integrations to HTTPX2. Applications that use the default OpenAI client do not need to change their client setup, but applications that customize the OpenAI HTTP layer may need to migrate transport-facing code.
