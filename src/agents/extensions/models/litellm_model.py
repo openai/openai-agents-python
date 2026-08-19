@@ -302,19 +302,6 @@ class LitellmModel(Model):
                 usage = Usage(requests=1)
                 logger.warning("No usage information returned from Litellm")
 
-            if tracing.include_data():
-                span_generation.span_data.output = (
-                    [message.model_dump()] if message is not None else []
-                )
-            span_generation.span_data.usage = {
-                "requests": usage.requests,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total_tokens,
-                "input_tokens_details": usage.input_tokens_details.model_dump(),
-                "output_tokens_details": usage.output_tokens_details.model_dump(),
-            }
-
             # Surface content-filter refusals explicitly. Some providers (e.g.
             # Anthropic on Amazon Bedrock) signal a safety block only via
             # ``finish_reason == "content_filter"`` with an empty message and no
@@ -324,7 +311,9 @@ class LitellmModel(Model):
             # refusal so downstream handling (ResponseOutputRefusal) fires.
             # A completion truncated before any visible token (``finish_reason ==
             # "length"``) has the same shape and must not collapse into an empty
-            # turn either.
+            # turn either. This runs before the span output is recorded so the
+            # synthesized refusal is reflected in tracing; a provider-supplied
+            # refusal (carried in ``provider_specific_fields``) is left as-is.
             if (
                 message is not None
                 and first_choice is not None
@@ -342,6 +331,19 @@ class LitellmModel(Model):
                     )
                     provider_specific_fields["refusal"] = refusal_message
                     message.provider_specific_fields = provider_specific_fields
+
+            if tracing.include_data():
+                span_generation.span_data.output = (
+                    [message.model_dump()] if message is not None else []
+                )
+            span_generation.span_data.usage = {
+                "requests": usage.requests,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "input_tokens_details": usage.input_tokens_details.model_dump(),
+                "output_tokens_details": usage.output_tokens_details.model_dump(),
+            }
 
             # Build provider_data for provider specific fields
             provider_data: dict[str, Any] = {"model": self.model}
