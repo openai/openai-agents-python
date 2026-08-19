@@ -93,7 +93,7 @@ async def main():
             input=result.to_input_list()
             + [
                 {
-                    "content": "I live in New York City. Whats the population of the city?",
+                    "content": "I live in New York City. What's the population of the city?",
                     "role": "user",
                 }
             ],
@@ -152,7 +152,7 @@ async def main():
         "type": "message"
         }
         {
-        "content": "I live in New York City. Whats the population of the city?",
+        "content": "I live in New York City. What's the population of the city?",
         "role": "user"
         }
         {
