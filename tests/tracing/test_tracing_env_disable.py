@@ -39,6 +39,19 @@ def test_disabled_span_logging_respects_data_policy(monkeypatch, caplog, redacte
     assert "Tracing is disabled. Not creating span" in caplog.text
 
 
+def test_force_flush_initializes_env_disable_cache(monkeypatch):
+    """Force flush preserves the first-use timing for the env disable flag."""
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "1")
+    provider = DefaultTraceProvider()
+
+    provider.force_flush()
+
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "0")
+    trace = provider.create_trace("still-disabled")
+
+    assert isinstance(trace, NoOpTrace)
+
+
 def test_env_cached_after_first_use(monkeypatch):
     """Env flag is cached after the first trace and later env changes do not flip it."""
     monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "0")
