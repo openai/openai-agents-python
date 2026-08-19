@@ -74,7 +74,7 @@ from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.result import RunResultStreaming
 from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
 from agents.run_config import _default_trace_include_sensitive_data
-from agents.run_internal import run_loop
+from agents.run_internal import blocked_output, run_loop
 from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.agent_runner_helpers import build_resumed_stream_debug_extra
 from agents.run_internal.items import (
@@ -496,7 +496,7 @@ def test_blocked_snapshot_cancellation_severs_replay_graph_and_propagates(
     def cancel_preparation(_raw_item: Any) -> dict[str, Any]:
         raise cancellation
 
-    monkeypatch.setattr(run_loop, "_blocked_function_output_payload", cancel_preparation)
+    monkeypatch.setattr(blocked_output, "blocked_function_output_payload", cancel_preparation)
 
     with pytest.raises(asyncio.CancelledError) as exc_info:
         run_loop._retained_items_for_blocked_response(
@@ -601,7 +601,7 @@ def test_blocked_snapshot_application_baseexception_severs_every_owner(
             object.__setattr__(owner, field, value)
         raise application_error
 
-    monkeypatch.setattr(run_loop, "_apply_blocked_output_owner_plan", fail_application)
+    monkeypatch.setattr(blocked_output, "_apply_blocked_output_owner_plan", fail_application)
 
     with pytest.raises(KeyboardInterrupt) as exc_info:
         run_loop._retained_items_for_blocked_response(
@@ -666,7 +666,7 @@ def test_blocked_snapshot_application_exception_becomes_fixed_error(
     def fail_application(_plan: Any) -> None:
         raise ValueError("application-secret")
 
-    monkeypatch.setattr(run_loop, "_apply_blocked_output_owner_plan", fail_application)
+    monkeypatch.setattr(blocked_output, "_apply_blocked_output_owner_plan", fail_application)
 
     with pytest.raises(RuntimeError) as exc_info:
         run_loop._retained_items_for_blocked_response(
