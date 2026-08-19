@@ -31,6 +31,7 @@ from agents import (
     HandoffInputData,
     InputGuardrail,
     InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
     ModelBehaviorError,
     ModelRetryAdvice,
     ModelRetrySettings,
@@ -48,12 +49,14 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolNameCollisionPolicy,
+    ToolOutputGuardrailData,
     ToolTimeoutError,
     UserError,
     handoff,
     retry_policies,
     tool_input_guardrail,
     tool_namespace,
+    tool_output_guardrail,
 )
 from agents._tool_identity import resolve_tool_name_collisions
 from agents.agent import ToolsToFinalOutputResult
@@ -764,6 +767,119 @@ async def test_non_streamed_trip_preserves_prior_run_state_side_effect(
     assert "accepted-output" in serialized_memory_items
     assert "rejected-output" not in serialized_memory_items
     assert "reasoning-current" not in serialized_memory_items
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non-streamed", "streamed"])
+@pytest.mark.parametrize("handoff_turn", [False, True], ids=["run-again", "handoff"])
+@pytest.mark.asyncio
+async def test_resumed_trip_preserves_accepted_turns_and_turn_budget(
+    streamed: bool,
+    handoff_turn: bool,
+) -> None:
+    side_effects: list[str] = []
+
+    @tool_input_guardrail
+    def record_accepted_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="accepted-input-audit")
+
+    @tool_output_guardrail
+    def record_accepted_output(_data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="accepted-output-audit")
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        side_effects.append("approved")
+        return "approved-output"
+
+    @function_tool(
+        name_override="accepted_tool",
+        tool_input_guardrails=[record_accepted_input],
+        tool_output_guardrails=[record_accepted_output],
+    )
+    def accepted_tool() -> str:
+        side_effects.append("accepted")
+        return "accepted-output"
+
+    @function_tool(name_override="terminal_tool")
+    def terminal_tool() -> str:
+        side_effects.append("terminal")
+        return "rejected-secret"
+
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = ScriptedModel()
+    target = Agent(
+        name="target",
+        model=model,
+        tools=[terminal_tool],
+        tool_use_behavior={"stop_at_tool_names": ["terminal_tool"]},
+        output_guardrails=[OutputGuardrail(guardrail_function=reject_output)],
+    )
+    agent = Agent(
+        name="source",
+        model=model,
+        tools=[approval_tool, accepted_tool, terminal_tool],
+        handoffs=[target] if handoff_turn else [],
+        tool_use_behavior={"stop_at_tool_names": ["terminal_tool"]},
+        output_guardrails=(
+            [] if handoff_turn else [OutputGuardrail(guardrail_function=reject_output)]
+        ),
+    )
+    accepted_response = [get_function_tool_call("accepted_tool", "{}", call_id="accepted-call")]
+    if handoff_turn:
+        accepted_response.append(get_handoff_tool_call(target))
+    model.extend(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="approved-call")],
+            accepted_response,
+            [get_function_tool_call("terminal_tool", "{}", call_id="terminal-call")],
+        ]
+    )
+
+    interrupted = await Runner.run(agent, "run approved tools", max_turns=3)
+    state = interrupted.to_state()
+    state.approve(interrupted.interruptions[0])
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if streamed:
+            result = Runner.run_streamed(agent, state)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state)
+
+    assert side_effects == ["approved", "accepted", "terminal"]
+    assert state._current_turn == 3
+    assert len(state._model_responses) == 3
+    assert [result.output.output_info for result in state._tool_input_guardrail_results] == [
+        "accepted-input-audit"
+    ]
+    assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+        "accepted-output-audit"
+    ]
+    for items in (state._generated_items, state._session_items):
+        outputs = [item for item in items if isinstance(item, ToolCallOutputItem)]
+        assert [item.output for item in outputs] == [
+            "approved-output",
+            "accepted-output",
+            run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+        ]
+
+    serialized_state = json.dumps(state.to_json())
+    assert "approved-output" in serialized_state
+    assert "accepted-output" in serialized_state
+    assert "accepted-input-audit" in serialized_state
+    assert "accepted-output-audit" in serialized_state
+    assert "rejected-secret" not in serialized_state
+
+    with pytest.raises(MaxTurnsExceeded):
+        await Runner.run(agent, state)
+    assert side_effects == ["approved", "accepted", "terminal"]
 
 
 @pytest.mark.asyncio

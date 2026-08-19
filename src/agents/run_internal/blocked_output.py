@@ -24,7 +24,11 @@ from ..memory import Session
 from ..result import RunResultStreaming
 from ..run_config import RunConfig
 from ..run_state import RunState
-from ..tool_guardrails import ToolGuardrailFunctionOutput, ToolOutputGuardrailResult
+from ..tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailResult,
+    ToolOutputGuardrailResult,
+)
 from .run_steps import NextStepInterruption, ProcessedResponse
 
 OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = "Output withheld by an output guardrail."
@@ -242,6 +246,25 @@ _OwnerItemT = TypeVar("_OwnerItemT")
 
 def _has_output_guardrails(agent: Agent[Any], run_config: RunConfig) -> bool:
     return bool(agent.output_guardrails or run_config.output_guardrails)
+
+
+def _synchronize_accepted_run_state(
+    run_state: RunState[Any],
+    *,
+    generated_items: Sequence[RunItem],
+    session_items: Sequence[RunItem],
+    model_responses: Sequence[ModelResponse],
+    tool_input_guardrail_results: Sequence[ToolInputGuardrailResult],
+    tool_output_guardrail_results: Sequence[ToolOutputGuardrailResult],
+    current_turn: int,
+) -> None:
+    """Capture accepted run history before a guardrail-owned model response begins."""
+    run_state._generated_items = list(generated_items)
+    run_state._session_items = list(session_items)
+    run_state._model_responses = list(model_responses)
+    run_state._tool_input_guardrail_results = list(tool_input_guardrail_results)
+    run_state._tool_output_guardrail_results = list(tool_output_guardrail_results)
+    run_state._current_turn = current_turn
 
 
 def _should_defer_interrupted_session_items(

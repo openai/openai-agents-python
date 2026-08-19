@@ -86,10 +86,12 @@ from .run_internal.blocked_output import (
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
     _final_turn_items_for_persistence,
+    _has_output_guardrails,
     _is_terminal_tool_output_response,
     _retained_items_for_blocked_response,
     _sanitize_blocked_output_guardrail_results,
     _should_defer_interrupted_session_items,
+    _synchronize_accepted_run_state,
     _validate_resumed_session_output_guardrail_safety,
 )
 from .run_internal.error_handlers import (
@@ -1535,6 +1537,17 @@ class AgentRunner:
                             )
                         except Exception:
                             last_saved_input_snapshot_for_rewind = None
+
+                    if run_state is not None and _has_output_guardrails(current_agent, run_config):
+                        _synchronize_accepted_run_state(
+                            run_state,
+                            generated_items=generated_items,
+                            session_items=session_items,
+                            model_responses=model_responses,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            current_turn=current_turn,
+                        )
 
                     blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                         nonstreamed_session_items=len(session_items),

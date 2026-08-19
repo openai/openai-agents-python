@@ -84,6 +84,7 @@ from ..tool import (
     Tool,
     dispose_resolved_computers,
 )
+from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
@@ -111,10 +112,12 @@ from .blocked_output import (
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
     _final_turn_items_for_persistence,
+    _has_output_guardrails,
     _is_terminal_tool_output_response,
     _retained_items_for_blocked_response,
     _sanitize_blocked_output_guardrail_results,
     _should_defer_interrupted_session_items,
+    _synchronize_accepted_run_state,
     _validate_resumed_session_output_guardrail_safety,
 )
 from .error_handlers import (
@@ -800,6 +803,9 @@ async def _persist_stream_input_if_needed(
 def _accumulate_tool_guardrail_results(
     streamed_result: RunResultStreaming,
     turn_result: SingleStepResult,
+    *,
+    accepted_input_results: list[ToolInputGuardrailResult],
+    accepted_output_results: list[ToolOutputGuardrailResult],
 ) -> None:
     """Carry a turn's tool guardrail results onto the streamed result.
 
@@ -812,6 +818,9 @@ def _accumulate_tool_guardrail_results(
     streamed_result.tool_output_guardrail_results = (
         streamed_result.tool_output_guardrail_results + turn_result.tool_output_guardrail_results
     )
+    if isinstance(turn_result.next_step, NextStepRunAgain | NextStepHandoff):
+        accepted_input_results.extend(turn_result.tool_input_guardrail_results)
+        accepted_output_results.extend(turn_result.tool_output_guardrail_results)
 
 
 async def _finalize_streamed_interruption(
@@ -972,6 +981,12 @@ async def start_streaming(
             current_turn = run_state._current_turn
         else:
             current_turn = 0
+        accepted_tool_input_guardrail_results = (
+            list(run_state._tool_input_guardrail_results) if run_state is not None else []
+        )
+        accepted_tool_output_guardrail_results = (
+            list(run_state._tool_output_guardrail_results) if run_state is not None else []
+        )
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
         if run_state is not None:
@@ -1323,7 +1338,12 @@ async def start_streaming(
                     # but skips a resumed turn that loops back to the model, so a guardrail that
                     # re-runs for the same tool call on resume is not counted twice.
                     if not isinstance(turn_result.next_step, NextStepRunAgain):
-                        _accumulate_tool_guardrail_results(streamed_result, turn_result)
+                        _accumulate_tool_guardrail_results(
+                            streamed_result,
+                            turn_result,
+                            accepted_input_results=accepted_tool_input_guardrail_results,
+                            accepted_output_results=accepted_tool_output_guardrail_results,
+                        )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
                         await _finalize_streamed_interruption(
@@ -1652,6 +1672,17 @@ async def start_streaming(
                         )
                     )
             try:
+                if run_state is not None and _has_output_guardrails(current_agent, run_config):
+                    _synchronize_accepted_run_state(
+                        run_state,
+                        generated_items=streamed_result._model_input_items,
+                        session_items=streamed_result.new_items,
+                        model_responses=streamed_result.raw_responses,
+                        tool_input_guardrail_results=accepted_tool_input_guardrail_results,
+                        tool_output_guardrail_results=accepted_tool_output_guardrail_results,
+                        current_turn=current_turn,
+                    )
+
                 blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                     run_state_generated_items=(
                         len(run_state._generated_items) if run_state is not None else None
@@ -1746,7 +1777,12 @@ async def start_streaming(
                 streamed_result.raw_responses = streamed_result.raw_responses + [
                     turn_result.model_response
                 ]
-                _accumulate_tool_guardrail_results(streamed_result, turn_result)
+                _accumulate_tool_guardrail_results(
+                    streamed_result,
+                    turn_result,
+                    accepted_input_results=accepted_tool_input_guardrail_results,
+                    accepted_output_results=accepted_tool_output_guardrail_results,
+                )
                 input_before_turn_rewrite = streamed_result.input
                 streamed_result.input = turn_result.original_input
                 if isinstance(turn_result.next_step, NextStepHandoff):
