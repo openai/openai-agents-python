@@ -1,4 +1,5 @@
-from unittest.mock import Mock
+import re
+from unittest.mock import Mock, PropertyMock
 
 import graphviz  # type: ignore
 import pytest
@@ -184,6 +185,155 @@ def test_cycle_detection():
     assert nodes.count('"B" [label="B"') == 1
     assert '"A" -> "B"' in edges
     assert '"B" -> "A"' in edges
+
+
+def test_graph_keeps_different_node_types_with_the_same_name_distinct():
+    shared_tool = Mock()
+    shared_tool.name = "shared"
+    shared_handoff = Mock(spec=Handoff)
+    shared_handoff.agent_name = "shared"
+    agent = Mock(spec=Agent)
+    agent.name = "shared"
+    agent.tools = [shared_tool]
+    agent.mcp_servers = [FakeMCPServer(server_name="shared")]
+    agent.handoffs = [shared_handoff]
+
+    source = get_main_graph(agent)
+
+    node_ids = re.findall(r'"([^"]+)" \[label="shared"', source)
+    assert len(node_ids) == 4
+    assert len(set(node_ids)) == 4
+    agent_id, tool_id, server_id, handoff_id = node_ids
+    assert f'"{agent_id}" -> "{tool_id}" [style=dotted' in source
+    assert f'"{agent_id}" -> "{server_id}" [style=dashed' in source
+    assert f'"{agent_id}" -> "{handoff_id}";' in source
+    assert all(f'"{node_id}" -> "{node_id}"' not in source for node_id in node_ids)
+
+
+def test_graph_keeps_names_that_escape_to_the_same_id_distinct():
+    shared_tool = Mock()
+    shared_tool.name = "shared\r"
+    shared_handoff = Mock(spec=Handoff)
+    shared_handoff.agent_name = "shared\r\n"
+    shared_handoff._agent_ref = None
+    agent = Mock(spec=Agent)
+    agent.name = "shared\n"
+    agent.tools = [shared_tool]
+    agent.mcp_servers = []
+    agent.handoffs = [shared_handoff]
+
+    source = get_main_graph(agent)
+
+    node_ids = re.findall(r'"([^"]+)" \[label="shared\\n"', source)
+    assert len(node_ids) == 3
+    assert len(set(node_ids)) == 3
+    agent_id, tool_id, handoff_id = node_ids
+    assert f'"{agent_id}" -> "{tool_id}" [style=dotted' in source
+    assert f'"{agent_id}" -> "{handoff_id}";' in source
+    assert all(f'"{node_id}" -> "{node_id}"' not in source for node_id in node_ids)
+
+
+@pytest.mark.parametrize("use_handoff_object", [False, True])
+def test_graph_traverses_different_agents_with_the_same_name(
+    use_handoff_object: bool,
+):
+    child_tool = Mock()
+    child_tool.name = "child_tool"
+    child = Agent(name="duplicate", tools=[child_tool])
+    child_handoff = handoff(child) if use_handoff_object else child
+    parent = Agent(name="duplicate", handoffs=[child_handoff])
+
+    source = get_main_graph(parent)
+
+    agent_ids = re.findall(r'"([^"]+)" \[label="duplicate"', source)
+    assert len(agent_ids) == 2
+    assert len(set(agent_ids)) == 2
+    parent_id, child_id = agent_ids
+    assert f'"{parent_id}" -> "{child_id}";' in source
+    assert f'"{child_id}" -> "child_tool" [style=dotted' in source
+
+
+@pytest.mark.parametrize("use_handoff_object", [False, True])
+def test_get_all_nodes_honors_prepopulated_visited_names(
+    use_handoff_object: bool,
+):
+    child = Agent(name="child")
+    child_handoff = handoff(child) if use_handoff_object else child
+    parent = Agent(name="parent", handoffs=[child_handoff])
+    visited = {"child"}
+
+    nodes = get_all_nodes(parent, visited=visited)
+
+    assert '"child" [label="child"' not in nodes
+    assert visited == {"parent", "child"}
+
+
+@pytest.mark.parametrize("renderer", [get_all_nodes, get_all_edges])
+def test_graph_does_not_inspect_previsited_root(renderer):
+    agent = Mock(spec=Agent)
+    agent.name = "visited"
+    type(agent).tools = PropertyMock(
+        side_effect=AssertionError("previsited agent should not be inspected")
+    )
+
+    assert renderer(agent, visited={"visited"}) == ""
+
+
+@pytest.mark.parametrize("renderer", [get_all_nodes, get_all_edges])
+def test_previsited_subgraph_does_not_affect_included_node_ids(renderer):
+    included_tool = Mock()
+    included_tool.name = "shared"
+    skipped_tool = Mock()
+    skipped_tool.name = "shared"
+    child = Agent(name="child", tools=[skipped_tool])
+    parent = Agent(name="parent", tools=[included_tool], handoffs=[child])
+
+    source = renderer(parent, visited={"child"})
+
+    assert '"shared"' in source
+    assert "__agents_graph_tool_" not in source
+
+
+@pytest.mark.parametrize("use_handoff_object", [False, True])
+def test_previsited_agent_reserves_its_id(use_handoff_object: bool):
+    tool = Mock()
+    tool.name = "shared"
+    child = Agent(name="shared")
+    child_handoff = handoff(child) if use_handoff_object else child
+    parent = Agent(name="parent", tools=[tool], handoffs=[child_handoff])
+
+    nodes = get_all_nodes(parent, visited={"shared"})
+    edges = get_all_edges(parent, visited={"shared"})
+
+    tool_ids = re.findall(r'"([^"]+)" \[label="shared"', nodes)
+    assert len(tool_ids) == 1
+    assert tool_ids[0].startswith("__agents_graph_tool_")
+    assert f'"parent" -> "{tool_ids[0]}" [style=dotted' in edges
+    assert '"parent" -> "shared";' in edges
+
+
+def test_collision_free_escaped_ids_keep_legacy_names():
+    tool = Mock()
+    tool.name = "shared\n"
+    agent = Agent(name=r"shared\n", tools=[tool])
+
+    source = get_main_graph(agent)
+
+    assert '"shared\\\\n" [label="shared\\\\n"' in source
+    assert '"shared\\n" [label="shared\\n"' in source
+    assert "__agents_graph_" not in source
+
+
+def test_graph_reserves_start_and_end_node_ids():
+    agent = Agent(name="__start__")
+
+    source = get_main_graph(agent)
+
+    start_ids = re.findall(r'"([^"]+)" \[label="__start__"', source)
+    assert len(start_ids) == 2
+    assert len(set(start_ids)) == 2
+    assert start_ids[0] == "__start__"
+    assert f'"__start__" -> "{start_ids[1]}";' in source
 
 
 def test_names_with_quotes_and_backslashes_are_escaped(mock_agent):
