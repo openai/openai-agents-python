@@ -16,6 +16,8 @@ from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider, 
     [
         {"api_key": "other_key"},
         {"base_url": "https://example.com"},
+        {"organization": "org_test"},
+        {"project": "proj_test"},
         {"api_key": "other_key", "base_url": "https://example.com"},
     ],
 )
