@@ -1129,6 +1129,7 @@ async def _finalize_streamed_final_output(
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
+    redacted_persistence_error: BaseException | None = None
     try:
         output_guardrail_results = await _run_output_guardrails_for_stream(
             agent=agent,
@@ -1179,9 +1180,47 @@ async def _finalize_streamed_final_output(
                     return
                 raise safe_error from None
         raise
-    except (Exception, asyncio.CancelledError):
-        # Without a verdict, the SDK does not persist any part of the terminal response.
-        raise
+    except Exception as guardrail_error:
+        if _is_terminal_tool_output_response(
+            items,
+            processed_response,
+            streamed_result._state,
+        ):
+            raise
+        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
+        if guardrail_error_is_redacted:
+            _detach_data_redacted_error_traceback(guardrail_error)
+        try:
+            await save_items(items, response_id, store_setting)
+        except BaseException as persistence_error:
+            if guardrail_error_is_redacted:
+                safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
+                if (
+                    isinstance(safe_persistence_error, asyncio.CancelledError)
+                    and streamed_result._cancel_mode != "immediate"
+                ):
+                    streamed_result._stored_exception = safe_persistence_error
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    return
+                if isinstance(safe_persistence_error, asyncio.CancelledError):
+                    return
+                redacted_persistence_error = safe_persistence_error
+            if (
+                isinstance(persistence_error, asyncio.CancelledError)
+                and streamed_result._cancel_mode != "immediate"
+            ):
+                streamed_result._stored_exception = persistence_error
+            if redacted_persistence_error is None:
+                raise
+        else:
+            if on_persisted_after_guardrails is not None:
+                on_persisted_after_guardrails(False)
+        if redacted_persistence_error is None:
+            raise
+
+    if redacted_persistence_error is not None:
+        raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
     final_turn_items = _final_turn_items_for_persistence(
@@ -1316,6 +1355,8 @@ async def finalize_max_turns_handler_output(
     output: Any,
     context_wrapper: RunContextWrapper[TContext],
     output_guardrail_results: list[OutputGuardrailResult],
+    save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
+    include_in_history: bool,
 ) -> tuple[Any, RunItem]:
     """Validate and finalize one synthesized max-turn handler output."""
     validated_output = validate_handler_final_output(agent, output)
@@ -1324,6 +1365,7 @@ async def finalize_max_turns_handler_output(
 
     await run_final_output_hooks(agent, hooks, context_wrapper, validated_output)
 
+    redacted_persistence_error: BaseException | None = None
     try:
         await run_output_guardrails(
             agent.output_guardrails + (run_config.output_guardrails or []),
@@ -1332,10 +1374,23 @@ async def finalize_max_turns_handler_output(
             context_wrapper,
             output_guardrail_results,
         )
-    except Exception as guardrail_error:
-        if _is_error_data_redacted(guardrail_error):
-            _detach_data_redacted_error_traceback(guardrail_error)
+    except OutputGuardrailTripwireTriggered:
         raise
+    except Exception as guardrail_error:
+        guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
+        if guardrail_error_is_redacted:
+            _detach_data_redacted_error_traceback(guardrail_error)
+        try:
+            await save_items_after_guardrails([synthesized_item] if include_in_history else [])
+        except BaseException as persistence_error:
+            if not guardrail_error_is_redacted:
+                raise
+            redacted_persistence_error = _safe_redacted_persistence_error(persistence_error)
+        if redacted_persistence_error is None:
+            raise
+
+    if redacted_persistence_error is not None:
+        raise redacted_persistence_error from None
     return validated_output, synthesized_item
 
 

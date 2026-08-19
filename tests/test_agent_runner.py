@@ -5193,8 +5193,9 @@ def test_output_guardrail_tripwire_does_not_save_assistant_message_to_session_sy
     ] == ["user"]
 
 
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.asyncio
-async def test_output_guardrail_error_does_not_persist_unverdictable_output() -> None:
+async def test_output_guardrail_error_preserves_final_output_in_session(streamed: bool) -> None:
     def guardrail_function(
         _context: RunContextWrapper[Any], _agent: Agent[Any], _agent_output: Any
     ) -> GuardrailFunctionOutput:
@@ -5202,7 +5203,7 @@ async def test_output_guardrail_error_does_not_persist_unverdictable_output() ->
 
     session = SimpleListSession()
     model = ScriptedModel()
-    model.enqueue([get_text_message("not_persisted_on_guardrail_error")])
+    model.enqueue([get_text_message("preserved_on_guardrail_error")])
     agent = Agent(
         name="test",
         model=model,
@@ -5210,17 +5211,22 @@ async def test_output_guardrail_error_does_not_persist_unverdictable_output() ->
     )
 
     with pytest.raises(RuntimeError, match="guardrail failed"):
-        await Runner.run(agent, input="user_message", session=session)
+        if streamed:
+            result = Runner.run_streamed(agent, input="user_message", session=session)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, input="user_message", session=session)
 
     items = await session.get_items()
     assert [
         cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
         for item in items
-    ] == ["user"]
+    ] == ["user", "message"]
 
 
 @pytest.mark.asyncio
-async def test_output_guardrail_cancellation_does_not_start_a_final_session_write() -> None:
+async def test_output_guardrail_cancellation_preserves_final_output_in_session() -> None:
     guardrail_started = asyncio.Event()
 
     async def guardrail_function(
@@ -5232,7 +5238,7 @@ async def test_output_guardrail_cancellation_does_not_start_a_final_session_writ
 
     session = SimpleListSession()
     model = ScriptedModel()
-    model.enqueue([get_text_message("not_persisted_on_guardrail_cancellation")])
+    model.enqueue([get_text_message("preserved_on_guardrail_cancellation")])
     agent = Agent(
         name="test",
         model=model,
@@ -5250,7 +5256,7 @@ async def test_output_guardrail_cancellation_does_not_start_a_final_session_writ
     assert [
         cast(dict[str, Any], item).get("type") or cast(dict[str, Any], item).get("role")
         for item in items
-    ] == ["user"]
+    ] == ["user", "message"]
 
 
 @pytest.mark.asyncio

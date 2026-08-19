@@ -674,7 +674,7 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
 
     saved_items = await session.get_items()
     saved_types = [str(item.get("type", item.get("role"))) for item in saved_items]
-    if outcome == "pass":
+    if outcome in {"pass", "error"}:
         assert saved_types == ["user", "message"]
     else:
         assert saved_types == ["user"]
@@ -690,7 +690,7 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
 
     if streamed:
         assert streamed_result is not None
-        expected_history_count = 1 if outcome == "pass" else 0
+        expected_history_count = 1 if outcome in {"pass", "error"} else 0
         assert (
             len([item for item in streamed_result.new_items if isinstance(item, MessageOutputItem)])
             == expected_history_count

@@ -1281,7 +1281,23 @@ class AgentRunner:
                                         ) from None
                                     raise
                                 except (Exception, asyncio.CancelledError):
-                                    # Without a verdict, do not persist any part of this response.
+                                    if not _is_terminal_tool_output_response(
+                                        turn_session_items,
+                                        current_processed_response,
+                                        run_state,
+                                    ):
+                                        await save_final_turn_items_after_guardrails(
+                                            session=session,
+                                            run_state=run_state,
+                                            session_persistence_enabled=session_persistence_enabled,
+                                            input_guardrail_results=(
+                                                _attempt_input_guardrail_results()
+                                            ),
+                                            items=turn_session_items,
+                                            response_id=turn_result.model_response.response_id,
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
                                     raise
 
                                 final_turn_items = _final_turn_items_for_persistence(
@@ -1470,6 +1486,8 @@ class AgentRunner:
                             output=handler_result.final_output,
                             context_wrapper=context_wrapper,
                             output_guardrail_results=output_guardrail_results,
+                            save_items_after_guardrails=_save_max_turns_handler_output,
+                            include_in_history=include_in_history,
                         )
                         if include_in_history and not handler_output_recorded:
                             await _save_max_turns_handler_output([synthesized_item])
@@ -1849,7 +1867,23 @@ class AgentRunner:
                                     ) from None
                                 raise
                             except (Exception, asyncio.CancelledError):
-                                # Without a verdict, do not persist any part of this response.
+                                if not _is_terminal_tool_output_response(
+                                    turn_session_items,
+                                    turn_result.processed_response,
+                                    run_state,
+                                ):
+                                    await save_final_turn_items_after_guardrails(
+                                        session=session,
+                                        run_state=run_state,
+                                        session_persistence_enabled=session_persistence_enabled,
+                                        input_guardrail_results=(
+                                            _attempt_input_guardrail_results()
+                                        ),
+                                        items=items_to_save_turn,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                    )
                                 raise
 
                             final_turn_items = _final_turn_items_for_persistence(
