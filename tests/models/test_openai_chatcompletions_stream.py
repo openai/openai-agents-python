@@ -3930,10 +3930,7 @@ async def test_buffer_tool_call_stream_forwards_length_finish_reason() -> None:
     buffered = [c async for c in ChatCmplStreamHandler.buffer_tool_call_stream(source())]
 
     terminal_choices = [
-        choice
-        for chunk in buffered
-        for choice in chunk.choices
-        if choice.finish_reason == "length"
+        choice for chunk in buffered for choice in chunk.choices if choice.finish_reason == "length"
     ]
     assert len(terminal_choices) == 1
     # The forwarded copy carries no delta output.
