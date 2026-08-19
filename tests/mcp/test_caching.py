@@ -185,6 +185,82 @@ async def test_cached_tools_returns_a_snapshot(
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
 @patch("mcp.client.session.ClientSession.list_tools")
+async def test_list_tools_snapshots_tool_objects(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """Mutating a returned tool must not corrupt the cached tool or its schema."""
+    schema = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"],
+    }
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema=schema)]
+    )
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+
+        returned = await server.list_tools(run_context, agent)
+        cached = server.cached_tools
+        assert cached is not None
+        assert returned[0] is not cached[0]
+        assert returned[0].input_schema is not cached[0].input_schema
+
+        returned[0].input_schema["required"] = []
+        returned[0].description = "mutated"
+
+        later = await server.list_tools(run_context, agent)
+        assert later[0].description is None
+        assert later[0].input_schema.get("required") == ["q"]
+        assert (server.cached_tools or [])[0].input_schema.get("required") == ["q"]
+        assert mock_list_tools.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.call_tool", new_callable=AsyncMock)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_list_tools_mutation_cannot_bypass_required_parameter_validation(
+    mock_list_tools: AsyncMock,
+    mock_call_tool: AsyncMock,
+    mock_initialize: AsyncMock,
+    mock_stdio_client,
+):
+    """Clearing required fields on a returned tool must not skip call-time validation."""
+    from mcp.types import CallToolResult, TextContent
+
+    from agents.exceptions import UserError
+
+    schema = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"],
+    }
+    server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
+    mock_list_tools.return_value = ListToolsResult(
+        tools=[MCPTool(name="tool1", inputSchema=schema)]
+    )
+    mock_call_tool.return_value = CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    async with server:
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+        returned = await server.list_tools(run_context, agent)
+        returned[0].input_schema["required"] = []
+
+        with pytest.raises(UserError, match="missing required parameters: q"):
+            await server.call_tool("tool1", {})
+        assert mock_call_tool.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
 async def test_cached_tools_is_none_before_the_first_list(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
