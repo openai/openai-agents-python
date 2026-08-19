@@ -360,7 +360,7 @@ def test_flush_traces_is_importable_from_top_level_agents_package():
     assert top_level_flush_traces is flush_traces
 
 
-def test_default_trace_provider_force_flush_respects_disabled_flag():
+def test_default_trace_provider_force_flush_still_flushes_when_disabled():
     provider = DefaultTraceProvider()
     mock_processor = MagicMock()
     provider.register_processor(mock_processor)
@@ -368,7 +368,7 @@ def test_default_trace_provider_force_flush_respects_disabled_flag():
     provider.set_disabled(True)
     provider.force_flush()
 
-    mock_processor.force_flush.assert_not_called()
+    mock_processor.force_flush.assert_called_once_with()
 
 
 def test_trace_provider_force_flush_and_shutdown_default_to_noops():
@@ -497,7 +497,6 @@ def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog
 
     mock_response = Response()
     mock_client.return_value.post.return_value = mock_response
-
     exporter = BackendSpanExporter(api_key="test_key")
     with caplog.at_level(logging.ERROR, logger="openai.agents"):
         exporter.export([get_span(mock_processor())])
