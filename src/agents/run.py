@@ -1222,6 +1222,12 @@ class AgentRunner:
                             )
 
                             if isinstance(turn_result.next_step, NextStepFinalOutput):
+                                if run_state is not None and _has_output_guardrails(
+                                    current_agent, run_config
+                                ):
+                                    run_state._tool_output_guardrail_results = list(
+                                        tool_output_guardrail_results
+                                    )
                                 current_processed_response = (
                                     turn_result.processed_response
                                     if turn_result.processed_response is not None
@@ -1284,12 +1290,21 @@ class AgentRunner:
                                             persistence_error
                                         ) from None
                                     raise
-                                except (Exception, asyncio.CancelledError):
-                                    if not _is_terminal_tool_output_response(
+                                except (Exception, asyncio.CancelledError) as guardrail_error:
+                                    if not isinstance(
+                                        guardrail_error, asyncio.CancelledError
+                                    ) or not _is_terminal_tool_output_response(
                                         turn_session_items,
                                         current_processed_response,
                                         run_state,
                                     ):
+                                        final_turn_items = _final_turn_items_for_persistence(
+                                            turn_session_items,
+                                            current_processed_response,
+                                            run_state,
+                                            current_agent,
+                                            run_config,
+                                        )
                                         await save_final_turn_items_after_guardrails(
                                             session=session,
                                             run_state=run_state,
@@ -1297,7 +1312,7 @@ class AgentRunner:
                                             input_guardrail_results=(
                                                 _attempt_input_guardrail_results()
                                             ),
-                                            items=turn_session_items,
+                                            items=final_turn_items,
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
@@ -1826,6 +1841,12 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            if run_state is not None and _has_output_guardrails(
+                                current_agent, run_config
+                            ):
+                                run_state._tool_output_guardrail_results = list(
+                                    tool_output_guardrail_results
+                                )
                             output_guardrail_result_start = len(output_guardrail_results)
                             try:
                                 await run_output_guardrails(
@@ -1881,12 +1902,21 @@ class AgentRunner:
                                         persistence_error
                                     ) from None
                                 raise
-                            except (Exception, asyncio.CancelledError):
-                                if not _is_terminal_tool_output_response(
+                            except (Exception, asyncio.CancelledError) as guardrail_error:
+                                if not isinstance(
+                                    guardrail_error, asyncio.CancelledError
+                                ) or not _is_terminal_tool_output_response(
                                     turn_session_items,
                                     turn_result.processed_response,
                                     run_state,
                                 ):
+                                    final_turn_items = _final_turn_items_for_persistence(
+                                        turn_session_items,
+                                        turn_result.processed_response,
+                                        run_state,
+                                        current_agent,
+                                        run_config,
+                                    )
                                     await save_final_turn_items_after_guardrails(
                                         session=session,
                                         run_state=run_state,
@@ -1894,7 +1924,7 @@ class AgentRunner:
                                         input_guardrail_results=(
                                             _attempt_input_guardrail_results()
                                         ),
-                                        items=items_to_save_turn,
+                                        items=final_turn_items,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                         wrapper=context_wrapper,

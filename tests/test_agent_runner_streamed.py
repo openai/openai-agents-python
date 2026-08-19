@@ -32,6 +32,7 @@ from agents import (
     ModelBehaviorError,
     ModelRetrySettings,
     ModelSettings,
+    OpenAIChatCompletionsModel,
     OpenAIResponsesWSModel,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
@@ -2242,15 +2243,23 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
-@pytest.mark.parametrize("tripwire", [False, True], ids=["passes", "trips"])
+@pytest.mark.parametrize("outcome", ["passes", "trips", "error"])
 @pytest.mark.asyncio
 async def test_resumed_approved_tool_final_persists_complete_post_verdict_batch(
     mode: str,
-    tripwire: bool,
+    outcome: str,
 ) -> None:
-    guardrail_state = {"tripwire": tripwire}
+    guardrail_state = {"outcome": outcome}
 
-    @function_tool(name_override="approval_tool", needs_approval=True)
+    @tool_output_guardrail
+    def record_tool_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        name_override="approval_tool",
+        needs_approval=True,
+        tool_output_guardrails=[record_tool_output],
+    )
     def approval_tool() -> str:
         return "approved-result"
 
@@ -2259,9 +2268,11 @@ async def test_resumed_approved_tool_final_persists_complete_post_verdict_batch(
         _agent: Agent[Any],
         _output: Any,
     ) -> GuardrailFunctionOutput:
+        if guardrail_state["outcome"] == "error":
+            raise RuntimeError("guardrail failed")
         return GuardrailFunctionOutput(
             output_info=None,
-            tripwire_triggered=guardrail_state["tripwire"],
+            tripwire_triggered=guardrail_state["outcome"] == "trips",
         )
 
     model = ScriptedModel()
@@ -2287,8 +2298,14 @@ async def test_resumed_approved_tool_final_persists_complete_post_verdict_batch(
     state = first.to_state()
     state.approve(first.interruptions[0])
 
-    if tripwire:
+    if outcome == "trips":
         with pytest.raises(OutputGuardrailTripwireTriggered):
+            await run_once(state)
+        assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+            run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+        ]
+    elif outcome == "error":
+        with pytest.raises(RuntimeError, match="guardrail failed"):
             await run_once(state)
     else:
         resumed = await run_once(state)
@@ -2309,12 +2326,12 @@ async def test_resumed_approved_tool_final_persists_complete_post_verdict_batch(
         ("function_call_output", "call-approved"),
     ]
     expected_output = (
-        run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT if tripwire else "approved-result"
+        run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT if outcome == "trips" else "approved-result"
     )
     assert saved_tool_items[1].get("output") == expected_output
 
-    if tripwire:
-        guardrail_state["tripwire"] = False
+    if outcome == "trips":
+        guardrail_state["outcome"] = "passes"
         model.enqueue([get_text_message("done")])
         next_result = await run_once("Continue")
         assert next_result.final_output == "done"
@@ -2369,6 +2386,7 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
     first = await Runner.run(agent, "Use approval_tool")
     state = first.to_state()
     state._current_turn = 2
+    state._current_turn_persisted_item_count = 1
     restored = await RunState.from_json(agent, state.to_json())
     restored.approve(restored.get_interruptions()[0])
 
@@ -2380,6 +2398,69 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
             await consume_stream(result)
 
     assert tool_calls == 0
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("serialized", [False, True], ids=["live", "serialized"])
+@pytest.mark.parametrize("attach_session", [False, True], ids=["without-session", "with-session"])
+@pytest.mark.asyncio
+async def test_legacy_approval_checkpoint_uses_current_session_ownership(
+    mode: str,
+    serialized: bool,
+    attach_session: bool,
+) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        side_effects.append("executed")
+        return "approved-result"
+
+    model = ScriptedModel(
+        [[get_function_tool_call("approval_tool", "{}", call_id="call-approved")]]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    legacy_session = SimpleListSession()
+    first = await Runner.run(agent, "Use approval_tool", session=legacy_session)
+    state = first.to_state()
+    assert state._current_turn_persisted_item_count > 0
+    if serialized:
+        state = await RunState.from_json(agent, state.to_json())
+    state.approve(state.get_interruptions()[0])
+    agent.output_guardrails = [
+        OutputGuardrail(
+            guardrail_function=lambda _context, _agent, _output: GuardrailFunctionOutput(
+                output_info=None,
+                tripwire_triggered=False,
+            )
+        )
+    ]
+    session = legacy_session if attach_session else None
+
+    if attach_session:
+        with pytest.raises(UserError, match="after current-turn items were persisted"):
+            if mode == "non_streamed":
+                await Runner.run(agent, state, session=session)
+            else:
+                result = Runner.run_streamed(agent, state, session=session)
+                await consume_stream(result)
+        assert side_effects == []
+        return
+
+    if mode == "non_streamed":
+        result = await Runner.run(agent, state, session=None)
+    else:
+        result = Runner.run_streamed(agent, state, session=None)
+        await consume_stream(result)
+
+    assert result.final_output == "approved-result"
+    assert state._current_turn_persisted_item_count == 0
+    assert side_effects == ["executed"]
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
@@ -2406,6 +2487,84 @@ async def test_output_guardrails_fail_closed_with_server_managed_history(mode: s
             Runner.run_streamed(agent, "hello", previous_response_id="response-id")
 
     assert not model.calls
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("strict", [False, True], ids=["default", "strict"])
+@pytest.mark.parametrize("use_run_config_model", [False, True], ids=["agent-model", "run-model"])
+@pytest.mark.asyncio
+async def test_chat_completions_output_guardrails_use_adapter_conversation_policy(
+    mode: str,
+    strict: bool,
+    use_run_config_model: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scripted_model = ScriptedModel([[get_text_message("accepted-output")]])
+    chat_model = OpenAIChatCompletionsModel(
+        model="test",
+        openai_client=cast(Any, object()),
+        strict_feature_validation=strict,
+    )
+
+    async def get_response(*args: Any, **kwargs: Any) -> Any:
+        chat_model._handle_unsupported_server_managed_conversation_state(
+            previous_response_id=kwargs.get("previous_response_id"),
+            conversation_id=kwargs.get("conversation_id"),
+        )
+        return await scripted_model.get_response(*args, **kwargs)
+
+    async def stream_response(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        chat_model._handle_unsupported_server_managed_conversation_state(
+            previous_response_id=kwargs.get("previous_response_id"),
+            conversation_id=kwargs.get("conversation_id"),
+        )
+        async for event in scripted_model.stream_response(*args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(chat_model, "get_response", get_response)
+    monkeypatch.setattr(chat_model, "stream_response", stream_response)
+    agent = Agent(
+        name="test",
+        model=ScriptedModel() if use_run_config_model else chat_model,
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda _context, _agent, _output: GuardrailFunctionOutput(
+                    output_info=None,
+                    tripwire_triggered=False,
+                )
+            )
+        ],
+    )
+    run_config = RunConfig(model=chat_model) if use_run_config_model else None
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    async def run_once() -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(
+                agent,
+                "hello",
+                previous_response_id="response-id",
+                run_config=run_config,
+            )
+        result = Runner.run_streamed(
+            agent,
+            "hello",
+            previous_response_id="response-id",
+            run_config=run_config,
+        )
+        await consume_stream(result)
+        return result
+
+    if strict:
+        with pytest.raises(UserError, match="OpenAIChatCompletionsModel does not support"):
+            await run_once()
+        assert not scripted_model.calls
+        return
+
+    assert (await run_once()).final_output == "accepted-output"
+    assert "Ignoring unsupported server-managed conversation state" in caplog.text
+    assert len(scripted_model.calls) == 1
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
@@ -2684,10 +2843,10 @@ async def test_mixed_final_turn_session_order_and_committed_items(
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.asyncio
-async def test_failing_output_guardrail_does_not_persist_the_unverdictable_turn(
+async def test_failing_output_guardrail_keeps_the_whole_final_turn(
     mode: str,
 ) -> None:
-    """A guardrail error leaves no verdict, so its response is not persisted."""
+    """A guardrail error leaves no rejection, so the completed turn remains replayable."""
 
     @function_tool(name_override="commit_tool")
     def commit_tool() -> str:
@@ -2728,7 +2887,7 @@ async def test_failing_output_guardrail_does_not_persist_the_unverdictable_turn(
 
     saved_items = await session.get_items()
     saved = [item.get("type") or item.get("role") for item in saved_items if isinstance(item, dict)]
-    assert saved == ["user"]
+    assert saved == ["user", "message", "function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio

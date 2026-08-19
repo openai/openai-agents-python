@@ -554,17 +554,18 @@ async def _finalize_streamed_final_output(
                 raise safe_error from None
         raise
     except Exception as guardrail_error:
-        if _is_terminal_tool_output_response(
-            items,
-            processed_response,
-            streamed_result._state,
-        ):
-            raise
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
         try:
-            await save_items(items, response_id, store_setting)
+            final_turn_items = _final_turn_items_for_persistence(
+                items,
+                processed_response,
+                streamed_result._state,
+                agent,
+                run_config,
+            )
+            await save_items(final_turn_items, response_id, store_setting)
         except BaseException as persistence_error:
             if guardrail_error_is_redacted:
                 safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
@@ -977,6 +978,10 @@ async def start_streaming(
             session=session,
             run_state=run_state if is_resumed_state else None,
         )
+        if run_state is not None and session is None:
+            streamed_result._current_turn_persisted_item_count = (
+                run_state._current_turn_persisted_item_count
+            )
         if run_state is not None:
             current_turn = run_state._current_turn
         else:

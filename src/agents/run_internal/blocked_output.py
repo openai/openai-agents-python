@@ -283,27 +283,28 @@ def _validate_resumed_session_output_guardrail_safety(
     run_state: RunState[Any] | None,
 ) -> None:
     """Reject approval resumes whose current-response boundary is not structurally provable."""
-    del session
     if run_state is None or not _has_output_guardrails(agent, run_config):
         return
     if not isinstance(run_state._current_step, NextStepInterruption):
         return
-    if run_state._current_turn_persisted_item_count > 0:
-        raise UserError(
-            "Cannot resume an approval checkpoint with output guardrails after current-turn "
-            "items were persisted. Start a new run from safe input."
-        )
     boundary = _current_response_boundary(
         (),
         run_state._last_processed_response,
         run_state,
     )
-    if boundary.proven:
-        return
-    raise UserError(
-        "Cannot resume a serialized approval checkpoint with output guardrails because the "
-        "current response boundary cannot be proven. Start a new run from safe input."
-    )
+    if not boundary.proven:
+        raise UserError(
+            "Cannot resume a serialized approval checkpoint with output guardrails because the "
+            "current response boundary cannot be proven. Start a new run from safe input."
+        )
+    if run_state._current_turn_persisted_item_count > 0:
+        if session is not None:
+            raise UserError(
+                "Cannot resume an approval checkpoint with output guardrails after current-turn "
+                "items were persisted. Start a new run from safe input."
+            )
+        # A detached Session cannot contribute its old persisted prefix to this run.
+        run_state._current_turn_persisted_item_count = 0
 
 
 def _identity_sequence_start(
@@ -345,17 +346,19 @@ def _current_response_boundary(
             if session_start is not None:
                 suffixes.extend(run_state._session_items[session_start:])
                 proven = True
-        if (
-            not supplied_items
-            and generated_start is None
-            and session_start is None
-            and run_state._current_turn == 1
-        ):
-            generated_start = 0
-            session_start = 0
-            suffixes.extend(run_state._generated_items)
-            suffixes.extend(run_state._session_items)
-            proven = True
+        if generated_start is None and session_start is None and run_state._current_turn == 1:
+            current_response_prefix = tuple(run_state._generated_items[: len(processed_items)])
+            if len(current_response_prefix) == len(processed_items) and all(
+                type(actual) is type(expected)
+                for actual, expected in zip(current_response_prefix, processed_items, strict=False)
+            ):
+                # Serialization rebuilds item identities, but turn one has no accepted prefix.
+                processed_items = current_response_prefix
+                generated_start = 0
+                session_start = 0
+                suffixes.extend(run_state._generated_items)
+                suffixes.extend(run_state._session_items)
+                proven = True
 
     current_items: list[RunItem] = []
     seen: set[int] = set()
@@ -688,16 +691,21 @@ def _prepare_blocked_output_owner_plan(
     safe_items = list(snapshot.items) if snapshot is not None else []
     safe_response = snapshot.model_response if snapshot is not None else None
     assignments: list[tuple[Any, str, Any]] = []
-    safe_tool_output_guardrail_results: tuple[ToolOutputGuardrailResult, ...] = ()
     if streamed_result is not None:
         public_results = streamed_result.tool_output_guardrail_results
         current_results = list.__getitem__(
             public_results,
             slice(len(prefixes.streamed_tool_output_guardrail_results), None),
         )
-        safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(
-            current_results
+    elif run_state is not None:
+        current_results = list.__getitem__(
+            run_state._tool_output_guardrail_results,
+            slice(len(prefixes.run_state_tool_output_guardrail_results), None),
         )
+    else:
+        current_results = []
+    safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(current_results)
+    if streamed_result is not None:
         public_safe_results = [
             *prefixes.streamed_tool_output_guardrail_results,
             *safe_tool_output_guardrail_results,
@@ -715,13 +723,10 @@ def _prepare_blocked_output_owner_plan(
                     else []
                 ),
             ]
-            if streamed_result is not None:
-                run_state_safe_results = [
-                    *prefixes.run_state_tool_output_guardrail_results,
-                    *safe_tool_output_guardrail_results,
-                ]
-            else:
-                run_state_safe_results = list(prefixes.run_state_tool_output_guardrail_results)
+            run_state_safe_results = [
+                *prefixes.run_state_tool_output_guardrail_results,
+                *safe_tool_output_guardrail_results,
+            ]
             assignments.extend(
                 [
                     (
