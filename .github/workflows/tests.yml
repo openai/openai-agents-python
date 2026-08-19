@@ -275,7 +275,8 @@ jobs:
         with:
           version: "0.11.14"
           enable-cache: true
-          prune-cache: true
+          # Disable cache pruning on Windows to avoid intermittent post-job cleanup failures.
+          prune-cache: false
           python-version: "3.14"
       - name: Download prospective release contract
         if: steps.changes.outputs.run == 'true'

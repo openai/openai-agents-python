@@ -21,6 +21,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Streaming](https://openai.github.io/openai-agents-python/streaming/): Shows how to subscribe to incremental events, stream tool progress, and render partial model outputs in real time.
 - [REPL](https://openai.github.io/openai-agents-python/repl/): Interactive runner for exploring agent behavior, step-by-step execution, and debugging tool calls.
 - [Visualization](https://openai.github.io/openai-agents-python/visualization/): Demonstrates embeddable visualizations for session timelines, message flows, and tool interactions.
+- [Testing](https://openai.github.io/openai-agents-python/testing/): Build deterministic, provider-neutral tests for Agent, Sandbox, Realtime, and Voice workflows.
 
 ## Coordination, Safety, and Tooling
 - [Handoffs](https://openai.github.io/openai-agents-python/handoffs/): Implements delegation between agents, argument passing, completion handling, and error recovery across agent boundaries.
@@ -47,6 +48,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [memory interfaces](https://openai.github.io/openai-agents-python/ref/memory/): Session memory primitives, storage adapters, and utilities for retrieving historical context.
 - [repl utilities](https://openai.github.io/openai-agents-python/ref/repl/): Programmatic access to the interactive REPL loop and inspection helpers.
 - [tool base classes](https://openai.github.io/openai-agents-python/ref/tool/): Tool registration, invocation, and structured argument parsing.
+- [testing utilities](https://openai.github.io/openai-agents-python/ref/testing/): Deterministic utilities for Agent model calls and Sandbox workflows.
 - [tool context helpers](https://openai.github.io/openai-agents-python/ref/tool_context/): Manage shared resources, dependency injection, and cleanup for tool execution.
 - [result objects](https://openai.github.io/openai-agents-python/ref/result/): Fields exposed on run results, including final content, tool call summaries, and attachments.
 - [stream events](https://openai.github.io/openai-agents-python/ref/stream_events/): Event models emitted during streaming runs and their payload schemas.
@@ -85,6 +87,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Realtime events](https://openai.github.io/openai-agents-python/ref/realtime/events/): Event payload types delivered over realtime channels.
 - [Realtime config](https://openai.github.io/openai-agents-python/ref/realtime/config/): Configuration models for realtime transports and behaviors.
 - [Realtime model interface](https://openai.github.io/openai-agents-python/ref/realtime/model/): Interfaces for plugging in realtime-capable models.
+- [Realtime testing](https://openai.github.io/openai-agents-python/ref/realtime/testing/): Scripted model utilities for Realtime session and tool workflow tests.
 
 ## API Reference – Voice
 - [Voice pipeline API](https://openai.github.io/openai-agents-python/ref/voice/pipeline/): Programmatic control over the voice pipeline and event flow.
@@ -96,6 +99,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Voice exceptions](https://openai.github.io/openai-agents-python/ref/voice/exceptions/): Exception types for voice pipelines and error handling guidance.
 - [Voice model adapters](https://openai.github.io/openai-agents-python/ref/voice/model/): Interfaces for voice-enabled models and synthesis engines.
 - [Voice utility helpers](https://openai.github.io/openai-agents-python/ref/voice/utils/): Audio conversion, streaming helpers, and testing utilities.
+- [Voice testing](https://openai.github.io/openai-agents-python/ref/voice/testing/): Scripted STT, TTS, transcription, and workflow test utilities.
 - [OpenAI voice provider](https://openai.github.io/openai-agents-python/ref/voice/models/openai_provider/): Adapter for OpenAI voice models.
 - [OpenAI speech-to-text provider](https://openai.github.io/openai-agents-python/ref/voice/models/openai_stt/): Integration for STT models used in the pipeline.
 - [OpenAI text-to-speech provider](https://openai.github.io/openai-agents-python/ref/voice/models/openai_tts/): Adapter for OpenAI TTS output.

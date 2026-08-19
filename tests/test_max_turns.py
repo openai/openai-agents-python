@@ -662,8 +662,10 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
         with pytest.raises(RuntimeError, match="guardrail failed"):
             await run_once()
     elif outcome == "tripwire":
-        with pytest.raises(OutputGuardrailTripwireTriggered):
+        with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
             await run_once()
+        assert exc_info.value.guardrail_result.agent_output == "fallback answer"
+        assert exc_info.value.guardrail_result.output.output_info == "tripwire"
     else:
         result = await run_once()
         assert result.final_output == "fallback answer"
@@ -672,10 +674,10 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
 
     saved_items = await session.get_items()
     saved_types = [str(item.get("type", item.get("role"))) for item in saved_items]
-    if outcome == "tripwire":
-        assert saved_types == ["user"]
-    else:
+    if outcome in {"pass", "error"}:
         assert saved_types == ["user", "message"]
+    else:
+        assert saved_types == ["user"]
 
     fallback_events = [
         event
@@ -688,7 +690,7 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
 
     if streamed:
         assert streamed_result is not None
-        expected_history_count = 0 if outcome == "tripwire" else 1
+        expected_history_count = 1 if outcome in {"pass", "error"} else 0
         assert (
             len([item for item in streamed_result.new_items if isinstance(item, MessageOutputItem)])
             == expected_history_count
@@ -698,6 +700,64 @@ async def test_max_turns_handler_output_guardrail_session_semantics(
             len([item for item in state._session_items if isinstance(item, MessageOutputItem)])
             == expected_history_count
         )
+
+
+@pytest.mark.asyncio
+async def test_streamed_max_turns_trip_preserves_completed_tool_prefix() -> None:
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        steps=[[get_function_tool_call("some_function", "{}", call_id="accepted-call")]]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("some_function", "accepted-output")],
+        output_guardrails=[OutputGuardrail(guardrail_function=reject_output)],
+    )
+    session = SimpleListSession()
+    result = Runner.run_streamed(
+        agent,
+        "run the tool",
+        max_turns=1,
+        session=session,
+        error_handlers={"max_turns": lambda data: "rejected fallback"},
+    )
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        async for _ in result.stream_events():
+            pass
+
+    def call_ids(items: list[Any]) -> list[str]:
+        return [
+            call_id
+            for item in items
+            if (
+                call_id := (
+                    item.raw_item.get("call_id")
+                    if isinstance(item.raw_item, dict)
+                    else getattr(item.raw_item, "call_id", None)
+                )
+            )
+            is not None
+        ]
+
+    assert call_ids(result.new_items) == ["accepted-call", "accepted-call"]
+    assert call_ids(result._model_input_items) == ["accepted-call", "accepted-call"]
+    state = result.to_state()
+    assert call_ids(state._generated_items) == ["accepted-call", "accepted-call"]
+    assert call_ids(state._session_items) == ["accepted-call", "accepted-call"]
+    serialized_state = json.dumps(state.to_json())
+    assert "accepted-output" in serialized_state
+    assert "rejected fallback" in serialized_state
+
+    saved_types = [item.get("type", item.get("role")) for item in await session.get_items()]
+    assert saved_types == ["user", "function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio
@@ -993,6 +1053,52 @@ async def test_resumed_max_turns_handler_preserves_output_guardrail_results(
         "first response",
         "fallback answer",
     ]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_resumed_max_turns_trip_preserves_current_guardrail_result(
+    streamed: bool,
+) -> None:
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=output,
+            tripwire_triggered=output == "fallback answer",
+        )
+
+    agent = Agent(
+        name="test",
+        model=ScriptedModel(steps=[[get_text_message("first response")]]),
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    first = await Runner.run(agent, "first input", max_turns=1)
+    state = first.to_state()
+    prior_result = state._output_guardrail_results[0]
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        if streamed:
+            result = Runner.run_streamed(
+                agent,
+                state,
+                error_handlers={"max_turns": lambda data: "fallback answer"},
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                state,
+                error_handlers={"max_turns": lambda data: "fallback answer"},
+            )
+
+    assert state._output_guardrail_results == [prior_result]
+    assert prior_result.output.output_info == "first response"
+    assert exc_info.value.guardrail_result.agent_output == "fallback answer"
+    assert exc_info.value.guardrail_result.output.output_info == "fallback answer"
 
 
 @pytest.mark.parametrize("streamed", [False, True])

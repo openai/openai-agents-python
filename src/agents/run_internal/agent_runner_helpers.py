@@ -14,6 +14,7 @@ from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
+from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -42,6 +43,7 @@ from .run_steps import (
 )
 from .session_persistence import save_result_to_session, save_resumed_turn_items
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
+from .turn_preparation import get_model
 
 __all__ = [
     "apply_resumed_conversation_settings",
@@ -55,6 +57,7 @@ __all__ = [
     "finalize_conversation_tracking",
     "get_unsent_tool_call_ids_for_interrupted_state",
     "input_guardrails_triggered",
+    "validate_output_guardrails_with_server_managed_conversation",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -254,6 +257,29 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def validate_output_guardrails_with_server_managed_conversation(
+    agent: Agent[Any],
+    run_config: RunConfig,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    """Reject an output-guardrail run whose rejected history cannot be locally replaced."""
+    if conversation_id is None and previous_response_id is None and not auto_previous_response_id:
+        return
+    if not agent.output_guardrails and not run_config.output_guardrails:
+        return
+    if isinstance(get_model(agent, run_config), OpenAIChatCompletionsModel):
+        # Chat Completions owns its released warn-and-ignore or strict rejection behavior.
+        return
+    raise UserError(
+        "Output guardrails cannot be combined with conversation_id, previous_response_id, "
+        "or auto_previous_response_id because rejected output cannot be removed from "
+        "server-managed conversation history."
     )
 
 

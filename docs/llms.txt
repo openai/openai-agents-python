@@ -17,6 +17,7 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 - [Streaming](https://openai.github.io/openai-agents-python/streaming/): Stream intermediate tool usage and LLM responses for responsive UIs.
 - [REPL](https://openai.github.io/openai-agents-python/repl/): Use the interactive runner to prototype agents and inspect execution step by step.
 - [Context strategies](https://openai.github.io/openai-agents-python/context/): Control what past messages, attachments, and tool runs are injected into prompts.
+- [Testing](https://openai.github.io/openai-agents-python/testing/): Test Agent, Sandbox, Realtime, and Voice workflows deterministically without provider requests.
 
 ## Coordination and Safety
 - [Handoffs](https://openai.github.io/openai-agents-python/handoffs/): Delegate tasks between agents with intent classification, argument passing, and return values.
@@ -46,6 +47,7 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 - [Runs and sessions](https://openai.github.io/openai-agents-python/ref/run/): API for launching runs, streaming updates, and handling cancellations.
 - [Results objects](https://openai.github.io/openai-agents-python/ref/result/): Data structures returned from agent runs, including final output and tool calls.
 - [Tool interfaces](https://openai.github.io/openai-agents-python/ref/tool/): Create tools, parse arguments, and manage tool execution contexts.
+- [Testing APIs](https://openai.github.io/openai-agents-python/ref/testing/): Reference provider-neutral testing utilities for Agent model calls and Sandbox workflows.
 - [Tracing APIs](https://openai.github.io/openai-agents-python/ref/tracing/index/): Programmatic interfaces for creating traces, spans, and integrating custom processors.
 - [Realtime APIs](https://openai.github.io/openai-agents-python/ref/realtime/agent/): Classes for realtime agents, runners, sessions, and event payloads.
 - [Voice APIs](https://openai.github.io/openai-agents-python/ref/voice/pipeline/): Configure voice pipelines, inputs, events, and model adapters.

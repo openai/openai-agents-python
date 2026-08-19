@@ -1,5 +1,4 @@
 import asyncio
-import time
 from copy import deepcopy
 from typing import Any, cast
 
@@ -112,18 +111,22 @@ async def test_stream_events_main():
         agent,
         input="Hello",
     )
-    tool_call_start_time = -1
-    tool_call_end_time = -1
+    event_index = 0
+    tool_call_start_index = -1
+    tool_call_end_index = -1
     async for event in result.stream_events():
+        event_index += 1
         if event.type == "run_item_stream_event":
             if event.item.type == "tool_call_item":
-                tool_call_start_time = time.time_ns()
+                tool_call_start_index = event_index
             elif event.item.type == "tool_call_output_item":
-                tool_call_end_time = time.time_ns()
+                tool_call_end_index = event_index
 
-    assert tool_call_start_time > 0, "tool_call_item was not observed"
-    assert tool_call_end_time > 0, "tool_call_output_item was not observed"
-    assert tool_call_start_time < tool_call_end_time, "Tool call ended before or equals it started?"
+    assert tool_call_start_index > 0, "tool_call_item was not observed"
+    assert tool_call_end_index > 0, "tool_call_output_item was not observed"
+    assert tool_call_start_index < tool_call_end_index, (
+        "Tool call ended before or equals it started?"
+    )
 
 
 @pytest.mark.asyncio

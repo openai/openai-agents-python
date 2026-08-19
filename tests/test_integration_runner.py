@@ -78,7 +78,7 @@ def test_live_profiles_refuse_untrusted_credentials_before_side_effects(
     ):
         bootstrap_in_uv(
             ["--profile", profile],
-            {"OPENAI_API_KEY": "inherited-employee-key"},
+            {"OPENAI_API_KEY": "placeholder-key"},
             lambda *args: child_processes.append("uv"),
         )
 
@@ -89,17 +89,21 @@ def test_live_profiles_refuse_untrusted_credentials_before_side_effects(
     "profile",
     ["packaging", "prospective-contract", "prospective-platform", "security", "mcp-v1", "extras"],
 )
-def test_local_only_profiles_remove_key_before_uv_child_process(profile: str) -> None:
+def test_local_only_profiles_remove_key_before_uv_child_process(
+    profile: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     namespace = runpy.run_path(str(RUNNER))
     bootstrap_in_uv = cast(Callable[..., None], namespace["bootstrap_in_uv"])
     environment = {
-        "OPENAI_API_KEY": "inherited-employee-key",
+        "OPENAI_API_KEY": "placeholder-key",
         "OPENAI_API_KEY_SOURCE": "employee",
     }
     captured: list[tuple[str, list[str], dict[str, str]]] = []
 
     def capture_exec(file: str, command: list[str], child_env: dict[str, str]) -> None:
         captured.append((file, command, child_env))
+
+    monkeypatch.setattr(bootstrap_in_uv.__globals__["sys"], "platform", "linux")
 
     with pytest.raises(RuntimeError, match="bootstrap returned unexpectedly"):
         bootstrap_in_uv(["--profile", profile], environment, capture_exec)
@@ -109,6 +113,37 @@ def test_local_only_profiles_remove_key_before_uv_child_process(profile: str) ->
     assert captured[0][1][0:3] == ["uv", "run", "python"]
     assert "OPENAI_API_KEY" not in captured[0][2]
     assert captured[0][2][namespace["BOOTSTRAPPED_ENV"]] == "1"
+    assert "OPENAI_API_KEY" not in environment
+
+
+def test_windows_bootstrap_uses_subprocess_and_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    bootstrap_in_uv = cast(Callable[..., None], namespace["bootstrap_in_uv"])
+    environment = {"OPENAI_API_KEY": "placeholder-key"}
+    captured: list[tuple[list[str], dict[str, str], bool]] = []
+
+    def capture_run(command: list[str], *, env: dict[str, str], check: bool) -> SimpleNamespace:
+        captured.append((command, env, check))
+        return SimpleNamespace(returncode=23)
+
+    monkeypatch.setattr(bootstrap_in_uv.__globals__["sys"], "platform", "win32")
+    monkeypatch.setattr(bootstrap_in_uv.__globals__["subprocess"], "run", capture_run)
+
+    with pytest.raises(SystemExit) as exc_info:
+        bootstrap_in_uv(
+            ["--profile", "prospective-platform"],
+            environment,
+            lambda *_args: pytest.fail("Windows bootstrap must not call os.execvpe"),
+        )
+
+    assert exc_info.value.code == 23
+    assert len(captured) == 1
+    assert captured[0][0][0:3] == ["uv", "run", "python"]
+    assert "OPENAI_API_KEY" not in captured[0][1]
+    assert captured[0][1][namespace["BOOTSTRAPPED_ENV"]] == "1"
+    assert captured[0][2] is False
     assert "OPENAI_API_KEY" not in environment
 
 
@@ -144,7 +179,7 @@ def test_local_only_profile_removes_key_before_cleanup_build_and_children(
         _ = (args, kwargs)
         assert_sanitized("run-suite")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "inherited-employee-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "placeholder-key")
     monkeypatch.setenv("OPENAI_API_KEY_SOURCE", "employee")
     monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "packaging"])
     monkeypatch.setitem(main.__globals__, "build_distributions", fake_build_distributions)
