@@ -497,6 +497,7 @@ def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog
 
     mock_response = Response()
     mock_client.return_value.post.return_value = mock_response
+
     exporter = BackendSpanExporter(api_key="test_key")
     with caplog.at_level(logging.ERROR, logger="openai.agents"):
         exporter.export([get_span(mock_processor())])
