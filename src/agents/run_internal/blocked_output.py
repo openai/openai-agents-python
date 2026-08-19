@@ -271,8 +271,8 @@ def _should_defer_interrupted_session_items(
     agent: Agent[Any],
     run_config: RunConfig,
 ) -> bool:
-    """Keep pre-verdict approval state in RunState instead of durable Session history."""
-    return _has_output_guardrails(agent, run_config)
+    """Defer only approval state that could still become guarded terminal tool output."""
+    return _has_output_guardrails(agent, run_config) and agent.tool_use_behavior != "run_llm_again"
 
 
 def _validate_resumed_session_output_guardrail_safety(
@@ -297,7 +297,9 @@ def _validate_resumed_session_output_guardrail_safety(
             "Cannot resume a serialized approval checkpoint with output guardrails because the "
             "current response boundary cannot be proven. Start a new run from safe input."
         )
-    if run_state._current_turn_persisted_item_count > 0:
+    if run_state._current_turn_persisted_item_count > 0 and (
+        _should_defer_interrupted_session_items(agent, run_config)
+    ):
         if session is not None:
             raise UserError(
                 "Cannot resume an approval checkpoint with output guardrails after current-turn "

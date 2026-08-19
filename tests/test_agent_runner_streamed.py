@@ -42,6 +42,7 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
+    ToolsToFinalOutputResult,
     UserError,
     function_tool,
     handoff,
@@ -2240,6 +2241,215 @@ async def test_streaming_resume_with_session_does_not_duplicate_items():
 
     assert call_count == 1
     assert output_count == 1
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_run_llm_again_approval_persists_completed_sibling(mode: str) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        side_effects.append("approved")
+        return "approved-output"
+
+    @function_tool(name_override="sibling_tool")
+    def sibling_tool() -> str:
+        side_effects.append("sibling")
+        return "sibling-output"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("approval_tool", "{}", call_id="call-approved"),
+                get_function_tool_call("sibling_tool", "{}", call_id="call-sibling"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool, sibling_tool],
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda _context, _agent, _output: GuardrailFunctionOutput(
+                    output_info=None,
+                    tripwire_triggered=False,
+                )
+            )
+        ],
+    )
+    session = SimpleListSession()
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    first = await run_once("Use both tools")
+    assert len(first.interruptions) == 1
+    assert side_effects == ["sibling"]
+
+    saved_before_resume = await session.get_items()
+    saved_sibling_items = [
+        item
+        for item in saved_before_resume
+        if isinstance(item, dict) and item.get("call_id") == "call-sibling"
+    ]
+    assert [item.get("type") for item in saved_sibling_items] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert saved_sibling_items[1].get("output") == "sibling-output"
+
+    state = first.to_state()
+    assert state._current_turn_persisted_item_count > 0
+    state.approve(first.interruptions[0])
+    resumed = await run_once(state)
+
+    assert resumed.final_output == "done"
+    assert side_effects == ["sibling", "approved"]
+    saved_after_resume = await session.get_items()
+    for call_id in ("call-sibling", "call-approved"):
+        assert [
+            item.get("type")
+            for item in saved_after_resume
+            if isinstance(item, dict) and item.get("call_id") == call_id
+        ] == ["function_call", "function_call_output"]
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("terminal_behavior", ["first", "named", "custom"])
+@pytest.mark.asyncio
+async def test_terminal_behaviors_defer_completed_approval_siblings(
+    mode: str,
+    terminal_behavior: str,
+) -> None:
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "approved-output"
+
+    @function_tool(name_override="sibling_tool")
+    def sibling_tool() -> str:
+        return "sibling-output"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("approval_tool", "{}", call_id="call-approved"),
+                get_function_tool_call("sibling_tool", "{}", call_id="call-sibling"),
+            ]
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool, sibling_tool],
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda _context, _agent, _output: GuardrailFunctionOutput(
+                    output_info=None,
+                    tripwire_triggered=False,
+                )
+            )
+        ],
+    )
+    if terminal_behavior == "first":
+        agent.tool_use_behavior = "stop_on_first_tool"
+    elif terminal_behavior == "named":
+        agent.tool_use_behavior = {"stop_at_tool_names": ["approval_tool"]}
+    else:
+        agent.tool_use_behavior = lambda _context, results: ToolsToFinalOutputResult(
+            is_final_output=True,
+            final_output=results[0].output,
+        )
+
+    session = SimpleListSession()
+    if mode == "non_streamed":
+        result = await Runner.run(agent, "Use both tools", session=session)
+    else:
+        result = Runner.run_streamed(agent, "Use both tools", session=session)
+        await consume_stream(result)
+
+    assert len(result.interruptions) == 1
+    assert result.to_state()._current_turn_persisted_item_count == 0
+    assert "sibling-output" not in json.dumps(await session.get_items())
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("terminal_behavior", ["first", "named", "custom"])
+@pytest.mark.asyncio
+async def test_persisted_run_llm_again_checkpoint_rejects_terminal_behavior_change(
+    mode: str,
+    terminal_behavior: str,
+) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        side_effects.append("approved")
+        return "approved-output"
+
+    @function_tool(name_override="sibling_tool")
+    def sibling_tool() -> str:
+        side_effects.append("sibling")
+        return "sibling-output"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("approval_tool", "{}", call_id="call-approved"),
+                get_function_tool_call("sibling_tool", "{}", call_id="call-sibling"),
+            ]
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[approval_tool, sibling_tool],
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda _context, _agent, _output: GuardrailFunctionOutput(
+                    output_info=None,
+                    tripwire_triggered=False,
+                )
+            )
+        ],
+    )
+    session = SimpleListSession()
+
+    if mode == "non_streamed":
+        first = await Runner.run(agent, "Use both tools", session=session)
+    else:
+        first = Runner.run_streamed(agent, "Use both tools", session=session)
+        await consume_stream(first)
+
+    assert side_effects == ["sibling"]
+    state = first.to_state()
+    assert state._current_turn_persisted_item_count > 0
+    state.approve(first.interruptions[0])
+
+    if terminal_behavior == "first":
+        agent.tool_use_behavior = "stop_on_first_tool"
+    elif terminal_behavior == "named":
+        agent.tool_use_behavior = {"stop_at_tool_names": ["approval_tool"]}
+    else:
+        agent.tool_use_behavior = lambda _context, results: ToolsToFinalOutputResult(
+            is_final_output=True,
+            final_output=results[0].output,
+        )
+
+    with pytest.raises(UserError, match="after current-turn items were persisted"):
+        if mode == "non_streamed":
+            await Runner.run(agent, state, session=session)
+        else:
+            result = Runner.run_streamed(agent, state, session=session)
+            await consume_stream(result)
+
+    assert side_effects == ["sibling"]
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
