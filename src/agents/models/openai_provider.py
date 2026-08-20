@@ -195,17 +195,34 @@ class OpenAIProvider(ModelProvider):
             await self._close_models(models)
             return
         if loop.is_running():
-            for model in models:
-                future = asyncio.run_coroutine_threadsafe(model.close(), loop)
-                await asyncio.wrap_future(future)
+            await self._close_models(models, owner_loop=loop)
             return
         # Do not run an inactive foreign loop on another thread. This also covers closed loops.
         # Close from the current loop and rely on model-specific cross-loop cleanup fallbacks.
         await self._close_models(models)
 
-    async def _close_models(self, models: list[Model]) -> None:
+    async def _close_models(
+        self,
+        models: list[Model],
+        *,
+        owner_loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        first_error: Exception | None = None
         for model in models:
-            await model.close()
+            try:
+                if owner_loop is None:
+                    await model.close()
+                else:
+                    future = asyncio.run_coroutine_threadsafe(model.close(), owner_loop)
+                    await asyncio.wrap_future(future)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+
+        if first_error is not None:
+            raise first_error
 
     def _clear_ws_loop_cache_entry(
         self, loop: asyncio.AbstractEventLoop, loop_cache: _WSLoopModelCache
@@ -302,7 +319,17 @@ class OpenAIProvider(ModelProvider):
         current_loop = self._get_running_loop()
         if current_loop is None:
             return
+        first_error: Exception | None = None
         for loop, loop_cache in list(self._ws_model_cache_by_loop.items()):
             models_to_close = self._collect_unique_cached_models(loop_cache, seen)
-            await self._close_ws_models_for_loop(loop, models_to_close, current_loop)
+            try:
+                await self._close_ws_models_for_loop(loop, models_to_close, current_loop)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
             self._clear_ws_loop_cache_entry(loop, loop_cache)
+
+        if first_error is not None:
+            raise first_error

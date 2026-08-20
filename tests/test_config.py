@@ -467,6 +467,42 @@ def test_openai_provider_aclose_closes_websocket_models_from_other_loops(monkeyp
     assert model2_again is not model2
 
 
+@pytest.mark.asyncio
+async def test_openai_provider_aclose_continues_and_preserves_first_failure(monkeypatch):
+    class DummyAsyncOpenAI:
+        pass
+
+    provider = OpenAIProvider(
+        use_responses=True,
+        use_responses_websocket=True,
+        openai_client=DummyAsyncOpenAI(),  # type: ignore[arg-type]
+    )
+
+    models = [provider.get_model(name) for name in ("gpt-4", "gpt-5", "gpt-6")]
+    assert all(isinstance(model, OpenAIResponsesWSModel) for model in models)
+    model1, model2, model3 = cast(list[OpenAIResponsesWSModel], models)
+
+    first_error = RuntimeError("first close failed")
+    second_error = RuntimeError("second close failed")
+    closed_models: list[OpenAIResponsesWSModel] = []
+
+    async def fake_close(self: OpenAIResponsesWSModel) -> None:
+        closed_models.append(self)
+        if self is model1:
+            raise first_error
+        if self is model3:
+            raise second_error
+
+    monkeypatch.setattr(OpenAIResponsesWSModel, "close", fake_close)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value is first_error
+    assert closed_models == [model1, model2, model3]
+    assert list(provider._ws_model_cache_by_loop.items()) == []
+
+
 def test_openai_provider_aclose_closes_websocket_models_when_original_loop_is_closed(monkeypatch):
     class DummyAsyncOpenAI:
         pass
