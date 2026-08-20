@@ -86,3 +86,25 @@ def test_voice_provider_explicit_options_override_default_client(
 
     assert provider._get_client() is created_client
     assert captured_kwargs[option_name] == option_value
+
+
+def test_voice_provider_accepts_async_api_key_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def api_key_provider() -> str:
+        return "sk-rotating"
+
+    created_client = cast(openai.AsyncOpenAI, object())
+    captured_kwargs: dict[str, Any] = {}
+
+    def create_client(**kwargs: Any) -> openai.AsyncOpenAI:
+        captured_kwargs.update(kwargs)
+        return created_client
+
+    monkeypatch.setattr(openai_model_provider, "AsyncOpenAI", create_client)
+    monkeypatch.setattr(openai_model_provider, "shared_http_client", object)
+
+    provider = OpenAIVoiceModelProvider(api_key=api_key_provider)
+
+    assert provider._get_client() is created_client
+    assert captured_kwargs["api_key"] is api_key_provider
