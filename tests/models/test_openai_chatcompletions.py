@@ -473,9 +473,67 @@ async def test_get_response_traces_error_on_truncated_empty_turn(monkeypatch) ->
         span for span in fetch_ordered_spans() if span.span_data.type == "generation"
     ]
     assert len(generation_spans) == 1
-    exported_span = generation_spans[0].export()
+    generation = generation_spans[0]
+    exported_span = generation.export()
     assert exported_span is not None
     assert exported_span["error"] is not None
+    # The request (and any reported tokens) must be preserved on the span even though
+    # the call raised, so the run's usage accounting does not lose the request.
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_traces_usage_on_truncated_empty_turn(monkeypatch) -> None:
+    """The token usage reported before a truncated empty completion raises must be
+    preserved on the generation span, alongside the request."""
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content=None),
+            )
+        ],
+        usage=CompletionUsage(
+            completion_tokens=0,
+            prompt_tokens=7,
+            total_tokens=7,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+        ),
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with trace(workflow_name="truncation-usage"):
+        with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+            await model.get_response(
+                system_instructions=None,
+                input="",
+                model_settings=ModelSettings(),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                tracing=ModelTracing.ENABLED,
+                previous_response_id=None,
+                conversation_id=None,
+                prompt=None,
+            )
+
+    generation = next(span for span in fetch_ordered_spans() if span.span_data.type == "generation")
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1
+    assert generation.span_data.usage["input_tokens"] == 7
+    assert generation.span_data.usage["total_tokens"] == 7
 
 
 @pytest.mark.allow_call_model_methods
