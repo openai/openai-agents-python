@@ -1,3 +1,4 @@
+import math
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +17,28 @@ class TestPlaybackTracker:
     def model(self):
         """Create a fresh model instance for each test."""
         return OpenAIRealtimeWebSocketModel()
+
+    @pytest.mark.parametrize("duration", [-1.0, math.nan, math.inf, -math.inf])
+    def test_tracker_rejects_invalid_playback_duration(self, duration: float) -> None:
+        tracker = RealtimePlaybackTracker()
+
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            tracker.on_play_ms("item", 0, duration)
+
+        assert tracker.get_state() == {
+            "current_item_id": None,
+            "current_item_content_index": None,
+            "elapsed_ms": None,
+        }
+
+    def test_tracker_rejects_overflowing_playback_total(self) -> None:
+        tracker = RealtimePlaybackTracker()
+        tracker.on_play_ms("item", 0, 1e308)
+
+        with pytest.raises(ValueError, match="total must be finite"):
+            tracker.on_play_ms("item", 0, 1e308)
+
+        assert tracker.get_state()["elapsed_ms"] == 1e308
 
     @pytest.mark.asyncio
     async def test_interrupt_timing_with_custom_playback_tracker(self, model):

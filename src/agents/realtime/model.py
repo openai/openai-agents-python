@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from collections.abc import Callable
 
 from typing_extensions import NotRequired, TypedDict
@@ -57,12 +58,18 @@ class RealtimePlaybackTracker:
             item_content_index: The index of the audio content in `item.content`
             ms: The number of milliseconds of audio that have been played.
         """
+        if not math.isfinite(ms) or ms < 0:
+            raise ValueError("Playback duration must be a finite, non-negative number.")
+
         if self._current_item != (item_id, item_content_index):
+            new_elapsed_ms = ms
             self._current_item = (item_id, item_content_index)
-            self._elapsed_ms = ms
         else:
             assert self._elapsed_ms is not None
-            self._elapsed_ms += ms
+            new_elapsed_ms = self._elapsed_ms + ms
+        if not math.isfinite(new_elapsed_ms):
+            raise ValueError("Playback duration total must be finite.")
+        self._elapsed_ms = new_elapsed_ms
 
     def on_interrupted(self) -> None:
         """Called by the model when the audio playback has been interrupted."""
