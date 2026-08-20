@@ -9,9 +9,11 @@ from collections.abc import AsyncGenerator
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import numpy as np
 import numpy.typing as npt
 import pytest
+from openai import AsyncOpenAI
 
 import agents._debug as _debug
 from agents import trace
@@ -55,6 +57,17 @@ def create_mock_websocket(messages: list[str]) -> AsyncMock:
     return mock_ws
 
 
+def create_mock_openai_client(api_key: str = "FAKE_KEY") -> AsyncOpenAI:
+    client = AsyncMock(api_key=api_key)
+    client.websocket_base_url = None
+    client.base_url = httpx2.URL("https://api.openai.com/v1/")
+    client.default_query = {}
+    client.auth_headers = {"Authorization": f"Bearer {api_key}"}
+    client.default_headers = {}
+    client._refresh_api_key = AsyncMock()
+    return cast(AsyncOpenAI, client)
+
+
 def fake_time(increment: int):
     current = 1000
     while True:
@@ -67,7 +80,7 @@ def fake_time(increment: int):
 async def test_transcribe_turns_propagates_consumer_cancellation(monkeypatch) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -105,7 +118,7 @@ async def test_transcribe_turns_propagates_consumer_cancellation(monkeypatch) ->
 async def test_transcribe_turns_closes_owned_tasks_after_yield(monkeypatch) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -165,7 +178,7 @@ async def test_transcribe_turns_closes_owned_tasks_after_yield(monkeypatch) -> N
 async def test_close_finishes_span_started_while_websocket_close_is_pending() -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -223,7 +236,7 @@ async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
 ) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -270,7 +283,7 @@ async def test_transcribe_turns_preserves_consumer_exception_when_cleanup_fails(
 async def test_transcribe_turns_propagates_cancellation_during_cleanup(monkeypatch) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -307,7 +320,7 @@ async def test_transcribe_turns_preserves_terminal_error_when_close_fails(
 ) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
@@ -372,7 +385,7 @@ async def test_non_json_messages_should_crash():
 
         session = OpenAISTTTranscriptionSession(
             input=input_audio,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -412,7 +425,7 @@ async def test_session_connects_and_configures_successfully():
 
         session = OpenAISTTTranscriptionSession(
             input=input_audio,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -472,7 +485,7 @@ async def test_stream_audio_sends_pcm16(
 
     session = OpenAISTTTranscriptionSession(
         input=audio_input,
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=stt_settings,
         trace_include_sensitive_data=False,
@@ -548,7 +561,7 @@ async def test_transcription_event_puts_output_in_queue(created, updated, comple
 
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -594,7 +607,7 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
 
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -643,7 +656,7 @@ async def test_session_error_event(monkeypatch: pytest.MonkeyPatch):
 
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -679,7 +692,7 @@ async def test_session_error_event_before_session_created():
         audio_input = await StreamedAudioInputFactory.get(count=2)
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=STTModelSettings(),
             trace_include_sensitive_data=False,
@@ -722,7 +735,7 @@ async def test_listener_timeout_drains_buffered_transcript_before_setup():
         audio_input = await StreamedAudioInputFactory.get(count=2)
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=STTModelSettings(),
             trace_include_sensitive_data=False,
@@ -778,7 +791,7 @@ async def test_inactivity_timeout():
 
         session = OpenAISTTTranscriptionSession(
             input=audio_input,
-            client=AsyncMock(api_key="FAKE_KEY"),
+            client=create_mock_openai_client(),
             model="whisper-1",
             settings=stt_settings,
             trace_include_sensitive_data=False,
@@ -804,7 +817,7 @@ async def test_stream_audio_buffers_turn_audio_only_for_audio_tracing(
 ) -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
-        client=AsyncMock(api_key="FAKE_KEY"),
+        client=create_mock_openai_client(),
         model="whisper-1",
         settings=STTModelSettings(),
         trace_include_sensitive_data=False,
