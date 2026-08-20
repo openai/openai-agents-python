@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any, TypeGuard, cast
 
+from openai import NOT_GIVEN
+
 from .exceptions import UserError
 
 _EMPTY_SCHEMA = {
@@ -359,9 +361,10 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # Strict schemas mark every property as required, so API-level defaults are not used and
-    # must be omitted because Structured Outputs rejects `default` in property definitions.
-    json_schema.pop("default", None)
+    # Preserve the historical early handling for `default: None`: it is non-constraining and
+    # should not force a `$ref` expansion by itself.
+    if json_schema.get("default", NOT_GIVEN) is None:
+        json_schema.pop("default")
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
@@ -394,6 +397,10 @@ def _ensure_strict_json_schema(
             depth=next_depth,
             inside_nested_resource=inside_nested_resource,
         )
+
+    # Strict schemas mark every property as required, so API-level defaults are not used and
+    # must be omitted because Structured Outputs rejects `default` in property definitions.
+    json_schema.pop("default", None)
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)
