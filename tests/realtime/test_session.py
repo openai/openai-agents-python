@@ -3125,6 +3125,7 @@ class TestToolCallExecution:
     @pytest.mark.parametrize(
         "arguments",
         [
+            "",
             '{"subject": "refund"',
             "null",
             "[]",

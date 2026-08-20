@@ -919,6 +919,7 @@ async def test_function_needs_approval_invalid_type_raises() -> None:
 @pytest.mark.parametrize(
     "arguments",
     [
+        "",
         '{"subject": "refund"',
         "null",
         "[]",

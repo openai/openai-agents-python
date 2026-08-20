@@ -17,9 +17,11 @@ def _reject_nonstandard_json_constant(value: str) -> NoReturn:
 
 def parse_function_tool_arguments(arguments: str | None) -> dict[str, Any] | None:
     """Return parsed object arguments, or None when an approval policy cannot inspect them."""
+    if arguments is None or not arguments.strip():
+        return None
     try:
         parsed = json.loads(
-            arguments or "{}",
+            arguments,
             parse_constant=_reject_nonstandard_json_constant,
         )
     except ValueError:
