@@ -58,6 +58,13 @@ def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
     return base64.b64encode(buffer.tobytes()).decode("utf-8")
 
 
+async def _refresh_openai_client_api_key_if_supported(client: Any) -> None:
+    """Refresh callable/rotating OpenAI credentials before a manual websocket handshake."""
+    refresh_api_key = getattr(client, "_refresh_api_key", None)
+    if callable(refresh_api_key):
+        await refresh_api_key()
+
+
 async def _wait_for_event(
     event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel],
     expected_types: list[str],
@@ -303,6 +310,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _process_websocket_connection(self) -> None:
         try:
+            await _refresh_openai_client_api_key_if_supported(self._client)
             async with websockets.connect(
                 "wss://api.openai.com/v1/realtime?intent=transcription",
                 additional_headers={
