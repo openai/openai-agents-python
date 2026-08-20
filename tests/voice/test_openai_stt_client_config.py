@@ -2,7 +2,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import httpx2
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI, omit
 
 from agents.voice.models.openai_stt import (
     _prepare_websocket_headers,
@@ -11,6 +11,7 @@ from agents.voice.models.openai_stt import (
 
 
 def _mock_client(**attributes: object) -> AsyncOpenAI:
+    attributes.setdefault("default_query", {})
     return cast(AsyncOpenAI, MagicMock(**attributes))
 
 
@@ -43,6 +44,26 @@ def test_streaming_stt_websocket_url_prefers_websocket_base_url() -> None:
     assert url.params["intent"] == "transcription"
 
 
+def test_streaming_stt_websocket_url_merges_client_default_query() -> None:
+    client = _mock_client(
+        websocket_base_url="wss://voice-ws.example.test/custom/?tenant=one&remove=base",
+        base_url=httpx2.URL("https://ignored.example.test/v1/"),
+        default_query={
+            "api-version": "2026-08-01-preview",
+            "remove": omit,
+            "skip": NOT_GIVEN,
+        },
+    )
+
+    url = httpx2.URL(_prepare_websocket_url(client))
+
+    assert url.params["tenant"] == "one"
+    assert url.params["api-version"] == "2026-08-01-preview"
+    assert url.params["intent"] == "transcription"
+    assert "remove" not in url.params
+    assert "skip" not in url.params
+
+
 def test_streaming_stt_websocket_headers_use_client_configuration() -> None:
     client = _mock_client(
         auth_headers={"Authorization": "Bearer sk-client"},
@@ -59,4 +80,23 @@ def test_streaming_stt_websocket_headers_use_client_configuration() -> None:
     assert headers["OpenAI-Organization"] == "org-client"
     assert headers["OpenAI-Project"] == "proj-client"
     assert headers["X-Proxy-Token"] == "proxy-token"
+    assert headers["OpenAI-Log-Session"] == "1"
+
+
+def test_streaming_stt_websocket_headers_skip_openai_omission_sentinels() -> None:
+    client = _mock_client(
+        auth_headers={"Authorization": "Bearer sk-client"},
+        default_headers={
+            "OpenAI-Organization": omit,
+            "OpenAI-Project": NOT_GIVEN,
+            "X-Proxy-Token": "proxy-token",
+        },
+    )
+
+    headers = _prepare_websocket_headers(client)
+
+    assert headers["Authorization"] == "Bearer sk-client"
+    assert headers["X-Proxy-Token"] == "proxy-token"
+    assert "OpenAI-Organization" not in headers
+    assert "OpenAI-Project" not in headers
     assert headers["OpenAI-Log-Session"] == "1"
