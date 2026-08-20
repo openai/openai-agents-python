@@ -8,13 +8,16 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-import httpx2
-from openai import AsyncOpenAI, NotGiven, Omit
+from openai import AsyncOpenAI
 
 from ... import _debug
 from ...exceptions import AgentsException, UserError
 from ...logger import logger
-from ...models.openai_responses import _refresh_openai_client_api_key_if_supported
+from ...models._openai_websocket import (
+    merge_openai_client_websocket_headers,
+    prepare_openai_client_websocket_base_url,
+    refresh_openai_client_api_key_if_supported,
+)
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
 from ...util._error_tracing import get_trace_error
 from ..exceptions import STTWebsocketConnectionError
@@ -60,42 +63,19 @@ def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
     return base64.b64encode(buffer.tobytes()).decode("utf-8")
 
 
-def _is_openai_omitted_value(value: Any) -> bool:
-    return isinstance(value, Omit | NotGiven)
-
-
 def _prepare_websocket_url(client: AsyncOpenAI) -> str:
-    websocket_base_url = client.websocket_base_url
-    base_value = websocket_base_url if websocket_base_url is not None else client.base_url
-    base_url = httpx2.URL(str(base_value))
-    ws_scheme = {"http": "ws", "https": "wss"}.get(base_url.scheme, base_url.scheme)
+    base_url = prepare_openai_client_websocket_base_url(
+        client,
+        context="Streamed STT websocket",
+    )
     params: dict[str, Any] = dict(base_url.params)
-    default_query = client.default_query
-    if default_query is not None and not _is_openai_omitted_value(default_query):
-        for key, value in default_query.items():
-            query_key = str(key)
-            if isinstance(value, Omit):
-                params.pop(query_key, None)
-                continue
-            if isinstance(value, NotGiven):
-                continue
-            params[query_key] = value
     params["intent"] = "transcription"
     path = base_url.path.rstrip("/") + "/realtime"
-    return str(base_url.copy_with(scheme=ws_scheme, path=path, params=params))
+    return str(base_url.copy_with(path=path, params=params))
 
 
 def _prepare_websocket_headers(client: AsyncOpenAI) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for source in (client.auth_headers, client.default_headers):
-        for key, value in source.items():
-            if _is_openai_omitted_value(value):
-                continue
-            header_key = str(key)
-            for existing_key in list(headers):
-                if existing_key.lower() == header_key.lower():
-                    del headers[existing_key]
-            headers[header_key] = str(value)
+    headers = merge_openai_client_websocket_headers(client)
     headers["OpenAI-Log-Session"] = "1"
     return headers
 
@@ -345,7 +325,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _process_websocket_connection(self) -> None:
         try:
-            await _refresh_openai_client_api_key_if_supported(self._client)
+            await refresh_openai_client_api_key_if_supported(self._client)
             async with websockets.connect(
                 _prepare_websocket_url(self._client),
                 additional_headers=_prepare_websocket_headers(self._client),
