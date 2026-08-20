@@ -5,6 +5,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from typing_extensions import TypedDict
+
 from .imports import np, npt
 from .input import AudioInput, StreamedAudioInput
 from .utils import get_sentence_based_splitter
@@ -14,22 +16,33 @@ DEFAULT_TTS_INSTRUCTIONS = (
 )
 DEFAULT_TTS_BUFFER_SIZE = 120
 
-TTSVoice = Literal[
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "fable",
-    "onyx",
-    "nova",
-    "sage",
-    "shimmer",
-    "verse",
-    "marin",
-    "cedar",
-]
-"""Exportable type for the TTSModelSettings voice enum"""
+
+class TTSCustomVoice(TypedDict):
+    """A custom OpenAI TTS voice reference."""
+
+    id: str
+    """The custom voice ID."""
+
+
+TTSVoice = (
+    Literal[
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "onyx",
+        "nova",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar",
+    ]
+    | TTSCustomVoice
+)
+"""Exportable type for built-in TTS voices and custom voice IDs."""
 
 
 @dataclass
