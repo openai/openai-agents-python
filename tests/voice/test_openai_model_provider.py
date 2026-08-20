@@ -8,6 +8,7 @@ import pytest
 
 from agents.exceptions import UserError
 from agents.models import _openai_shared
+from agents.voice.models import openai_model_provider
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider, shared_http_client
 
 
@@ -48,3 +49,57 @@ def test_voice_provider_preserves_falsy_default_client(monkeypatch):
     monkeypatch.setattr(_openai_shared, "get_default_openai_client", lambda: client)
 
     assert OpenAIVoiceModelProvider()._get_client() is client
+
+
+@pytest.mark.parametrize(
+    ("option_name", "option_value"),
+    [
+        ("api_key", "sk-voice-provider"),
+        ("base_url", "https://voice-provider.example.test/v1"),
+        ("organization", "org-voice-provider"),
+        ("project", "proj-voice-provider"),
+    ],
+)
+def test_voice_provider_explicit_options_override_default_client(
+    monkeypatch: pytest.MonkeyPatch,
+    option_name: str,
+    option_value: str,
+) -> None:
+    default_client = cast(openai.AsyncOpenAI, object())
+    created_client = cast(openai.AsyncOpenAI, object())
+    captured_kwargs: dict[str, Any] = {}
+
+    def create_client(**kwargs: Any) -> openai.AsyncOpenAI:
+        captured_kwargs.update(kwargs)
+        return created_client
+
+    monkeypatch.setattr(_openai_shared, "get_default_openai_client", lambda: default_client)
+    monkeypatch.setattr(openai_model_provider, "AsyncOpenAI", create_client)
+    monkeypatch.setattr(openai_model_provider, "shared_http_client", object)
+
+    provider = OpenAIVoiceModelProvider(**cast(dict[str, Any], {option_name: option_value}))
+
+    assert provider._get_client() is created_client
+    assert captured_kwargs[option_name] == option_value
+
+
+def test_voice_provider_preserves_explicit_empty_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_client = cast(openai.AsyncOpenAI, object())
+    created_client = cast(openai.AsyncOpenAI, object())
+    captured_kwargs: dict[str, Any] = {}
+
+    def create_client(**kwargs: Any) -> openai.AsyncOpenAI:
+        captured_kwargs.update(kwargs)
+        return created_client
+
+    monkeypatch.setattr(_openai_shared, "get_default_openai_client", lambda: default_client)
+    monkeypatch.setattr(_openai_shared, "get_default_openai_key", lambda: "sk-global")
+    monkeypatch.setattr(openai_model_provider, "AsyncOpenAI", create_client)
+    monkeypatch.setattr(openai_model_provider, "shared_http_client", object)
+
+    provider = OpenAIVoiceModelProvider(api_key="")
+
+    assert provider._get_client() is created_client
+    assert captured_kwargs["api_key"] == ""
