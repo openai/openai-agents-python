@@ -1,6 +1,7 @@
 from typing import Literal, get_args, get_origin
 
-from agents.voice.model import TTSCustomVoice, TTSModelSettings, TTSVoice
+import agents.voice as voice
+from agents.voice import TTSCustomVoice, TTSModelSettings, TTSVoice
 
 
 def _builtin_voice_values() -> set[str]:
@@ -18,3 +19,7 @@ def test_tts_voice_type_accepts_custom_voice_ids() -> None:
 
     assert TTSCustomVoice in get_args(TTSVoice)
     assert settings.voice == {"id": "voice_1234"}
+
+
+def test_tts_custom_voice_is_exported_from_agents_voice() -> None:
+    assert "TTSCustomVoice" in voice.__all__
