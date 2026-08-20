@@ -94,6 +94,21 @@ class TestSelectCompactionCandidateItems:
 
 
 class TestOpenAIResponsesCompactionSession:
+    class SpoofedCompactionMode(str):
+        def __eq__(self, other: object) -> bool:
+            return other == "auto"
+
+        __hash__ = str.__hash__
+
+    class SpoofedStringClass:
+        @property
+        def __class__(self) -> type[str]:
+            return str
+
+    class FailingRepr:
+        def __repr__(self) -> str:
+            raise RuntimeError("repr exploded")
+
     def test_client_preserves_falsy_default_client(self) -> None:
         mock_client = MagicMock()
         mock_client.__bool__.return_value = False
@@ -136,6 +151,35 @@ class TestOpenAIResponsesCompactionSession:
         )
         assert session.model == "gpt-4.1"
 
+    @pytest.mark.parametrize(
+        "invalid_mode",
+        [
+            pytest.param("", id="empty-string"),
+            pytest.param("typo", id="unknown-string"),
+            pytest.param(["auto"], id="non-string"),
+            pytest.param(SpoofedCompactionMode("unsupported"), id="spoofed-string-subclass"),
+            pytest.param(SpoofedStringClass(), id="spoofed-string-class"),
+            pytest.param(FailingRepr(), id="failing-repr"),
+        ],
+    )
+    def test_init_rejects_invalid_compaction_mode(self, invalid_mode: Any) -> None:
+        with pytest.raises(ValueError, match="compaction_mode must be one of"):
+            OpenAIResponsesCompactionSession(
+                session_id="test",
+                underlying_session=self.create_mock_session(),
+                compaction_mode=cast(Any, invalid_mode),
+            )
+
+    def test_init_canonicalizes_valid_string_subclass(self) -> None:
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=self.create_mock_session(),
+            compaction_mode=cast(Any, self.SpoofedCompactionMode("input")),
+        )
+
+        assert session.compaction_mode == "input"
+        assert type(session.compaction_mode) is str
+
     @pytest.mark.asyncio
     async def test_add_items_delegates(self) -> None:
         mock_session = self.create_mock_session()
@@ -176,6 +220,97 @@ class TestOpenAIResponsesCompactionSession:
 
         with pytest.raises(ValueError, match="previous_response_id compaction"):
             await session.run_compaction()
+
+    @pytest.mark.parametrize(
+        "invalid_mode",
+        [
+            pytest.param("", id="empty-string"),
+            pytest.param(SpoofedStringClass(), id="spoofed-string-class"),
+            pytest.param(FailingRepr(), id="failing-repr"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_run_compaction_rejects_invalid_mode_before_side_effects(
+        self, invalid_mode: Any
+    ) -> None:
+        mock_session = self.create_mock_session()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        decision_hook = MagicMock(return_value=True)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            should_trigger_compaction=decision_hook,
+        )
+        session._response_id = "resp-original"
+        session._last_unstored_response_id = "resp-original"
+
+        with pytest.raises(ValueError, match="compaction_mode must be one of"):
+            await session.run_compaction(
+                cast(
+                    Any,
+                    {
+                        "response_id": "resp-new",
+                        "compaction_mode": invalid_mode,
+                        "store": False,
+                        "force": True,
+                    },
+                )
+            )
+
+        assert session._response_id == "resp-original"
+        assert session._last_unstored_response_id == "resp-original"
+        mock_session.get_items.assert_not_awaited()
+        mock_client.responses.compact.assert_not_awaited()
+        decision_hook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_revalidates_mutated_default_mode_before_side_effects(
+        self,
+    ) -> None:
+        mock_session = self.create_mock_session()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        decision_hook = MagicMock(return_value=True)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            should_trigger_compaction=decision_hook,
+        )
+        session._response_id = "resp-original"
+        session._last_unstored_response_id = "resp-original"
+        session.compaction_mode = cast(Any, "typo")
+
+        with pytest.raises(ValueError, match="compaction_mode must be one of"):
+            await session.run_compaction({"response_id": "resp-new", "store": False, "force": True})
+
+        assert session._response_id == "resp-original"
+        assert session._last_unstored_response_id == "resp-original"
+        mock_session.get_items.assert_not_awaited()
+        mock_client.responses.compact.assert_not_awaited()
+        decision_hook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deferred_compaction_revalidates_mutated_default_mode_before_history_read(
+        self,
+    ) -> None:
+        mock_session = self.create_mock_session()
+        decision_hook = MagicMock(return_value=True)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            should_trigger_compaction=decision_hook,
+        )
+        session.compaction_mode = cast(Any, "typo")
+
+        with pytest.raises(ValueError, match="compaction_mode must be one of"):
+            await session._defer_compaction("resp-new", store=True)
+
+        assert session._deferred_response_id is None
+        mock_session.get_items.assert_not_awaited()
+        decision_hook.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_compaction_honors_falsey_decision_hook(self) -> None:

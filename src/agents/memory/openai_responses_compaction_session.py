@@ -29,6 +29,20 @@ DEFAULT_COMPACTION_THRESHOLD = 10
 _ALL_SESSION_ITEMS_LIMIT = 2_147_483_647
 
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
+_VALID_COMPACTION_MODES: tuple[OpenAIResponsesCompactionMode, ...] = (
+    "auto",
+    "input",
+    "previous_response_id",
+)
+
+
+def _validate_compaction_mode(mode: object) -> OpenAIResponsesCompactionMode:
+    if issubclass(type(mode), str):
+        string_mode = cast(str, mode)
+        for valid_mode in _VALID_COMPACTION_MODES:
+            if str.__eq__(string_mode, valid_mode):
+                return valid_mode
+    raise ValueError("compaction_mode must be one of 'auto', 'input', or 'previous_response_id'.")
 
 
 def select_compaction_candidate_items(
@@ -122,11 +136,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if not is_openai_model_name(model):
             raise ValueError(f"Unsupported model for OpenAI responses compaction: {model}")
 
+        validated_compaction_mode = _validate_compaction_mode(compaction_mode)
+
         self.session_id = session_id
         self.underlying_session = underlying_session
         self._client = client
         self.model = model
-        self.compaction_mode = compaction_mode
+        self.compaction_mode = validated_compaction_mode
         self.should_trigger_compaction = (
             should_trigger_compaction
             if should_trigger_compaction is not None
@@ -157,7 +173,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         store: bool | None,
         requested_mode: OpenAIResponsesCompactionMode | None,
     ) -> _ResolvedCompactionMode:
-        mode = requested_mode or self.compaction_mode
+        mode = _validate_compaction_mode(
+            requested_mode if requested_mode is not None else self.compaction_mode
+        )
         if (
             mode == "auto"
             and store is None
@@ -178,9 +196,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         When a run context is provided, the billed compaction request contributes to
         that run's usage totals.
         """
+        requested_mode = _validate_compaction_mode(
+            args["compaction_mode"]
+            if args is not None and "compaction_mode" in args
+            else self.compaction_mode
+        )
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
-        requested_mode = args.get("compaction_mode") if args else None
         if args and "store" in args:
             store = args["store"]
             if store is False and self._response_id:
@@ -386,12 +408,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
             requested_mode=None,
         )
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         should_compact = self.should_trigger_compaction(
             {
                 "response_id": response_id,
