@@ -1,0 +1,73 @@
+name: Apply STT review follow-up
+
+on:
+  push:
+    branches:
+      - fix/stt-stream-language-prompt
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/stt-stream-language-prompt
+          fetch-depth: 0
+      - name: Apply review changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('src/agents/voice/models/openai_stt.py')
+          text = src.read_text()
+          old = 'if self._model == "gpt-live-transcribe":'
+          new = 'if self._model in {"gpt-transcribe", "gpt-live-transcribe"}:'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one model condition, found {text.count(old)}')
+          src.write_text(text.replace(old, new, 1))
+
+          test = Path('tests/voice/test_openai_stt_session_config.py')
+          text = test.read_text()
+          marker = '@pytest.mark.asyncio\nasync def test_streaming_stt_sends_plural_languages_for_gpt_live_transcribe() -> None:\n'
+          if marker not in text:
+              raise SystemExit('live-transcribe test marker not found')
+          addition = '''@pytest.mark.asyncio
+async def test_streaming_stt_sends_plural_languages_for_gpt_transcribe() -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="gpt-transcribe",
+        settings=STTModelSettings(language="fr", prompt="domain vocabulary"),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    websocket = AsyncMock()
+    session._websocket = websocket
+
+    await session._configure_session()
+
+    payload = json.loads(websocket.send.await_args.args[0])
+    assert payload["session"]["audio"]["input"]["transcription"] == {
+        "model": "gpt-transcribe",
+        "languages": ["fr"],
+        "prompt": "domain vocabulary",
+    }
+
+
+'''
+          test.write_text(text.replace(marker, addition + marker, 1))
+          PY
+          rm .github/workflows/followup-4533.yml
+      - name: Commit follow-up
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(voice): map current transcription languages"
+          git push origin HEAD:fix/stt-stream-language-prompt
