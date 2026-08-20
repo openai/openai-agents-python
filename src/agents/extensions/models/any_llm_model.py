@@ -1363,12 +1363,12 @@ class AnyLLMModel(Model):
 
     def _build_chat_extra_kwargs(self, model_settings: ModelSettings) -> dict[str, Any]:
         extra_kwargs: dict[str, Any] = {}
-        if model_settings.extra_query:
+        if model_settings.extra_query is not None:
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
-        if model_settings.metadata:
+        if model_settings.metadata is not None:
             extra_kwargs["metadata"] = copy(model_settings.metadata)
-        if isinstance(model_settings.extra_body, dict):
-            extra_kwargs.update(model_settings.extra_body)
+        if model_settings.extra_body is not None:
+            extra_kwargs["extra_body"] = copy(model_settings.extra_body)
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
         return extra_kwargs

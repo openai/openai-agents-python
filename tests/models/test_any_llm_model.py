@@ -373,6 +373,47 @@ async def test_any_llm_chat_preserves_falsy_reasoning(monkeypatch: pytest.Monkey
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_any_llm_chat_nests_extra_body_instead_of_flattening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    extra_body = {"cached_content": "some_cache", "foo": 123, "temperature": 0.9}
+    settings = ModelSettings(
+        temperature=0.1,
+        extra_body=extra_body,
+        extra_query={},
+        metadata={},
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    call = provider.chat_calls[0]
+    assert call["temperature"] == 0.1
+    assert call["extra_body"] == extra_body
+    assert call["extra_body"] is not extra_body
+    assert call["extra_query"] == {}
+    assert call["metadata"] == {}
+    assert "cached_content" not in call
+    assert "foo" not in call
+    extra_body["foo"] = 999
+    assert call["extra_body"]["foo"] == 123
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_name", ["gemini", "vertexai"])
 @pytest.mark.parametrize("options_type", ["unset", "dictionary", "model"])
 async def test_any_llm_google_chat_headers_use_http_options(
