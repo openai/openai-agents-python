@@ -175,6 +175,12 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _configure_session(self) -> None:
         assert self._websocket is not None, "Websocket not initialized"
+        transcription_config: dict[str, Any] = {"model": self._model}
+        if self._settings.language is not None:
+            transcription_config["language"] = self._settings.language
+        if self._settings.prompt is not None:
+            transcription_config["prompt"] = self._settings.prompt
+
         await self._websocket.send(
             json.dumps(
                 {
@@ -184,7 +190,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                         "audio": {
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": 24000},
-                                "transcription": {"model": self._model},
+                                "transcription": transcription_config,
                                 "turn_detection": self._turn_detection,
                             }
                         },
