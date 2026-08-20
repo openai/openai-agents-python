@@ -14,7 +14,21 @@ DEFAULT_TTS_INSTRUCTIONS = (
 )
 DEFAULT_TTS_BUFFER_SIZE = 120
 
-TTSVoice = Literal["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
+TTSVoice = Literal[
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "onyx",
+    "nova",
+    "sage",
+    "shimmer",
+    "verse",
+    "marin",
+    "cedar",
+]
 """Exportable type for the TTSModelSettings voice enum"""
 
 
