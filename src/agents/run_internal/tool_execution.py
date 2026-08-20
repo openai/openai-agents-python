@@ -11,6 +11,7 @@ import dataclasses
 import functools
 import inspect
 import json
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -694,7 +695,12 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
     max_length_value = get_mapping_or_attr(action_payload, "max_output_length")
     if max_length_value is None:
         max_length_value = get_mapping_or_attr(action_payload, "maxOutputLength")
-    max_output_length = int(max_length_value) if isinstance(max_length_value, int | float) else None
+    if isinstance(max_length_value, int):
+        max_output_length = max_length_value
+    elif isinstance(max_length_value, float):
+        max_output_length = int(max_length_value) if math.isfinite(max_length_value) else 0
+    else:
+        max_output_length = None
 
     action = ShellActionRequest(
         commands=commands,

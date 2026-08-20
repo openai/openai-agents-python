@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from agents.agent import Agent
@@ -21,6 +23,31 @@ def test_coerce_shell_call_reads_max_output_length() -> None:
     }
     result = run_loop.coerce_shell_call(tool_call)
     assert result.action.max_output_length == 512
+
+
+@pytest.mark.parametrize("max_output_length", [math.nan, math.inf, -math.inf])
+def test_coerce_shell_call_ignores_non_finite_max_output_length(
+    max_output_length: float,
+) -> None:
+    tool_call = {
+        "call_id": "shell-non-finite-length",
+        "action": {"commands": ["ls"], "max_output_length": max_output_length},
+    }
+
+    result = run_loop.coerce_shell_call(tool_call)
+
+    assert result.action.max_output_length == 0
+
+
+def test_coerce_shell_call_preserves_large_integer_max_output_length() -> None:
+    tool_call = {
+        "call_id": "shell-large-length",
+        "action": {"commands": ["ls"], "max_output_length": 10**400},
+    }
+
+    result = run_loop.coerce_shell_call(tool_call)
+
+    assert result.action.max_output_length == 10**400
 
 
 @pytest.mark.parametrize("timeout_key", ["timeout_ms", "timeoutMs", "timeout"])
