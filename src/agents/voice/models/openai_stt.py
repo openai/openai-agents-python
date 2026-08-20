@@ -177,7 +177,10 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         assert self._websocket is not None, "Websocket not initialized"
         transcription_config: dict[str, Any] = {"model": self._model}
         if self._settings.language is not None:
-            transcription_config["language"] = self._settings.language
+            if self._model == "gpt-live-transcribe":
+                transcription_config["languages"] = [self._settings.language]
+            else:
+                transcription_config["language"] = self._settings.language
         if self._settings.prompt is not None:
             transcription_config["prompt"] = self._settings.prompt
 
