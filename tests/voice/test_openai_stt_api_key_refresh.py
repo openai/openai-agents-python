@@ -46,7 +46,11 @@ async def test_streamed_stt_refreshes_callable_api_key_before_handshake(monkeypa
         return _WebSocketContext()
 
     monkeypatch.setattr(openai_stt.websockets, "connect", connect)
-    session._setup_connection = AsyncMock(side_effect=RuntimeError("stop after handshake"))
+    monkeypatch.setattr(
+        session,
+        "_setup_connection",
+        AsyncMock(side_effect=RuntimeError("stop after handshake")),
+    )
 
     with pytest.raises(RuntimeError, match="stop after handshake"):
         await session._process_websocket_connection()
