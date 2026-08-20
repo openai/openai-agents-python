@@ -3781,9 +3781,9 @@ async def test_buffer_tool_call_stream_forwards_content_filter_finish_reason() -
 
 
 @pytest.mark.asyncio
-async def test_handler_stream_synthesizes_refusal_on_length_truncation() -> None:
+async def test_handler_stream_raises_on_length_truncation() -> None:
     """A stream that terminates with finish_reason == "length" and no emitted
-    content must synthesize a ResponseOutputRefusal instead of an empty turn,
+    content must raise ModelBehaviorError instead of manufacturing a refusal,
     matching the non-streaming path."""
     terminal = ChatCompletionChunk(
         id="chunk-id",
@@ -3793,28 +3793,8 @@ async def test_handler_stream_synthesizes_refusal_on_length_truncation() -> None
         choices=[Choice(index=0, delta=ChoiceDelta(), finish_reason="length")],
     )
 
-    output_events = await _collect_handler_events(terminal)
-
-    types = [e.type for e in output_events]
-    assert "response.refusal.delta" in types
-    assert types[-1] == "response.completed"
-
-    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
-    assert refusal_deltas and refusal_deltas[0].delta == (
-        "Response truncated because the provider's maximum token limit was reached."
-    )
-
-    completed_event = output_events[-1]
-    assert isinstance(completed_event, ResponseCompletedEvent)
-    assistant_msg = completed_event.response.output[0]
-    assert isinstance(assistant_msg, ResponseOutputMessage)
-    assert len(assistant_msg.content) == 1
-    refusal_part = assistant_msg.content[0]
-    assert isinstance(refusal_part, ResponseOutputRefusal)
-    assert (
-        refusal_part.refusal
-        == "Response truncated because the provider's maximum token limit was reached."
-    )
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _collect_handler_events(terminal)
 
 
 @pytest.mark.asyncio
@@ -3838,10 +3818,10 @@ async def test_handler_stream_length_does_not_clobber_text() -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_buffered_stream_synthesizes_refusal_on_length_truncation(monkeypatch) -> None:
+async def test_buffered_stream_raises_on_length_truncation(monkeypatch) -> None:
     """With tool-call buffering enabled, a stream that terminates with
-    finish_reason == "length" and no emitted content must still synthesize a
-    ResponseOutputRefusal, mirroring the content_filter buffered behavior."""
+    finish_reason == "length" and no emitted content must still raise
+    ModelBehaviorError, mirroring the non-buffered behavior."""
     chunk1 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
@@ -3858,26 +3838,8 @@ async def test_buffered_stream_synthesizes_refusal_on_length_truncation(monkeypa
         usage=CompletionUsage(completion_tokens=0, prompt_tokens=7, total_tokens=7),
     )
 
-    output_events = await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
-
-    types = [e.type for e in output_events]
-    assert "response.refusal.delta" in types
-    assert types[-1] == "response.completed"
-
-    refusal_deltas = [e for e in output_events if e.type == "response.refusal.delta"]
-    assert refusal_deltas and refusal_deltas[0].delta
-
-    completed_event = output_events[-1]
-    assert isinstance(completed_event, ResponseCompletedEvent)
-    assistant_msg = completed_event.response.output[0]
-    assert isinstance(assistant_msg, ResponseOutputMessage)
-    assert len(assistant_msg.content) == 1
-    refusal_part = assistant_msg.content[0]
-    assert isinstance(refusal_part, ResponseOutputRefusal)
-    assert (
-        refusal_part.refusal
-        == "Response truncated because the provider's maximum token limit was reached."
-    )
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _buffered_stream_events(monkeypatch, [chunk1, chunk2])
 
 
 @pytest.mark.allow_call_model_methods

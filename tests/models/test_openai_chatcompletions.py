@@ -50,7 +50,7 @@ from agents import (
     generation_span,
     trace,
 )
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.models._retry_runtime import provider_managed_retries_disabled
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
@@ -428,30 +428,8 @@ async def test_get_response_preserves_empty_nonfiltered_output(monkeypatch) -> N
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_get_response_surfaces_truncated_empty_turn_as_refusal(monkeypatch) -> None:
-    resp = await _get_response_for_choice(
-        monkeypatch,
-        Choice(
-            index=0,
-            finish_reason="length",
-            message=ChatCompletionMessage(role="assistant", content=None),
-        ),
-    )
-
-    assert len(resp.output) == 1
-    assert isinstance(resp.output[0], ResponseOutputMessage)
-    assert len(resp.output[0].content) == 1
-    assert isinstance(resp.output[0].content[0], ResponseOutputRefusal)
-    assert (
-        resp.output[0].content[0].refusal
-        == "Response truncated because the provider's maximum token limit was reached."
-    )
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-async def test_get_response_traces_synthesized_truncation_refusal(monkeypatch) -> None:
-    with trace(workflow_name="truncation-refusal"):
+async def test_get_response_raises_on_truncated_empty_turn(monkeypatch) -> None:
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
         await _get_response_for_choice(
             monkeypatch,
             Choice(
@@ -459,8 +437,37 @@ async def test_get_response_traces_synthesized_truncation_refusal(monkeypatch) -
                 finish_reason="length",
                 message=ChatCompletionMessage(role="assistant", content=None),
             ),
-            tracing=ModelTracing.ENABLED,
         )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_raises_on_truncated_empty_string_turn(monkeypatch) -> None:
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _get_response_for_choice(
+            monkeypatch,
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content=""),
+            ),
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_traces_error_on_truncated_empty_turn(monkeypatch) -> None:
+    with trace(workflow_name="truncation-error"):
+        with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+            await _get_response_for_choice(
+                monkeypatch,
+                Choice(
+                    index=0,
+                    finish_reason="length",
+                    message=ChatCompletionMessage(role="assistant", content=None),
+                ),
+                tracing=ModelTracing.ENABLED,
+            )
 
     generation_spans = [
         span for span in fetch_ordered_spans() if span.span_data.type == "generation"
@@ -468,9 +475,7 @@ async def test_get_response_traces_synthesized_truncation_refusal(monkeypatch) -
     assert len(generation_spans) == 1
     exported_span = generation_spans[0].export()
     assert exported_span is not None
-    assert exported_span["span_data"]["output"][0]["refusal"] == (
-        "Response truncated because the provider's maximum token limit was reached."
-    )
+    assert exported_span["error"] is not None
 
 
 @pytest.mark.allow_call_model_methods

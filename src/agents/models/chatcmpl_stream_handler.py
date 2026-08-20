@@ -448,7 +448,7 @@ class ChatCmplStreamHandler:
                 elif choice.finish_reason in {"content_filter", "length"}:
                     # A content-filtered or truncated choice ends the stream with an empty
                     # delta, so it would otherwise be dropped here and the handler would
-                    # never see the finish_reason it needs to synthesize the refusal.
+                    # never see the finish_reason it needs to act on.
                     # Forward a delta-stripped copy so buffering semantics are unchanged.
                     passthrough_choices.append(choice.model_copy(update={"delta": ChoiceDelta()}))
 
@@ -631,7 +631,8 @@ class ChatCmplStreamHandler:
         # empty delta and no refusal field. Track it so we can synthesize an
         # explicit refusal after the stream if nothing else was emitted.
         # A completion truncated before any visible token (finish_reason ==
-        # "length") has the same shape and must not collapse into an empty turn.
+        # "length") has the same shape; track it too so we can surface a model
+        # behavior error instead of collapsing into an empty turn.
         saw_content_filter = False
         saw_length = False
         async for chunk in stream:
@@ -1122,18 +1123,27 @@ class ChatCmplStreamHandler:
                             sequence_number=sequence_number.get_and_increment(),
                         )
 
-        # Content-filter refusal / zero-token truncation with no emitted output:
-        # synthesize a refusal so the completed response carries a
-        # ResponseOutputRefusal rather than an empty turn. Only when nothing else
-        # was produced (text / refusal / tool calls) — a content_filter or length
-        # that still emitted content is left as-is.
+        # Content-filter refusal with no emitted output: synthesize a refusal so
+        # the completed response carries a ResponseOutputRefusal rather than an
+        # empty turn. Only when nothing else was produced (text / refusal / tool
+        # calls) — a content_filter that still emitted content is left as-is.
         if (
             (saw_content_filter or saw_length)
             and state.text_content_index_and_output is None
             and state.refusal_content_index_and_output is None
             and not state.function_calls
         ):
-            # A content-filtered or truncated turn (e.g. Bedrock) can terminate with no
+            if saw_length:
+                # A completion truncated before any visible token (finish_reason ==
+                # "length") is a token- or reasoning-budget exhaustion, not a policy
+                # refusal. Surface it as a model behavior error rather than
+                # manufacturing a refusal that would route through model_refusal
+                # handlers.
+                raise ModelBehaviorError(
+                    "Chat Completions stream terminated with finish_reason='length' "
+                    "but produced no assistant text, tool call, or refusal."
+                )
+            # A content-filtered turn (e.g. Bedrock) can terminate with no
             # emitted output. Its leading empty "" content delta is suppressed
             # above so no text part opens, so we announce a fresh assistant
             # message and place the refusal at content index 0. A reasoning item
@@ -1143,11 +1153,7 @@ class ChatCmplStreamHandler:
             # the sole content part, is at content_index 0 in both the stream and
             # response.completed regardless of any reasoning item.
             refusal_index = 0
-            refusal_message = (
-                "Response withheld by the provider's content filter."
-                if saw_content_filter
-                else "Response truncated because the provider's maximum token limit was reached."
-            )
+            refusal_message = "Response withheld by the provider's content filter."
             state.refusal_content_index_and_output = (
                 refusal_index,
                 ResponseOutputRefusal(refusal=refusal_message, type="refusal"),

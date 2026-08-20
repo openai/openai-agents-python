@@ -303,23 +303,32 @@ class OpenAIChatCompletionsModel(Model):
             # Some providers signal a filtered non-streaming completion only through
             # finish_reason="content_filter" and an otherwise empty message. Preserve
             # that terminal signal as a refusal instead of returning an empty output.
-            # A completion truncated before any visible token (finish_reason="length")
-            # has the same shape and must not collapse into an indistinguishable
-            # empty turn either.
             if (
                 message is not None
                 and first_choice is not None
-                and first_choice.finish_reason in {"content_filter", "length"}
+                and first_choice.finish_reason == "content_filter"
                 and not message.content
                 and not message.refusal
                 and not message.tool_calls
             ):
-                if first_choice.finish_reason == "content_filter":
-                    message.refusal = "Response withheld by the provider's content filter."
-                else:
-                    message.refusal = (
-                        "Response truncated because the provider's maximum token limit was reached."
-                    )
+                message.refusal = "Response withheld by the provider's content filter."
+
+            # A completion truncated before any visible token (finish_reason="length")
+            # is a token- or reasoning-budget exhaustion, not a policy refusal.
+            # Surface it as a model behavior error rather than manufacturing a
+            # refusal that would route through model_refusal handlers.
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "length"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+            ):
+                raise ModelBehaviorError(
+                    "Chat Completions response terminated with finish_reason='length' "
+                    "but produced no assistant text, tool call, or refusal."
+                )
 
             if tracing.include_data():
                 span_generation.span_data.output = (
