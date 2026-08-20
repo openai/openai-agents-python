@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx2
@@ -38,7 +39,7 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
     def __init__(
         self,
         *,
-        api_key: str | None = None,
+        api_key: str | Callable[[], Awaitable[str]] | None = None,
         base_url: str | None = None,
         openai_client: AsyncOpenAI | None = None,
         organization: str | None = None,
@@ -48,8 +49,8 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
         """Create a new OpenAI voice model provider.
 
         Args:
-            api_key: The API key to use for the OpenAI client. If not provided, we will use the
-                default API key.
+            api_key: The API key or async API-key provider to use for the OpenAI client. If not
+                provided, we will use the default API key.
             base_url: The base URL to use for the OpenAI client. If not provided, we will use the
                 default base URL.
             openai_client: An optional OpenAI client to use. If not provided, we will create a new
