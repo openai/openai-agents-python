@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,7 +37,47 @@ def _assert_must_pass_tool_arguments() -> str:
     raise ValueError("tool_arguments must be passed to ToolContext")
 
 
+_ACTION_REF_DOMAIN = b"openai-agents-python:tool-action-ref:v1\0"
 _MISSING = object()
+
+
+def _canonical_tool_request(tool_arguments: str) -> bytes:
+    """Return deterministic bytes for hashing a tool request without changing execution behavior."""
+    try:
+        parsed_arguments = json.loads(tool_arguments)
+        canonical_arguments = json.dumps(
+            parsed_arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return b"raw\0" + tool_arguments.encode("utf-8")
+    return b"json\0" + canonical_arguments.encode("utf-8")
+
+
+def _compute_tool_action_ref(
+    agent_name: str | None,
+    qualified_tool_name: str,
+    tool_arguments: str,
+) -> str | None:
+    if agent_name is None:
+        return None
+
+    request_digest = hashlib.sha256(_canonical_tool_request(tool_arguments)).hexdigest()
+    commitment = json.dumps(
+        {
+            "agent_id": agent_name,
+            "request_digest": request_digest,
+            "tool_name": qualified_tool_name,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(_ACTION_REF_DOMAIN + commitment).hexdigest()
+    return f"act_v1_{digest}"
 
 
 @dataclass(eq=False)
@@ -62,6 +104,8 @@ class ToolContext(RunContextWrapper[TContext]):
 
     run_config: RunConfig | None = None
     """The active run config for this tool call, when available."""
+
+    _action_ref: str | None = field(default=None, init=False, repr=False)
 
     def __init__(
         self,
@@ -114,6 +158,11 @@ class ToolContext(RunContextWrapper[TContext]):
             self.run_config = _coerce_run_config(run_config)
         else:
             self.run_config = None
+        self._action_ref = _compute_tool_action_ref(
+            agent.name if agent is not None else None,
+            self.qualified_tool_name,
+            self.tool_arguments,
+        )
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._custom_data: dict[str, Any] | None = None
 
@@ -121,6 +170,11 @@ class ToolContext(RunContextWrapper[TContext]):
     def qualified_tool_name(self) -> str:
         """Return the tool name qualified by namespace when available."""
         return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
+
+    @property
+    def action_ref(self) -> str | None:
+        """Return the deterministic commitment for this tool action, when agent metadata exists."""
+        return self._action_ref
 
     def _find_nested_approval_target(
         self,
