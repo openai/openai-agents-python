@@ -14,6 +14,7 @@ from openai import AsyncOpenAI, NotGiven, Omit
 from ... import _debug
 from ...exceptions import AgentsException, UserError
 from ...logger import logger
+from ...models.openai_responses import _refresh_openai_client_api_key_if_supported
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
 from ...util._error_tracing import get_trace_error
 from ..exceptions import STTWebsocketConnectionError
@@ -344,6 +345,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _process_websocket_connection(self) -> None:
         try:
+            await _refresh_openai_client_api_key_if_supported(self._client)
             async with websockets.connect(
                 _prepare_websocket_url(self._client),
                 additional_headers=_prepare_websocket_headers(self._client),
