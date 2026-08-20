@@ -10,14 +10,15 @@ from agents.voice.models.openai_stt import (
 )
 
 
-def _mock_client() -> AsyncOpenAI:
-    return cast(AsyncOpenAI, MagicMock())
+def _mock_client(**attributes: object) -> AsyncOpenAI:
+    return cast(AsyncOpenAI, MagicMock(**attributes))
 
 
 def test_streaming_stt_websocket_url_uses_client_base_url() -> None:
-    client = _mock_client()
-    client.websocket_base_url = None
-    client.base_url = httpx2.URL("https://voice-proxy.example.test/v1/")
+    client = _mock_client(
+        websocket_base_url=None,
+        base_url=httpx2.URL("https://voice-proxy.example.test/v1/"),
+    )
 
     url = httpx2.URL(_prepare_websocket_url(client))
 
@@ -28,9 +29,10 @@ def test_streaming_stt_websocket_url_uses_client_base_url() -> None:
 
 
 def test_streaming_stt_websocket_url_prefers_websocket_base_url() -> None:
-    client = _mock_client()
-    client.websocket_base_url = "https://voice-ws.example.test/custom/?tenant=one"
-    client.base_url = httpx2.URL("https://ignored.example.test/v1/")
+    client = _mock_client(
+        websocket_base_url="https://voice-ws.example.test/custom/?tenant=one",
+        base_url=httpx2.URL("https://ignored.example.test/v1/"),
+    )
 
     url = httpx2.URL(_prepare_websocket_url(client))
 
@@ -42,13 +44,14 @@ def test_streaming_stt_websocket_url_prefers_websocket_base_url() -> None:
 
 
 def test_streaming_stt_websocket_headers_use_client_configuration() -> None:
-    client = _mock_client()
-    client.auth_headers = {"Authorization": "Bearer sk-client"}
-    client.default_headers = {
-        "OpenAI-Organization": "org-client",
-        "OpenAI-Project": "proj-client",
-        "X-Proxy-Token": "proxy-token",
-    }
+    client = _mock_client(
+        auth_headers={"Authorization": "Bearer sk-client"},
+        default_headers={
+            "OpenAI-Organization": "org-client",
+            "OpenAI-Project": "proj-client",
+            "X-Proxy-Token": "proxy-token",
+        },
+    )
 
     headers = _prepare_websocket_headers(client)
 
