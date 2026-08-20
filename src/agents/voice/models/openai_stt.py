@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
+import httpx2
 from openai import AsyncOpenAI
 
 from ... import _debug
@@ -56,6 +57,30 @@ def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
     elif buffer.dtype != np.int16:
         raise UserError("Buffer must be a numpy array of int16 or float32")
     return base64.b64encode(buffer.tobytes()).decode("utf-8")
+
+
+def _prepare_websocket_url(client: AsyncOpenAI) -> str:
+    websocket_base_url = client.websocket_base_url
+    base_value = websocket_base_url if websocket_base_url is not None else client.base_url
+    base_url = httpx2.URL(str(base_value))
+    ws_scheme = {"http": "ws", "https": "wss"}.get(base_url.scheme, base_url.scheme)
+    params = dict(base_url.params)
+    params["intent"] = "transcription"
+    path = base_url.path.rstrip("/") + "/realtime"
+    return str(base_url.copy_with(scheme=ws_scheme, path=path, params=params))
+
+
+def _prepare_websocket_headers(client: AsyncOpenAI) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for source in (client.auth_headers, client.default_headers):
+        for key, value in source.items():
+            header_key = str(key)
+            for existing_key in list(headers):
+                if existing_key.lower() == header_key.lower():
+                    del headers[existing_key]
+            headers[header_key] = str(value)
+    headers["OpenAI-Log-Session"] = "1"
+    return headers
 
 
 async def _wait_for_event(
@@ -304,11 +329,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
     async def _process_websocket_connection(self) -> None:
         try:
             async with websockets.connect(
-                "wss://api.openai.com/v1/realtime?intent=transcription",
-                additional_headers={
-                    "Authorization": f"Bearer {self._client.api_key}",
-                    "OpenAI-Log-Session": "1",
-                },
+                _prepare_websocket_url(self._client),
+                additional_headers=_prepare_websocket_headers(self._client),
             ) as ws:
                 await self._setup_connection(ws)
                 self._process_events_task = asyncio.create_task(self._handle_events())
