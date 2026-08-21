@@ -661,6 +661,37 @@ async def test_any_llm_chat_path_content_filter_keeps_real_content(monkeypatch) 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_any_llm_chat_path_rejects_empty_choices(monkeypatch) -> None:
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=ChatCompletion(
+            id="chatcmpl_empty",
+            created=0,
+            model="fake-model",
+            object="chat.completion",
+            choices=[],
+        ),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    with pytest.raises(ModelBehaviorError, match="ChatCompletion response has no choices"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chat_response",
     [
