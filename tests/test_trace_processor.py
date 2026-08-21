@@ -77,6 +77,23 @@ def test_batch_trace_processor_on_trace_start(mocked_exporter):
     processor.shutdown()
 
 
+def test_batch_trace_processor_rejects_zero_max_batch_size(mocked_exporter):
+    with pytest.raises(ValueError, match="max_batch_size must be at least 1"):
+        BatchTraceProcessor(exporter=mocked_exporter, max_batch_size=0)
+
+
+def test_batch_trace_processor_force_flush_exports_every_queued_item(mocked_exporter):
+    processor = BatchTraceProcessor(exporter=mocked_exporter, max_batch_size=1)
+    processor.on_trace_start(get_trace(processor))
+    processor.on_span_end(get_span(processor))
+
+    processor.force_flush()
+
+    assert mocked_exporter.export.call_count == 2
+    assert processor._queue.empty()
+    processor.shutdown()
+
+
 def test_batch_trace_processor_on_span_end(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=0.1)
     test_span = get_span(processor)

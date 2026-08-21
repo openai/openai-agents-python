@@ -562,6 +562,9 @@ class BatchTraceProcessor(TracingProcessor):
             schedule_delay: The delay between checks for new spans to export.
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
+        if max_batch_size < 1:
+            raise ValueError("max_batch_size must be at least 1")
+
         self._exporter = exporter
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
