@@ -100,6 +100,12 @@ class ManifestApplier:
         manifest_rel = Manifest._coerce_rel_path(rel_dest)
         Manifest._validate_rel_path(manifest_rel)
         if artifact.ephemeral:
+            if isinstance(artifact, Dir):
+                for child_name in artifact.children:
+                    self._validate_ephemeral_child_paths(
+                        manifest_rel / Manifest._coerce_rel_path(child_name),
+                        artifact.children[child_name],
+                    )
             out.append((manifest_rel, self._prune_to_ephemeral(artifact)))
             return
         if isinstance(artifact, Dir):
@@ -108,6 +114,14 @@ class ManifestApplier:
                     rel_dest=manifest_rel / Manifest._coerce_rel_path(child_name),
                     artifact=child_artifact,
                     out=out,
+                )
+
+    def _validate_ephemeral_child_paths(self, rel_dest: Path, artifact: BaseEntry) -> None:
+        Manifest._validate_rel_path(rel_dest)
+        if isinstance(artifact, Dir):
+            for child_name, child_artifact in artifact.children.items():
+                self._validate_ephemeral_child_paths(
+                    rel_dest / Manifest._coerce_rel_path(child_name), child_artifact
                 )
 
     def _prune_to_ephemeral(self, artifact: BaseEntry) -> BaseEntry:

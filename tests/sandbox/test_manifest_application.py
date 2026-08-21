@@ -14,7 +14,7 @@ from agents.sandbox.entries import (
     InContainerMountStrategy,
     MountpointMountPattern,
 )
-from agents.sandbox.errors import ExecNonZeroError
+from agents.sandbox.errors import ExecNonZeroError, InvalidManifestPathError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.manifest_application import ManifestApplier
@@ -23,6 +23,35 @@ from agents.sandbox.types import ExecResult, Group, User
 
 def _materialized(dest: Path) -> list[MaterializedFile]:
     return [MaterializedFile(path=dest, sha256=dest.as_posix())]
+
+
+@pytest.mark.asyncio
+async def test_manifest_applier_rejects_unsafe_children_of_ephemeral_directory() -> None:
+    async def mkdir(_path: Path) -> None:
+        return None
+
+    async def exec_checked_nonzero(*_command: str) -> ExecResult:
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    async def apply_entry(_entry: object, _dest: Path, _base_dir: Path) -> list[MaterializedFile]:
+        return []
+
+    applier = ManifestApplier(
+        mkdir=mkdir,
+        exec_checked_nonzero=exec_checked_nonzero,
+        apply_entry=apply_entry,
+    )
+    manifest = Manifest(
+        entries={
+            "safe": Dir(
+                ephemeral=True,
+                children={"../outside.txt": File(content=b"nope")},
+            )
+        }
+    )
+
+    with pytest.raises(InvalidManifestPathError, match="must not escape root"):
+        await applier.apply_manifest(manifest, only_ephemeral=True)
 
 
 @pytest.mark.asyncio
