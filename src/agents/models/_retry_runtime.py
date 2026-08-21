@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -64,7 +65,7 @@ def parse_retry_after_ms(value: str | None) -> float | None:
         parsed = float(value) / 1000.0
     except ValueError:
         return None
-    return parsed if parsed >= 0 else None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 def parse_retry_after_value(value: str | None) -> float | None:
@@ -76,7 +77,7 @@ def parse_retry_after_value(value: str | None) -> float | None:
     except ValueError:
         parsed = None
     if parsed is not None:
-        return parsed if parsed >= 0 else None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
     try:
         retry_datetime = parsedate_to_datetime(value)
