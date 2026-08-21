@@ -5,8 +5,13 @@ def _debug_flag_enabled(flag: str, default: bool = False) -> bool:
     flag_value = os.getenv(flag)
     if flag_value is None:
         return default
-    else:
-        return flag_value == "1" or flag_value.lower() == "true"
+
+    normalized = flag_value.strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    return default
 
 
 def _load_dont_log_model_data() -> bool:
