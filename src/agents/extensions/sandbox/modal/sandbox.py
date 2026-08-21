@@ -88,6 +88,7 @@ from ....sandbox.util.retry import (
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tar_bytes
 from ....sandbox.workspace_paths import (
     coerce_posix_path,
+    normalize_posix_path,
     posix_path_as_path,
     posix_path_for_error,
     sandbox_path_str,
@@ -1421,7 +1422,7 @@ class ModalSandboxSession(BaseSandboxSession):
         assert self._sandbox is not None
         if not hasattr(self._sandbox, "snapshot_directory"):
             return await self._persist_workspace_via_tar()
-        if self._native_snapshot_requires_tar_fallback():
+        if self._native_snapshot_requires_tar_fallback(snapshot_root=root):
             return await self._persist_workspace_via_tar()
         plain_skip = self._modal_snapshot_plain_skip_relpaths(root)
         skip_abs = [root / rel for rel in sorted(plain_skip, key=lambda p: p.as_posix())]
@@ -1509,7 +1510,9 @@ class ModalSandboxSession(BaseSandboxSession):
                         },
                     )
 
-            for mount_entry, mount_path in self._snapshot_directory_mount_targets_to_restore(root):
+            for mount_entry, mount_path in self._snapshot_directory_mount_targets_to_restore(
+                root, include_ephemeral=True
+            ):
                 transition_error, transition_cancelled = await _settle_mount_transition(
                     self,
                     mount_entry.mount_strategy.teardown_for_snapshot(
@@ -1938,14 +1941,19 @@ class ModalSandboxSession(BaseSandboxSession):
                 cause=e,
             ) from e
 
-    def _snapshot_directory_mount_targets_to_restore(self, root: Path) -> list[tuple[Mount, Path]]:
+    def _snapshot_directory_mount_targets_to_restore(
+        self,
+        root: Path,
+        *,
+        include_ephemeral: bool = False,
+    ) -> list[tuple[Mount, Path]]:
         mount_targets: list[tuple[Mount, Path]] = []
         for mount_entry, mount_path in self.state.manifest.mount_targets():
-            if mount_entry.ephemeral:
+            if mount_entry.ephemeral and not include_ephemeral:
                 continue
             if isinstance(mount_entry.mount_strategy, ModalCloudBucketMountStrategy):
                 continue
-            if mount_path != root and root not in mount_path.parents:
+            if not self._sandbox_paths_overlap(root, mount_path):
                 continue
             mount_targets.append((mount_entry, mount_path))
         return mount_targets
@@ -2063,15 +2071,28 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if workspace_persistence != _WORKSPACE_PERSISTENCE_SNAPSHOT_DIRECTORY:
             return
 
-        root = posix_path_as_path(coerce_posix_path(manifest.root))
+        root = posix_path_as_path(normalize_posix_path(manifest.root))
         for mount_entry, mount_path in manifest.mount_targets():
             if not isinstance(mount_entry.mount_strategy, ModalCloudBucketMountStrategy):
                 continue
+            mount_path = posix_path_as_path(normalize_posix_path(mount_path))
             if mount_path == root or root in mount_path.parents:
                 raise MountConfigError(
                     message=(
                         "snapshot_directory is not supported when a Modal cloud bucket mount "
                         "lives at or under the workspace root"
+                    ),
+                    context={
+                        "workspace_root": root.as_posix(),
+                        "mount_path": mount_path.as_posix(),
+                        "workspace_persistence": workspace_persistence,
+                    },
+                )
+            if mount_path in root.parents:
+                raise MountConfigError(
+                    message=(
+                        "snapshot_directory is not supported when the workspace root "
+                        "lives inside a Modal cloud bucket mount"
                     ),
                     context={
                         "workspace_root": root.as_posix(),
@@ -2302,6 +2323,10 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
             )
             _mark_mount_validation_error(error)
             raise error
+        self._validate_manifest_for_workspace_persistence(
+            manifest=state.manifest,
+            workspace_persistence=state.workspace_persistence,
+        )
         if state.mount_authority_rebound:
             state.sandbox_id = None
             state.session_id = uuid.uuid4()

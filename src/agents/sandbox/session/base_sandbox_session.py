@@ -37,6 +37,7 @@ from ..util.parse_utils import parse_ls_la
 from ..workspace_paths import (
     WorkspacePathPolicy,
     coerce_posix_path,
+    normalize_posix_path,
     posix_path_as_path,
     posix_path_for_error,
     sandbox_path_str,
@@ -578,8 +579,14 @@ class BaseSandboxSession(abc.ABC):
         await dependencies.aclose()
 
     @staticmethod
-    def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:
-        return lhs == rhs or lhs in rhs.parents or rhs in lhs.parents
+    def _sandbox_paths_overlap(lhs: PurePath, rhs: PurePath) -> bool:
+        lhs_posix = normalize_posix_path(lhs)
+        rhs_posix = normalize_posix_path(rhs)
+        return (
+            lhs_posix == rhs_posix
+            or lhs_posix in rhs_posix.parents
+            or rhs_posix in lhs_posix.parents
+        )
 
     def _mount_relpaths_within_workspace(self) -> set[Path]:
         root = self._workspace_root_path()
@@ -595,11 +602,21 @@ class BaseSandboxSession(abc.ABC):
         return {
             mount_relpath
             for mount_relpath in self._mount_relpaths_within_workspace()
-            if self._workspace_relpaths_overlap(rel_path, mount_relpath)
+            if self._sandbox_paths_overlap(rel_path, mount_relpath)
         }
 
-    def _native_snapshot_requires_tar_fallback(self) -> bool:
-        for mount_entry, _mount_path in self.state.manifest.mount_targets():
+    def _native_snapshot_requires_tar_fallback(self, *, snapshot_root: Path | None = None) -> bool:
+        """Return whether mounts prevent a safe native snapshot.
+
+        Filesystem-wide native snapshots pass no root and conservatively inspect every mount.
+        Directory snapshots may ignore mounts that cannot overlap the resolved snapshot root.
+        """
+
+        for mount_entry, mount_path in self.state.manifest.mount_targets():
+            if snapshot_root is not None and not self._sandbox_paths_overlap(
+                snapshot_root, mount_path
+            ):
+                continue
             if not mount_entry.mount_strategy.supports_native_snapshot_detach(mount_entry):
                 return True
         return False

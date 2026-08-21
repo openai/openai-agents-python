@@ -37,6 +37,15 @@ def coerce_posix_path(path: str | PurePath) -> PurePosixPath:
     return PurePosixPath(path)
 
 
+def normalize_posix_path(path: str | PurePath) -> PurePosixPath:
+    """Return a normalized POSIX path for sandbox filesystem comparisons."""
+
+    normalized = posixpath.normpath(coerce_posix_path(path).as_posix())
+    if normalized.startswith("//"):
+        normalized = f"/{normalized.lstrip('/')}"
+    return PurePosixPath(normalized)
+
+
 def windows_absolute_path(path: str | PurePath) -> PureWindowsPath | None:
     """Return a Windows absolute path when the input uses Windows absolute syntax."""
 
@@ -498,10 +507,10 @@ class WorkspacePathPolicy:
     def _absolute_posix_path(self, path: PurePosixPath) -> PurePosixPath:
         root = self._normalized_root()
         raw_candidate = path.as_posix() if path.is_absolute() else str(root / path.as_posix())
-        return PurePosixPath(posixpath.normpath(str(raw_candidate)))
+        return normalize_posix_path(str(raw_candidate))
 
     def _normalized_root(self) -> PurePosixPath:
-        return PurePosixPath(posixpath.normpath(self._sandbox_root.as_posix()))
+        return normalize_posix_path(self._sandbox_root)
 
     @staticmethod
     def _path_exists(path: Path) -> bool:

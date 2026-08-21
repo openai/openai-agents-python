@@ -7,11 +7,13 @@ import subprocess
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import Literal
 
 import pytest
 
 from agents.sandbox.entries import GCSMount, InContainerMountStrategy, MountpointMountPattern
+from agents.sandbox.entries.mounts.base import Mount
 from agents.sandbox.errors import (
     MountConfigError,
     WorkspaceArchiveReadError,
@@ -81,6 +83,14 @@ class _ManifestSession(_CaptureExecSession):
             manifest=manifest,
             snapshot=NoopSnapshot(id="noop"),
         )
+
+
+class _NonDetachableMountStrategy(InContainerMountStrategy):
+    type: Literal["test_non_detachable"] = "test_non_detachable"
+
+    def supports_native_snapshot_detach(self, mount: Mount) -> bool:
+        _ = mount
+        return False
 
 
 class _QueuedExecSession(_CaptureExecSession):
@@ -445,3 +455,83 @@ def test_register_persist_workspace_skip_path_allows_non_overlapping_path() -> N
     registered = session.register_persist_workspace_skip_path("logs/events.jsonl")
 
     assert registered == Path("logs/events.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("snapshot_root", "mount_path", "requires_fallback"),
+    [
+        pytest.param("/workspace", "/mnt/remote", False, id="disjoint"),
+        pytest.param("/workspace", "/workspace/remote", True, id="descendant"),
+        pytest.param("/workspace", "/workspace", True, id="equal"),
+        pytest.param("/workspace/project", "/workspace", True, id="ancestor"),
+        pytest.param("/workspace", "/mnt/../workspace/remote", True, id="normalized-descendant"),
+        pytest.param("/x/../workspace/project", "/workspace", True, id="normalized-ancestor"),
+        pytest.param("/workspace", "//workspace/remote", True, id="double-slash-mount"),
+        pytest.param("//workspace/project", "/workspace", True, id="double-slash-root"),
+    ],
+)
+def test_native_directory_snapshot_fallback_only_considers_overlapping_non_detachable_mounts(
+    snapshot_root: str,
+    mount_path: str,
+    requires_fallback: bool,
+) -> None:
+    resolved_snapshot_root = Path(snapshot_root)
+    session = _ManifestSession(
+        Manifest(
+            root=resolved_snapshot_root.as_posix(),
+            entries={
+                "remote": GCSMount(
+                    bucket="bucket",
+                    mount_path=Path(mount_path),
+                    mount_strategy=_NonDetachableMountStrategy(pattern=MountpointMountPattern()),
+                )
+            },
+        )
+    )
+
+    assert (
+        session._native_snapshot_requires_tar_fallback(snapshot_root=resolved_snapshot_root)
+        is requires_fallback
+    )
+
+
+def test_native_directory_snapshot_keeps_detachable_overlapping_mounts_native() -> None:
+    snapshot_root = Path("/workspace")
+    session = _ManifestSession(
+        Manifest(
+            root=snapshot_root.as_posix(),
+            entries={
+                "remote": GCSMount(
+                    bucket="bucket",
+                    mount_path=Path("/workspace/remote"),
+                    mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
+                )
+            },
+        )
+    )
+
+    assert not session._native_snapshot_requires_tar_fallback(snapshot_root=snapshot_root)
+
+
+def test_native_directory_snapshot_overlap_is_independent_of_host_path_flavor() -> None:
+    assert BaseSandboxSession._sandbox_paths_overlap(
+        PureWindowsPath("/workspace"),
+        PureWindowsPath("/workspace/remote"),
+    )
+
+
+def test_filesystem_snapshot_still_considers_disjoint_non_detachable_mounts() -> None:
+    session = _ManifestSession(
+        Manifest(
+            root="/workspace",
+            entries={
+                "remote": GCSMount(
+                    bucket="bucket",
+                    mount_path=Path("/mnt/remote"),
+                    mount_strategy=_NonDetachableMountStrategy(pattern=MountpointMountPattern()),
+                )
+            },
+        )
+    )
+
+    assert session._native_snapshot_requires_tar_fallback()

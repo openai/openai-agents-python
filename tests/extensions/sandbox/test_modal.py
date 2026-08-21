@@ -1430,6 +1430,58 @@ async def test_modal_resume_creates_fresh_sandbox_for_rebound_mount_authority(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workspace_root", "mount_path"),
+    [
+        pytest.param("/workspace", "/workspace", id="equal"),
+        pytest.param("/workspace", "/workspace/remote", id="descendant"),
+        pytest.param("/workspace/project", "/workspace", id="ancestor"),
+    ],
+)
+async def test_modal_resume_rejects_snapshot_directory_with_rebound_overlapping_cloud_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_root: str,
+    mount_path: str,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    trusted_manifest = Manifest(
+        root=workspace_root,
+        entries={
+            "remote": S3Mount(
+                bucket="bucket",
+                mount_path=Path(mount_path),
+                mount_strategy=modal_module.ModalCloudBucketMountStrategy(
+                    secret_name="current-secret"
+                ),
+            )
+        },
+    )
+    state = modal_module.ModalSandboxSessionState(
+        manifest=trusted_manifest,
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-existing",
+        workspace_persistence="snapshot_directory",
+    )
+    client = modal_module.ModalSandboxClient()
+    restored = client.deserialize_session_state(client.serialize_session_state(state))
+    rebound = restored.rebind_persisted_mount_authority(
+        trusted_manifest,
+        provider_backend_id="modal",
+    )
+    original_session_id = rebound.session_id
+    original_sandbox_id = rebound.sandbox_id
+
+    with pytest.raises(MountConfigError, match="sandbox mount configuration is invalid"):
+        await client.resume(rebound)
+
+    assert rebound.session_id == original_session_id
+    assert rebound.sandbox_id == original_sandbox_id
+    assert create_calls == []
+    assert sys.modules["modal"].Sandbox.from_id_calls == []
+
+
+@pytest.mark.asyncio
 async def test_modal_resume_marks_reconnected_sandbox_preserved_before_snapshot_reuse(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3562,6 +3614,42 @@ async def test_modal_snapshot_directory_restore_preserves_exposed_ports(
 
 
 @pytest.mark.asyncio
+async def test_modal_snapshot_directory_restore_recreates_disjoint_cloud_bucket_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "remote": S3Mount(
+                    bucket="bucket",
+                    mount_path=Path("/mnt/remote"),
+                    mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+                )
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        workspace_persistence="snapshot_directory",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    await session.hydrate_workspace(
+        io.BytesIO(modal_module._encode_snapshot_directory_ref(snapshot_id="snap-dir-123"))
+    )
+
+    assert create_calls
+    volumes = cast(dict[str, object], create_calls[0]["volumes"])
+    assert volumes.keys() == {"/mnt/remote"}
+    assert session._sandbox is not None  # noqa: SLF001
+    assert session._sandbox.mount_image_calls == [  # noqa: SLF001
+        ("/workspace", "snap-dir-123")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_modal_snapshot_directory_restore_reactivates_durable_workspace_mounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3596,8 +3684,21 @@ async def test_modal_snapshot_directory_restore_reactivates_durable_workspace_mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mount_path", "expected_mount_path"),
+    [
+        pytest.param(Path("actual"), "/workspace/actual", id="canonical"),
+        pytest.param(
+            Path("/mnt/../workspace/actual"),
+            "/mnt/../workspace/actual",
+            id="normalized",
+        ),
+    ],
+)
 async def test_modal_snapshot_directory_persist_only_detaches_durable_workspace_mounts(
     monkeypatch: pytest.MonkeyPatch,
+    mount_path: Path,
+    expected_mount_path: str,
 ) -> None:
     modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
     events: list[tuple[str, str]] = []
@@ -3607,7 +3708,7 @@ async def test_modal_snapshot_directory_persist_only_detaches_durable_workspace_
             root="/workspace",
             entries={
                 "inside": _RecordingMount(
-                    mount_path=Path("actual"),
+                    mount_path=mount_path,
                     ephemeral=False,
                 ).bind_events(events),
                 "outside": _RecordingMount(
@@ -3628,7 +3729,65 @@ async def test_modal_snapshot_directory_persist_only_detaches_durable_workspace_
     assert create_calls
     assert session._sandbox is not None  # noqa: SLF001
     assert archive.read() == modal_module._encode_snapshot_directory_ref(snapshot_id="im-123")
-    assert events == [("unmount", "/workspace/actual"), ("mount", "/workspace/actual")]
+    assert events == [("unmount", expected_mount_path), ("mount", expected_mount_path)]
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_directory_persist_detaches_durable_ancestor_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    events: list[tuple[str, str]] = []
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace/project",
+            entries={
+                "remote": _RecordingMount(
+                    mount_path=Path("/workspace"),
+                    ephemeral=False,
+                ).bind_events(events)
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        workspace_persistence="snapshot_directory",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == modal_module._encode_snapshot_directory_ref(snapshot_id="im-123")
+    assert events == [("unmount", "/workspace"), ("mount", "/workspace")]
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_directory_persist_detaches_ephemeral_overlapping_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    events: list[tuple[str, str]] = []
+
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(
+            root="/workspace",
+            entries={
+                "remote": _RecordingMount(
+                    mount_path=Path("remote"),
+                    ephemeral=True,
+                ).bind_events(events)
+            },
+        ),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        workspace_persistence="snapshot_directory",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == modal_module._encode_snapshot_directory_ref(snapshot_id="im-123")
+    assert events == [("unmount", "/workspace/remote"), ("mount", "/workspace/remote")]
 
 
 @pytest.mark.asyncio
@@ -4234,8 +4393,14 @@ async def test_modal_snapshot_filesystem_falls_back_to_tar_for_non_detachable_mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mount_path",
+    [Path("remote"), Path("/mnt/../workspace/remote"), Path("//workspace/remote")],
+    ids=["canonical", "normalized", "double-slash"],
+)
 async def test_modal_create_rejects_snapshot_directory_with_cloud_bucket_mount_under_workspace(
     monkeypatch: pytest.MonkeyPatch,
+    mount_path: Path,
 ) -> None:
     modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
 
@@ -4252,9 +4417,50 @@ async def test_modal_create_rejects_snapshot_directory_with_cloud_bucket_mount_u
                 entries={
                     "remote": S3Mount(
                         bucket="bucket",
+                        mount_path=mount_path,
                         mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
                     )
                 }
+            ),
+            options=modal_module.ModalSandboxClientOptions(
+                app_name="sandbox-tests",
+                workspace_persistence="snapshot_directory",
+            ),
+        )
+
+    assert create_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "workspace_root",
+    ["/workspace/project", "/x/../workspace/project", "//workspace/project"],
+    ids=["canonical", "normalized", "double-slash"],
+)
+async def test_modal_create_rejects_snapshot_directory_inside_cloud_bucket_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_root: str,
+) -> None:
+    modal_module, create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    client = modal_module.ModalSandboxClient()
+    with pytest.raises(
+        MountConfigError,
+        match=(
+            "snapshot_directory is not supported when the workspace root "
+            "lives inside a Modal cloud bucket mount"
+        ),
+    ):
+        await client.create(
+            manifest=Manifest(
+                root=workspace_root,
+                entries={
+                    "remote": S3Mount(
+                        bucket="bucket",
+                        mount_path=Path("/workspace"),
+                        mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+                    )
+                },
             ),
             options=modal_module.ModalSandboxClientOptions(
                 app_name="sandbox-tests",
@@ -4291,6 +4497,39 @@ async def test_modal_create_allows_snapshot_directory_with_cloud_bucket_mount_ou
     assert create_calls
     volumes = cast(dict[str, object], create_calls[0]["volumes"])
     assert volumes.keys() == {"/mnt/remote"}
+
+
+@pytest.mark.asyncio
+async def test_modal_snapshot_directory_uses_native_with_disjoint_cloud_bucket_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    client = modal_module.ModalSandboxClient()
+    session = await client.create(
+        manifest=Manifest(
+            entries={
+                "remote": S3Mount(
+                    bucket="bucket",
+                    mount_path=Path("/mnt/remote"),
+                    mount_strategy=modal_module.ModalCloudBucketMountStrategy(),
+                )
+            }
+        ),
+        options=modal_module.ModalSandboxClientOptions(
+            app_name="sandbox-tests",
+            workspace_persistence="snapshot_directory",
+        ),
+    )
+
+    async def _unexpected_tar_persist() -> io.BytesIO:
+        return io.BytesIO(b"tar-fallback")
+
+    monkeypatch.setattr(session._inner, "_persist_workspace_via_tar", _unexpected_tar_persist)
+
+    archive = await session.persist_workspace()
+
+    assert archive.read() == modal_module._encode_snapshot_directory_ref(snapshot_id="im-123")
 
 
 @pytest.mark.asyncio
