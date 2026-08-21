@@ -122,9 +122,12 @@ class ToolExecutionConfig:
     """
 
     def __post_init__(self) -> None:
-        if self.max_function_tool_concurrency is not None and (
-            self.max_function_tool_concurrency < 1
-        ):
+        value = self.max_function_tool_concurrency
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise TypeError(
+                "tool_execution.max_function_tool_concurrency must be a positive integer or None"
+            )
+        if value is not None and value < 1:
             raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
         if not isinstance(self.pre_approval_tool_input_guardrails, bool):
             raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")

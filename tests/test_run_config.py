@@ -334,6 +334,17 @@ def test_tool_execution_config_rejects_invalid_function_tool_concurrency() -> No
         ToolExecutionConfig(max_function_tool_concurrency=0)
 
 
+@pytest.mark.parametrize("value", [True, 1.5])
+def test_tool_execution_config_rejects_non_integer_function_tool_concurrency(
+    value: object,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="tool_execution.max_function_tool_concurrency must be a positive integer or None",
+    ):
+        ToolExecutionConfig(max_function_tool_concurrency=cast(Any, value))
+
+
 def test_tool_execution_config_is_public_from_agents_package() -> None:
     config = RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2))
 
