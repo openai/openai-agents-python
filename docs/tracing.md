@@ -87,7 +87,7 @@ app = FastAPI()
 
 def process_in_background(prompt: str) -> None:
     try:
-        with trace("background_job"):
+        with trace("celery_task"):
             Runner.run_sync(agent, prompt)
     finally:
         flush_traces()
@@ -106,6 +106,7 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
 Sometimes, you might want multiple calls to `run()` to be part of a single trace. You can do this by wrapping the entire code in a `trace()`.
 
 ```python
+import asyncio
 from agents import Agent, Runner, trace
 
 async def main():
@@ -139,11 +140,19 @@ Spans are automatically part of the current trace, and are nested under the near
 
 Certain spans may capture potentially sensitive data.
 
-The `generation_span()` stores the inputs/outputs of the LLM generation, and `function_span()` stores the inputs/outputs of function calls. These may contain sensitive data, so you can disable capturing that data via [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data].
+The `generation_span()` stores the inputs/outputs of the LLM generation, and `function_span()` stores the inputs/outputs of function calls. These may contain sensitive data, so you can control capturing that data via [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data].
 
 Similarly, Audio spans include base64-encoded PCM data for input and output audio by default. You can disable capturing this audio data by configuring [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data].
 
-By default, `trace_include_sensitive_data` is `True`. You can set the default without code by exporting the `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` environment variable to `true/1` or `false/0` before running your app.
+By default, `trace_include_sensitive_data` is `False`. Applications that intentionally need model and tool inputs/outputs in traces must opt in explicitly, either in code:
+
+```python
+from agents import RunConfig
+
+run_config = RunConfig(trace_include_sensitive_data=True)
+```
+
+or by exporting `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=true` (also accepts `1`, `yes`, or `on`). Setting the option explicitly is recommended for applications migrating from releases where sensitive trace data was included by default.
 
 ## Custom tracing processors
 
@@ -154,7 +163,7 @@ The high level architecture for tracing is:
 
 To customize this default setup, to send traces to alternative or additional backends or modifying exporter behavior, you have two options:
 
-1. [`add_trace_processor()`][agents.tracing.add_trace_processor] lets you add an **additional** trace processor that will receive traces and spans as they are ready. This lets you do your own processing in addition to sending traces to OpenAI's backend.
+1. [`add_trace_processor()`][agents.tracing.add_trace_processor] lets you add an **additional** trace processor that will receive traces as they are ready. This lets you do your own processing in addition to sending them to OpenAI's backend.
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
 
@@ -212,14 +221,14 @@ The following community and vendor integrations support the tracing API surface 
 -   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
 -   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
 -   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration)
--   [Respan](https://respan.ai/docs/integrations/tracing/openai-agents-sdk)
--   [LangSmith](https://docs.smith.langchain.com/observability/how_to_guides/trace_with_openai_agents_sdk)
+-   [Respan](https://respan.ai/docs/integrations/openai-agents)
+-   [LangSmith](https://docs.smith.langchain.com/observability/how_to_guides/trace_with_openai_agents)
 -   [Maxim AI](https://www.getmaxim.ai/docs/observe/integrations/openai-agents-sdk)
 -   [Comet Opik](https://www.comet.com/docs/opik/tracing/integrations/openai_agents)
 -   [Langfuse](https://langfuse.com/docs/integrations/openaiagentssdk/openai-agents)
 -   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
 -   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
--   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agent-integration)
+-   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agents)
 -   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
 -   [LangDB AI](https://docs.langdb.ai/getting-started/working-with-agent-frameworks/working-with-openai-agents-sdk)
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
