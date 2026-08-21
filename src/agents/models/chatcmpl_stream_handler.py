@@ -339,18 +339,29 @@ class ChatCmplStreamHandler:
             )
 
     @staticmethod
-    def _buffered_tool_call_delta(
-        buffered_call: _BufferedToolCall,
-    ) -> ChoiceDeltaToolCall:
-        if not buffered_call.call_id:
+    def _validate_completed_tool_call(call_id: str | None, name: str | None) -> None:
+        """Reject a finalized tool call with a missing id or name.
+
+        Shared by the buffered path (`_buffered_tool_call_delta()`) and the unbuffered
+        fallback path in `handle_stream()`, so both fail with the same diagnostics instead
+        of the unbuffered path silently emitting a `call_id=""` function call.
+        """
+        if not call_id:
             raise ModelBehaviorError(
                 "Buffered Chat Completions tool call stream ended without a tool call id."
             )
 
-        if not buffered_call.name:
+        if not name:
             raise ModelBehaviorError(
                 "Buffered Chat Completions tool call stream ended without a function name."
             )
+
+    @classmethod
+    def _buffered_tool_call_delta(
+        cls,
+        buffered_call: _BufferedToolCall,
+    ) -> ChoiceDeltaToolCall:
+        cls._validate_completed_tool_call(buffered_call.call_id, buffered_call.name)
 
         tool_call_delta = ChoiceDeltaToolCall(
             index=buffered_call.index,
@@ -1259,6 +1270,7 @@ class ChatCmplStreamHandler:
             else:
                 # Function call was not streamed (fallback to old behavior)
                 # This handles edge cases where function name never arrived
+                cls._validate_completed_tool_call(function_call.call_id, function_call.name)
                 output_index = output_layout.function_call_output_index(state, index)
                 fallback_func_call_item = cls._function_call_item(
                     state,

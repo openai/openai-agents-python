@@ -756,6 +756,22 @@ def test_buffered_tool_call_delta_requires_id_and_name(
         ChatCmplStreamHandler._buffered_tool_call_delta(buffered_call)
 
 
+@pytest.mark.parametrize(
+    ("call_id", "name", "message"),
+    [
+        ("", "my_func", "without a tool call id"),
+        ("tool-id", "", "without a function name"),
+    ],
+)
+def test_validate_completed_tool_call_requires_id_and_name(
+    call_id: str,
+    name: str,
+    message: str,
+) -> None:
+    with pytest.raises(ModelBehaviorError, match=message):
+        ChatCmplStreamHandler._validate_completed_tool_call(call_id, name)
+
+
 def test_function_call_item_omits_provider_data_when_absent() -> None:
     function_call = ResponseFunctionToolCall(
         id="fake-id",
@@ -3053,7 +3069,10 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_fallback_function_calls_have_unique_output_indexes(monkeypatch) -> None:
+async def test_unbuffered_stream_raises_for_function_calls_missing_id(monkeypatch) -> None:
+    """A provider that streams function name/arguments but never a tool call id must
+    raise ModelBehaviorError instead of completing with an empty call_id, matching the
+    buffered path's `_buffered_tool_call_delta()` validation."""
     tool_call_delta1 = ChoiceDeltaToolCall(
         index=0,
         function=ChoiceDeltaToolCallFunction(
@@ -3107,45 +3126,89 @@ async def test_fallback_function_calls_have_unique_output_indexes(monkeypatch) -
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
 
-    output_events = []
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    ):
-        output_events.append(event)
-
-    added_indexes = [
-        event.output_index for event in output_events if event.type == "response.output_item.added"
-    ]
-    delta_indexes = [
-        event.output_index
-        for event in output_events
-        if event.type == "response.function_call_arguments.delta"
-    ]
-    done_indexes = [
-        event.output_index for event in output_events if event.type == "response.output_item.done"
-    ]
-
-    assert added_indexes == [0, 1]
-    assert delta_indexes == [0, 1]
-    assert done_indexes == [0, 1]
+    with pytest.raises(ModelBehaviorError, match="without a tool call id"):
+        async for _ in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            pass
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_fallback_function_call_keeps_index_before_streamed_call(monkeypatch) -> None:
-    fallback_first = ChoiceDeltaToolCall(
+async def test_unbuffered_stream_raises_for_function_call_missing_name(monkeypatch) -> None:
+    """A provider that streams a tool call id and arguments but never a function name must
+    also raise ModelBehaviorError, mirroring the buffered path's validation."""
+    tool_call_delta = ChoiceDeltaToolCall(
+        index=0,
+        id="tool-call-1",
+        function=ChoiceDeltaToolCallFunction(arguments='{"a": 1}'),
+        type="function",
+    )
+
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta]))],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        yield chunk1
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    with pytest.raises(ModelBehaviorError, match="without a function name"):
+        async for _ in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            pass
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_unbuffered_stream_raises_for_missing_id_alongside_streamed_call(
+    monkeypatch,
+) -> None:
+    """A tool call that never receives an id must raise ModelBehaviorError even when a
+    sibling tool call on the same stream completed real-time streaming successfully."""
+    missing_id_first = ChoiceDeltaToolCall(
         index=0,
         function=ChoiceDeltaToolCallFunction(
-            name="fallback_first",
+            name="missing_id_first",
             arguments='{"a": 1}',
         ),
         type="function",
@@ -3170,7 +3233,7 @@ async def test_fallback_function_call_keeps_index_before_streamed_call(monkeypat
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[fallback_first]))],
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[missing_id_first]))],
     )
     chunk2 = ChatCompletionChunk(
         id="chunk-id",
@@ -3209,59 +3272,40 @@ async def test_fallback_function_call_keeps_index_before_streamed_call(monkeypat
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
 
     output_events = []
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    ):
-        output_events.append(event)
+    with pytest.raises(ModelBehaviorError, match="without a tool call id"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            output_events.append(event)
 
-    completed = next(
-        event.response for event in output_events if event.type == "response.completed"
+    # The valid, already real-time-streamed tool call still emitted its events before the
+    # invalid sibling was finalized, but the stream must not reach response.completed.
+    assert any(
+        event.type == "response.output_item.added"
+        and isinstance(event.item, ResponseFunctionToolCall)
+        and event.item.name == "streamed_second"
+        for event in output_events
     )
-    assert [
-        item.name for item in completed.output if isinstance(item, ResponseFunctionToolCall)
-    ] == [
-        "fallback_first",
-        "streamed_second",
-    ]
-
-    added_by_name = {
-        event.item.name: event.output_index
-        for event in output_events
-        if event.type == "response.output_item.added"
-        and isinstance(event.item, ResponseFunctionToolCall)
-    }
-    delta_indexes = [
-        event.output_index
-        for event in output_events
-        if event.type == "response.function_call_arguments.delta"
-    ]
-    done_by_name = {
-        event.item.name: event.output_index
-        for event in output_events
-        if event.type == "response.output_item.done"
-        and isinstance(event.item, ResponseFunctionToolCall)
-    }
-
-    assert added_by_name == {"fallback_first": 0, "streamed_second": 1}
-    assert delta_indexes == [1, 0]
-    assert done_by_name == {"streamed_second": 1, "fallback_first": 0}
+    assert not any(event.type == "response.completed" for event in output_events)
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_fallback_function_call_before_text_uses_final_output_index(
+async def test_unbuffered_stream_raises_for_missing_id_before_text(
     monkeypatch,
 ) -> None:
-    fallback_call = ChoiceDeltaToolCall(
+    """A tool call that never receives an id must raise even when it is followed by
+    ordinary assistant text on the same stream."""
+    missing_id_call = ChoiceDeltaToolCall(
         index=0,
         function=ChoiceDeltaToolCallFunction(name="first_tool", arguments='{"a": 1}'),
         type="function",
@@ -3271,7 +3315,7 @@ async def test_fallback_function_call_before_text_uses_final_output_index(
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[fallback_call]))],
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[missing_id_call]))],
     )
     chunk2 = ChatCompletionChunk(
         id="chunk-id",
@@ -3303,47 +3347,22 @@ async def test_fallback_function_call_before_text_uses_final_output_index(
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
     output_events = []
 
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    ):
-        output_events.append(event)
+    with pytest.raises(ModelBehaviorError, match="without a tool call id"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            output_events.append(event)
 
-    added_events = [event for event in output_events if event.type == "response.output_item.added"]
-    delta_events = [
-        event for event in output_events if event.type == "response.function_call_arguments.delta"
-    ]
-    done_events = [event for event in output_events if event.type == "response.output_item.done"]
-    completed_event = next(event for event in output_events if event.type == "response.completed")
-
-    added_message_event = next(
-        event for event in added_events if isinstance(event.item, ResponseOutputMessage)
-    )
-    added_tool_event = next(
-        event for event in added_events if isinstance(event.item, ResponseFunctionToolCall)
-    )
-    done_message_event = next(
-        event for event in done_events if isinstance(event.item, ResponseOutputMessage)
-    )
-    done_tool_event = next(
-        event for event in done_events if isinstance(event.item, ResponseFunctionToolCall)
-    )
-
-    assert added_message_event.output_index == 0
-    assert added_tool_event.output_index == 1
-    assert [event.output_index for event in delta_events] == [1]
-    assert done_message_event.output_index == 0
-    assert done_tool_event.output_index == 1
-    assert isinstance(completed_event.response.output[0], ResponseOutputMessage)
-    assert isinstance(completed_event.response.output[1], ResponseFunctionToolCall)
+    assert not any(event.type == "response.completed" for event in output_events)
 
 
 @pytest.mark.allow_call_model_methods
@@ -3451,12 +3470,14 @@ async def test_streamed_function_call_before_text_keeps_realtime_order(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_mixed_function_calls_before_text_keep_tracked_order(
+async def test_unbuffered_stream_raises_for_missing_id_mixed_with_streamed_call_and_text(
     monkeypatch,
 ) -> None:
-    fallback_first = ChoiceDeltaToolCall(
+    """A tool call that never receives an id must raise even when mixed with a
+    successfully real-time-streamed sibling call and trailing assistant text."""
+    missing_id_first = ChoiceDeltaToolCall(
         index=0,
-        function=ChoiceDeltaToolCallFunction(name="fallback_first", arguments='{"a": 1}'),
+        function=ChoiceDeltaToolCallFunction(name="missing_id_first", arguments='{"a": 1}'),
         type="function",
     )
     streamed_second_start = ChoiceDeltaToolCall(
@@ -3475,7 +3496,7 @@ async def test_mixed_function_calls_before_text_keep_tracked_order(
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[fallback_first]))],
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[missing_id_first]))],
     )
     chunk2 = ChatCompletionChunk(
         id="chunk-id",
@@ -3521,44 +3542,22 @@ async def test_mixed_function_calls_before_text_keep_tracked_order(
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
     output_events = []
 
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    ):
-        output_events.append(event)
+    with pytest.raises(ModelBehaviorError, match="without a tool call id"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            output_events.append(event)
 
-    added_events = [event for event in output_events if event.type == "response.output_item.added"]
-    delta_events = [
-        event for event in output_events if event.type == "response.function_call_arguments.delta"
-    ]
-    completed_event = next(event for event in output_events if event.type == "response.completed")
-
-    added_message_event = next(
-        event for event in added_events if isinstance(event.item, ResponseOutputMessage)
-    )
-    added_tool_indexes = {
-        event.item.name: event.output_index
-        for event in added_events
-        if isinstance(event.item, ResponseFunctionToolCall)
-    }
-
-    assert added_tool_indexes == {"streamed_second": 1, "fallback_first": 0}
-    assert added_message_event.output_index == 2
-    assert {event.delta: event.output_index for event in delta_events} == {
-        '{"b": 2}': 1,
-        '{"a": 1}': 0,
-    }
-    assert isinstance(completed_event.response.output[0], ResponseFunctionToolCall)
-    assert isinstance(completed_event.response.output[1], ResponseFunctionToolCall)
-    assert isinstance(completed_event.response.output[2], ResponseOutputMessage)
+    assert not any(event.type == "response.completed" for event in output_events)
 
 
 async def _buffered_stream_events(monkeypatch, chunks: list[ChatCompletionChunk]) -> list[Any]:
