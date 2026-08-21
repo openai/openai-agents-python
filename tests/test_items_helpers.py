@@ -621,6 +621,46 @@ def test_to_input_items_strips_created_by_for_non_tool_search_items() -> None:
     assert all("created_by" not in item for item in input_items)
 
 
+def test_tool_call_item_to_input_item_strips_created_by() -> None:
+    """RunItem replay must strip output-only created_by, matching ModelResponse.to_input_items."""
+    agent = Agent(name="A")
+    call = ResponseFunctionToolCall.model_validate(
+        {
+            "id": "fc_1",
+            "arguments": "{}",
+            "call_id": "call_1",
+            "name": "lookup",
+            "type": "function_call",
+            "created_by": "server",
+        }
+    )
+    item = ToolCallItem(agent=agent, raw_item=call)
+    replayed = item.to_input_item()
+    assert isinstance(replayed, dict)
+    assert replayed["type"] == "function_call"
+    assert "created_by" not in replayed
+    assert getattr(call, "created_by", None) == "server"
+
+
+def test_tool_call_output_item_to_input_item_strips_created_by() -> None:
+    agent = Agent(name="A")
+    item = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "ok",
+            "created_by": "server",
+        },
+        output="ok",
+    )
+    replayed = item.to_input_item()
+    assert isinstance(replayed, dict)
+    assert replayed["type"] == "function_call_output"
+    assert "created_by" not in replayed
+    assert item.raw_item["created_by"] == "server"
+
+
 def test_to_input_items_strips_nested_created_by_from_shell_call_output() -> None:
     """``shell_call_output`` carries ``created_by`` at the item level and inside each output chunk.
 

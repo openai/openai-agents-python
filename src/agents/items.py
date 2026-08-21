@@ -150,14 +150,7 @@ class RunItemBase(Generic[T], abc.ABC):
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
-        if isinstance(self.raw_item, dict):
-            # We know that input items are dicts, so we can ignore the type error
-            return self.raw_item  # type: ignore
-        elif isinstance(self.raw_item, BaseModel):
-            # All output items are Pydantic models that can be converted to input items.
-            return self.raw_item.model_dump(exclude_unset=True)  # type: ignore
-        else:
-            raise AgentsException(f"Unexpected raw item type: {type(self.raw_item)}")
+        return _output_item_to_input_item(self.raw_item)
 
 
 @dataclass
@@ -491,6 +484,7 @@ class ToolCallOutputItem(RunItemBase[Any]):
                         if isinstance(outcome, dict):
                             if outcome.get("type") == "exit":
                                 entry["outcome"] = outcome
+            payload.pop("created_by", None)
             return cast(TResponseInputItem, payload)
 
         return super().to_input_item()
