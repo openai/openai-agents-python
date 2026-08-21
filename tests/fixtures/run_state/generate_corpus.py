@@ -426,6 +426,40 @@ state.reject(approval("exception-call"), rejection_message="Denied exactly")
             "changed to exercise the canonical compatibility branch."
         ),
     ),
+    Scenario(
+        "1.17",
+        "2baa1b1bcc4cebc64e197debd4c59e4bee1093be",
+        "docker_labels",
+        """
+from agents.sandbox import Manifest
+from agents.sandbox.snapshot import NoopSnapshot
+
+session_state = {
+    "type": "docker",
+    "session_id": "00000000-0000-0000-0000-000000000117",
+    "snapshot": NoopSnapshot(id="snapshot").model_dump(mode="json"),
+    "manifest": Manifest().model_dump(mode="json"),
+    "exposed_ports": [],
+    "workspace_root_ready": False,
+    "image": "python:3.14-slim",
+    "container_id": "container",
+    "network_mode": None,
+    "labels": {"com.example.owner": "worker-123"},
+}
+state._sandbox = {
+    "backend_id": "docker",
+    "current_agent_name": agent.name,
+    "session_state": session_state,
+}
+""",
+        provenance="canonical_compatibility",
+        emitted_version="1.16",
+        note=(
+            "The labels implementation was first emitted with the unreleased 1.16 writer. "
+            "The fixture changes only the schema label to exercise the 1.17 compatibility "
+            "reader while preserving the Docker session payload."
+        ),
+    ),
 )
 
 
@@ -441,6 +475,19 @@ MINIMAL_SCENARIOS = (
             "The schema transition introduced this reader version without a retained writer "
             "commit that emitted it. The recorded writer emitted 1.15; only the schema label is "
             "changed to exercise the canonical compatibility branch."
+        ),
+    ),
+    Scenario(
+        "1.17",
+        "2baa1b1bcc4cebc64e197debd4c59e4bee1093be",
+        "minimal",
+        "",
+        provenance="canonical_compatibility",
+        emitted_version="1.16",
+        note=(
+            "The labels implementation was first emitted with the unreleased 1.16 writer. "
+            "The fixture changes only the schema label to exercise the 1.17 compatibility "
+            "reader while preserving older payload compatibility."
         ),
     ),
 )

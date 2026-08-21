@@ -20,6 +20,9 @@ import pytest
 from pydantic import Field, PrivateAttr
 
 import agents.sandbox.sandboxes.docker as docker_sandbox
+from agents import Agent
+from agents.run_context import RunContextWrapper
+from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
 from agents.sandbox import SandboxPathGrant
 from agents.sandbox._mount_security import REDACTED_MOUNT_AUTHORITY_KEY
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
@@ -1850,6 +1853,21 @@ async def test_docker_create_container_applies_labels(
     assert docker_client.containers.calls[0]["labels"] == labels
 
 
+@pytest.mark.asyncio
+async def test_docker_create_container_omits_empty_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _ResumeContainer(status="created")
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    await client._create_container(DEFAULT_PYTHON_SANDBOX_IMAGE, labels={})
+
+    assert "labels" not in docker_client.containers.calls[0]
+
+
 def test_docker_session_state_roundtrip_preserves_labels() -> None:
     client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
     labels = {"com.example.owner": "worker-123"}
@@ -1865,6 +1883,54 @@ def test_docker_session_state_roundtrip_preserves_labels() -> None:
 
     assert isinstance(restored, DockerSandboxSessionState)
     assert restored.labels == labels
+
+
+def test_docker_session_state_without_labels_preserves_old_payloads() -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+    payload = client.serialize_session_state(state)
+    payload.pop("labels", None)
+
+    restored = client.deserialize_session_state(payload)
+
+    assert isinstance(restored, DockerSandboxSessionState)
+    assert restored.labels == {}
+
+
+@pytest.mark.asyncio
+async def test_docker_labels_roundtrip_through_run_state() -> None:
+    agent = Agent(name="sandbox")
+    labels = {"com.example.owner": "worker-123"}
+    run_state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="resume sandbox",
+        starting_agent=agent,
+    )
+    run_state._sandbox = {
+        "backend_id": "docker",
+        "current_agent_name": agent.name,
+        "session_state": DockerSandboxSessionState(
+            manifest=Manifest(),
+            snapshot=NoopSnapshot(id="snapshot"),
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            container_id="container",
+            labels=labels,
+        ).model_dump(mode="json"),
+    }
+
+    serialized = run_state.to_json()
+    restored = await RunState.from_json(agent, serialized)
+
+    assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.17"
+    assert restored._sandbox is not None
+    restored_session_state = restored._sandbox["session_state"]
+    assert isinstance(restored_session_state, dict)
+    assert restored_session_state["labels"] == labels
 
 
 @pytest.mark.asyncio
@@ -3406,6 +3472,7 @@ class _ResumeContainer:
         workspace_exists: bool = False,
         published_ports: dict[str, list[dict[str, str]] | None] | None = None,
         mounts: list[dict[str, object]] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.status = status
         self.id = container_id
@@ -3414,6 +3481,7 @@ class _ResumeContainer:
         self.attrs = {
             "NetworkSettings": {"Ports": published_ports or {}},
             "Mounts": mounts or [],
+            "Config": {"Labels": labels or {}},
         }
 
     def reload(self) -> None:
@@ -4291,6 +4359,52 @@ async def test_docker_resume_forwards_persisted_labels_when_recreating_container
 
     assert isinstance(resumed._inner, DockerSandboxSession)
     assert forwarded_labels == [labels]
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_reuses_container_with_matching_labels() -> None:
+    labels = {"com.example.owner": "worker-123"}
+    container = _ResumeContainer(
+        status="running",
+        labels={**labels, "com.example.extra": "preserved"},
+    )
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(container))
+    state = DockerSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id=container.id,
+        labels=labels,
+    )
+
+    resumed = await client.resume(state)
+
+    assert isinstance(resumed._inner, DockerSandboxSession)
+    assert resumed._inner._container is container
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actual_labels",
+    [{}, {"com.example.owner": "different"}],
+    ids=["missing", "mismatched"],
+)
+async def test_docker_resume_rejects_mismatched_existing_labels(
+    actual_labels: dict[str, str],
+) -> None:
+    expected_labels = {"com.example.owner": "worker-123"}
+    container = _ResumeContainer(status="running", labels=actual_labels)
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(container))
+    state = DockerSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id=container.id,
+        labels=expected_labels,
+    )
+
+    with pytest.raises(ValueError, match="labels"):
+        await client.resume(state)
 
 
 @pytest.mark.asyncio

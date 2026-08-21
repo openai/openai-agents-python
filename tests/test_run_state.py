@@ -3001,7 +3001,7 @@ class TestRunState:
             state.approve(approval("exception"))
 
         serialized = state.to_json()
-        assert serialized["$schemaVersion"] == "1.16"
+        assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION
 
         restored = await RunState.from_json(agent, serialized)
         assert restored._context is not None
@@ -9136,6 +9136,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.13",
                 "1.14",
                 "1.15",
+                "1.16",
                 CURRENT_SCHEMA_VERSION,
             }
         )

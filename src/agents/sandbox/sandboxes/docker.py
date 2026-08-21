@@ -25,7 +25,7 @@ from docker.api.container import DEFAULT_DATA_CHUNK_SIZE  # type: ignore[import-
 from docker.models.containers import Container  # type: ignore[import-untyped]
 from docker.types import DriverConfig, Mount as DockerSDKMount  # type: ignore[import-untyped]
 from docker.utils import parse_repository_tag
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from .._mount_security import (
@@ -185,7 +185,7 @@ class DockerSandboxSessionState(SandboxSessionState):
     image: str
     container_id: str
     network_mode: Literal["none"] | None = None
-    labels: dict[str, str] | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_network_configuration(self) -> Self:
@@ -215,7 +215,7 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
     image: str
     exposed_ports: tuple[int, ...] = ()
     network_mode: Literal["none"] | None = None
-    labels: dict[str, str] | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_network_configuration(self) -> Self:
@@ -239,7 +239,7 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
             image=image,
             exposed_ports=exposed_ports,
             network_mode=network_mode,
-            labels=labels,
+            labels={} if labels is None else labels,
         )
 
 
@@ -1659,6 +1659,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 container,
                 state.network_mode,
             )
+            _assert_existing_container_labels_match(container, state.labels)
         owns_replacement = container is None
         replacement_session_id = (
             uuid.uuid4()
@@ -1744,7 +1745,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         }
         if network_mode is not None:
             create_kwargs["network_mode"] = network_mode
-        if labels is not None:
+        if labels:
             create_kwargs["labels"] = labels
         if manifest is not None:
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
@@ -1902,6 +1903,25 @@ def _assert_existing_container_network_configuration_matches(
         raise ValueError(
             "Existing Docker sandbox network configuration does not match persisted "
             "network_mode='none'; create a fresh sandbox session"
+        )
+
+
+def _assert_existing_container_labels_match(
+    container: Container,
+    labels: dict[str, str],
+) -> None:
+    if not labels:
+        return
+
+    container.reload()
+    attrs = getattr(container, "attrs", {}) or {}
+    config = attrs.get("Config")
+    actual_labels = config.get("Labels") if isinstance(config, dict) else None
+    actual_labels = actual_labels if isinstance(actual_labels, dict) else {}
+    if any(actual_labels.get(key) != value for key, value in labels.items()):
+        raise ValueError(
+            "Existing Docker sandbox labels do not match persisted labels; "
+            "create a fresh sandbox session"
         )
 
 

@@ -179,7 +179,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.16"
+CURRENT_SCHEMA_VERSION = "1.17"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
@@ -213,6 +213,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker network-isolation state and lets an exact call approval decision "
         "override a sticky decision for the same tool."
     ),
+    "1.17": "Persists Docker container labels across sandbox resume and replacement.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 

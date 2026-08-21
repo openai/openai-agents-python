@@ -118,6 +118,15 @@
       "note": "The schema transition introduced this reader version without a retained writer commit that emitted it. The recorded writer emitted 1.15; only the schema label is changed to exercise the canonical compatibility branch.",
       "provenance": "canonical_compatibility",
       "version": "1.16"
+    },
+    {
+      "commit": "2baa1b1bcc4cebc64e197debd4c59e4bee1093be",
+      "emitted_version": "1.16",
+      "feature": "docker_labels",
+      "fixture": "features/v1_17_docker_labels.json",
+      "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving the Docker session payload.",
+      "provenance": "canonical_compatibility",
+      "version": "1.17"
     }
   ],
   "resume": {
@@ -177,6 +186,13 @@
       "emitted_version": "1.15",
       "fixture": "minimal/v1_16.json",
       "note": "The schema transition introduced this reader version without a retained writer commit that emitted it. The recorded writer emitted 1.15; only the schema label is changed to exercise the canonical compatibility branch.",
+      "provenance": "canonical_compatibility"
+    },
+    "1.17": {
+      "commit": "2baa1b1bcc4cebc64e197debd4c59e4bee1093be",
+      "emitted_version": "1.16",
+      "fixture": "minimal/v1_17.json",
+      "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving older payload compatibility.",
       "provenance": "canonical_compatibility"
     },
     "1.2": {
