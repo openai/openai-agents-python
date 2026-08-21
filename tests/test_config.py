@@ -298,6 +298,38 @@ def test_openai_provider_scopes_websocket_model_cache_to_running_loop():
     assert model2 is not model1
 
 
+def test_openai_provider_reuses_falsy_websocket_model(monkeypatch):
+    class DummyAsyncOpenAI:
+        pass
+
+    class FalsyWebsocketModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __bool__(self) -> bool:
+            return False
+
+    monkeypatch.setattr("agents.models.openai_provider.OpenAIResponsesWSModel", FalsyWebsocketModel)
+    provider = OpenAIProvider(
+        use_responses=True,
+        use_responses_websocket=True,
+        openai_client=DummyAsyncOpenAI(),  # type: ignore[arg-type]
+    )
+
+    async def get_model():
+        return provider.get_model("gpt-4")
+
+    loop = asyncio.new_event_loop()
+    try:
+        model = loop.run_until_complete(get_model())
+        model_again = loop.run_until_complete(get_model())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    assert model is model_again
+
+
 def test_openai_provider_websocket_loop_cache_does_not_keep_closed_loop_alive(monkeypatch):
     class DummyAsyncOpenAI:
         pass

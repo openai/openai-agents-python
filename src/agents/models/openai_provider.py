@@ -259,8 +259,8 @@ class OpenAIProvider(ModelProvider):
                 if running_loop is not None
                 else None
             )
-            if loop_cache is not None and (cached_model := loop_cache.get(cache_key)):
-                return cached_model
+            if loop_cache is not None and cache_key in loop_cache:
+                return loop_cache[cache_key]
         client = self._get_client()
         model: Model
 
