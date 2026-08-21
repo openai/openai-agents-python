@@ -38,6 +38,14 @@ def test_action_ref_is_stable_for_equivalent_json_arguments() -> None:
     assert first.action_ref == second.action_ref
 
 
+def test_action_ref_handles_json_surrogate_escape() -> None:
+    first = _tool_context(tool_arguments='{"x":"\\ud800"}')
+    second = _tool_context(tool_arguments='{ "x": "\\ud800" }')
+
+    assert first.action_ref is not None
+    assert first.action_ref == second.action_ref
+
+
 def test_action_ref_commits_agent_tool_and_request() -> None:
     baseline = _tool_context().action_ref
 
@@ -46,6 +54,16 @@ def test_action_ref_commits_agent_tool_and_request() -> None:
     assert _tool_context(tool_name="update").action_ref != baseline
     assert _tool_context(tool_arguments='{"account": 8, "active": true}').action_ref != baseline
     assert _tool_context(tool_namespace="billing").action_ref != baseline
+
+
+def test_action_ref_distinguishes_bare_and_deferred_tool_identity() -> None:
+    bare = _tool_context(tool_name="lookup")
+    deferred = _tool_context(tool_name="lookup", tool_namespace="lookup")
+
+    assert bare.qualified_tool_name == deferred.qualified_tool_name == "lookup"
+    assert bare.action_ref is not None
+    assert deferred.action_ref is not None
+    assert bare.action_ref != deferred.action_ref
 
 
 def test_action_ref_does_not_depend_on_opaque_tool_call_id() -> None:
