@@ -31,7 +31,7 @@ async def test_streaming_stt_sends_language_and_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_stt_sends_plural_languages_for_gpt_transcribe() -> None:
+async def test_streaming_stt_sends_singular_language_for_gpt_transcribe() -> None:
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
         client=AsyncMock(api_key="FAKE_KEY"),
@@ -48,7 +48,7 @@ async def test_streaming_stt_sends_plural_languages_for_gpt_transcribe() -> None
     payload = json.loads(websocket.send.await_args.args[0])
     assert payload["session"]["audio"]["input"]["transcription"] == {
         "model": "gpt-transcribe",
-        "languages": ["fr"],
+        "language": "fr",
         "prompt": "domain vocabulary",
     }
 
