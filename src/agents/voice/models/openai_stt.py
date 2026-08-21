@@ -66,9 +66,11 @@ async def _wait_for_event(
     """
     Wait for an event from event_queue whose type is in expected_types within the specified timeout.
     """
-    start_time = time.time()
+    # Wall-clock adjustments can move a deadline forwards or backwards. Timeout
+    # accounting must use a monotonic clock instead.
+    start_time = time.monotonic()
     while True:
-        remaining = timeout - (time.time() - start_time)
+        remaining = timeout - (time.monotonic() - start_time)
         if remaining <= 0:
             raise TimeoutError(f"Timeout waiting for event(s): {expected_types}")
         evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)

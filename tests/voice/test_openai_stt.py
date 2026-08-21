@@ -32,6 +32,7 @@ try:
         ErrorSentinel,
         WebsocketDoneSentinel,
         _audio_buffer_to_base64,
+        _wait_for_event,
     )
 
     from .pipeline_test_models import StreamedAudioInputFactory
@@ -53,6 +54,16 @@ def create_mock_websocket(messages: list[str]) -> AsyncMock:
     # The incoming_messages are strings that we pretend come from the server
     mock_ws.__aiter__.return_value = iter(messages)
     return mock_ws
+
+
+@pytest.mark.asyncio
+async def test_wait_for_event_returns_matching_event() -> None:
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+    await queue.put({"type": "session.created"})
+
+    event = await _wait_for_event(queue, ["session.created"], timeout=1)
+
+    assert event == {"type": "session.created"}
 
 
 def fake_time(increment: int):
@@ -579,8 +590,8 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
     def fake_time_func():
         return next(time_gen)
 
-    # Monkey-patch time.time with our fake_time_func
-    monkeypatch.setattr(time, "time", fake_time_func)
+    # Monkey-patch the monotonic clock used for event deadlines.
+    monkeypatch.setattr(time, "monotonic", fake_time_func)
 
     mock_ws = create_mock_websocket(
         [
