@@ -185,6 +185,7 @@ class DockerSandboxSessionState(SandboxSessionState):
     image: str
     container_id: str
     network_mode: Literal["none"] | None = None
+    labels: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _validate_network_configuration(self) -> Self:
@@ -214,6 +215,7 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
     image: str
     exposed_ports: tuple[int, ...] = ()
     network_mode: Literal["none"] | None = None
+    labels: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _validate_network_configuration(self) -> Self:
@@ -230,12 +232,14 @@ class DockerSandboxClientOptions(BaseSandboxClientOptions):
         *,
         type: Literal["docker"] = "docker",
         network_mode: Literal["none"] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
             type=type,
             image=image,
             exposed_ports=exposed_ports,
             network_mode=network_mode,
+            labels=labels,
         )
 
 
@@ -1535,6 +1539,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 exposed_ports=options.exposed_ports,
                 network_mode=options.network_mode,
                 session_id=session_id,
+                labels=options.labels,
             )
             container.start()
             container_id = container.id
@@ -1549,6 +1554,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 container_id=container_id,
                 exposed_ports=options.exposed_ports,
                 network_mode=options.network_mode,
+                labels=options.labels,
             )
             inner = DockerSandboxSession(
                 docker_client=self.docker_client,
@@ -1681,6 +1687,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                     exposed_ports=state.exposed_ports,
                     network_mode=state.network_mode,
                     session_id=replacement_session_id,
+                    labels=state.labels,
                 )
                 container_id = container.id
                 assert container_id is not None
@@ -1715,6 +1722,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         exposed_ports: tuple[int, ...] = (),
         network_mode: Literal["none"] | None = None,
         session_id: uuid.UUID | None = None,
+        labels: dict[str, str] | None = None,
     ) -> Container:
         if manifest is not None:
             _validate_docker_path_grants(manifest)
@@ -1736,6 +1744,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         }
         if network_mode is not None:
             create_kwargs["network_mode"] = network_mode
+        if labels is not None:
+            create_kwargs["labels"] = labels
         if manifest is not None:
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
             if docker_mounts:

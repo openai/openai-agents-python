@@ -27,6 +27,20 @@ def test_sandbox_client_options_parse_uses_registered_builtin_type() -> None:
     )
 
 
+def test_docker_client_options_roundtrip_preserves_labels() -> None:
+    options = DockerSandboxClientOptions(
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        labels={"com.example.owner": "worker-123"},
+    )
+
+    payload = options.model_dump(mode="json")
+    restored = BaseSandboxClientOptions.parse(payload)
+
+    assert restored == options
+    assert isinstance(restored, DockerSandboxClientOptions)
+    assert restored.labels == {"com.example.owner": "worker-123"}
+
+
 def test_sandbox_client_options_parse_passthrough_existing_instance() -> None:
     options = UnixLocalSandboxClientOptions(exposed_ports=(8080,))
 

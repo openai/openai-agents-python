@@ -1831,6 +1831,79 @@ async def test_docker_create_container_publishes_exposed_ports(
 
 
 @pytest.mark.asyncio
+async def test_docker_create_container_applies_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _ResumeContainer(status="created")
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    labels = {"com.example.owner": "worker-123"}
+
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    created = await client._create_container(
+        DEFAULT_PYTHON_SANDBOX_IMAGE,
+        labels=labels,
+    )
+
+    assert created is container
+    assert docker_client.containers.calls[0]["labels"] == labels
+
+
+def test_docker_session_state_roundtrip_preserves_labels() -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    labels = {"com.example.owner": "worker-123"}
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+        labels=labels,
+    )
+
+    restored = client.deserialize_session_state(client.serialize_session_state(state))
+
+    assert isinstance(restored, DockerSandboxSessionState)
+    assert restored.labels == labels
+
+
+@pytest.mark.asyncio
+async def test_docker_create_persists_configured_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _StartedContainer()
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    labels = {"com.example.owner": "worker-123"}
+    forwarded_labels: list[dict[str, str] | None] = []
+
+    async def _fake_create_container(
+        image: str,
+        *,
+        manifest: Manifest | None = None,
+        exposed_ports: tuple[int, ...] = (),
+        network_mode: str | None = None,
+        session_id: uuid.UUID | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> _StartedContainer:
+        _ = (image, manifest, exposed_ports, network_mode, session_id)
+        forwarded_labels.append(labels)
+        return container
+
+    monkeypatch.setattr(client, "_create_container", _fake_create_container)
+
+    session = await client.create(
+        options=DockerSandboxClientOptions(
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            labels=labels,
+        )
+    )
+
+    assert isinstance(session._inner, DockerSandboxSession)
+    assert session._inner.state.labels == labels
+    assert forwarded_labels == [labels]
+
+
+@pytest.mark.asyncio
 async def test_docker_create_container_mounts_explicit_host_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2811,8 +2884,9 @@ async def test_docker_resume_applies_current_authority_with_fresh_volume_identit
         exposed_ports: tuple[int, ...] = (),
         network_mode: str | None = None,
         session_id: uuid.UUID | None = None,
+        labels: dict[str, str] | None = None,
     ) -> _StartedContainer:
-        _ = (image, exposed_ports)
+        _ = (image, exposed_ports, labels)
         assert network_mode is None
         assert session_id == replacement_session_id
         assert stale_volume.remove_calls == 0
@@ -4150,8 +4224,10 @@ async def test_docker_resume_resets_workspace_readiness_when_container_is_recrea
         exposed_ports: tuple[int, ...] = (),
         network_mode: str | None = None,
         session_id: uuid.UUID | None = None,
+        labels: dict[str, str] | None = None,
     ) -> object:
         _ = session_id
+        _ = labels
         create_calls.append((image, manifest, exposed_ports, network_mode))
         return replacement
 
@@ -4175,6 +4251,46 @@ async def test_docker_resume_resets_workspace_readiness_when_container_is_recrea
     assert inner._workspace_root_ready is False
     assert inner.should_provision_manifest_accounts_on_resume() is True
     assert create_calls == [(DEFAULT_PYTHON_SANDBOX_IMAGE, inner.state.manifest, (8765,), None)]
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_forwards_persisted_labels_when_recreating_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = DockerSandboxClient(
+        docker_client=cast(object, _ResumeDockerClient(docker.errors.NotFound("missing")))
+    )
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+    labels = {"com.example.owner": "worker-123"}
+    forwarded_labels: list[dict[str, str] | None] = []
+
+    async def _fake_create_container(
+        image: str,
+        *,
+        manifest: Manifest | None = None,
+        exposed_ports: tuple[int, ...] = (),
+        network_mode: str | None = None,
+        session_id: uuid.UUID | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> _ResumeContainer:
+        _ = (image, manifest, exposed_ports, network_mode, session_id)
+        forwarded_labels.append(labels)
+        return replacement
+
+    monkeypatch.setattr(client, "_create_container", _fake_create_container)
+
+    resumed = await client.resume(
+        DockerSandboxSessionState(
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            container_id="missing",
+            labels=labels,
+        )
+    )
+
+    assert isinstance(resumed._inner, DockerSandboxSession)
+    assert forwarded_labels == [labels]
 
 
 @pytest.mark.asyncio
