@@ -21,11 +21,16 @@ async def refresh_openai_client_api_key_if_supported(client: Any) -> None:
         await refresh_api_key()
 
 
-def _set_header(headers: dict[str, str], key: object, value: object) -> None:
+def _remove_header(headers: dict[str, str], key: object) -> None:
     header_key = str(key)
     for existing_key in list(headers):
         if existing_key.lower() == header_key.lower():
             del headers[existing_key]
+
+
+def _set_header(headers: dict[str, str], key: object, value: object) -> None:
+    header_key = str(key)
+    _remove_header(headers, header_key)
     headers[header_key] = str(value)
 
 
@@ -41,20 +46,20 @@ def merge_openai_client_websocket_headers(
         getattr(client, "default_headers", {}),
     ):
         for key, value in source.items():
-            if _is_openai_omitted_value(value):
+            if isinstance(value, NotGiven):
+                continue
+            if isinstance(value, Omit):
+                _remove_header(headers, key)
                 continue
             _set_header(headers, key, value)
 
     for key, value in (extra_headers or {}).items():
         if isinstance(value, NotGiven):
             continue
-        header_key = str(key)
-        for existing_key in list(headers):
-            if existing_key.lower() == header_key.lower():
-                del headers[existing_key]
+        _remove_header(headers, key)
         if isinstance(value, Omit):
             continue
-        headers[header_key] = str(value)
+        headers[str(key)] = str(value)
 
     return headers
 
