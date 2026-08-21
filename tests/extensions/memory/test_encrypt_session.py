@@ -33,6 +33,20 @@ def _invalid_encrypted_envelope() -> TResponseInputItem:
     )
 
 
+def _malformed_encrypted_envelope() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {"__enc__": 1, "v": 1, "kid": "hkdf-v1", "payload": None},
+    )
+
+
+def _malformed_unicode_encrypted_envelope() -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {"__enc__": 1, "v": 1, "kid": "hkdf-v1", "payload": "\ud800"},
+    )
+
+
 @pytest.fixture
 def agent() -> Agent:
     """Fixture for a basic agent with a scripted model."""
@@ -377,6 +391,40 @@ async def test_encrypted_session_get_items_limit_skips_invalid_latest_envelope(
 
     limited = await session.get_items(limit=1)
     assert [item.get("content") for item in limited] == ["older valid"]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_skips_malformed_envelopes(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """Malformed persisted envelopes should be skipped like invalid tokens."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    await session.add_items([{"role": "user", "content": "valid"}])
+    await underlying_session.add_items(
+        [_malformed_encrypted_envelope(), _malformed_unicode_encrypted_envelope()]
+    )
+    await underlying_session.add_items(
+        [
+            cast(
+                TResponseInputItem,
+                {
+                    "__enc__": 1,
+                    "v": 1,
+                    "kid": "hkdf-v1",
+                    "payload": session.cipher.encrypt(b"[]").decode("utf-8"),
+                },
+            )
+        ]
+    )
+
+    items = await session.get_items()
+    assert [item.get("content") for item in items] == ["valid"]
 
     underlying_session.close()
 
