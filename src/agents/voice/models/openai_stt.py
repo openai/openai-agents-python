@@ -75,9 +75,10 @@ def _prepare_websocket_url(client: AsyncOpenAI) -> str:
 
 
 def _prepare_websocket_headers(client: AsyncOpenAI) -> dict[str, str]:
-    headers = merge_openai_client_websocket_headers(client)
-    headers["OpenAI-Log-Session"] = "1"
-    return headers
+    return merge_openai_client_websocket_headers(
+        client,
+        extra_headers={"OpenAI-Log-Session": "1"},
+    )
 
 
 async def _wait_for_event(
