@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import pickle
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -16,7 +17,15 @@ from agents.sandbox.entries import (
     MountpointMountPattern,
 )
 from agents.sandbox.errors import InvalidManifestPathError
-from agents.sandbox.manifest import EnvEntry, Environment, EnvValue, Manifest, StrEnvValue
+from agents.sandbox.manifest import (
+    EnvEntry,
+    Environment,
+    EnvValue,
+    Manifest,
+    ProcessEnvValue,
+    StrEnvValue,
+    _normalize_process_environment_bindings,
+)
 from agents.sandbox.manifest_render import _truncate_manifest_description
 
 
@@ -39,6 +48,36 @@ class _CustomSerializedEnvValue(EnvValue):
     @model_serializer
     def _serialize_reference(self) -> dict[str, str]:
         return {"key": self.key}
+
+
+class _NonCopyableClient:
+    def __deepcopy__(self, _memo: object) -> "_NonCopyableClient":
+        raise RuntimeError("client must not be copied")
+
+
+class _ClientBackedEnvValue(EnvValue):
+    type: Literal["test.client_backed"] = "test.client_backed"
+    client: object
+
+    async def resolve(self) -> str:
+        return "resolved"
+
+
+@pytest.mark.asyncio
+async def test_manifest_pickle_revokes_process_environment_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "pickle-secret")
+    trusted = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()}),
+    )._with_process_environment_access(name)
+
+    restored = pickle.loads(pickle.dumps(trusted))
+
+    assert restored._process_environment_access == frozenset()
+    with pytest.raises(ValueError, match=f"binding {name!r} -> {name!r} is not granted"):
+        await restored.resolve_environment()
 
 
 def test_manifest_rejects_nested_child_paths_that_escape_workspace() -> None:
@@ -338,6 +377,410 @@ def test_manifest_round_trips_str_env_value() -> None:
         "PLAIN": "plain",
         "TYPED": StrEnvValue(value="typed"),
     }
+
+
+@pytest.mark.asyncio
+async def test_manifest_resolves_same_name_and_renamed_process_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_TEST_SAME_NAME", "same-value")
+    monkeypatch.setenv("SANDBOX_TEST_SOURCE_NAME", "renamed-value")
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "SANDBOX_TEST_SAME_NAME": ProcessEnvValue(),
+                "SANDBOX_TEST_DESTINATION": ProcessEnvValue(name="SANDBOX_TEST_SOURCE_NAME"),
+                "PLAIN": "literal",
+            }
+        )
+    )._with_process_environment_access(
+        "SANDBOX_TEST_SAME_NAME",
+        ("SANDBOX_TEST_DESTINATION", "SANDBOX_TEST_SOURCE_NAME"),
+    )
+
+    assert await manifest.resolve_environment() == {
+        "SANDBOX_TEST_SAME_NAME": "same-value",
+        "SANDBOX_TEST_DESTINATION": "renamed-value",
+        "PLAIN": "literal",
+    }
+
+    monkeypatch.setenv("SANDBOX_TEST_SAME_NAME", "rotated-value")
+    assert (await manifest.resolve_environment())["SANDBOX_TEST_SAME_NAME"] == "rotated-value"
+
+
+@pytest.mark.asyncio
+async def test_process_environment_access_distinguishes_missing_and_empty_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match=f"variable {name!r} is not set"):
+        await manifest.resolve_environment()
+
+    monkeypatch.setenv(name, "")
+
+    assert await manifest.resolve_environment() == {name: ""}
+
+
+@pytest.mark.asyncio
+async def test_non_process_environment_resolution_does_not_read_process_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "creation-only-value")
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                name: ProcessEnvValue(),
+                "LITERAL": "literal-value",
+            }
+        )
+    )._with_process_environment_access(name)
+    monkeypatch.delenv(name)
+
+    assert await manifest._resolve_environment_without_process_values() == {
+        "LITERAL": "literal-value"
+    }
+    monkeypatch.setenv(name, "current-value")
+    assert await manifest._resolve_process_environment_values() == {name: "current-value"}
+
+
+@pytest.mark.asyncio
+async def test_process_environment_access_is_runtime_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    secret = "must-not-be-serialized"
+    monkeypatch.setenv(name, secret)
+    untrusted = Manifest(environment=Environment(value={"TOKEN": ProcessEnvValue(name=name)}))
+    manifest = untrusted._with_process_environment_access(("TOKEN", name))
+
+    payload = manifest.model_dump(mode="json")
+    serialized = json.dumps(payload)
+    restored = Manifest.model_validate(payload)
+
+    assert payload["environment"] == {"value": {"TOKEN": {"type": "process_env", "name": name}}}
+    assert secret not in serialized
+    assert "process_environment_access" not in serialized
+    assert type(restored.environment.value["TOKEN"]) is ProcessEnvValue
+
+    with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+        await untrusted.resolve_environment()
+    with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+        await restored.resolve_environment()
+
+    rebound = restored._with_process_environment_access(("TOKEN", name))
+    assert await rebound.resolve_environment() == {"TOKEN": secret}
+
+
+@pytest.mark.asyncio
+async def test_process_environment_reference_requires_client_runtime_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "from-process")
+    value = ProcessEnvValue(name=name)
+    environment = Environment(value={"TOKEN": value})
+
+    with pytest.raises(ValueError, match="sandbox client with trusted"):
+        await value.resolve()
+    with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+        await environment.resolve()
+
+
+@pytest.mark.asyncio
+async def test_process_environment_access_is_bound_to_the_sandbox_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "secret")
+    trusted = Manifest(
+        environment=Environment(value={"TOKEN": ProcessEnvValue(name=name)})
+    )._with_process_environment_access(("TOKEN", name))
+    tampered = trusted.model_copy(
+        update={
+            "environment": Environment(value={"EXFIL": ProcessEnvValue(name=name)}),
+        },
+        deep=True,
+    )
+
+    with pytest.raises(ValueError, match=f"binding {name!r} -> 'EXFIL' is not granted"):
+        await tampered.resolve_environment()
+
+
+def test_process_environment_client_config_rejects_conflicting_destinations() -> None:
+    with pytest.raises(ValueError, match="conflicting bindings"):
+        _normalize_process_environment_bindings(
+            allowed_process_environment_keys={"TOKEN"},
+            process_environment_bindings={"TOKEN": "PROD_TOKEN"},
+        )
+
+
+def test_process_environment_client_config_rejects_bare_string_allowlist() -> None:
+    with pytest.raises(TypeError, match="iterable of names, not a string"):
+        _normalize_process_environment_bindings(allowed_process_environment_keys="TOKEN")
+
+
+def test_process_environment_access_does_not_copy_unrelated_resolvers() -> None:
+    resolver = _ClientBackedEnvValue(client=_NonCopyableClient())
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "TOKEN": ProcessEnvValue(),
+                "CUSTOM": resolver,
+            }
+        )
+    )
+
+    trusted = manifest._with_process_environment_access("TOKEN")
+
+    assert trusted is not manifest
+    assert trusted.environment.value["CUSTOM"] is resolver
+
+
+def test_process_environment_access_snapshots_process_declarations() -> None:
+    source = ProcessEnvValue(name="PROD_TOKEN")
+    entry = EnvEntry(value=ProcessEnvValue(name="ENTRY_TOKEN"))
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "TOKEN": source,
+                "ENTRY": entry,
+            }
+        )
+    )
+
+    trusted = manifest._with_process_environment_access(
+        ("TOKEN", "PROD_TOKEN"),
+        ("ENTRY", "ENTRY_TOKEN"),
+    )
+    manifest.environment.value.clear()
+    source.name = "MUTATED_TOKEN"
+    entry.value.name = "MUTATED_ENTRY_TOKEN"
+
+    assert trusted._declared_process_environment_bindings() == frozenset(
+        {("TOKEN", "PROD_TOKEN"), ("ENTRY", "ENTRY_TOKEN")}
+    )
+    assert trusted._has_process_environment_access() is True
+
+
+def test_process_environment_client_rebind_replaces_prior_runtime_authority() -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    privileged = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+
+    rebound = privileged._with_process_environment_access(frozenset())
+
+    assert rebound._process_environment_access == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_process_environment_access_grants_only_requested_destination_for_shared_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_name = "SANDBOX_TEST_SHARED_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(source_name, "secret")
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "TOKEN": ProcessEnvValue(name=source_name),
+                "EXFIL": ProcessEnvValue(name=source_name),
+            }
+        )
+    )
+
+    trusted = manifest._with_process_environment_access(("TOKEN", source_name))
+
+    assert trusted._process_environment_access == frozenset({("TOKEN", source_name)})
+    with pytest.raises(ValueError, match=f"binding {source_name!r} -> 'EXFIL' is not granted"):
+        await trusted.resolve_environment()
+
+
+@pytest.mark.asyncio
+async def test_process_environment_bindings_are_validated_before_custom_resolvers_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "secret")
+    resolver_started = False
+
+    class RecordingEnvValue(EnvValue):
+        type: Literal["test.recording_process_env_sibling"] = "test.recording_process_env_sibling"
+
+        async def resolve(self) -> str:
+            nonlocal resolver_started
+            resolver_started = True
+            return "resolved"
+
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "CUSTOM": RecordingEnvValue(),
+                "TOKEN": ProcessEnvValue(name=name),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+        await manifest.resolve_environment()
+
+    assert resolver_started is False
+
+
+@pytest.mark.asyncio
+async def test_process_environment_destination_names_are_validated_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "secret")
+    resolver_started = False
+
+    class RecordingEnvValue(EnvValue):
+        type: Literal["test.recording_invalid_destination_sibling"] = (
+            "test.recording_invalid_destination_sibling"
+        )
+
+        async def resolve(self) -> str:
+            nonlocal resolver_started
+            resolver_started = True
+            return "resolved"
+
+    for destination in ("INVALID=DEST", "INVALID\x00DEST"):
+        with pytest.raises(ValueError, match="must not contain '=' or NUL"):
+            Manifest(
+                environment=Environment(
+                    value={
+                        destination: ProcessEnvValue(name=name),
+                        "CUSTOM": RecordingEnvValue(),
+                    }
+                )
+            )._with_process_environment_access((destination, name))
+
+    assert resolver_started is False
+
+
+def _manifest_traceback_locals(error: BaseException) -> str:
+    frames: list[dict[str, object]] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_filename.endswith("/agents/sandbox/manifest.py"):
+            frames.append(dict(frame.f_locals))
+        traceback = traceback.tb_next
+    return repr(frames)
+
+
+@pytest.mark.asyncio
+async def test_custom_resolver_failure_does_not_retain_process_values_in_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    secret = "process-secret-must-not-reach-traceback"
+    monkeypatch.setenv(name, secret)
+
+    class FailingEnvValue(EnvValue):
+        type: Literal["test.failing_process_env_sibling"] = "test.failing_process_env_sibling"
+
+        async def resolve(self) -> str:
+            raise RuntimeError("custom resolver failed")
+
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "TOKEN": ProcessEnvValue(name=name),
+                "CUSTOM": FailingEnvValue(),
+            }
+        )
+    )._with_process_environment_access(("TOKEN", name))
+
+    with pytest.raises(RuntimeError, match="custom resolver failed") as exc_info:
+        await manifest.resolve_environment()
+
+    assert secret not in _manifest_traceback_locals(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_process_values_are_snapshotted_before_custom_resolvers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_name = "SANDBOX_TEST_FIRST_PROCESS_ENV_VALUE"
+    second_name = "SANDBOX_TEST_SECOND_PROCESS_ENV_VALUE"
+    secret = "partial-process-secret-must-not-reach-traceback"
+    monkeypatch.setenv(first_name, secret)
+    monkeypatch.setenv(second_name, "removed-before-materialization")
+
+    class RemovingEnvValue(EnvValue):
+        type: Literal["test.removing_process_env_sibling"] = "test.removing_process_env_sibling"
+
+        async def resolve(self) -> str:
+            monkeypatch.delenv(second_name)
+            return "custom"
+
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "FIRST": ProcessEnvValue(name=first_name),
+                "SECOND": ProcessEnvValue(name=second_name),
+                "CUSTOM": RemovingEnvValue(),
+            }
+        )
+    )._with_process_environment_access(("FIRST", first_name), ("SECOND", second_name))
+
+    assert await manifest.resolve_environment() == {
+        "FIRST": secret,
+        "SECOND": "removed-before-materialization",
+        "CUSTOM": "custom",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_snapshot_survives_custom_resolver_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    custom_secret = "custom-secret-must-not-reach-traceback"
+    monkeypatch.setenv(name, "removed-before-materialization")
+
+    class SecretRemovingEnvValue(EnvValue):
+        type: Literal["test.secret_removing_process_env_sibling"] = (
+            "test.secret_removing_process_env_sibling"
+        )
+
+        async def resolve(self) -> str:
+            monkeypatch.delenv(name)
+            return custom_secret
+
+    manifest = Manifest(
+        environment=Environment(
+            value={
+                "TOKEN": ProcessEnvValue(name=name),
+                "CUSTOM": SecretRemovingEnvValue(),
+            }
+        )
+    )._with_process_environment_access(("TOKEN", name))
+
+    assert await manifest.resolve_environment() == {
+        "TOKEN": "removed-before-materialization",
+        "CUSTOM": custom_secret,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload_key",
+    [
+        "process_environment_access",
+        "_process_environment_access",
+        "processEnvironmentAllowedNames",
+    ],
+)
+def test_manifest_rejects_serialized_process_environment_authority(payload_key: str) -> None:
+    with pytest.raises(TypeError, match="trusted sandbox client runtime configuration"):
+        Manifest.model_validate({payload_key: ["OPENAI_API_KEY"]})
 
 
 def test_manifest_reads_legacy_discriminator_free_str_env_values() -> None:

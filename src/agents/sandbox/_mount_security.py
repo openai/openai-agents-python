@@ -9,7 +9,7 @@ import types
 from collections.abc import Callable, Collection, Coroutine, Iterable, Mapping
 from functools import wraps
 from pathlib import PurePath, PurePosixPath
-from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast, get_args
 from urllib.parse import urlsplit
 
 from ..exceptions import (
@@ -411,6 +411,8 @@ _RCLONE_SAFE_FLAG_ARGS = frozenset({"allow-other"})
 _RCLONE_SAFE_VALUE_ARGS = frozenset({"buffer-size", "gid", "uid"})
 _SAFE_MOUNT_VALIDATION_MESSAGE_ATTR = "_agents_safe_mount_validation_message"
 _SAFE_MOUNT_VALIDATION_MESSAGE_MARKER = object()
+_SAFE_PROCESS_ENVIRONMENT_ERROR_ATTR = "_agents_safe_process_environment_error"
+_SAFE_PROCESS_ENVIRONMENT_ERROR_MARKER = object()
 _SANDBOX_ERROR_OPS = frozenset(get_args(OpName))
 _STRUCTURED_SANDBOX_ERROR_SAFE_SUBTYPE_STATE: tuple[
     tuple[type[SandboxError], tuple[tuple[str, object], ...]], ...
@@ -487,11 +489,16 @@ class _InvalidRawMountManifestError(ValueError):
 def redact_mount_error_data(
     function: Callable[_P, Coroutine[Any, Any, _T]],
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
-    """Replace failures after clearing async frames that handled mount authority."""
+    """Replace failures after clearing async frames that handled protected authority."""
 
     @wraps(function)
     async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
         call_has_authority = _call_has_configured_mount_authority(
+            args,
+            kwargs,
+            function=function,
+        )
+        call_has_process_environment_access = _call_has_process_environment_access(
             args,
             kwargs,
             function=function,
@@ -501,12 +508,30 @@ def redact_mount_error_data(
             return await function(*args, **kwargs)
         except BaseException as error:
             error_is_redacted = _is_error_data_redacted(error)
-            if call_has_authority or error_is_redacted:
+            safe_process_environment_error = (
+                _replace_safe_process_environment_error(error)
+                if call_has_process_environment_access
+                else None
+            )
+            if safe_process_environment_error is not None:
+                safe_error = safe_process_environment_error
+            elif call_has_authority:
+                safe_error = _replace_protected_mount_error(error)
+            elif call_has_process_environment_access:
+                safe_error = _replace_protected_process_environment_error(error)
+            elif error_is_redacted:
                 safe_error = _replace_protected_mount_error(error)
             else:
                 raise
 
-        del args, kwargs, call_has_authority, error_is_redacted
+        del (
+            args,
+            kwargs,
+            call_has_authority,
+            call_has_process_environment_access,
+            error_is_redacted,
+            safe_process_environment_error,
+        )
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -527,21 +552,44 @@ def _redact_mount_error_data_sync(
             kwargs,
             function=function,
         )
+        call_has_process_environment_access = _call_has_process_environment_access(
+            args,
+            kwargs,
+            function=function,
+        )
         safe_error: BaseException | None = None
         try:
             return function(*args, **kwargs)
         except BaseException as error:
             error_is_redacted = _is_error_data_redacted(error)
-            if preserve_value_error_type and call_has_authority and isinstance(error, ValueError):
+            safe_process_environment_error = (
+                _replace_safe_process_environment_error(error)
+                if call_has_process_environment_access
+                else None
+            )
+            if safe_process_environment_error is not None:
+                safe_error = safe_process_environment_error
+            elif preserve_value_error_type and call_has_authority and isinstance(error, ValueError):
                 discard_mount_source_exception(error)
                 safe_error = ValueError("sandbox mount validation failed")
                 _mark_error_data_redacted(safe_error)
-            elif call_has_authority or error_is_redacted:
+            elif call_has_authority:
+                safe_error = _replace_protected_mount_error(error)
+            elif call_has_process_environment_access:
+                safe_error = _replace_protected_process_environment_error(error)
+            elif error_is_redacted:
                 safe_error = _replace_protected_mount_error(error)
             else:
                 raise
 
-        del args, kwargs, call_has_authority, error_is_redacted
+        del (
+            args,
+            kwargs,
+            call_has_authority,
+            call_has_process_environment_access,
+            error_is_redacted,
+            safe_process_environment_error,
+        )
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -588,16 +636,89 @@ def _replace_mount_error(
 
 
 def _replace_protected_mount_error(error: BaseException) -> BaseException:
+    return _replace_protected_sandbox_error(
+        error,
+        message="sandbox operation failed while using a protected mount configuration",
+    )
+
+
+def _replace_protected_process_environment_error(error: BaseException) -> BaseException:
+    return _replace_protected_sandbox_error(
+        error,
+        message="sandbox operation failed while using protected process environment values",
+    )
+
+
+def _mark_process_environment_error_safe(error: ValueError) -> None:
+    setattr(
+        error,
+        _SAFE_PROCESS_ENVIRONMENT_ERROR_ATTR,
+        _SAFE_PROCESS_ENVIRONMENT_ERROR_MARKER,
+    )
+
+
+def _replace_safe_process_environment_error(error: BaseException) -> ValueError | None:
+    pending = [error]
+    seen: set[int] = set()
+    message: str | None = None
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if type(current) is ValueError:
+            state = _base_exception_instance_dict(current)
+            if (
+                state is not None
+                and _exact_string_state_value(state, _SAFE_PROCESS_ENVIRONMENT_ERROR_ATTR)
+                is _SAFE_PROCESS_ENVIRONMENT_ERROR_MARKER
+            ):
+                try:
+                    args = cast(Any, BaseException.args).__get__(current, ValueError)
+                except BaseException:
+                    args = None
+                if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                    message = args[0]
+                    break
+        for descriptor in (
+            cast(Any, BaseException.__cause__),
+            cast(Any, BaseException.__context__),
+        ):
+            try:
+                candidate = descriptor.__get__(current, type(current))
+            except BaseException:
+                continue
+            if issubclass(type(candidate), BaseException):
+                pending.append(cast(BaseException, candidate))
+    if message is None:
+        return None
+
+    discard_mount_source_exception(error)
+    safe_error = ValueError(message)
+    _mark_process_environment_error_safe(safe_error)
+    _mark_error_data_redacted(safe_error)
+    return safe_error
+
+
+def _replace_protected_sandbox_error(
+    error: BaseException,
+    *,
+    message: str,
+) -> BaseException:
     process_control_error = _replace_data_redacted_process_control_error(error)
     if process_control_error is not None:
         return process_control_error
-    structured_error = _replace_structured_sandbox_error(error)
+    structured_error = _replace_structured_sandbox_error(error, message=message)
     if structured_error is not None:
         return structured_error
-    return _replace_mount_operation_error(error)
+    return _replace_protected_operation_error(error, message=message)
 
 
-def _replace_structured_sandbox_error(error: BaseException) -> SandboxError | None:
+def _replace_structured_sandbox_error(
+    error: BaseException,
+    *,
+    message: str = "sandbox operation failed while using a protected mount configuration",
+) -> SandboxError | None:
     error_type = type(error)
     state = _base_exception_instance_dict(error)
     if state is None:
@@ -636,7 +757,6 @@ def _replace_structured_sandbox_error(error: BaseException) -> SandboxError | No
 
     discard_mount_source_exception(error)
     safe_error = cast(SandboxError, BaseException.__new__(error_type))
-    message = "sandbox operation failed while using a protected mount configuration"
     object.__setattr__(safe_error, "message", message)
     object.__setattr__(safe_error, "error_code", error_code)
     object.__setattr__(safe_error, "op", cast(OpName, op))
@@ -650,11 +770,9 @@ def _replace_structured_sandbox_error(error: BaseException) -> SandboxError | No
     return safe_error
 
 
-def _replace_mount_operation_error(error: BaseException) -> RuntimeError:
+def _replace_protected_operation_error(error: BaseException, *, message: str) -> RuntimeError:
     discard_mount_source_exception(error)
-    safe_error = RuntimeError(
-        "sandbox operation failed while using a protected mount configuration"
-    )
+    safe_error = RuntimeError(message)
     _mark_error_data_redacted(safe_error)
     return safe_error
 
@@ -1016,6 +1134,10 @@ def _manifest_has_configured_mount_authority(manifest: Manifest) -> bool:
     return False
 
 
+def _manifest_has_process_environment_access(manifest: Manifest) -> bool:
+    return bool(manifest._process_environment_access)
+
+
 def _mount_has_or_may_hide_configured_authority(mount: Mount) -> bool:
     """Classify untrusted mount implementations without reading their configuration."""
 
@@ -1142,7 +1264,36 @@ def _call_has_configured_mount_authority(
     *,
     function: Callable[..., object],
 ) -> bool:
-    """Inspect SDK-owned call-boundary state for protected authority."""
+    return _call_has_configured_authority(
+        args,
+        kwargs,
+        function=function,
+        authority_kind="mount",
+    )
+
+
+def _call_has_process_environment_access(
+    args: tuple[object, ...],
+    kwargs: Mapping[str, object],
+    *,
+    function: Callable[..., object],
+) -> bool:
+    return _call_has_configured_authority(
+        args,
+        kwargs,
+        function=function,
+        authority_kind="process_environment",
+    )
+
+
+def _call_has_configured_authority(
+    args: tuple[object, ...],
+    kwargs: Mapping[str, object],
+    *,
+    function: Callable[..., object],
+    authority_kind: Literal["mount", "process_environment"],
+) -> bool:
+    """Inspect SDK-owned call-boundary state for one protected authority kind."""
 
     from .manifest import Manifest
     from .session.base_sandbox_session import BaseSandboxSession
@@ -1154,9 +1305,25 @@ def _call_has_configured_mount_authority(
             return True
         sandbox_session_state_descriptor = sandbox_session_metadata[0]["state"]
         values = (*args, *kwargs.values())
+        has_configured_process_environment_client = False
         for value in values:
-            if type(value) is Manifest and _manifest_has_configured_mount_authority(value):
-                return True
+            if authority_kind == "process_environment":
+                try:
+                    if vars(value).get("_process_environment_bindings"):
+                        has_configured_process_environment_client = True
+                except TypeError:
+                    pass
+            if type(value) is Manifest:
+                if authority_kind == "mount" and _manifest_has_configured_mount_authority(value):
+                    return True
+                if authority_kind == "process_environment" and (
+                    _manifest_has_process_environment_access(value)
+                    or (
+                        has_configured_process_environment_client
+                        and value._has_process_environment_values()
+                    )
+                ):
+                    return True
 
         decorated_owner_type = _decorated_owner_type(function)
         pending = [(value, False) for value in values]
@@ -1175,13 +1342,23 @@ def _call_has_configured_mount_authority(
             value_metadata = _static_type_metadata(type(value))
             value_mro = () if value_metadata is None else value_metadata[1]
             if type(value) is Manifest:
-                if _manifest_has_configured_mount_authority(value):
+                if authority_kind == "mount" and _manifest_has_configured_mount_authority(value):
+                    return True
+                if authority_kind == "process_environment" and (
+                    _manifest_has_process_environment_access(value)
+                    or (
+                        has_configured_process_environment_client
+                        and value._has_process_environment_values()
+                    )
+                ):
                     return True
                 continue
             if any(base is Manifest for base in value_mro):
                 return True
             if any(base is Mount for base in value_mro):
-                if _mount_has_or_may_hide_configured_authority(cast(Mount, value)):
+                if authority_kind == "mount" and _mount_has_or_may_hide_configured_authority(
+                    cast(Mount, value)
+                ):
                     return True
                 continue
             if type(value) is dict:
@@ -1241,16 +1418,19 @@ def _call_has_configured_mount_authority(
                 if found and candidate is not None:
                     pending.append((candidate, False))
 
-            credentials_found, credentials = _exact_string_state_entry(
-                state,
-                "_trusted_s3_mount_credentials",
-            )
-            if type(credentials) is dict:
-                for configured in dict.values(credentials):
-                    if type(configured) is tuple and any(item is not None for item in configured):
-                        return True
-            elif credentials_found and credentials is not None:
-                return True
+            if authority_kind == "mount":
+                credentials_found, credentials = _exact_string_state_entry(
+                    state,
+                    "_trusted_s3_mount_credentials",
+                )
+                if type(credentials) is dict:
+                    for configured in dict.values(credentials):
+                        if type(configured) is tuple and any(
+                            item is not None for item in configured
+                        ):
+                            return True
+                elif credentials_found and credentials is not None:
+                    return True
     except BaseException:
         return True
     return False

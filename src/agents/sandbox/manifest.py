@@ -1,6 +1,7 @@
 import abc
 import inspect
-from collections.abc import Iterator, Mapping
+import os
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, ClassVar, Literal
@@ -19,7 +20,10 @@ from typing_extensions import assert_never
 
 from .._config_coercion import coerce_pydantic_config
 from ..util._asyncio_tasks import gather_with_cancel
-from ._mount_security import redact_mount_validation_error_data_sync
+from ._mount_security import (
+    _mark_process_environment_error_safe,
+    redact_mount_validation_error_data_sync,
+)
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
@@ -68,6 +72,19 @@ _MOUNT_CREDENTIAL_EXPOSURE_POLICY_KEYS = frozenset(
         "_inContainerMountBroadCredentialExposureAcknowledgedPaths",
         "mount_credential_exposure_policy",
         "_mount_credential_exposure_policy",
+    }
+)
+
+_PROCESS_ENVIRONMENT_ACCESS_KEYS = frozenset(
+    {
+        "process_environment_access",
+        "_process_environment_access",
+        "processEnvironmentAccess",
+        "_processEnvironmentAccess",
+        "process_environment_allowed_names",
+        "_process_environment_allowed_names",
+        "processEnvironmentAllowedNames",
+        "_processEnvironmentAllowedNames",
     }
 )
 
@@ -145,6 +162,74 @@ class StrEnvValue(EnvValue):
 
     async def resolve(self) -> str:
         return self.value
+
+
+class ProcessEnvValue(EnvValue):
+    """References a value in the SDK process environment.
+
+    The source name defaults to the containing environment mapping key. Process
+    environment access is granted by trusted sandbox client runtime configuration,
+    not by serialized manifest data.
+    """
+
+    type: Literal["process_env"] = "process_env"
+    name: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str | None:
+        if value is not None:
+            _validate_process_environment_name(value)
+        return value
+
+    async def resolve(self) -> str:
+        raise _process_environment_error(
+            "ProcessEnvValue must be resolved through a sandbox client with "
+            "trusted process environment bindings"
+        )
+
+
+def _validate_process_environment_name(name: str) -> None:
+    if not isinstance(name, str):
+        raise TypeError("Process environment variable names must be strings.")
+    if not name:
+        raise ValueError("Process environment variable names must not be empty.")
+    if "=" in name or "\x00" in name:
+        raise ValueError("Process environment variable names must not contain '=' or NUL.")
+
+
+def _normalize_process_environment_bindings(
+    *,
+    allowed_process_environment_keys: Iterable[str] = (),
+    process_environment_bindings: Mapping[str, str] | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Normalize trusted client configuration into exact destination/source bindings."""
+
+    if isinstance(allowed_process_environment_keys, str):
+        raise TypeError(
+            "allowed_process_environment_keys must be an iterable of names, not a string."
+        )
+    normalized: dict[str, str] = {}
+    for key in allowed_process_environment_keys:
+        _validate_process_environment_name(key)
+        normalized[key] = key
+    for destination, source_name in (process_environment_bindings or {}).items():
+        _validate_process_environment_name(destination)
+        _validate_process_environment_name(source_name)
+        existing_source = normalized.get(destination)
+        if existing_source is not None and existing_source != source_name:
+            raise ValueError(
+                "Process environment client configuration has conflicting bindings for "
+                f"destination {destination!r}"
+            )
+        normalized[destination] = source_name
+    return frozenset(normalized.items())
+
+
+def _process_environment_error(message: str) -> ValueError:
+    error = ValueError(message)
+    _mark_process_environment_error_safe(error)
+    return error
 
 
 def _serialize_env_value_with_type(value: EnvValue, serialized: object) -> dict[str, Any]:
@@ -233,14 +318,98 @@ class Environment(BaseModel):
         return result
 
     async def resolve(self) -> dict[str, str]:
+        return await self._resolve(process_environment_access=frozenset())
+
+    async def _resolve(
+        self,
+        *,
+        process_environment_access: frozenset[tuple[str, str]],
+        include_process_values: bool = True,
+        include_non_process_values: bool = True,
+    ) -> dict[str, str]:
         normalized = self.normalized()
-        keys = normalized.keys()
+        process_bindings = _validate_process_environment_bindings(
+            normalized,
+            process_environment_access=process_environment_access,
+            require_values_present=include_process_values,
+        )
+        process_values = (
+            {
+                key: _read_process_environment_value(source_name)
+                for key, source_name in process_bindings.items()
+            }
+            if include_process_values
+            else {}
+        )
+        custom_keys = (
+            [
+                key
+                for key, entry in normalized.items()
+                if not isinstance(entry.value, ProcessEnvValue)
+            ]
+            if include_non_process_values
+            else []
+        )
+
         # `EnvValue` is an extension point, so these are user-supplied coroutines that
         # can reach a secret store or the network. A bare gather returns on the first
         # failure and leaves the rest running, which is how a rejected lookup ends up
         # with sibling fetches still in flight after the manifest has already failed.
-        values = await gather_with_cancel(*[normalized[key].value.resolve() for key in keys])
-        return dict(zip(keys, values, strict=False))
+        custom_values: tuple[str, ...] = ()
+        resolved_custom_values: dict[str, str] = {}
+        try:
+            custom_values = await gather_with_cancel(
+                *[normalized[key].value.resolve() for key in custom_keys]
+            )
+            resolved_custom_values = dict(zip(custom_keys, custom_values, strict=False))
+            return {
+                key: (
+                    process_values[key] if key in process_bindings else resolved_custom_values[key]
+                )
+                for key in normalized
+                if (include_process_values and key in process_bindings)
+                or (include_non_process_values and key not in process_bindings)
+            }
+        except BaseException:
+            custom_values = ()
+            resolved_custom_values.clear()
+            process_values.clear()
+            raise
+
+
+def _validate_process_environment_bindings(
+    normalized: Mapping[str, EnvEntry],
+    *,
+    process_environment_access: frozenset[tuple[str, str]],
+    require_values_present: bool = True,
+) -> dict[str, str]:
+    process_bindings: dict[str, str] = {}
+    for key, entry in normalized.items():
+        if not isinstance(entry.value, ProcessEnvValue):
+            continue
+        _validate_process_environment_name(key)
+        source_name = entry.value.name if entry.value.name is not None else key
+        _validate_process_environment_name(source_name)
+        if (key, source_name) not in process_environment_access:
+            raise _process_environment_error(
+                f"Process environment binding {source_name!r} -> {key!r} is not granted; "
+                "configure the sandbox client with an allowed process environment binding"
+            )
+        if require_values_present and source_name not in os.environ:
+            raise _process_environment_error(
+                f"Process environment variable {source_name!r} is not set"
+            )
+        process_bindings[key] = source_name
+    return process_bindings
+
+
+def _read_process_environment_value(source_name: str) -> str:
+    try:
+        return os.environ[source_name]
+    except KeyError:
+        raise _process_environment_error(
+            f"Process environment variable {source_name!r} is not set"
+        ) from None
 
 
 class Manifest(BaseModel):
@@ -257,17 +426,29 @@ class Manifest(BaseModel):
     _mount_credential_exposure_policy: _MountCredentialExposurePolicy = PrivateAttr(
         default_factory=_MountCredentialExposurePolicy
     )
+    _process_environment_access: frozenset[tuple[str, str]] = PrivateAttr(default_factory=frozenset)
+
+    def __getstate__(self) -> dict[Any, Any]:
+        state = super().__getstate__()
+        private_state = dict(state.get("__pydantic_private__") or {})
+        private_state["_process_environment_access"] = frozenset()
+        state["__pydantic_private__"] = private_state
+        return state
 
     @model_validator(mode="before")
     @classmethod
     def _reject_mount_credential_exposure_policy_input(cls, value: object) -> object:
-        if isinstance(value, Mapping) and _MOUNT_CREDENTIAL_EXPOSURE_POLICY_KEYS.intersection(
-            value
-        ):
-            raise TypeError(
-                "In-container mount credential exposure must be configured on a trusted "
-                "Manifest instance, not in manifest input."
-            )
+        if isinstance(value, Mapping):
+            if _MOUNT_CREDENTIAL_EXPOSURE_POLICY_KEYS.intersection(value):
+                raise TypeError(
+                    "In-container mount credential exposure must be configured on a trusted "
+                    "Manifest instance, not in manifest input."
+                )
+            if _PROCESS_ENVIRONMENT_ACCESS_KEYS.intersection(value):
+                raise TypeError(
+                    "Process environment access must be configured by trusted sandbox client "
+                    "runtime configuration, not in manifest input."
+                )
         return value
 
     @field_validator("entries", mode="before")
@@ -292,6 +473,117 @@ class Manifest(BaseModel):
         for _path, _artifact in self.iter_entries():
             pass
         return validated
+
+    def _with_process_environment_access(
+        self,
+        *bindings: frozenset[tuple[str, str]] | str | tuple[str, str],
+    ) -> "Manifest":
+        """Attach trusted client-owned process environment bindings at runtime."""
+
+        declared_bindings = self._declared_process_environment_bindings()
+        if len(bindings) == 1 and isinstance(bindings[0], frozenset):
+            requested_bindings = bindings[0]
+        else:
+            same_name_keys = [binding for binding in bindings if isinstance(binding, str)]
+            renamed_bindings = {
+                binding[0]: binding[1]
+                for binding in bindings
+                if isinstance(binding, tuple) and len(binding) == 2
+            }
+            requested_bindings = _normalize_process_environment_bindings(
+                allowed_process_environment_keys=same_name_keys,
+                process_environment_bindings=renamed_bindings,
+            )
+        environment_values: dict[str, str | EnvValue | EnvEntry] = {}
+        for key, value in self.environment.value.items():
+            if isinstance(value, ProcessEnvValue):
+                environment_values[key] = value.model_copy()
+            elif isinstance(value, EnvEntry) and isinstance(value.value, ProcessEnvValue):
+                environment_values[key] = value.model_copy(
+                    update={"value": value.value.model_copy()}
+                )
+            else:
+                environment_values[key] = value
+        trusted = self.model_copy(
+            update={
+                "environment": self.environment.model_copy(update={"value": environment_values})
+            }
+        )
+        trusted._process_environment_access = requested_bindings & declared_bindings
+        return trusted
+
+    async def resolve_environment(self) -> dict[str, str]:
+        """Resolve the environment on a runtime-only copy bound by a trusted sandbox client."""
+
+        return await self.environment._resolve(
+            process_environment_access=self._process_environment_access
+        )
+
+    async def _resolve_environment_without_process_values(self) -> dict[str, str]:
+        """Resolve non-process values without materializing protected process values."""
+
+        return await self.environment._resolve(
+            process_environment_access=self._process_environment_access,
+            include_process_values=False,
+        )
+
+    async def _resolve_process_environment_values(self) -> dict[str, str]:
+        """Resolve only protected process values for an out-of-band provider channel."""
+
+        return await self.environment._resolve(
+            process_environment_access=self._process_environment_access,
+            include_non_process_values=False,
+        )
+
+    def _validate_process_environment_access(self) -> None:
+        """Validate process environment references without returning their values."""
+
+        _validate_process_environment_bindings(
+            self.environment.normalized(),
+            process_environment_access=self._process_environment_access,
+        )
+
+    def _snapshot_process_environment_values(self) -> dict[str, str]:
+        """Snapshot protected process values before provider or resolver side effects."""
+
+        normalized = self.environment.normalized()
+        process_bindings = _validate_process_environment_bindings(
+            normalized,
+            process_environment_access=self._process_environment_access,
+        )
+        return {
+            key: _read_process_environment_value(source_name)
+            for key, source_name in process_bindings.items()
+        }
+
+    def _declared_process_environment_bindings(self) -> frozenset[tuple[str, str]]:
+        return frozenset(
+            (key, entry.value.name if entry.value.name is not None else key)
+            for key, entry in self.environment.normalized().items()
+            if isinstance(entry.value, ProcessEnvValue)
+        )
+
+    def _has_process_environment_values(self) -> bool:
+        return bool(self._declared_process_environment_bindings())
+
+    def _has_process_environment_access(self) -> bool:
+        return bool(
+            self._process_environment_access & self._declared_process_environment_bindings()
+        )
+
+    def _reject_process_environment_values(
+        self,
+        *,
+        backend_id: str,
+        supported_alternative: str,
+    ) -> None:
+        if not self._has_process_environment_values():
+            return
+        raise _process_environment_error(
+            f"{backend_id} does not support ProcessEnvValue because it cannot transport "
+            "protected values while enforcing the required host-environment isolation and "
+            f"out-of-band provider boundary; {supported_alternative}"
+        )
 
     @redact_mount_validation_error_data_sync
     def with_in_container_mount_credential_exposure_acknowledged(

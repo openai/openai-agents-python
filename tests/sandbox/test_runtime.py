@@ -77,6 +77,7 @@ from agents.sandbox.errors import (
     WorkspaceArchiveWriteError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
+from agents.sandbox.manifest import Environment, ProcessEnvValue
 from agents.sandbox.materialization import MaterializationResult, MaterializedFile
 from agents.sandbox.remote_mount_policy import (
     REMOTE_MOUNT_POLICY,
@@ -246,6 +247,84 @@ class _FailingStopSession(_FakeSession):
     async def stop(self) -> None:
         await super().stop()
         raise RuntimeError("stop failed")
+
+
+class _FailOnceStopSession(_FakeSession):
+    async def stop(self) -> None:
+        await super().stop()
+        if self.stop_calls == 1:
+            raise RuntimeError("stop failed")
+
+
+@pytest.mark.asyncio
+async def test_owned_session_cleanup_waits_for_inflight_start() -> None:
+    start_gate = asyncio.Event()
+    session = _FakeSession(Manifest(), start_gate=start_gate)
+    resources = _SandboxSessionResources(session=session, client=None, owns_session=True)
+
+    start_task = asyncio.create_task(resources.ensure_started())
+    await asyncio.sleep(0)
+    assert session.start_calls == 1
+
+    cleanup_task = asyncio.create_task(resources.cleanup())
+    await asyncio.sleep(0)
+    assert session.stop_calls == 0
+    assert session.shutdown_calls == 0
+
+    start_gate.set()
+    await start_task
+    await cleanup_task
+
+    assert session.stop_calls == 1
+    assert session.shutdown_calls == 1
+    with pytest.raises(RuntimeError, match="cleanup has already started"):
+        await resources.ensure_started()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cleanup_waiter_does_not_poison_inflight_start() -> None:
+    start_gate = asyncio.Event()
+    session = _FakeSession(Manifest(), start_gate=start_gate)
+    resources = _SandboxSessionResources(session=session, client=None, owns_session=True)
+
+    start_task = asyncio.create_task(resources.ensure_started())
+    await asyncio.sleep(0)
+    cleanup_task = asyncio.create_task(resources.cleanup())
+    await asyncio.sleep(0)
+
+    cleanup_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+    start_gate.set()
+    await start_task
+    await resources.ensure_started()
+
+    assert session.start_calls == 1
+    await resources.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_owned_session_cleanup_retries_after_failure() -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    session = _FailOnceStopSession(
+        Manifest(
+            environment=Environment(value={name: ProcessEnvValue()})
+        )._with_process_environment_access(name)
+    )
+    resources = _SandboxSessionResources(session=session, client=None, owns_session=True)
+
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resources.cleanup()
+    assert session.shutdown_calls == 1
+    assert session.close_dependency_calls == 1
+    with pytest.raises(RuntimeError, match="cleanup has already started"):
+        await resources.ensure_started()
+    await resources.cleanup()
+
+    assert session.stop_calls == 2
+    assert session.shutdown_calls == 2
+    assert session.close_dependency_calls == 2
 
 
 def _external_mount_manifest(secret_access_key: str) -> Manifest:
@@ -540,7 +619,7 @@ async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> N
         await session.aclose()
 
     assert inner.stop_calls == 1
-    assert inner.shutdown_calls == 0
+    assert inner.shutdown_calls == 1
     assert inner.close_dependency_calls == 1
 
 
@@ -1224,6 +1303,26 @@ def test_process_manifest_preserves_mount_acknowledgement_across_replacement() -
         "/workspace/data",
         "mount_scoped",
     )
+
+
+@pytest.mark.asyncio
+async def test_process_manifest_does_not_regrant_process_environment_access_across_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "from-process")
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+
+    processed = SandboxRuntimeSessionManager._process_manifest(
+        [_ManifestReplacementCapability()],
+        manifest,
+    )
+
+    assert processed is not None
+    with pytest.raises(ValueError, match="configure the sandbox client"):
+        await processed.resolve_environment()
 
 
 @pytest.mark.parametrize(
@@ -3909,6 +4008,145 @@ async def test_session_manager_rebinds_persisted_path_grants_from_current_manife
 
 
 @pytest.mark.asyncio
+async def test_session_manager_does_not_rebind_process_environment_access_from_current_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-worker-value")
+    trusted_manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(),
+        instructions="Worker.",
+        default_manifest=trusted_manifest,
+    )
+    persisted_manifest = Manifest.model_validate(trusted_manifest.model_dump(mode="json"))
+    session_state = TestSessionState(
+        manifest=persisted_manifest,
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    processed = SandboxRuntimeSessionManager._process_resumed_state_manifest(
+        agent=agent,
+        capabilities=[],
+        session_state=session_state,
+        trusted_manifest=trusted_manifest,
+        provider_backend_id="docker",
+    )
+
+    assert processed.manifest._has_process_environment_access() is False  # noqa: SLF001
+    with pytest.raises(ValueError, match="configure the sandbox client"):
+        await processed.manifest.resolve_environment()
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_rebind_removed_process_environment_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "must-not-be-rebound")
+    originally_trusted = Manifest(
+        environment=Environment(value={"TOKEN": ProcessEnvValue(name=name)})
+    )._with_process_environment_access(("TOKEN", name))
+    current_trusted = originally_trusted.model_copy(
+        update={"environment": Environment(value={})},
+        deep=True,
+    )
+    persisted_manifest = Manifest.model_validate(originally_trusted.model_dump(mode="json"))
+    session_state = TestSessionState(
+        manifest=persisted_manifest,
+        snapshot=NoopSnapshot(id="resume"),
+    )
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(),
+        instructions="Worker.",
+        default_manifest=current_trusted,
+    )
+
+    class _RemoveProcessEnvironmentCapability(Capability):
+        type: str = "remove-process-environment"
+
+        def process_manifest(self, manifest: Manifest) -> Manifest:
+            return manifest.model_copy(update={"environment": Environment(value={})})
+
+    with pytest.raises(ValueError, match="cannot remove or change ProcessEnvValue bindings"):
+        SandboxRuntimeSessionManager._process_resumed_state_manifest(
+            agent=agent,
+            capabilities=[_RemoveProcessEnvironmentCapability()],
+            session_state=session_state,
+            trusted_manifest=current_trusted,
+            provider_backend_id="test",
+        )
+
+
+def test_resume_does_not_rebind_changed_process_environment_reference() -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    source_name = "SANDBOX_TEST_PROCESS_ENV_SOURCE"
+    current_trusted = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    session_state = TestSessionState(
+        manifest=current_trusted,
+        snapshot=NoopSnapshot(id="snapshot"),
+    )
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(),
+        instructions="Worker.",
+        default_manifest=current_trusted,
+    )
+
+    class _ChangeProcessEnvironmentCapability(Capability):
+        type: str = "change-process-environment"
+
+        def process_manifest(self, manifest: Manifest) -> Manifest:
+            return manifest.model_copy(
+                update={"environment": Environment(value={name: ProcessEnvValue(name=source_name)})}
+            )
+
+    with pytest.raises(ValueError, match="cannot remove or change ProcessEnvValue bindings"):
+        SandboxRuntimeSessionManager._process_resumed_state_manifest(
+            agent=agent,
+            capabilities=[_ChangeProcessEnvironmentCapability()],
+            session_state=session_state,
+            trusted_manifest=current_trusted,
+            provider_backend_id="test",
+        )
+
+
+def test_resume_preserves_preprocessed_manifest_for_provider_cleanup() -> None:
+    persisted_manifest = Manifest(entries={"old.txt": File(content=b"old")})
+    session_state = TestSessionState(
+        manifest=persisted_manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+    )
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(),
+        instructions="Worker.",
+        default_manifest=persisted_manifest,
+    )
+
+    class _RemoveEntryCapability(Capability):
+        type: str = "remove-entry"
+
+        def process_manifest(self, manifest: Manifest) -> Manifest:
+            return manifest.model_copy(update={"entries": {}})
+
+    processed = SandboxRuntimeSessionManager._process_resumed_state_manifest(
+        agent=agent,
+        capabilities=[_RemoveEntryCapability()],
+        session_state=session_state,
+        trusted_manifest=persisted_manifest,
+        provider_backend_id="docker",
+    )
+
+    assert processed.resume_persisted_manifest is persisted_manifest
+
+
+@pytest.mark.asyncio
 async def test_session_manager_rebinds_redacted_external_mount_authority() -> None:
     trusted_manifest = Manifest(
         entries={
@@ -4268,6 +4506,31 @@ async def test_session_manager_rejects_unsafe_stopped_injected_session_manifest(
         assert live_session.state.manifest.entries == {"remote": unsafe_mount}
     else:
         assert live_session.state.manifest.entries == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_rejects_injected_process_environment_before_probe() -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    live_session = _LiveSessionDeltaRecorder(
+        Manifest(environment=Environment(value={name: ProcessEnvValue()}))
+    )
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=live_session),
+        run_state=None,
+    )
+
+    manager.acquire_agent(agent)
+    with pytest.raises(ValueError, match="client-owned fresh session or resume path"):
+        await manager.ensure_session(
+            agent=agent,
+            capabilities=[],
+            is_resumed_state=False,
+        )
+
+    assert live_session.running_calls == 0
+    assert live_session.start_calls == 0
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import pickle
 import uuid
 from pathlib import Path
 from typing import ClassVar, Literal, cast
@@ -17,7 +18,13 @@ import pytest
 from pydantic import ConfigDict, ValidationError, field_serializer, field_validator
 
 from agents.sandbox import Manifest, SandboxPathGrant
-from agents.sandbox.manifest import EnvEntry, Environment, EnvValue, StrEnvValue
+from agents.sandbox.manifest import (
+    EnvEntry,
+    Environment,
+    EnvValue,
+    ProcessEnvValue,
+    StrEnvValue,
+)
 from agents.sandbox.session import (
     BaseSandboxClient,
     Dependencies,
@@ -218,6 +225,53 @@ class TestSandboxSessionStateRoundTrip:
             "DIRECT": "resolved-secret-for-direct",
             "ENTRY": "resolved-secret-for-entry",
         }
+
+    @pytest.mark.asyncio
+    async def test_process_environment_authority_is_not_persisted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+        secret = "session-state-secret"
+        monkeypatch.setenv(name, secret)
+        manifest = Manifest(
+            environment=Environment(value={"TOKEN": ProcessEnvValue(name=name)})
+        )._with_process_environment_access(("TOKEN", name))
+        original = _StubSessionState(
+            snapshot=NoopSnapshot(id="noop"),
+            manifest=manifest,
+            custom_field="custom",
+        )
+
+        payload = original.model_dump(mode="json")
+        serialized = json.dumps(payload)
+        restored = SandboxSessionState.parse(payload)
+
+        assert secret not in serialized
+        assert "process_environment_access" not in serialized
+        with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+            await restored.manifest.resolve_environment()
+
+    @pytest.mark.asyncio
+    async def test_process_environment_authority_is_not_pickled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+        monkeypatch.setenv(name, "pickle-session-state-secret")
+        original = _StubSessionState(
+            snapshot=NoopSnapshot(id="noop"),
+            manifest=Manifest(
+                environment=Environment(value={"TOKEN": ProcessEnvValue(name=name)})
+            )._with_process_environment_access(("TOKEN", name)),
+            custom_field="custom",
+        )
+
+        restored = pickle.loads(pickle.dumps(original))
+
+        assert restored.manifest._process_environment_access == frozenset()
+        with pytest.raises(ValueError, match=f"binding {name!r} -> 'TOKEN' is not granted"):
+            await restored.manifest.resolve_environment()
 
     def test_parse_reads_legacy_discriminator_free_str_env_values(self) -> None:
         payload = _make_session_state().model_dump(mode="json")

@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import docker.errors  # type: ignore[import-untyped]
 import pytest
@@ -53,7 +53,7 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
-from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest import Environment, Manifest, ProcessEnvValue
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
@@ -62,9 +62,25 @@ from agents.sandbox.sandboxes.docker import (
     DockerSandboxSessionState,
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER
-from agents.sandbox.snapshot import NoopSnapshot
+from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult, Permissions
+
+
+class _RestorableSnapshot(SnapshotBase):
+    type: Literal["test-restorable-docker"] = "test-restorable-docker"
+
+    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None = None) -> None:
+        _ = (data, dependencies)
+
+    async def restore(self, *, dependencies: Dependencies | None = None) -> io.IOBase:
+        _ = dependencies
+        return io.BytesIO(b"")
+
+    async def restorable(self, *, dependencies: Dependencies | None = None) -> bool:
+        _ = dependencies
+        return True
 
 
 class _FakeDockerContainer:
@@ -1798,6 +1814,940 @@ async def test_docker_create_container_parses_registry_port_image_refs(
         await client._create_container("localhost:5000/myimg:latest")
 
     assert docker_client.images.calls == [("localhost:5000/myimg", "latest", False)]
+
+
+@pytest.mark.asyncio
+async def test_docker_resolves_process_environment_before_image_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "available-when-granted")
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    monkeypatch.delenv(name)
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+
+    def _unexpected_image_lookup(_image: str) -> bool:
+        raise AssertionError("image lookup must not start before environment resolution")
+
+    monkeypatch.setattr(client, "image_exists", _unexpected_image_lookup)
+
+    with pytest.raises(ValueError, match=f"variable {name!r} is not set"):
+        await client._create_container(DEFAULT_PYTHON_SANDBOX_IMAGE, manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_docker_client_binds_renamed_process_environment_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(source_name, "current-value")
+    manifest = Manifest(environment=Environment(value={"TOKEN": ProcessEnvValue(name=source_name)}))
+    client = DockerSandboxClient(
+        docker_client=cast(object, _FakeDockerClient()),
+        process_environment_bindings={"TOKEN": source_name},
+    )
+
+    trusted_manifest = client._validate_manifest_for_create(manifest)  # noqa: SLF001
+
+    assert await trusted_manifest.resolve_environment() == {"TOKEN": "current-value"}
+    with pytest.raises(ValueError, match="configure the sandbox client"):
+        await manifest.resolve_environment()
+
+
+@pytest.mark.parametrize("destination", ["INVALID=DEST", "INVALID\x00DEST"])
+@pytest.mark.asyncio
+async def test_docker_rejects_invalid_process_environment_destination_before_image_operations(
+    destination: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "secret")
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+
+    def _unexpected_image_lookup(_image: str) -> bool:
+        raise AssertionError("image lookup must not start before destination validation")
+
+    monkeypatch.setattr(client, "image_exists", _unexpected_image_lookup)
+
+    with pytest.raises(ValueError, match="must not contain '=' or NUL"):
+        Manifest(
+            environment=Environment(value={destination: ProcessEnvValue(name=name)})
+        )._with_process_environment_access((destination, name))
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_rebind_recreates_with_current_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(environment=Environment(value={name: ProcessEnvValue()}))
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+        network_mode="none",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="running", container_id="existing-container")
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+    existing.remove = lambda **_kwargs: None
+    replacement.start = lambda: None
+
+    reconnect_calls: list[str] = []
+
+    def reconnect(container_id: str) -> object:
+        reconnect_calls.append(container_id)
+        return existing
+
+    async def create_container(*args: object, **kwargs: object) -> _ResumeContainer:
+        _ = args
+        assert await cast(Manifest, kwargs["manifest"]).resolve_environment() == {
+            name: "current-value"
+        }
+        assert kwargs["network_mode"] == "none"
+        return replacement
+
+    monkeypatch.setattr(client, "get_container", reconnect)
+    monkeypatch.setattr(client, "_create_container", create_container)
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        return None
+
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+
+    async def start_without_workspace_setup(_session: BaseSandboxSession) -> None:
+        return None
+
+    monkeypatch.setattr(BaseSandboxSession, "start", start_without_workspace_setup)
+
+    resumed = await client.resume(state)
+    assert reconnect_calls == []
+    assert resumed.state.container_id == "existing-container"
+    assert await resumed.running() is True
+    assert reconnect_calls == ["existing-container"]
+    reconnect_calls.clear()
+    await resumed.start()
+
+    assert reconnect_calls == ["existing-container"]
+    assert resumed.state.container_id == "replacement"
+    assert resumed._inner._workspace_state_preserved_on_start() is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_persists_stopped_workspace_before_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="stopped", container_id="existing-container")
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+    events: list[str] = []
+
+    def start_existing() -> None:
+        events.append("start")
+        existing.status = "running"
+
+    def stop_existing() -> None:
+        events.append("stop")
+        existing.status = "stopped"
+
+    existing.start = start_existing
+    existing.stop = stop_existing
+    existing.remove = lambda **_kwargs: None
+    replacement.start = lambda: None
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        events.append("persist")
+
+    async def create_container(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        events.append("create")
+        return replacement
+
+    async def start_without_workspace_setup(_session: BaseSandboxSession) -> None:
+        return None
+
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    monkeypatch.setattr(client, "_create_container", create_container)
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+    monkeypatch.setattr(BaseSandboxSession, "start", start_without_workspace_setup)
+
+    resumed = await client.resume(state)
+    await resumed.start()
+
+    assert events[:4] == ["start", "persist", "stop", "create"]
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_restores_stopped_container_after_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="stopped", container_id="existing-container")
+    events: list[str] = []
+
+    def start_existing() -> None:
+        events.append("start")
+        existing.status = "running"
+
+    def stop_existing() -> None:
+        events.append("stop")
+        existing.status = "stopped"
+
+    async def fail_persist(_session: BaseSandboxSession) -> None:
+        events.append("persist")
+        raise RuntimeError("persist failed")
+
+    async def unexpected_create(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        raise AssertionError("replacement must not be created after persist failure")
+
+    existing.start = start_existing
+    existing.stop = stop_existing
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    monkeypatch.setattr(client, "_create_container", unexpected_create)
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", fail_persist)
+
+    resumed = await client.resume(state)
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert events == ["start", "persist", "stop"]
+    assert existing.status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_retires_stopped_container_when_restoring_stop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="stopped", container_id="existing-container")
+    remove_calls: list[dict[str, object]] = []
+
+    def start_existing() -> None:
+        existing.status = "running"
+
+    def fail_stop_existing() -> None:
+        raise RuntimeError("stop failed")
+
+    def remove_existing(**kwargs: object) -> None:
+        remove_calls.append(kwargs)
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        return None
+
+    async def unexpected_create(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        raise AssertionError("replacement must not be created after stop failure")
+
+    existing.start = start_existing
+    existing.stop = fail_stop_existing
+    existing.remove = remove_existing
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    monkeypatch.setattr(client, "_create_container", unexpected_create)
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+
+    resumed = await client.resume(state)
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert remove_calls == [{"force": True}]
+    assert resumed._inner._process_environment_resume_previous_container_id is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_kills_stopped_container_when_retirement_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="stopped", container_id="existing-container")
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+    kill_calls = 0
+    start_calls = 0
+
+    def start_existing() -> None:
+        nonlocal start_calls
+        start_calls += 1
+        existing.status = "running"
+
+    def fail_stop_existing() -> None:
+        raise RuntimeError("stop failed")
+
+    def fail_remove_existing(**_kwargs: object) -> None:
+        raise RuntimeError("remove failed")
+
+    def kill_existing() -> None:
+        nonlocal kill_calls
+        kill_calls += 1
+        existing.status = "stopped"
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        return None
+
+    async def create_container(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        return replacement
+
+    async def start_without_workspace_setup(_session: BaseSandboxSession) -> None:
+        return None
+
+    existing.start = start_existing
+    existing.stop = fail_stop_existing
+    existing.remove = fail_remove_existing
+    existing.kill = kill_existing
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    monkeypatch.setattr(client, "_create_container", create_container)
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+    monkeypatch.setattr(BaseSandboxSession, "start", start_without_workspace_setup)
+
+    resumed = await client.resume(state)
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert kill_calls == 1
+    assert existing.status == "stopped"
+    assert (
+        resumed._inner._process_environment_resume_previous_container_id  # noqa: SLF001
+        == "existing-container"
+    )
+
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert start_calls == 1
+    assert resumed.state.container_id == "replacement"
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_restores_inactivity_when_stopped_container_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="stopped", container_id="existing-container")
+    events: list[str] = []
+
+    def fail_start_existing() -> None:
+        events.append("start")
+        existing.status = "running"
+        raise RuntimeError("start failed")
+
+    def stop_existing() -> None:
+        events.append("stop")
+        existing.status = "stopped"
+
+    async def unexpected_persist(_session: BaseSandboxSession) -> None:
+        raise AssertionError("workspace persistence must not run after start failure")
+
+    existing.start = fail_start_existing
+    existing.stop = stop_existing
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", unexpected_persist)
+
+    resumed = await client.resume(state)
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert events == ["start", "stop"]
+    assert existing.status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_checks_snapshot_before_custom_environment_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NonRestorableSnapshot(_RestorableSnapshot):
+        type: Literal["test-non-restorable-docker"] = "test-non-restorable-docker"
+
+        async def restorable(self, *, dependencies: Dependencies | None = None) -> bool:
+            _ = dependencies
+            return False
+
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(environment=Environment(value={name: ProcessEnvValue(), "CUSTOM": "value"}))
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=_NonRestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="missing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    custom_resolution_calls = 0
+
+    async def unexpected_custom_resolution() -> dict[str, str]:
+        nonlocal custom_resolution_calls
+        custom_resolution_calls += 1
+        raise AssertionError("custom environment resolution must not run")
+
+    monkeypatch.setattr(
+        client,
+        "get_container",
+        lambda _container_id: (_ for _ in ()).throw(docker.errors.NotFound("missing")),
+    )
+    resumed = await client.resume(state)
+    monkeypatch.setattr(
+        resumed.state.manifest,
+        "_resolve_environment_without_process_values",
+        unexpected_custom_resolution,
+    )
+
+    with pytest.raises(ValueError, match="restorable snapshot"):
+        await resumed.start()
+
+    assert custom_resolution_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_docker_deferred_resume_running_handles_missing_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="missing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    monkeypatch.setattr(client, "get_container", lambda _container_id: None)
+
+    resumed = await client.resume(state)
+
+    assert await resumed.running() is False
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_redacts_failure_before_process_environment_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+
+    def fail_rebind(_manifest: Manifest) -> Manifest:
+        raise RuntimeError("provider-secret")
+
+    monkeypatch.setattr(client, "_bind_process_environment_manifest", fail_rebind)
+
+    with pytest.raises(RuntimeError, match="protected process environment") as exc_info:
+        await client.resume(state)
+
+    assert "provider-secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_revalidates_process_environment_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    reconnect_calls: list[str] = []
+
+    def reconnect(container_id: str) -> object:
+        reconnect_calls.append(container_id)
+        return _ResumeContainer(status="running", container_id=container_id)
+
+    monkeypatch.setattr(client, "get_container", reconnect)
+    resumed = await client.resume(state)
+    monkeypatch.delenv(name)
+
+    with pytest.raises(ValueError, match="is not set"):
+        await resumed.start()
+
+    assert reconnect_calls == []
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_rejects_noop_snapshot_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    reconnect_calls: list[str] = []
+
+    def reconnect(container_id: str) -> object:
+        reconnect_calls.append(container_id)
+        return _ResumeContainer(status="running", container_id=container_id)
+
+    monkeypatch.setattr(client, "get_container", reconnect)
+    resumed = await client.resume(state)
+
+    with pytest.raises(ValueError, match="restorable snapshot"):
+        await resumed.start()
+
+    assert reconnect_calls == []
+
+
+@pytest.mark.asyncio
+async def test_docker_retirement_failure_keeps_started_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    original_session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    previous_volume_name = docker_sandbox._docker_volume_name(  # noqa: SLF001
+        session_id=original_session_id,
+        mount_path=Path("/workspace/removed"),
+    )
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    previous_manifest = Manifest(
+        entries={
+            "removed": S3Mount(
+                bucket="bucket",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        },
+        environment=manifest.environment,
+    )
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+        session_id=original_session_id,
+    )
+    state._resume_persisted_manifest = previous_manifest  # noqa: SLF001
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(
+        status="running",
+        container_id="existing-container",
+        mounts=[
+            {"Type": "volume", "Name": previous_volume_name},
+            {"Type": "volume", "Name": "foreign-volume"},
+        ],
+    )
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+
+    def fail_retirement(**_kwargs: object) -> None:
+        raise RuntimeError("retire")
+
+    existing.remove = fail_retirement
+    replacement.start = lambda: None
+
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+
+    async def create_container(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        return replacement
+
+    monkeypatch.setattr(client, "_create_container", create_container)
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        assert _session.state.manifest is previous_manifest
+        return None
+
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+
+    async def start_without_workspace_setup(_session: BaseSandboxSession) -> None:
+        return None
+
+    monkeypatch.setattr(BaseSandboxSession, "start", start_without_workspace_setup)
+
+    resumed = await client.resume(state)
+    with pytest.raises(RuntimeError, match="protected process environment"):
+        await resumed.start()
+
+    assert resumed.state.container_id == "replacement"
+    assert resumed._inner._container is replacement  # noqa: SLF001
+    assert resumed._inner._process_environment_resume_start is None  # noqa: SLF001
+    assert resumed._inner._process_environment_resume_previous_volume_names == (  # noqa: SLF001
+        previous_volume_name,
+    )
+
+
+@pytest.mark.asyncio
+async def test_docker_resume_retains_preprocessed_volume_names_without_old_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    original_session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    persisted_manifest = Manifest(
+        entries={
+            "removed": S3Mount(
+                bucket="bucket",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        },
+        environment=Environment(value={name: ProcessEnvValue()}),
+    )
+    expected_volume_names = tuple(
+        docker_sandbox._docker_volume_names_for_manifest(  # noqa: SLF001
+            persisted_manifest,
+            session_id=original_session_id,
+        )
+    )
+    state = DockerSandboxSessionState(
+        manifest=Manifest(environment=Environment(value={name: ProcessEnvValue()})),
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="missing-container",
+        session_id=original_session_id,
+    )
+    state._resume_persisted_manifest = persisted_manifest  # noqa: SLF001
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(docker.errors.NotFound("missing")),
+        allowed_process_environment_keys={name},
+    )
+
+    resumed = await client.resume(state)
+
+    assert (
+        resumed._inner._process_environment_resume_previous_volume_names  # noqa: SLF001
+        == expected_volume_names
+    )
+
+
+def test_docker_failed_replacement_cleanup_retains_candidate_for_retry() -> None:
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    current = _ResumeContainer(status="running", container_id="existing-container")
+    candidate = _ResumeContainer(status="created", container_id="candidate")
+    remove_calls = 0
+
+    def remove_candidate(**_kwargs: object) -> None:
+        nonlocal remove_calls
+        remove_calls += 1
+        if remove_calls == 1:
+            raise RuntimeError("candidate cleanup failed")
+
+    candidate.remove = remove_candidate
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(current))
+    session = DockerSandboxSession.from_state(
+        state,
+        container=current,
+        docker_client=client.docker_client,
+    )
+    session._process_environment_failed_candidate_container = candidate  # noqa: SLF001
+    session._process_environment_failed_candidate_container_id = "candidate"  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="candidate cleanup failed"):
+        session._cleanup_process_environment_failed_candidate()  # noqa: SLF001
+
+    assert session._process_environment_failed_candidate_container is candidate  # noqa: SLF001
+    assert session._process_environment_failed_candidate_container_id == "candidate"  # noqa: SLF001
+
+    session._cleanup_process_environment_failed_candidate()  # noqa: SLF001
+
+    assert remove_calls == 2
+    assert session._process_environment_failed_candidate_container is None  # noqa: SLF001
+    assert session._process_environment_failed_candidate_container_id is None  # noqa: SLF001
+
+
+def test_docker_failed_replacement_cleanup_clears_missing_candidate() -> None:
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    current = _ResumeContainer(status="running", container_id="existing-container")
+    candidate = _ResumeContainer(status="created", container_id="candidate")
+
+    def remove_missing_candidate(**_kwargs: object) -> None:
+        raise docker.errors.NotFound("candidate missing")
+
+    candidate.remove = remove_missing_candidate
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(current))
+    session = DockerSandboxSession.from_state(
+        state,
+        container=current,
+        docker_client=client.docker_client,
+    )
+    session._process_environment_failed_candidate_container = candidate  # noqa: SLF001
+    session._process_environment_failed_candidate_container_id = "candidate"  # noqa: SLF001
+
+    session._cleanup_process_environment_failed_candidate()  # noqa: SLF001
+
+    assert session._process_environment_failed_candidate_container is None  # noqa: SLF001
+    assert session._process_environment_failed_candidate_container_id is None  # noqa: SLF001
+
+
+def test_docker_previous_retirement_clears_missing_container() -> None:
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="replacement",
+    )
+    current = _ResumeContainer(status="running", container_id="replacement")
+    previous = _ResumeContainer(status="running", container_id="previous")
+
+    def remove_missing_previous(**_kwargs: object) -> None:
+        raise docker.errors.NotFound("previous missing")
+
+    previous.remove = remove_missing_previous
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(current))
+    session = DockerSandboxSession.from_state(
+        state,
+        container=current,
+        docker_client=client.docker_client,
+    )
+    session._process_environment_resume_previous_container_id = "previous"  # noqa: SLF001
+
+    session._retire_process_environment_previous_resources(  # noqa: SLF001
+        previous_container=previous
+    )
+
+    assert session._process_environment_resume_previous_container_id is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_docker_shutdown_clears_missing_deferred_container() -> None:
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="previous",
+    )
+    current = _ResumeContainer(status="running", container_id="previous")
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(current))
+    session = DockerSandboxSession.from_state(
+        state,
+        container=current,
+        docker_client=client.docker_client,
+    )
+    session._container = None  # noqa: SLF001
+    session._process_environment_resume_previous_container_id = "previous"  # noqa: SLF001
+
+    def load_missing(_container_id: str) -> _ResumeContainer:
+        raise docker.errors.NotFound("previous missing")
+
+    session._process_environment_resume_previous_container_loader = load_missing  # noqa: SLF001
+
+    await session._shutdown_backend()  # noqa: SLF001
+
+    assert session._process_environment_resume_previous_container_id is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_docker_shutdown_surfaces_deferred_container_loader_failure() -> None:
+    state = DockerSandboxSessionState(
+        manifest=Manifest(),
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="previous",
+    )
+    current = _ResumeContainer(status="running", container_id="previous")
+    client = DockerSandboxClient(docker_client=_ResumeDockerClient(current))
+    session = DockerSandboxSession.from_state(
+        state,
+        container=current,
+        docker_client=client.docker_client,
+    )
+    session._container = None  # noqa: SLF001
+    session._process_environment_resume_previous_container_id = "previous"  # noqa: SLF001
+
+    def fail_load(_container_id: str) -> _ResumeContainer:
+        raise RuntimeError("loader failed")
+
+    session._process_environment_resume_previous_container_loader = fail_load  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="loader failed"):
+        await session._shutdown_backend()  # noqa: SLF001
+
+    assert session._process_environment_resume_previous_container_id == "previous"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_docker_protected_create_surfaces_failed_cleanup_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(environment=Environment(value={name: ProcessEnvValue()}))
+
+    class _FailingCleanupStartedContainer(_StartedContainer):
+        id = "protected-container"
+
+        def remove(self, **kwargs: object) -> None:
+            super().remove(**kwargs)
+            raise RuntimeError("cleanup failed with current-value")
+
+    container = _FailingCleanupStartedContainer()
+    docker_client = _DeleteDockerClient(container=container, volumes={})
+    client = DockerSandboxClient(
+        docker_client=cast(object, docker_client),
+        allowed_process_environment_keys={name},
+    )
+
+    async def create_container(*_args: object, **_kwargs: object) -> _StartedContainer:
+        return container
+
+    def fail_snapshot_resolution(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("snapshot failed with current-value")
+
+    monkeypatch.setattr(client, "_create_container", create_container)
+    monkeypatch.setattr(docker_sandbox, "resolve_snapshot", fail_snapshot_resolution)
+
+    with pytest.raises(ValueError, match="container_id='protected-container'") as exc_info:
+        await client.create(
+            manifest=manifest,
+            options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+        )
+
+    assert "current-value" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_docker_concurrent_resume_start_runs_replacement_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "SANDBOX_TEST_PROCESS_ENV_VALUE"
+    monkeypatch.setenv(name, "current-value")
+    manifest = Manifest(
+        environment=Environment(value={name: ProcessEnvValue()})
+    )._with_process_environment_access(name)
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=_RestorableSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+    )
+    client = DockerSandboxClient(
+        docker_client=_ResumeDockerClient(_ResumeContainer(status="running")),
+        allowed_process_environment_keys={name},
+    )
+    existing = _ResumeContainer(status="running", container_id="existing-container")
+    replacement = _ResumeContainer(status="created", container_id="replacement")
+    existing.remove = lambda **_kwargs: None
+    replacement.start = lambda: None
+    monkeypatch.setattr(client, "get_container", lambda _container_id: existing)
+    create_calls = 0
+
+    async def create_container(*_args: object, **_kwargs: object) -> _ResumeContainer:
+        nonlocal create_calls
+        create_calls += 1
+        return replacement
+
+    monkeypatch.setattr(client, "_create_container", create_container)
+
+    async def persist_snapshot(_session: BaseSandboxSession) -> None:
+        return None
+
+    monkeypatch.setattr(DockerSandboxSession, "_persist_snapshot", persist_snapshot)
+    shared_start_calls = 0
+
+    async def start_without_workspace_setup(_session: BaseSandboxSession) -> None:
+        nonlocal shared_start_calls
+        shared_start_calls += 1
+        replacement.status = "running"
+
+    monkeypatch.setattr(BaseSandboxSession, "start", start_without_workspace_setup)
+
+    resumed = await client.resume(state)
+    await asyncio.gather(resumed.start(), resumed.start())
+
+    assert create_calls == 1
+    assert shared_start_calls == 1
 
 
 @pytest.mark.asyncio

@@ -1115,6 +1115,10 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
         manifest = manifest if manifest is not None else Manifest()
+        manifest._reject_process_environment_values(
+            backend_id="unix_local",
+            supported_alternative="use DockerSandboxClient",
+        )
         _assert_unix_local_host_path_grants_unsupported(manifest)
         self._validate_manifest_for_create(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root
@@ -1175,6 +1179,10 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="unix_local",
+            supported_alternative="use DockerSandboxClient instead",
+        )
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)

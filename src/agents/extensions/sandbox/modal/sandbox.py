@@ -2110,6 +2110,10 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if options is None:
             raise ValueError("ModalSandboxClient.create requires options with app_name")
         manifest = manifest if manifest is not None else Manifest()
+        manifest._reject_process_environment_values(
+            backend_id="modal",
+            supported_alternative="use DockerSandboxClient",
+        )
         self._validate_manifest_for_create(manifest)
         app_name = options.app_name
         if not app_name:
@@ -2289,6 +2293,10 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="modal",
+            supported_alternative="use DockerSandboxClient instead",
+        )
         if _manifest_has_configured_mount_authority(state.manifest) and not (
             state.mount_authority_rebound
         ):

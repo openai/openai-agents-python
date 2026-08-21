@@ -1697,6 +1697,10 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         if options is None:
             raise ValueError("E2BSandboxClient.create requires options")
         manifest = manifest if manifest is not None else Manifest()
+        manifest._reject_process_environment_values(
+            backend_id="e2b",
+            supported_alternative="use DockerSandboxClient",
+        )
         self._validate_manifest_for_create(manifest)
 
         sandbox_type = _coerce_sandbox_type(options.sandbox_type)
@@ -1777,6 +1781,10 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         if not isinstance(state, E2BSandboxSessionState):
             raise TypeError("E2BSandboxClient.resume expects an E2BSandboxSessionState")
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="e2b",
+            supported_alternative="use DockerSandboxClient instead",
+        )
 
         sandbox_type = _coerce_sandbox_type(state.sandbox_type)
         SandboxClass = _import_sandbox_class(sandbox_type)

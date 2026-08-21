@@ -1584,6 +1584,10 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
 
         if manifest is None:
             manifest = Manifest()
+        manifest._reject_process_environment_values(
+            backend_id="cloudflare",
+            supported_alternative="use DockerSandboxClient",
+        )
         self._validate_manifest_for_create(manifest)
         if manifest.root != "/workspace":
             raise ConfigurationError(
@@ -1636,6 +1640,10 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
                 "CloudflareSandboxClient.resume expects a CloudflareSandboxSessionState"
             )
         state.assert_path_grants_rebound()
+        state.manifest._reject_process_environment_values(
+            backend_id="cloudflare",
+            supported_alternative="use DockerSandboxClient instead",
+        )
         if state.mount_authority_rebound or _manifest_has_configured_mount_authority(
             state.manifest
         ):

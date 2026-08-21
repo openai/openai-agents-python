@@ -40,7 +40,7 @@ from agents.sandbox.entries.mounts.patterns import (
     RcloneMountPattern,
     S3FilesMountPattern,
 )
-from agents.sandbox.manifest import EnvValue, StrEnvValue
+from agents.sandbox.manifest import EnvValue, ProcessEnvValue, StrEnvValue
 from agents.sandbox.session.sandbox_client import BaseSandboxClientOptions
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, RemoteSnapshot, SnapshotBase
@@ -901,6 +901,7 @@ def test_core_discriminator_type_strings_are_stable() -> None:
         InContainerMountStrategy: "in_container",
         DockerVolumeMountStrategy: "docker_volume",
         StrEnvValue: "str",
+        ProcessEnvValue: "process_env",
     }
 
     for cls, expected_type in expected_types.items():
