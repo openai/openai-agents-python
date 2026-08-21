@@ -100,3 +100,15 @@ def test_streaming_stt_websocket_headers_skip_openai_omission_sentinels() -> Non
     assert "OpenAI-Organization" not in headers
     assert "OpenAI-Project" not in headers
     assert headers["OpenAI-Log-Session"] == "1"
+
+
+def test_streaming_stt_websocket_headers_omit_removes_inherited_header() -> None:
+    client = _mock_client(
+        auth_headers={"Authorization": "Bearer sk-client"},
+        default_headers={"authorization": omit},
+    )
+
+    headers = _prepare_websocket_headers(client)
+
+    assert all(key.lower() != "authorization" for key in headers)
+    assert headers["OpenAI-Log-Session"] == "1"
