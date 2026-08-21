@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 
-from ._tool_identity import HostedMCPApprovalKey, get_tool_call_namespace, tool_trace_name
+from ._tool_identity import (
+    FunctionToolLookupKey,
+    HostedMCPApprovalKey,
+    get_function_tool_lookup_key,
+    get_tool_call_namespace,
+    serialize_function_tool_lookup_key,
+    tool_trace_name,
+)
 from ._tool_invocation import tool_invocation_identity, tool_invocation_identity_and_scope
 from .agent_tool_state import (
     get_agent_tool_state_scope,
@@ -47,22 +54,22 @@ def _canonical_tool_request(tool_arguments: str) -> bytes:
         parsed_arguments = json.loads(tool_arguments)
         canonical_arguments = json.dumps(
             parsed_arguments,
-            ensure_ascii=False,
+            ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
     except (json.JSONDecodeError, TypeError, ValueError):
-        return b"raw\0" + tool_arguments.encode("utf-8")
-    return b"json\0" + canonical_arguments.encode("utf-8")
+        return b"raw\0" + tool_arguments.encode("utf-8", errors="surrogatepass")
+    return b"json\0" + canonical_arguments.encode("ascii")
 
 
 def _compute_tool_action_ref(
     agent_name: str | None,
-    qualified_tool_name: str,
+    tool_lookup_key: FunctionToolLookupKey | None,
     tool_arguments: str,
 ) -> str | None:
-    if agent_name is None:
+    if agent_name is None or tool_lookup_key is None:
         return None
 
     request_digest = hashlib.sha256(_canonical_tool_request(tool_arguments)).hexdigest()
@@ -70,12 +77,12 @@ def _compute_tool_action_ref(
         {
             "agent_id": agent_name,
             "request_digest": request_digest,
-            "tool_name": qualified_tool_name,
+            "tool_identity": serialize_function_tool_lookup_key(tool_lookup_key),
         },
-        ensure_ascii=False,
+        ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8")
+    ).encode("ascii")
     digest = hashlib.sha256(_ACTION_REF_DOMAIN + commitment).hexdigest()
     return f"act_v1_{digest}"
 
@@ -160,7 +167,7 @@ class ToolContext(RunContextWrapper[TContext]):
             self.run_config = None
         self._action_ref = _compute_tool_action_ref(
             agent.name if agent is not None else None,
-            self.qualified_tool_name,
+            get_function_tool_lookup_key(self.tool_name, self.tool_namespace),
             self.tool_arguments,
         )
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
