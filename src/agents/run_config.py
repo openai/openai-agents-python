@@ -51,7 +51,7 @@ DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
 
 def _default_trace_include_sensitive_data() -> bool:
     """Return the default for trace_include_sensitive_data based on environment."""
-    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "false")
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
