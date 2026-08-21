@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -1986,6 +1987,7 @@ async def test_websocket_model_passes_keepalive_options_to_connect(monkeypatch):
     assert opened is ws
     assert captured_kwargs["ws_url"] == "wss://example.test/v1/responses"
     assert captured_kwargs["additional_headers"] == {"Authorization": "Bearer test-key"}
+    assert captured_kwargs["logger"].isEnabledFor(logging.DEBUG) is False
     assert captured_kwargs["open_timeout"] == 10.0
     assert captured_kwargs["ping_interval"] == 45.0
     assert captured_kwargs["ping_timeout"] is None
