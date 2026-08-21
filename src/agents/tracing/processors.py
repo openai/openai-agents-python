@@ -320,7 +320,12 @@ class BackendSpanExporter(TracingExporter):
 
     def _value_json_size_bytes(self, value: Any) -> int:
         try:
-            serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            serialized = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
         except (TypeError, ValueError):
             return self._OPENAI_TRACING_MAX_FIELD_BYTES + 1
         return len(serialized.encode("utf-8"))
