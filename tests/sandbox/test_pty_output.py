@@ -57,3 +57,28 @@ async def test_collect_pty_output_drains_chunks_added_when_done() -> None:
 
     assert output == b"before done after done"
     assert original_token_count is None
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_drains_chunks_queued_when_wait_times_out() -> None:
+    output_chunks: deque[bytes] = deque()
+
+    class TimeoutAfterQueueing:
+        async def wait(self) -> None:
+            output_chunks.append(b"queued at timeout")
+            raise asyncio.TimeoutError
+
+        def clear(self) -> None:
+            pass
+
+    output, original_token_count = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=TimeoutAfterQueueing(),  # type: ignore[arg-type]
+        is_done=lambda: False,
+        yield_time_ms=500,
+        max_output_tokens=None,
+    )
+
+    assert output == b"queued at timeout"
+    assert original_token_count is None

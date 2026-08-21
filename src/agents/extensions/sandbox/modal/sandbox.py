@@ -1010,6 +1010,16 @@ class ModalSandboxSession(BaseSandboxSession):
                     break
                 await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
+        # A stream task can complete between the final poll and the deadline check.
+        # Perform one last non-blocking read so that completed output is not deferred
+        # to a later pty_write_stdin call.
+        stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
+        stderr_chunk = await self._read_modal_stream(entry=entry, stream_name="stderr")
+        if stdout_chunk:
+            chunks.extend(stdout_chunk)
+        if stderr_chunk:
+            chunks.extend(stderr_chunk)
+
         text = chunks.decode("utf-8", errors="replace")
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count

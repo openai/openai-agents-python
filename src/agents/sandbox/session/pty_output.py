@@ -45,6 +45,12 @@ async def collect_pty_output(
             break
         output_notify.clear()
 
+    # A producer can enqueue output after the last top-of-loop drain but before the
+    # notification wait times out. Capture that tail before returning the snapshot.
+    async with output_lock:
+        while output_chunks:
+            output.extend(output_chunks.popleft())
+
     text = output.decode("utf-8", errors="replace")
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count
