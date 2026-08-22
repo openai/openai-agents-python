@@ -614,9 +614,9 @@ class LitellmModel(Model):
             stream_options = {"include_usage": model_settings.include_usage}
 
         extra_kwargs: dict[str, Any] = {}
-        if model_settings.extra_query:
+        if model_settings.extra_query is not None:
             extra_kwargs["extra_query"] = copy(model_settings.extra_query)
-        if model_settings.metadata:
+        if model_settings.metadata is not None:
             extra_kwargs["metadata"] = copy(model_settings.metadata)
         if model_settings.extra_body is not None:
             extra_body = copy(model_settings.extra_body)

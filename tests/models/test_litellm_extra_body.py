@@ -24,6 +24,43 @@ def test_falsy_reasoning_effort_is_preserved() -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_empty_extra_query_and_metadata_are_forwarded(monkeypatch):
+    """
+    Forward empty `extra_query` and `metadata` dicts instead of dropping them.
+
+    The OpenAI and AnyLLM model paths forward these settings whenever they are
+    not `None`; the falsy check here dropped `{}`, silently discarding an
+    explicitly configured value and diverging from those paths.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="ok")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = ModelSettings(extra_query={}, metadata={})
+    model = LitellmModel(model="test-model")
+
+    await model.get_response(
+        system_instructions=None,
+        input=[],
+        model_settings=settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    assert captured["extra_query"] == {}
+    assert captured["metadata"] == {}
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_extra_body_is_forwarded(monkeypatch):
     """
     Forward `extra_body` via LiteLLM's dedicated kwarg.
