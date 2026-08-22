@@ -386,10 +386,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     exc,
                 )
                 self._errors[server] = exc
-        if self.drop_failed_servers:
-            self._active_servers = [
-                server for server in self._all_servers if server in self._connected_servers
-            ]
+        self._refresh_active_servers()
 
     async def _run_with_timeout(
         self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
@@ -424,8 +421,9 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
     def _refresh_active_servers(self) -> None:
         if self.drop_failed_servers:
-            failed = set(self._failed_server_set)
-            self._active_servers = [server for server in self._all_servers if server not in failed]
+            self._active_servers = [
+                server for server in self._all_servers if server in self._connected_servers
+            ]
         else:
             self._active_servers = list(self._all_servers)
 
