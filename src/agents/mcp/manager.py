@@ -386,6 +386,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     exc,
                 )
                 self._errors[server] = exc
+        if self.drop_failed_servers:
+            self._active_servers = [
+                server for server in self._all_servers if server in self._connected_servers
+            ]
 
     async def _run_with_timeout(
         self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
