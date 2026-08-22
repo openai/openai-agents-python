@@ -1,4 +1,9 @@
-from .events import VoiceStreamEvent, VoiceStreamEventAudio, VoiceStreamEventLifecycle
+from .events import (
+    VoiceStreamEvent,
+    VoiceStreamEventAudio,
+    VoiceStreamEventError,
+    VoiceStreamEventLifecycle,
+)
 from .exceptions import STTWebsocketConnectionError
 from .input import AudioInput, StreamedAudioInput
 from .model import (
@@ -41,6 +46,7 @@ __all__ = [
     "OpenAISTTModel",
     "OpenAITTSModel",
     "VoiceStreamEventAudio",
+    "VoiceStreamEventError",
     "VoiceStreamEventLifecycle",
     "VoiceStreamEvent",
     "VoicePipeline",

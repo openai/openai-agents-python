@@ -12,8 +12,8 @@ from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from importlib.util import find_spec
 from pathlib import Path
-from types import FunctionType, TracebackType
-from typing import Any, ForwardRef, cast, get_origin, get_type_hints
+from types import FunctionType, TracebackType, UnionType
+from typing import Any, ForwardRef, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import typing_extensions
 from pydantic import BaseModel
@@ -36,7 +36,9 @@ class SubmoduleExportPolicy:
     modules: dict[str, dict[str, dict[str, str]]]
     dependency_installations: tuple[OptionalDependencyInstallation, ...]
     canonical_imports: tuple[dict[str, str], ...] = ()
+    public_class_contracts: tuple[dict[str, Any], ...] = ()
     public_properties: tuple[dict[str, Any], ...] = ()
+    public_type_aliases: tuple[dict[str, str], ...] = ()
     public_typed_dicts: tuple[dict[str, Any], ...] = ()
 
 
@@ -56,7 +58,9 @@ def load_submodule_export_policy(path: Path) -> SubmoduleExportPolicy:
             "canonical_imports",
             "modules",
             "optional_dependencies",
+            "public_class_contracts",
             "public_properties",
+            "public_type_aliases",
             "public_typed_dicts",
         }
     )
@@ -164,7 +168,11 @@ def load_submodule_export_policy(path: Path) -> SubmoduleExportPolicy:
             )
         ),
         canonical_imports=_canonical_import_policy(value.get("canonical_imports", [])),
+        public_class_contracts=_public_class_contract_policy(
+            value.get("public_class_contracts", [])
+        ),
         public_properties=_public_property_policy(value.get("public_properties", [])),
+        public_type_aliases=_public_type_alias_policy(value.get("public_type_aliases", [])),
         public_typed_dicts=_public_typed_dict_policy(value.get("public_typed_dicts", [])),
     )
 
@@ -205,7 +213,8 @@ def _public_property_policy(value: object) -> tuple[dict[str, Any], ...]:
         if not isinstance(entry, dict):
             raise ValueError("submodule export policy public_properties entries must be objects")
         owner_fields = {"class_name", "factory_name"} & set(entry)
-        if len(owner_fields) != 1 or set(entry) != {"module", "names", *owner_fields}:
+        required_fields = {"module", "names", *owner_fields}
+        if len(owner_fields) != 1 or set(entry) != required_fields:
             raise ValueError(
                 "submodule export policy public_properties entries must contain exactly "
                 "module, names, and one of class_name or factory_name"
@@ -240,7 +249,75 @@ def _public_property_policy(value: object) -> tuple[dict[str, Any], ...]:
                 f"{module_name}.{owner_name}"
             )
         identities.add(identity)
-        entries.append({owner_field: owner_name, "module": module_name, "names": list(names)})
+        normalized_entry = {
+            owner_field: owner_name,
+            "module": module_name,
+            "names": list(names),
+        }
+        entries.append(normalized_entry)
+    return tuple(entries)
+
+
+def _public_class_contract_policy(value: object) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise ValueError("submodule export policy public_class_contracts must be a list")
+    required_fields = {"class_name", "module"}
+    contract_fields = {"abstract", "abstract_members"}
+    entries: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for entry in value:
+        if (
+            not isinstance(entry, dict)
+            or not required_fields.issubset(entry)
+            or not set(entry).issubset(required_fields | contract_fields)
+            or not (set(entry) & contract_fields)
+        ):
+            raise ValueError(
+                "submodule export policy public_class_contracts entries must contain exactly "
+                "module, class_name, and at least one of abstract or abstract_members"
+            )
+        module_name = entry["module"]
+        class_name = entry["class_name"]
+        if type(module_name) is not str or not module_name:
+            raise ValueError(
+                "submodule export policy public_class_contracts module must be a non-empty string"
+            )
+        if type(class_name) is not str or not class_name:
+            raise ValueError(
+                "submodule export policy public_class_contracts class_name must be a non-empty "
+                "string"
+            )
+        if "abstract" in entry and type(entry["abstract"]) is not bool:
+            raise ValueError(
+                "submodule export policy public_class_contracts abstract must be a boolean"
+            )
+        abstract_members = entry.get("abstract_members")
+        if "abstract_members" in entry and (
+            not isinstance(abstract_members, list)
+            or not abstract_members
+            or not all(type(name) is str and name for name in abstract_members)
+            or len(abstract_members) != len(set(abstract_members))
+        ):
+            raise ValueError(
+                "submodule export policy public_class_contracts abstract_members must be a "
+                "non-empty list of unique non-empty strings"
+            )
+        identity = (module_name, class_name)
+        if identity in identities:
+            raise ValueError(
+                "submodule export policy public_class_contracts must not repeat "
+                f"{module_name}.{class_name}"
+            )
+        identities.add(identity)
+        normalized_entry: dict[str, Any] = {
+            "class_name": class_name,
+            "module": module_name,
+        }
+        if "abstract" in entry:
+            normalized_entry["abstract"] = entry["abstract"]
+        if "abstract_members" in entry:
+            normalized_entry["abstract_members"] = sorted(abstract_members)
+        entries.append(normalized_entry)
     return tuple(entries)
 
 
@@ -285,6 +362,33 @@ def _public_typed_dict_policy(value: object) -> tuple[dict[str, Any], ...]:
             )
         identities.add(identity)
         entries.append({"class_name": class_name, "module": module_name, "names": list(names)})
+    return tuple(entries)
+
+
+def _public_type_alias_policy(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        raise ValueError("submodule export policy public_type_aliases must be a list")
+    required_fields = {"module", "name"}
+    entries: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != required_fields:
+            raise ValueError(
+                "submodule export policy public_type_aliases entries must contain exactly "
+                "module and name"
+            )
+        if not all(type(entry[field]) is str and entry[field] for field in required_fields):
+            raise ValueError(
+                "submodule export policy public_type_aliases values must be non-empty strings"
+            )
+        identity = (entry["module"], entry["name"])
+        if identity in identities:
+            raise ValueError(
+                "submodule export policy public_type_aliases must not repeat "
+                f"{entry['module']}.{entry['name']}"
+            )
+        identities.add(identity)
+        entries.append({"module": entry["module"], "name": entry["name"]})
     return tuple(entries)
 
 
@@ -413,6 +517,11 @@ def _default_contract(value: object) -> dict[str, object]:
             "type": value_type,
             "name": value.name,
             "value": _default_contract(value.value),
+        }
+    if isinstance(value, type):
+        return {
+            "kind": "type",
+            "identity": f"{value.__module__}.{value.__qualname__}",
         }
     if isinstance(value, tuple | list):
         return {
@@ -723,6 +832,31 @@ def _merge_public_properties(
     return result
 
 
+def _merge_public_class_contracts(
+    existing: Iterable[Mapping[str, Any]], promoted: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    result = [deepcopy(dict(entry)) for entry in existing]
+    by_identity = {(entry["module"], entry["class_name"]): entry for entry in result}
+    for entry_value in promoted:
+        entry = deepcopy(dict(entry_value))
+        identity = (entry["module"], entry["class_name"])
+        previous = by_identity.get(identity)
+        if previous is None:
+            result.append(entry)
+            by_identity[identity] = entry
+            continue
+        for field_name in ("abstract", "abstract_members"):
+            if field_name not in entry:
+                continue
+            previous_value = previous.setdefault(field_name, entry[field_name])
+            if previous_value != entry[field_name]:
+                raise ValueError(
+                    "release policy public class contract conflicts with the released contract "
+                    f"for {entry['module']}.{entry['class_name']} field {field_name}"
+                )
+    return result
+
+
 def _public_property_identity(entry: Mapping[str, Any]) -> tuple[str, str, str]:
     if "class_name" in entry:
         return ("class_name", cast(str, entry["module"]), cast(str, entry["class_name"]))
@@ -742,6 +876,86 @@ def _annotation_contract(annotation: object) -> str:
             if annotation_text.startswith(qualified_prefix):
                 return f"{wrapper_name}[{annotation_text.removeprefix(qualified_prefix)}"
     return annotation_text
+
+
+def _sorted_type_alias_members(members: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(
+        members,
+        key=lambda member: (
+            cast(str, member["kind"]),
+            json.dumps(member, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def _type_alias_definition(value: object) -> dict[str, object]:
+    origin = get_origin(value)
+    if origin is Literal:
+        literal_values: list[dict[str, object]] = []
+        for literal_value in get_args(value):
+            literal_contract = _default_contract(literal_value)
+            if literal_contract["kind"] not in {"literal", "enum"}:
+                raise TypeError(
+                    "public type alias Literal members must use supported literal or enum values"
+                )
+            literal_values.append(literal_contract)
+        return {
+            "kind": "literal",
+            "values": _sorted_type_alias_members(literal_values),
+        }
+    if origin in {Union, UnionType}:
+        members = [_type_alias_definition(member) for member in get_args(value)]
+        return {
+            "kind": "union",
+            "members": _sorted_type_alias_members(members),
+        }
+    if isinstance(value, type) and (
+        value.__module__ == "agents" or value.__module__.startswith("agents.")
+    ):
+        return {
+            "kind": "type",
+            "identity": f"{value.__module__}.{value.__qualname__}",
+        }
+    raise TypeError(f"unsupported public type alias member: {value!r}")
+
+
+def _public_type_alias_contract(
+    policy_entries: Iterable[Mapping[str, str]],
+    agents_module: Any | None,
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    missing = object()
+    for policy_entry in policy_entries:
+        module_name = policy_entry["module"]
+        alias_name = policy_entry["name"]
+        module = _import_contract_module(module_name, agents_module)
+        alias = getattr(module, alias_name, missing)
+        if alias is missing:
+            raise ValueError(
+                f"Cannot promote public type alias {module_name}.{alias_name} because it is missing"
+            )
+        try:
+            definition = _type_alias_definition(alias)
+        except TypeError as error:
+            raise ValueError(
+                f"Cannot promote public type alias {module_name}.{alias_name}: {error}"
+            ) from None
+        entries.append({"definition": definition, "module": module_name, "name": alias_name})
+    return entries
+
+
+def _merge_public_type_aliases(
+    existing: Iterable[Mapping[str, Any]], promoted: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    result = [deepcopy(dict(entry)) for entry in existing]
+    identities = {(entry["module"], entry["name"]) for entry in result}
+    for entry_value in promoted:
+        entry = deepcopy(dict(entry_value))
+        identity = (entry["module"], entry["name"])
+        if identity not in identities:
+            result.append(entry)
+            identities.add(identity)
+    return result
 
 
 def _typed_dict_field_is_required(typed_dict: type, name: str, annotation: object) -> bool:
@@ -879,9 +1093,21 @@ def _optional_dependency_is_unsupported_for_contract(
 def _optional_dependency_for_binding(
     contract: Mapping[str, Any], module_name: str, binding_name: str
 ) -> str | None:
-    return _optional_dependency_for_binding_in_modules(
+    dependency = _optional_dependency_for_binding_in_modules(
         contract.get("required_submodule_exports", {}), module_name, binding_name
     )
+    if dependency is not None:
+        return dependency
+    canonical_dependencies = {
+        _optional_dependency_for_binding_in_modules(
+            contract.get("required_submodule_exports", {}), entry["module"], entry["name"]
+        )
+        for entry in contract.get("canonical_imports", [])
+        if entry["canonical_module"] == module_name and entry["canonical_name"] == binding_name
+    }
+    if canonical_dependencies and len(canonical_dependencies) == 1:
+        return next(iter(canonical_dependencies))
+    return None
 
 
 def _optional_dependency_for_binding_in_modules(
@@ -913,6 +1139,17 @@ def _optional_dependency_for_module_import(
     dependencies = {optional_bindings.get(name) or optional_exports.get(name) for name in names}
     if names and len(dependencies) == 1 and None not in dependencies:
         return cast(str, next(iter(dependencies)))
+    if names:
+        return None
+    canonical_dependencies = {
+        _optional_dependency_for_binding(contract, entry["module"], entry["name"])
+        for entry in contract.get("canonical_imports", [])
+        if entry["canonical_module"] == module_name
+    }
+    if canonical_dependencies and len(canonical_dependencies) == 1:
+        dependency = next(iter(canonical_dependencies))
+        if dependency is not None:
+            return dependency
     return None
 
 
@@ -1086,9 +1323,19 @@ def build_released_api_contract(
     updated["required_top_level_exports"] = ordered_exports
     updated["callables"] = callables
     updated["canonical_imports"] = canonical_imports
+    updated["public_class_contracts"] = _merge_public_class_contracts(
+        contract.get("public_class_contracts", []),
+        release_policy.public_class_contracts if release_policy is not None else (),
+    )
     updated["public_properties"] = _merge_public_properties(
         contract.get("public_properties", []),
         release_policy.public_properties if release_policy is not None else (),
+    )
+    updated["public_type_aliases"] = _merge_public_type_aliases(
+        contract.get("public_type_aliases", []),
+        _public_type_alias_contract(release_policy.public_type_aliases, agents_module)
+        if release_policy is not None
+        else (),
     )
     updated["public_typed_dicts"] = _merge_public_typed_dicts(
         contract.get("public_typed_dicts", []),
@@ -1220,7 +1467,9 @@ def build_released_api_contract(
         "callables",
         "optional_dependency_unsupported_platforms",
         "platform_import_errors",
+        "public_class_contracts",
         "public_properties",
+        "public_type_aliases",
         "public_typed_dicts",
         "public_modules",
         "required_submodule_exports",
@@ -1361,6 +1610,48 @@ def _validate_public_property_contract(
     return errors
 
 
+def _validate_public_class_contract(
+    contract: dict[str, Any],
+    agents_module: Any | None,
+    *,
+    unsupported_platforms: Mapping[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    unsupported_platforms = unsupported_platforms or {}
+    for entry in contract.get("public_class_contracts", []):
+        module_name = entry["module"]
+        class_name = entry["class_name"]
+        optional_dependency = _optional_dependency_for_binding(contract, module_name, class_name)
+        if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
+            optional_dependency, unsupported_platforms
+        ):
+            continue
+        try:
+            module = _import_contract_module(module_name, agents_module)
+        except Exception as error:
+            errors.append(f"Failed to import released module {module_name}: {error!r}")
+            continue
+        class_value = getattr(module, class_name, None)
+        if not isinstance(class_value, type):
+            errors.append(f"Missing released public class {module_name}.{class_name}")
+            continue
+        if "abstract" in entry and inspect.isabstract(class_value) != entry["abstract"]:
+            expected_state = "abstract" if entry["abstract"] else "concrete"
+            current_state = "abstract" if inspect.isabstract(class_value) else "concrete"
+            errors.append(
+                f"{module_name}.{class_name} changed its released public class state: "
+                f"expected {expected_state}, got {current_state}"
+            )
+        if "abstract_members" in entry:
+            current_members = sorted(getattr(class_value, "__abstractmethods__", ()))
+            if current_members != entry["abstract_members"]:
+                errors.append(
+                    f"{module_name}.{class_name} changed its released public abstract members: "
+                    f"expected {entry['abstract_members']!r}, got {current_members!r}"
+                )
+    return errors
+
+
 def _validate_public_typed_dict_contract(
     contract: dict[str, Any],
     agents_module: Any | None,
@@ -1394,6 +1685,48 @@ def _validate_public_typed_dict_contract(
                     f"TypedDict field contract: expected {released_field!r}, got "
                     f"{current_field!r}"
                 )
+    return errors
+
+
+def _validate_public_type_alias_contract(
+    contract: dict[str, Any],
+    agents_module: Any | None,
+    *,
+    unsupported_platforms: Mapping[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    unsupported_platforms = unsupported_platforms or {}
+    missing = object()
+    for entry in contract.get("public_type_aliases", []):
+        module_name = entry["module"]
+        alias_name = entry["name"]
+        optional_dependency = _optional_dependency_for_binding(contract, module_name, alias_name)
+        if optional_dependency is not None and not _optional_dependency_is_available_for_contract(
+            optional_dependency, unsupported_platforms
+        ):
+            continue
+        try:
+            module = _import_contract_module(module_name, agents_module)
+        except Exception as error:
+            errors.append(f"Failed to import released module {module_name}: {error!r}")
+            continue
+        alias = getattr(module, alias_name, missing)
+        if alias is missing:
+            errors.append(f"Missing released public type alias {module_name}.{alias_name}")
+            continue
+        try:
+            current_definition = _type_alias_definition(alias)
+        except TypeError as error:
+            errors.append(
+                f"{module_name}.{alias_name} no longer has a supported released public type "
+                f"alias definition: {error}"
+            )
+            continue
+        if current_definition != entry["definition"]:
+            errors.append(
+                f"{module_name}.{alias_name} changed its released public type alias: "
+                f"expected {entry['definition']!r}, got {current_definition!r}"
+            )
     return errors
 
 
@@ -1496,7 +1829,21 @@ def validate_released_api_contract(
         unsupported_platforms = {}
 
     errors.extend(
+        _validate_public_class_contract(
+            contract,
+            agents_module,
+            unsupported_platforms=unsupported_platforms,
+        )
+    )
+    errors.extend(
         _validate_public_property_contract(
+            contract,
+            agents_module,
+            unsupported_platforms=unsupported_platforms,
+        )
+    )
+    errors.extend(
+        _validate_public_type_alias_contract(
             contract,
             agents_module,
             unsupported_platforms=unsupported_platforms,

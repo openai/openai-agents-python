@@ -1,5 +1,7 @@
+import abc
 import builtins
 import importlib
+import inspect
 import json
 import subprocess
 import sys
@@ -10,7 +12,7 @@ from importlib.metadata import version
 from inspect import Parameter, Signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel, Field
@@ -25,7 +27,9 @@ from integration_tests._contract_support import (
     _parameter_contract,
     _public_class_member_contract,
     _validate_parameter_contract,
+    _validate_public_class_contract,
     _validate_public_property_contract,
+    _validate_public_type_alias_contract,
     _validate_public_typed_dict_contract,
     build_released_api_contract,
     load_api_contract,
@@ -41,14 +45,18 @@ def _release_policy(
     *,
     dependency_installations: tuple[OptionalDependencyInstallation, ...] = (),
     canonical_imports: tuple[dict[str, str], ...] = (),
+    public_class_contracts: tuple[dict[str, Any], ...] = (),
     public_properties: tuple[dict[str, Any], ...] = (),
+    public_type_aliases: tuple[dict[str, str], ...] = (),
     public_typed_dicts: tuple[dict[str, Any], ...] = (),
 ) -> SubmoduleExportPolicy:
     return SubmoduleExportPolicy(
         modules=modules,
         dependency_installations=dependency_installations,
         canonical_imports=canonical_imports,
+        public_class_contracts=public_class_contracts,
         public_properties=public_properties,
+        public_type_aliases=public_type_aliases,
         public_typed_dicts=public_typed_dicts,
     )
 
@@ -77,6 +85,59 @@ def test_literal_default_contract_preserves_exact_builtin_type(
 
     assert len(errors) == 1
     assert "changed its released positional parameter prefix" in errors[0]
+
+
+def test_type_default_contract_preserves_identity() -> None:
+    assert _default_contract(int) == {
+        "kind": "type",
+        "identity": "builtins.int",
+    }
+
+    def released_callable(value: type = int) -> None:
+        _ = value
+
+    def changed_callable(value: type = float) -> None:
+        _ = value
+
+    errors = _validate_parameter_contract(
+        "Example",
+        _parameter_contract(released_callable),
+        _parameter_contract(changed_callable),
+    )
+
+    assert len(errors) == 1
+    assert "changed its released positional parameter prefix" in errors[0]
+
+
+def test_optional_dependency_for_module_import_uses_canonical_bindings() -> None:
+    contract = {
+        "required_submodule_exports": {
+            "agents.voice": {
+                "names": ["VoicePipeline"],
+                "optional_bindings": {"VoicePipeline": "numpy"},
+                "optional_exports": {},
+            }
+        },
+        "canonical_imports": [
+            {
+                "canonical_module": "agents.voice.pipeline",
+                "canonical_name": "VoicePipeline",
+                "module": "agents.voice",
+                "name": "VoicePipeline",
+            }
+        ],
+    }
+
+    assert (
+        contract_support._optional_dependency_for_module_import(contract, "agents.voice.pipeline")
+        == "numpy"
+    )
+    assert (
+        contract_support._optional_dependency_for_binding(
+            contract, "agents.voice.pipeline", "VoicePipeline"
+        )
+        == "numpy"
+    )
 
 
 def test_released_api_contract_fixture_matches_installed_version() -> None:
@@ -255,12 +316,19 @@ def test_public_class_member_contract_tracks_direct_callable_bindings() -> None:
 
 
 def test_curated_public_property_contract_detects_removed_or_changed_properties() -> None:
-    class ReleasedBase:
+    class ReleasedBase(metaclass=abc.ABCMeta):
+        @abc.abstractmethod
+        def base_requirement(self) -> None:
+            pass
+
         @property
         def retained(self) -> str:
             return "value"
 
     class Released(ReleasedBase):
+        def base_requirement(self) -> None:
+            pass
+
         @property
         def retained(self) -> str:
             return "value"
@@ -293,18 +361,86 @@ def test_curated_public_property_contract_detects_removed_or_changed_properties(
         "agents.ReleasedBase.removed removed or changed a released public property"
     ]
 
-    Changed = type(
-        "Changed",
-        (ReleasedBase,),
-        {"retained": lambda self: "value"},
-    )
+    class Changed(ReleasedBase):
+        def base_requirement(self) -> None:
+            pass
+
+        @abc.abstractmethod
+        def new_requirement(self) -> None:
+            pass
+
+    with pytest.raises(TypeError):
+        cast(type[Any], Changed)()
 
     agents_module.Released = Changed
 
     assert _validate_public_property_contract(contract, agents_module) == [
         "agents.ReleasedBase.removed removed or changed a released public property",
-        "agents.Released.retained removed or changed a released public property",
         "agents.Released.concrete_only removed or changed a released public property",
+    ]
+
+
+def test_curated_public_class_contract_detects_abstract_member_and_state_changes() -> None:
+    class ReleasedBase(metaclass=abc.ABCMeta):
+        @abc.abstractmethod
+        def base_requirement(self) -> None:
+            pass
+
+    class Released(ReleasedBase):
+        def base_requirement(self) -> None:
+            pass
+
+    contract: dict[str, Any] = {
+        "public_class_contracts": [
+            {
+                "abstract_members": ["base_requirement"],
+                "class_name": "ReleasedBase",
+                "module": "agents",
+            },
+            {
+                "abstract": False,
+                "class_name": "Released",
+                "module": "agents",
+            },
+        ]
+    }
+    agents_module = SimpleNamespace(__all__=[], ReleasedBase=ReleasedBase, Released=Released)
+
+    assert _validate_public_class_contract(contract, agents_module) == []
+
+    class ChangedBase(ReleasedBase):
+        @abc.abstractmethod
+        def new_requirement(self) -> None:
+            pass
+
+    class Changed(ChangedBase):
+        def base_requirement(self) -> None:
+            pass
+
+        def new_requirement(self) -> None:
+            pass
+
+    class ExistingExternalSubclass(ChangedBase):
+        def base_requirement(self) -> None:
+            pass
+
+    assert not inspect.isabstract(Changed)
+    with pytest.raises(TypeError):
+        cast(type[Any], ExistingExternalSubclass)()
+
+    agents_module.ReleasedBase = ChangedBase
+    agents_module.Released = Changed
+
+    assert _validate_public_class_contract(contract, agents_module) == [
+        "agents.ReleasedBase changed its released public abstract members: expected "
+        "['base_requirement'], got ['base_requirement', 'new_requirement']"
+    ]
+
+    agents_module.Released = ExistingExternalSubclass
+    assert _validate_public_class_contract(contract, agents_module) == [
+        "agents.ReleasedBase changed its released public abstract members: expected "
+        "['base_requirement'], got ['base_requirement', 'new_requirement']",
+        "agents.Released changed its released public class state: expected concrete, got abstract",
     ]
 
 
@@ -339,6 +475,125 @@ def test_curated_public_property_contract_supports_factory_return_surfaces(
         "agents.testing.scripted_session.remaining_steps removed or changed a released public "
         "property"
     ]
+
+
+def test_curated_public_type_alias_contract_records_and_validates_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EventA:
+        pass
+
+    class EventB:
+        pass
+
+    EventA.__module__ = "agents.aliases"
+    EventA.__qualname__ = "EventA"
+    EventB.__module__ = "agents.aliases"
+    EventB.__qualname__ = "EventB"
+
+    agents_module = SimpleNamespace(__all__=[])
+    aliases_module = SimpleNamespace(
+        __all__=[],
+        PublicAlias=Literal["b", "a"] | EventB | EventA,
+    )
+    modules = {
+        "agents": agents_module,
+        "agents.aliases": aliases_module,
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: modules[module_name],
+    )
+    contract: dict[str, Any] = {
+        "baseline": "v0.19.4",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "public_class_contracts": [],
+        "public_properties": [],
+        "public_type_aliases": [],
+        "public_typed_dicts": [],
+        "callables": {},
+    }
+
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.20.0",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        release_policy=_release_policy(
+            {"agents.aliases": {"optional_bindings": {}, "optional_exports": {}}},
+            public_type_aliases=(
+                {
+                    "module": "agents.aliases",
+                    "name": "PublicAlias",
+                },
+            ),
+        ),
+    )
+
+    assert updated["public_type_aliases"] == [
+        {
+            "definition": {
+                "kind": "union",
+                "members": [
+                    {
+                        "kind": "literal",
+                        "values": [
+                            {
+                                "kind": "literal",
+                                "type": "builtins.str",
+                                "value": "a",
+                            },
+                            {
+                                "kind": "literal",
+                                "type": "builtins.str",
+                                "value": "b",
+                            },
+                        ],
+                    },
+                    {"identity": "agents.aliases.EventA", "kind": "type"},
+                    {"identity": "agents.aliases.EventB", "kind": "type"},
+                ],
+            },
+            "module": "agents.aliases",
+            "name": "PublicAlias",
+        }
+    ]
+
+    aliases_module.PublicAlias = Literal["a", "b"] | EventA | EventB
+    assert _validate_public_type_alias_contract(updated, agents_module) == []
+
+    aliases_module.PublicAlias = Literal["a"] | EventA
+    errors = _validate_public_type_alias_contract(updated, agents_module)
+    assert len(errors) == 1
+    assert errors[0].startswith("agents.aliases.PublicAlias changed its released public type alias")
+
+    aliases_module.PublicAlias = list[str]
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"agents\.aliases\.PublicAlias no longer has a supported released public type alias "
+            r"definition: unsupported"
+        ),
+    ):
+        build_released_api_contract(
+            updated,
+            baseline="v0.20.1",
+            baseline_commit="c" * 40,
+            agents_module=agents_module,
+            release_policy=_release_policy(
+                {"agents.aliases": {"optional_bindings": {}, "optional_exports": {}}},
+                public_type_aliases=(
+                    {
+                        "module": "agents.aliases",
+                        "name": "PublicAlias",
+                    },
+                ),
+            ),
+        )
 
 
 def test_curated_public_typed_dict_contract_detects_field_shape_drift(
@@ -1685,6 +1940,13 @@ def test_release_contract_policy_promotes_curated_public_state_surfaces(
                     "name": "NewPublic",
                 },
             ),
+            public_class_contracts=(
+                {
+                    "abstract": False,
+                    "class_name": "NewPublic",
+                    "module": "agents.submodule",
+                },
+            ),
             public_properties=(
                 {
                     "class_name": "NewPublic",
@@ -1726,6 +1988,13 @@ def test_release_contract_policy_promotes_curated_public_state_surfaces(
             "module": "agents.submodule",
             "names": ["calls"],
         },
+    ]
+    assert updated["public_class_contracts"] == [
+        {
+            "abstract": False,
+            "class_name": "NewPublic",
+            "module": "agents.submodule",
+        }
     ]
     assert updated["public_typed_dicts"] == [
         {
@@ -2428,9 +2697,14 @@ def test_load_submodule_export_policy_collects_artifact_installations(tmp_path: 
         '{"ConditionalExport": "export_dependency"}}}, "optional_dependencies": '
         '{"binding_dependency": {"requirement": "binding-package>=1"}, '
         '"export_dependency": {"extra": "export-extra"}}, "public_properties": '
-        '[{"class_name": "ConditionalExport", "module": "agents.submodule", '
-        '"names": ["status"]}, {"factory_name": "create_client", '
-        '"module": "agents.submodule", "names": ["calls"]}], "public_typed_dicts": '
+        '[{"class_name": "ConditionalExport", '
+        '"module": "agents.submodule", "names": ["status"]}, '
+        '{"factory_name": "create_client", '
+        '"module": "agents.submodule", "names": ["calls"]}], "public_class_contracts": '
+        '[{"abstract": false, "class_name": "ConditionalExport", '
+        '"module": "agents.submodule"}], "public_type_aliases": '
+        '[{"module": "agents.submodule", "name": "PublicAlias"}], '
+        '"public_typed_dicts": '
         '[{"class_name": "ClientState", "module": "agents.submodule", '
         '"names": ["status"]}]}',
         encoding="utf-8",
@@ -2466,6 +2740,13 @@ def test_load_submodule_export_policy_collects_artifact_installations(tmp_path: 
             "name": "ConditionalExport",
         },
     )
+    assert policy.public_class_contracts == (
+        {
+            "abstract": False,
+            "class_name": "ConditionalExport",
+            "module": "agents.submodule",
+        },
+    )
     assert tuple(
         entry
         for entry in policy.public_properties
@@ -2488,6 +2769,12 @@ def test_load_submodule_export_policy_collects_artifact_installations(tmp_path: 
             "names": ["calls"],
         },
     )
+    assert policy.public_type_aliases == (
+        {
+            "module": "agents.submodule",
+            "name": "PublicAlias",
+        },
+    )
     assert policy.public_typed_dicts == (
         {
             "class_name": "ClientState",
@@ -2495,6 +2782,23 @@ def test_load_submodule_export_policy_collects_artifact_installations(tmp_path: 
             "names": ["status"],
         },
     )
+
+
+def test_load_submodule_export_policy_rejects_invalid_class_abstract_state(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        '{"modules": {}, "optional_dependencies": {}, "public_class_contracts": '
+        '[{"abstract": "false", "class_name": "Released", "module": "agents"}]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="public_class_contracts abstract must be a boolean",
+    ):
+        load_submodule_export_policy(policy_path)
 
 
 def test_load_submodule_export_policy_collects_unsupported_platforms(tmp_path: Path) -> None:
@@ -2544,6 +2848,10 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
             "agents.testing.model",
             "agents.testing.sandbox",
             "agents.realtime.testing",
+            "agents.voice.model",
+            "agents.voice.models.openai_model_provider",
+            "agents.voice.models.openai_stt",
+            "agents.voice.models.openai_tts",
             "agents.voice.testing",
         }
     ) == (
@@ -2580,23 +2888,56 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
     )
 
 
-def test_repository_release_policy_declares_public_testing_modules() -> None:
+def test_repository_release_policy_declares_public_optional_modules() -> None:
     policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
-    expected_modules = {
+    documented_voice_modules = {
+        "agents.voice.events",
+        "agents.voice.exceptions",
+        "agents.voice.input",
+        "agents.voice.imports",
+        "agents.voice.model",
+        "agents.voice.models.openai_model_provider",
+        "agents.voice.models.openai_stt",
+        "agents.voice.models.openai_tts",
+        "agents.voice.pipeline",
+        "agents.voice.pipeline_config",
+        "agents.voice.result",
+        "agents.voice.testing",
+        "agents.voice.utils",
+        "agents.voice.workflow",
+    }
+    expected_modules = documented_voice_modules | {
         "agents.realtime.testing",
         "agents.testing",
         "agents.testing.model",
         "agents.testing.sandbox",
-        "agents.voice.testing",
+        "agents.voice",
     }
 
-    assert expected_modules <= policy.modules.keys()
-    assert policy.modules["agents.voice.testing"] == {
-        "optional_bindings": {
-            export: "numpy" for export in importlib.import_module("agents.voice.testing").__all__
-        },
-        "optional_exports": {},
+    documented_directive_modules = {
+        line.removeprefix("::: ")
+        for path in (CONTRACT.parents[2] / "docs" / "ref" / "voice").rglob("*.md")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("::: agents.voice")
     }
+
+    assert documented_directive_modules == documented_voice_modules
+    assert expected_modules <= policy.modules.keys()
+    for module_name in documented_voice_modules - {
+        "agents.voice.imports",
+        "agents.voice.testing",
+    }:
+        assert policy.modules[module_name] == {
+            "optional_bindings": {},
+            "optional_exports": {},
+        }
+    for module_name in ("agents.voice", "agents.voice.imports", "agents.voice.testing"):
+        assert policy.modules[module_name] == {
+            "optional_bindings": {
+                export: "numpy" for export in importlib.import_module(module_name).__all__
+            },
+            "optional_exports": {},
+        }
     assert (
         next(
             installation
@@ -2607,7 +2948,7 @@ def test_repository_release_policy_declares_public_testing_modules() -> None:
     )
 
 
-def test_repository_release_policy_declares_public_testing_state_surfaces() -> None:
+def test_repository_release_policy_declares_public_state_surfaces() -> None:
     policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
     expected_modules = {
         "agents.realtime.testing",
@@ -2659,6 +3000,133 @@ def test_repository_release_policy_declares_public_testing_state_surfaces() -> N
             "names": ["transcriptions"],
         },
     )
+    assert tuple(
+        entry
+        for entry in policy.public_properties
+        if entry["module"]
+        in {
+            "agents.voice.model",
+            "agents.voice.models.openai_model_provider",
+            "agents.voice.models.openai_stt",
+            "agents.voice.models.openai_tts",
+        }
+    ) == (
+        {
+            "class_name": "STTModel",
+            "module": "agents.voice.model",
+            "names": ["model_name"],
+        },
+        {
+            "class_name": "TTSModel",
+            "module": "agents.voice.model",
+            "names": ["model_name"],
+        },
+        {
+            "class_name": "OpenAISTTModel",
+            "module": "agents.voice.models.openai_stt",
+            "names": ["model_name"],
+        },
+        {
+            "class_name": "OpenAITTSModel",
+            "module": "agents.voice.models.openai_tts",
+            "names": ["model_name"],
+        },
+        {
+            "class_name": "OpenAIVoiceModelProvider",
+            "module": "agents.voice.models.openai_model_provider",
+            "names": ["agent_registration"],
+        },
+    )
+    assert policy.public_class_contracts == (
+        {
+            "class_name": "STTModel",
+            "module": "agents.voice.model",
+            "abstract_members": ["create_session", "model_name", "transcribe"],
+        },
+        {
+            "class_name": "StreamedTranscriptionSession",
+            "module": "agents.voice.model",
+            "abstract_members": ["close", "transcribe_turns"],
+        },
+        {
+            "class_name": "TTSModel",
+            "module": "agents.voice.model",
+            "abstract_members": ["model_name", "run"],
+        },
+        {
+            "class_name": "VoiceModelProvider",
+            "module": "agents.voice.model",
+            "abstract_members": ["get_stt_model", "get_tts_model"],
+        },
+        {
+            "abstract": False,
+            "class_name": "OpenAISTTModel",
+            "module": "agents.voice.models.openai_stt",
+        },
+        {
+            "abstract": False,
+            "class_name": "OpenAISTTTranscriptionSession",
+            "module": "agents.voice.models.openai_stt",
+        },
+        {
+            "abstract": False,
+            "class_name": "OpenAITTSModel",
+            "module": "agents.voice.models.openai_tts",
+        },
+        {
+            "class_name": "VoiceWorkflowBase",
+            "module": "agents.voice.workflow",
+            "abstract_members": ["run"],
+        },
+    )
+    assert policy.public_type_aliases == (
+        {
+            "module": "agents.voice.model",
+            "name": "TTSVoice",
+        },
+        {
+            "module": "agents.voice.events",
+            "name": "VoiceStreamEvent",
+        },
+    )
+    type_aliases: dict[tuple[str, str], dict[str, Any]] = {
+        (cast(str, entry["module"]), cast(str, entry["name"])): cast(
+            dict[str, Any], entry["definition"]
+        )
+        for entry in contract_support._public_type_alias_contract(policy.public_type_aliases, None)
+    }
+    tts_voice = type_aliases[("agents.voice.model", "TTSVoice")]
+    assert tts_voice["kind"] == "union"
+    assert [
+        value["value"]
+        for member in tts_voice["members"]
+        if member["kind"] == "literal"
+        for value in member["values"]
+    ] == [
+        "alloy",
+        "ash",
+        "ballad",
+        "cedar",
+        "coral",
+        "echo",
+        "fable",
+        "marin",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    ]
+    assert {member["identity"] for member in tts_voice["members"] if member["kind"] == "type"} == {
+        "agents.voice.model.TTSCustomVoice"
+    }
+    voice_stream_event = type_aliases[("agents.voice.events", "VoiceStreamEvent")]
+    assert voice_stream_event["kind"] == "union"
+    assert {member["identity"] for member in voice_stream_event["members"]} == {
+        "agents.voice.events.VoiceStreamEventAudio",
+        "agents.voice.events.VoiceStreamEventError",
+        "agents.voice.events.VoiceStreamEventLifecycle",
+    }
     assert policy.public_typed_dicts == (
         {
             "class_name": "ModelStepSpec",
@@ -2692,6 +3160,11 @@ def test_repository_release_policy_declares_public_testing_state_surfaces() -> N
                 "call_id",
             ],
         },
+        {
+            "class_name": "TTSCustomVoice",
+            "module": "agents.voice",
+            "names": ["id"],
+        },
     )
     for module_name in expected_modules:
         module = importlib.import_module(module_name)
@@ -2718,6 +3191,56 @@ def test_repository_release_policy_declares_public_testing_state_surfaces() -> N
 
     assert actual_canonical_imports == expected_canonical_imports
     for module_name, name, canonical_module_name, canonical_name in actual_canonical_imports:
+        module = importlib.import_module(module_name)
+        canonical_module = importlib.import_module(canonical_module_name)
+        assert getattr(module, name) is getattr(canonical_module, canonical_name)
+
+    voice_canonical_modules = {
+        "AudioInput": "agents.voice.input",
+        "StreamedAudioInput": "agents.voice.input",
+        "STTModel": "agents.voice.model",
+        "STTModelSettings": "agents.voice.model",
+        "TTSCustomVoice": "agents.voice.model",
+        "TTSModel": "agents.voice.model",
+        "TTSModelSettings": "agents.voice.model",
+        "TTSVoice": "agents.voice.model",
+        "VoiceModelProvider": "agents.voice.model",
+        "StreamedAudioResult": "agents.voice.result",
+        "SingleAgentVoiceWorkflow": "agents.voice.workflow",
+        "OpenAIVoiceModelProvider": "agents.voice.models.openai_model_provider",
+        "OpenAISTTModel": "agents.voice.models.openai_stt",
+        "OpenAITTSModel": "agents.voice.models.openai_tts",
+        "VoiceStreamEventAudio": "agents.voice.events",
+        "VoiceStreamEventError": "agents.voice.events",
+        "VoiceStreamEventLifecycle": "agents.voice.events",
+        "VoiceStreamEvent": "agents.voice.events",
+        "VoicePipeline": "agents.voice.pipeline",
+        "VoicePipelineConfig": "agents.voice.pipeline_config",
+        "get_sentence_based_splitter": "agents.voice.utils",
+        "VoiceWorkflowHelper": "agents.voice.workflow",
+        "VoiceWorkflowBase": "agents.voice.workflow",
+        "SingleAgentWorkflowCallbacks": "agents.voice.workflow",
+        "StreamedTranscriptionSession": "agents.voice.model",
+        "OpenAISTTTranscriptionSession": "agents.voice.models.openai_stt",
+        "STTWebsocketConnectionError": "agents.voice.exceptions",
+    }
+    expected_voice_canonical_imports = {
+        ("agents.voice", name, canonical_module_name, name)
+        for name, canonical_module_name in voice_canonical_modules.items()
+    }
+    actual_voice_canonical_imports = {
+        (
+            entry["module"],
+            entry["name"],
+            entry["canonical_module"],
+            entry["canonical_name"],
+        )
+        for entry in policy.canonical_imports
+        if entry["module"] == "agents.voice"
+    }
+
+    assert actual_voice_canonical_imports == expected_voice_canonical_imports
+    for module_name, name, canonical_module_name, canonical_name in actual_voice_canonical_imports:
         module = importlib.import_module(module_name)
         canonical_module = importlib.import_module(canonical_module_name)
         assert getattr(module, name) is getattr(canonical_module, canonical_name)
