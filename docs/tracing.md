@@ -101,6 +101,8 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
 
 [`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip this call when the default export latency is acceptable.
 
+Disabling tracing prevents the default provider from creating new traces and spans, but it does not discard data that its processors already buffered. [`flush_traces()`][agents.tracing.flush_traces] continues to flush that buffered data after tracing has been disabled through `set_tracing_disabled(True)` or `OPENAI_AGENTS_DISABLE_TRACING=1`.
+
 ## Higher level traces
 
 Sometimes, you might want multiple calls to `run()` to be part of a single trace. You can do this by wrapping the entire code in a `trace()`.
