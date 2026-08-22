@@ -83,7 +83,7 @@ def _prepare_websocket_headers(client: AsyncOpenAI) -> dict[str, str]:
 
 
 async def _wait_for_event(
-    event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel],
+    event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel],
     expected_types: list[str],
     timeout: float,
 ):
@@ -98,6 +98,8 @@ async def _wait_for_event(
         evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
         if isinstance(evt, ErrorSentinel):
             raise _ListenerError("Websocket listener failed") from evt.error
+        if isinstance(evt, WebsocketDoneSentinel):
+            raise _ListenerError("Websocket listener closed before the expected setup event")
         evt_type = evt.get("type", "")
         if evt_type in expected_types:
             return evt
@@ -133,7 +135,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel] = (
             asyncio.Queue()
         )
-        self._state_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel] = asyncio.Queue()
+        self._state_queue: asyncio.Queue[
+            dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel
+        ] = asyncio.Queue()
         self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
 
@@ -195,7 +199,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             await self._event_queue.put(error)
             await self._state_queue.put(error)
         finally:
-            await self._event_queue.put(WebsocketDoneSentinel())
+            done = WebsocketDoneSentinel()
+            await self._event_queue.put(done)
+            await self._state_queue.put(done)
 
     async def _configure_session(self) -> None:
         assert self._websocket is not None, "Websocket not initialized"
