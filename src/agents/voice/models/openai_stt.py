@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, cast
 
 from openai import AsyncOpenAI
@@ -90,9 +90,11 @@ async def _wait_for_event(
     """
     Wait for an event from event_queue whose type is in expected_types within the specified timeout.
     """
-    start_time = time.time()
+    # Wall-clock adjustments can move a deadline forwards or backwards. Timeout
+    # accounting must use a monotonic clock instead.
+    start_time = monotonic()
     while True:
-        remaining = timeout - (time.time() - start_time)
+        remaining = timeout - (monotonic() - start_time)
         if remaining <= 0:
             raise TimeoutError(f"Timeout waiting for event(s): {expected_types}")
         evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
