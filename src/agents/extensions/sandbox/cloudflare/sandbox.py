@@ -1059,6 +1059,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
                 break
             entry.output_notify.clear()
 
+        # Capture output queued just before the deadline notification timed out.
+        async with entry.output_lock:
+            while entry.output_chunks:
+                output.extend(entry.output_chunks.popleft())
+
         text = output.decode("utf-8", errors="replace")
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count

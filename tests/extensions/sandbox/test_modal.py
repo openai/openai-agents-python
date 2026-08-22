@@ -4501,6 +4501,117 @@ async def test_modal_pty_start_drains_all_buffered_output_after_exit(
 
 
 @pytest.mark.asyncio
+async def test_modal_pty_final_probe_skips_blocking_read_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self.read_calls = 0
+            self.read = _with_aio(self._read)
+
+        def _read(self, _size: int | None = None) -> bytes:
+            self.read_calls += 1
+            return b""
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _FakeStream()
+            self.stderr = _FakeStream()
+            self.poll = _with_aio(lambda: None)
+
+    process = _FakeProcess()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id="sb-final-probe",
+    )
+    session = modal_module.ModalSandboxSession.from_state(state)
+    entry = modal_module._ModalPtyProcessEntry(  # noqa: SLF001
+        process=process,
+        tty=True,
+        last_used=0.0,
+    )
+
+    output, original_token_count = await session._collect_pty_output(  # noqa: SLF001
+        entry=entry,
+        yield_time_ms=0,
+        max_output_tokens=None,
+    )
+
+    assert output == b""
+    assert original_token_count is None
+    assert process.stdout.read_calls == 1
+    assert process.stderr.read_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_final_probe_only_polls_existing_iterator_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self.anext_calls = 0
+
+        def __aiter__(self) -> _FakeStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            self.anext_calls += 1
+            return b"unexpected"
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _FakeStream()
+            self.stderr = _FakeStream()
+
+    process = _FakeProcess()
+    entry = modal_module._ModalPtyProcessEntry(  # noqa: SLF001
+        process=process,
+        tty=True,
+        last_used=0.0,
+    )
+    session = modal_module.ModalSandboxSession.from_state(
+        modal_module.ModalSandboxSessionState(
+            manifest=Manifest(root="/workspace"),
+            snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+            app_name="sandbox-tests",
+            sandbox_id="sb-final-iterator-probe",
+        )
+    )
+
+    assert (
+        await session._read_modal_stream(  # noqa: SLF001
+            entry=entry,
+            stream_name="stdout",
+            allow_new_read=False,
+        )
+        == b""
+    )
+    assert process.stdout.anext_calls == 0
+
+    async def _completed_chunk() -> bytes:
+        return b"ready"
+
+    entry.stdout_read_task = asyncio.create_task(_completed_chunk())
+    await entry.stdout_read_task
+
+    assert (
+        await session._read_modal_stream(  # noqa: SLF001
+            entry=entry,
+            stream_name="stdout",
+            allow_new_read=False,
+        )
+        == b"ready"
+    )
+    assert process.stdout.anext_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_modal_pty_start_wraps_startup_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
