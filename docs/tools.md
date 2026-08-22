@@ -245,23 +245,25 @@ Shell action timeouts use positive integer milliseconds for a finite timeout. Th
 
 `ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.
 
-For explicit [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. For requests to the older `computer-use-preview` model, the SDK continues to send the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
+When an [`Agent`][agents.agent.Agent] does not set `model`, normal SDK model-selection precedence applies. The built-in SDK default, currently [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna), supports computer use. If `OPENAI_DEFAULT_MODEL` or `RunConfig.model` overrides that default, select a model that supports computer use. Set `model` on the agent when you want to choose a different capability and cost profile for the computer-use workload. The example below uses the [`gpt-5.6`](https://developers.openai.com/api/docs/models/gpt-5.6) alias, which OpenAI routes to GPT-5.6 Sol; you can instead select another model that supports computer use, such as [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra) or [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+
+For explicit requests to a model that supports the GA built-in computer tool, such as `gpt-5.6`, the SDK sends the payload `{"type": "computer"}`. For requests to the older `computer-use-preview` model, the SDK continues to send the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
 
 -   Model: `computer-use-preview` -> `gpt-5.5`
 -   Tool selector: `computer_use_preview` -> `computer`
 -   Computer call shape: one `action` per `computer_call` -> batched `actions[]` on `computer_call`
 -   Truncation: `ModelSettings(truncation="auto")` required on the preview path -> not required on the GA path
 
-The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either keep `model="gpt-5.5"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either make a supported GA model such as `model="gpt-5.6"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 When a [`ComputerTool`][agents.tool.ComputerTool] is present, `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are all accepted and normalized to the built-in selector that matches the effective request model. Without a `ComputerTool`, those strings still behave like ordinary function names.
 
 This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so serialization can occur before a factory has produced a `Computer` or `AsyncComputer` instance. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
 
-At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.5` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
+At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; GA responses can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
 
 ```python
-from agents import Agent, ApplyPatchTool, ShellTool
+from agents import Agent, ApplyPatchTool, ComputerTool, ShellTool
 from agents.computer import AsyncComputer
 from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEditor
 
@@ -295,8 +297,10 @@ agent = Agent(
     tools=[
         ShellTool(executor=run_shell),
         ApplyPatchTool(editor=NoopEditor()),
-        # ComputerTool expects a Computer/AsyncComputer implementation; omitted here for brevity.
+        ComputerTool(computer=NoopComputer()),
     ],
+    # Optional: omit this argument to use the configured or built-in default model.
+    model="gpt-5.6",
 )
 ```
 

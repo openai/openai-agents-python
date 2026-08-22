@@ -52,6 +52,8 @@ for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
 
+When the SDK aggregates one [`Usage`][agents.usage.Usage] object into another, it copies the per-request entries and their nested input/output token details. Later mutation of the source usage object cannot change the aggregate's `request_usage_entries`, and mutation of the aggregate cannot change the source entries.
+
 ## Preserving provider usage payloads
 
 The Agents SDK normalizes provider usage into [`Usage`][agents.usage.Usage] fields that provide consistent totals across model providers. Set [`ModelSettings.preserve_raw_usage`][agents.model_settings.ModelSettings.preserve_raw_usage] to `True` when an application must retain provider-specific usage fields or distinguish an omitted field from a provider-reported zero:

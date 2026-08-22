@@ -59,6 +59,8 @@ In practice:
 
 When SDK-default nested handoff history preserves a message item verbatim, Sessions, `RunState`, and `to_input_list()` track the exact owned occurrence rather than deduplicating by content. Identical messages that occurred separately remain separate; only the already-owned occurrence is kept from being appended a second time.
 
+When model output is converted into replayable input, `to_input_list()`, [`ModelResponse.to_input_items()`][agents.items.ModelResponse.to_input_items], and each [`RunItemBase.to_input_item()`][agents.items.RunItemBase.to_input_item] call remove provider output-only `created_by` metadata. This includes `created_by` on nested `shell_call_output` chunks. The conversion rebuilds the affected mappings and does not mutate the original raw item.
+
 Unlike the JavaScript SDK, Python does not expose a separate `output` property containing only the model-format items newly generated during the run. Use `new_items` when you need SDK metadata, or inspect `raw_responses` when you need the raw model payloads.
 
 Resubmitting computer-tool items as conversation input uses the raw Responses payload shape. Preview-model `computer_call` items preserve a single `action`, while `gpt-5.5` computer calls can preserve batched `actions[]`. [`to_input_list()`][agents.result.RunResultBase.to_input_list] and [`RunState`][agents.run_state.RunState] keep whichever shape the model produced, so manually resubmitting those items as conversation input, pause/resume flows, and stored transcripts continue to work across both preview and GA computer-tool calls. Local execution results still appear as `computer_call_output` items in `new_items`.
@@ -134,6 +136,12 @@ if result.interruptions:
         state.approve(interruption)
     result = await Runner.run(agent, state)
 ```
+
+#### Recover a failed resumed Session write
+
+A resumed run can complete approved tool work, including a handoff in the same model response, and then fail while writing the completed tool calls and outputs to a client-managed [`Session`][agents.memory.session.Session]. Keep the same [`RunState`][agents.run_state.RunState], or serialize and restore it, and retry `Runner.run(...)` or `Runner.run_streamed(...)` with the original Session backend and `session_id`. Before any later model call, the SDK reconciles the pending batch with the Session history. If the Session committed the complete batch but its acknowledgment failed, the SDK recognizes the exact history tail and does not append the batch again. If the write did not commit, the SDK retries the append. The SDK does not execute completed tools, tool guardrails, hooks, or handoffs again. The resumed run continues with the agent selected by the completed handoff.
+
+Recovery fails closed when the Session history is not an exact match. Use the original Session backend and `session_id`, and give the resumed run exclusive access to that history. If another writer changes the history tail, only part of the pending batch is present, or the history is otherwise ambiguous, the SDK raises [`UserError`][agents.exceptions.UserError] before another model call. Repair the original Session history before resuming; do not rerun the completed work. The pending batch, selected agent, and accumulated tool guardrail results survive `RunState` JSON and string round trips, including a later approval interruption before recovery finishes. After [`stream_events()`][agents.result.RunResultStreaming.stream_events] raises the Session write error, [`RunResultStreaming.to_state()`][agents.result.RunResultStreaming.to_state] also returns a detached state that retains the same recovery data.
 
 #### Add input before resuming
 
