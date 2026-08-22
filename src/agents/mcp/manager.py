@@ -367,26 +367,28 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         return True
 
     async def _cleanup_all(self) -> None:
-        for server in reversed(self._all_servers):
-            try:
-                await self._cleanup_server(server)
-            except asyncio.CancelledError as exc:
-                if not self.suppress_cancelled_error:
-                    raise
-                log_tool_action_debug(
-                    logger,
-                    get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
-                    exc,
-                )
-                self._errors[server] = exc
-            except Exception as exc:
-                log_tool_action_error(
-                    logger,
-                    get_mcp_server_log_message("Failed to cleanup MCP server", server),
-                    exc,
-                )
-                self._errors[server] = exc
-        self._refresh_active_servers()
+        try:
+            for server in reversed(self._all_servers):
+                try:
+                    await self._cleanup_server(server)
+                except asyncio.CancelledError as exc:
+                    if not self.suppress_cancelled_error:
+                        raise
+                    log_tool_action_debug(
+                        logger,
+                        get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
+                        exc,
+                    )
+                    self._errors[server] = exc
+                except Exception as exc:
+                    log_tool_action_error(
+                        logger,
+                        get_mcp_server_log_message("Failed to cleanup MCP server", server),
+                        exc,
+                    )
+                    self._errors[server] = exc
+        finally:
+            self._refresh_active_servers()
 
     async def _run_with_timeout(
         self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
