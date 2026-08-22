@@ -20,5 +20,9 @@ async def test_cleanup_all_removes_cleaned_servers_from_active_servers() -> None
     assert manager.active_servers == []
     assert manager._connected_servers == set()
 
+    assert await manager.reconnect() == []
+    assert manager.active_servers == []
+    assert server.connect.await_count == 1
+
     assert await manager.connect_all() == [server]
     assert server.connect.await_count == 2
