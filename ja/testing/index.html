@@ -1,0 +1,2658 @@
+
+<!doctype html>
+<html lang="ja" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../tracing/">
+      
+      
+        <link rel="next" href="../visualization/">
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>テスト - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          コンテンツにスキップ
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="ヘッダー">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              テスト
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="言語切り替え">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../testing/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ko/testing/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/testing/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="検索" placeholder="検索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="検索">
+        
+        <button type="reset" class="md-search__icon md-icon" title="クリア" aria-label="クリア" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            検索を初期化
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="ナビゲーション" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="リポジトリへ" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    はじめに
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    設定
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    ドキュメント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            ドキュメント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Sandbox クライアント
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントメモリ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            リアルタイムエージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リアルタイムエージェントガイド
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    音声エージェント
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            音声エージェント
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    クイックスタート
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    パイプラインとワークフロー
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    モデル
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ツール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ガードレール
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの実行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ストリーミング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントオーケストレーション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ハンドオフ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    実行結果
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    ヒューマンインザループ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_14" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_14" id="__nav_4_14_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_14">
+            <span class="md-nav__icon md-icon"></span>
+            セッション
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高度な SQLite セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    暗号化セッション
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コンテキスト管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    使用状況
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    トレーシング
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    テスト
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    テスト
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#find-the-recipe-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      必要なレシピの検索
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      インポート
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-workflow-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      エージェントワークフローのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="エージェントワークフローのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#return-a-fixed-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      固定レスポンスの返却
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-a-tool-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#derive-a-response-from-the-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      リクエストからのレスポンス導出
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-model-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル呼び出しの検査
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミングのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inject-model-failures" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル障害の注入
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detect-workflow-drift" class="md-nav__link">
+    <span class="md-ellipsis">
+      ワークフローのドリフト検出
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandbox-agent-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox エージェントのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sandbox エージェントのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-sandbox-agent-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox エージェントワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configure-sandbox-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox ステップの設定
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#realtime-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime のレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Realtime のレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-realtime-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime セッションのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-a-realtime-tool-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime ツールワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-realtime-calls-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime の呼び出しとライフサイクルの検査
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#voice-pipeline-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice パイプラインのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Voice パイプラインのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-voice-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice パイプラインのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-streamed-transcription" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミング文字起こしのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-voice-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice 呼び出しの検査
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-correct-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      適切な境界の選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#final-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      最終チェックリスト
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scope-and-current-limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      スコープと現在の制限
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      API リファレンス
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    エージェントの可視化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL ユーティリティ
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    コード例
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../release/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    リリースプロセス／変更履歴
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目次">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目次
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#find-the-recipe-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      必要なレシピの検索
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      インポート
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agent-workflow-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      エージェントワークフローのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="エージェントワークフローのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#return-a-fixed-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      固定レスポンスの返却
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-a-tool-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      ツールワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#derive-a-response-from-the-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      リクエストからのレスポンス導出
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-model-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル呼び出しの検査
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-streaming" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミングのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inject-model-failures" class="md-nav__link">
+    <span class="md-ellipsis">
+      モデル障害の注入
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detect-workflow-drift" class="md-nav__link">
+    <span class="md-ellipsis">
+      ワークフローのドリフト検出
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sandbox-agent-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox エージェントのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sandbox エージェントのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-sandbox-agent-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox エージェントワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configure-sandbox-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      Sandbox ステップの設定
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#realtime-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime のレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Realtime のレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-realtime-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime セッションのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-a-realtime-tool-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime ツールワークフローのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-realtime-calls-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      Realtime の呼び出しとライフサイクルの検査
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#voice-pipeline-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice パイプラインのレシピ
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Voice パイプラインのレシピ">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#test-a-voice-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice パイプラインのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#test-streamed-transcription" class="md-nav__link">
+    <span class="md-ellipsis">
+      ストリーミング文字起こしのテスト
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inspect-voice-calls" class="md-nav__link">
+    <span class="md-ellipsis">
+      Voice 呼び出しの検査
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-correct-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      適切な境界の選択
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#final-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      最終チェックリスト
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scope-and-current-limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      スコープと現在の制限
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      API リファレンス
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">テスト</h1>
+<p>SDK は、エージェントワークフロー、Sandbox セッション、Realtime セッション、Voice パイプライン向けに、決定論的でプロバイダーに依存しないテストユーティリティを提供します。これらのユーティリティはメモリ内で動作し、モデル、Sandbox プロバイダー、Realtime API へのリクエストを行わず、SDK が管理する正規化済みのやり取りを記録します。以下の実行可能なレシピでは、OpenAI API キーが設定されている場合にデフォルトのトレースプロセッサーがテストアクティビティをアップロードしないよう、実行ごとにトレーシングを無効にしています。</p>
+<p>これらは、アプリケーションと SDK が管理するオーケストレーション（ツール実行、ハンドオフ、ガードレール、再試行、ストリーミング、セッション動作、Sandbox 機能、Realtime イベント処理、Voice パイプライン構成）のテストに使用します。外部のモデル、ネットワークプロトコル、Sandbox プロバイダー、音声システムが管理する動作については、実際のプロバイダーアダプターまたは統合環境を使用してください。</p>
+<h2 id="find-the-recipe-you-need">必要なレシピの検索</h2>
+<table>
+<thead>
+<tr>
+<th>目的</th>
+<th>使用するもの</th>
+<th>参照先</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>固定の最終回答を返す</td>
+<td><code>ScriptedModel</code> と <code>assistant_message()</code></td>
+<td><a href="#return-a-fixed-response">固定レスポンスの返却</a></td>
+</tr>
+<tr>
+<td>複数ターンのツールループを実行する</td>
+<td><code>function_call()</code> の後にアシスタントレスポンス</td>
+<td><a href="#test-a-tool-workflow">ツールワークフローのテスト</a></td>
+</tr>
+<tr>
+<td>リクエストからレスポンスを選択する</td>
+<td><code>ModelStep.respond()</code> または <code>responder</code> のマッピング</td>
+<td><a href="#derive-a-response-from-the-request">リクエストからのレスポンス導出</a></td>
+</tr>
+<tr>
+<td>ランナーがモデルに送信した内容をアサートする</td>
+<td><code>calls</code>、<code>first_call</code>、または <code>last_call</code></td>
+<td><a href="#inspect-model-calls">モデル呼び出しの検査</a></td>
+</tr>
+<tr>
+<td>ストリーミング実行をテストする</td>
+<td>通常のレスポンスステップ、またはイベントを厳密に指定する <code>ModelStep.stream()</code></td>
+<td><a href="#test-streaming">ストリーミングのテスト</a></td>
+</tr>
+<tr>
+<td>エラーまたは再試行の判断をテストする</td>
+<td><code>ModelStep.raise_error()</code></td>
+<td><a href="#inject-model-failures">モデル障害の注入</a></td>
+</tr>
+<tr>
+<td>意図しないワークフロー変更を検出する</td>
+<td>厳密な FIFO ステップと <code>assert_complete()</code></td>
+<td><a href="#detect-workflow-drift">ワークフローのドリフト検出</a></td>
+</tr>
+<tr>
+<td>Sandbox を起動せずに <code>SandboxAgent</code> をテストする</td>
+<td><code>scripted_sandbox_session()</code> と <code>ScriptedModel</code></td>
+<td><a href="#test-a-sandbox-agent-workflow">Sandbox エージェントワークフローのテスト</a></td>
+</tr>
+<tr>
+<td>Sandbox 呼び出しを照合する、またはその実行結果を導出する</td>
+<td>Sandbox ステップの <code>match</code> または <code>responder</code></td>
+<td><a href="#configure-sandbox-steps">Sandbox ステップの設定</a></td>
+</tr>
+<tr>
+<td>接続を開かずに Realtime セッションをテストする</td>
+<td><code>ScriptedRealtimeModel</code> と <code>RealtimeStep</code></td>
+<td><a href="#test-a-realtime-session">Realtime セッションのテスト</a></td>
+</tr>
+<tr>
+<td>Realtime ツールワークフローをテストする</td>
+<td><code>RealtimeModelToolCallEvent</code> を発行し、ツール出力を期待する</td>
+<td><a href="#test-a-realtime-tool-workflow">Realtime ツールワークフローのテスト</a></td>
+</tr>
+<tr>
+<td>静的またはストリーミングの Voice パイプラインをテストする</td>
+<td><code>ScriptedSTTModel</code>、<code>ScriptedTTSModel</code>、およびスクリプト化された、または実際のワークフロー</td>
+<td><a href="#test-a-voice-pipeline">Voice パイプラインのテスト</a></td>
+</tr>
+<tr>
+<td>プロバイダーのシリアライズまたはワイヤーペイロードをテストする</td>
+<td>制御されたネットワークトランスポートを備えた実際のプロバイダーアダプター</td>
+<td><a href="#choose-the-correct-boundary">適切な境界の選択</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="imports">インポート</h2>
+<p>テスト API は、置き換えるランタイム境界の近くに配置されています。</p>
+<table>
+<thead>
+<tr>
+<th>境界</th>
+<th>インポートパス</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>エージェントモデルと Sandbox ワークフロー</td>
+<td><code>agents.testing</code></td>
+</tr>
+<tr>
+<td>Realtime モデルトランスポート</td>
+<td><code>agents.realtime.testing</code></td>
+</tr>
+<tr>
+<td>Voice の STT、TTS、およびワークフローコンポーネント</td>
+<td><code>agents.voice.testing</code></td>
+</tr>
+</tbody>
+</table>
+<p>テスト用シンボルは、意図的にトップレベルの <code>agents</code> インポートには含まれていません。</p>
+<h2 id="agent-workflow-recipes">エージェントワークフローのレシピ</h2>
+<h3 id="return-a-fixed-response">固定レスポンスの返却</h3>
+<p>想定されるモデル呼び出しごとに、正規化済み出力項目のシーケンスを 1 つ渡します。出力シーケンスの省略記法には、1 回のリクエスト用の決定論的なレスポンス ID と使用量が設定されます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScriptedModel</span><span class="p">,</span> <span class="n">assistant_message</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_fixed_response</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedModel</span><span class="p">(</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="p">[[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;Paris is the capital of France.&quot;</span><span class="p">)]]</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="p">)</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Geography assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">)</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        <span class="s2">&quot;What is the capital of France?&quot;</span><span class="p">,</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">tracing_disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="p">)</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">final_output</span> <span class="o">==</span> <span class="s2">&quot;Paris is the capital of France.&quot;</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">calls</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>決定論的なワークフローテストの最後に <code>model.assert_complete()</code> を使用してください。設定されたすべてのステップを消費する前にワークフローが停止した場合を検出できます。</p>
+<h3 id="test-a-tool-workflow">ツールワークフローのテスト</h3>
+<p>ツールを呼び出すモデルレスポンスを 1 つ、その後に最終回答を生成する 2 つ目のレスポンスをスクリプト化します。これらのモデル呼び出しの間では、実際の SDK ツールパイプラインが実行されます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScriptedModel</span><span class="p">,</span> <span class="n">assistant_message</span><span class="p">,</span> <span class="n">function_call</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="nd">@tool</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the weather for a city.&quot;&quot;&quot;</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2">: sunny&quot;</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_tool_workflow</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedModel</span><span class="p">(</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="p">[</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>            <span class="p">[</span><span class="n">function_call</span><span class="p">(</span><span class="s2">&quot;get_weather&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;city&quot;</span><span class="p">:</span> <span class="s2">&quot;Tokyo&quot;</span><span class="p">},</span> <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;call_1&quot;</span><span class="p">)],</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>            <span class="p">[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;It is sunny in Tokyo.&quot;</span><span class="p">)],</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>        <span class="p">]</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="p">)</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span> <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">])</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a>        <span class="s2">&quot;What is the weather in Tokyo?&quot;</span><span class="p">,</span>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">tracing_disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a>    <span class="p">)</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">final_output</span> <span class="o">==</span> <span class="s2">&quot;It is sunny in Tokyo.&quot;</span>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>    <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">calls</span><span class="p">)</span> <span class="o">==</span> <span class="mi">2</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a>    <span class="k">assert</span> <span class="n">model</span><span class="o">.</span><span class="n">last_call</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-1-33"><a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>    <span class="k">assert</span> <span class="nb">any</span><span class="p">(</span>
+</span><span id="__span-1-34"><a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a>        <span class="n">item</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;function_call_output&quot;</span>
+</span><span id="__span-1-35"><a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a>        <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">last_call</span><span class="o">.</span><span class="n">input</span>
+</span><span id="__span-1-36"><a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>    <span class="p">)</span>
+</span><span id="__span-1-37"><a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>このパターンは、ツール入力の検証、実行、実行結果の変換、フック、ガードレール、および次のモデルターンをカバーします。Python 関数を直接呼び出すと、これらの SDK の動作は迂回されます。</p>
+<h3 id="derive-a-response-from-the-request">リクエストからのレスポンス導出</h3>
+<p>レスポンスが正規化済みモデル呼び出しに実際に依存する場合、またはアサーションをモデル境界に配置する場合は、<code>ModelStep.respond()</code> を使用します。レスポンダーは同期または非同期にでき、<code>ScriptedModel</code> が受け付ける任意のステップ形式を返せます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelCall</span><span class="p">,</span> <span class="n">ModelStep</span><span class="p">,</span> <span class="n">ScriptedModel</span><span class="p">,</span> <span class="n">assistant_message</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">respond</span><span class="p">(</span><span class="n">call</span><span class="p">:</span> <span class="n">ModelCall</span><span class="p">):</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="k">assert</span> <span class="n">call</span><span class="o">.</span><span class="n">streamed</span> <span class="ow">is</span> <span class="kc">False</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="k">assert</span> <span class="n">call</span><span class="o">.</span><span class="n">input</span> <span class="o">==</span> <span class="p">[{</span><span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;Summarize this&quot;</span><span class="p">,</span> <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">}]</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="p">[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;Handled the normalized request.&quot;</span><span class="p">)]}</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_request_aware_response</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedModel</span><span class="p">([</span><span class="n">ModelStep</span><span class="o">.</span><span class="n">respond</span><span class="p">(</span><span class="n">respond</span><span class="p">)])</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">)</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>        <span class="s2">&quot;Summarize this&quot;</span><span class="p">,</span>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">tracing_disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    <span class="p">)</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">final_output</span> <span class="o">==</span> <span class="s2">&quot;Handled the normalized request.&quot;</span>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p><code>ScriptedModel</code> は、<code>ModelStep</code>、同等の辞書形式、<code>ModelResponse</code>、正規化済み出力項目のシーケンス、または例外を受け付けます。レスポンスが呼び出しに依存しない場合は、固定スクリプトの方が予期しないターンを診断しやすいため、固定の出力シーケンスを優先してください。</p>
+<h3 id="inspect-model-calls">モデル呼び出しの検査</h3>
+<p><code>ScriptedModel</code> は、選択されたステップを解決するか例外を発生させる前に、各呼び出しを記録します。</p>
+<table>
+<thead>
+<tr>
+<th>メンバー</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>calls</code></td>
+<td>呼び出し順のすべての <code>ModelCall</code></td>
+</tr>
+<tr>
+<td><code>first_call</code></td>
+<td>最初の呼び出し、または <code>None</code></td>
+</tr>
+<tr>
+<td><code>last_call</code></td>
+<td>最新の呼び出し、または <code>None</code></td>
+</tr>
+<tr>
+<td><code>remaining_steps</code></td>
+<td>まだ消費されていない設定済みステップの数</td>
+</tr>
+</tbody>
+</table>
+<p>一般的なアサーションには、<code>call.input</code>、<code>call.model_settings</code>、<code>call.tools</code>、<code>call.handoffs</code>、および <code>call.streamed</code> があります。可変のリクエストデータは呼び出し境界でスナップショットされ、公開されている各履歴アクセサーは、切り離されたスナップショットを返します。ツール、ハンドオフ、出力スキーマ、およびトレーシングのオブジェクトは、ランタイム上の同一性を維持します。</p>
+<p>構造化された <code>call_index</code> および <code>input_index</code> のエラーフィールドは 0 始まりであるため、<code>calls[...]</code> または指定されたステップシーケンスのインデックスとして直接使用できます。人が読めるエラーメッセージでは、呼び出し番号またはステップ番号が 1 始まりで表示されます。</p>
+<p>1 つのテストでモデルステップを段階的に追加する必要がある場合は、<code>enqueue()</code> または <code>extend()</code> を使用します。独立したシナリオには、新しい <code>ScriptedModel</code> を作成してください。このユーティリティは、消費済みステップや呼び出し履歴をリセットしません。</p>
+<h3 id="test-streaming">ストリーミングのテスト</h3>
+<p>通常のレスポンスステップは、<code>Runner.run()</code> と <code>Runner.run_streamed()</code> の両方をサポートします。一般的なアシスタントメッセージ、推論項目、関数呼び出し、およびパッチ適用呼び出しについて、<code>ScriptedModel</code> は、正規化済みの開始、差分、項目完了、および終了レスポンスイベントを生成します。終了レスポンスには、完全な出力と使用量が含まれます。</p>
+<p>正規化済み <code>TResponseStreamEvent</code> の厳密なシーケンスがテスト対象の動作に含まれる場合にのみ、<code>ModelStep.stream()</code> を使用してください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">step</span> <span class="o">=</span> <span class="n">ModelStep</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">events</span><span class="p">,</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">output</span><span class="o">=</span><span class="p">[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;The terminal output used by the runner.&quot;</span><span class="p">)],</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>events</code> には、固定シーケンス、または記録された <code>ModelCall</code> を受け取る非同期ファクトリーを指定できます。同じステップが非ストリーミング呼び出しで使用された場合に返されるレスポンスは、オプションの <code>output</code> です。厳密なストリームイベントは SDK で正規化されたイベントであり、Responses API や Chat Completions のワイヤーチャンクではありません。</p>
+<p>自動ストリーミングでは、段階的なライフサイクルが実装されていない種類の正規化済み出力項目は拒否されます。不完全なイベントシーケンスに依存せず、それらの項目には <code>ModelStep.stream(...)</code> を使用してください。</p>
+<h3 id="inject-model-failures">モデル障害の注入</h3>
+<p>1 回のモデル呼び出しを失敗させるには、<code>ModelStep.raise_error()</code> を使用します。オプションの再試行に関する指示は、そのスクリプト化されたエラーにのみ適用されます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelRetryAdvice</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelStep</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">step</span> <span class="o">=</span> <span class="n">ModelStep</span><span class="o">.</span><span class="n">raise_error</span><span class="p">(</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;temporary failure&quot;</span><span class="p">),</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="n">retry_advice</span><span class="o">=</span><span class="n">ModelRetryAdvice</span><span class="p">(</span><span class="n">suggested</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">replay_safety</span><span class="o">=</span><span class="s2">&quot;safe&quot;</span><span class="p">),</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>ランナーの再試行ポリシーが、その指示によって再試行するかどうかを決定します。各再試行は別のモデル呼び出しであり、次のスクリプト化されたステップを消費します。Python ヘルパーは固定の <code>ModelRetryAdvice</code> 値を受け付けます。再試行に関する指示自体を試行ごとに動的に変える必要がある場合は、カスタム <code>Model</code> を使用してください。</p>
+<h3 id="detect-workflow-drift">ワークフローのドリフト検出</h3>
+<p>スクリプト化された呼び出しを、想定されるワークフロー形状として扱います。余分なモデルリクエストがあると <code>UnexpectedModelCall</code> が発生し、早期終了するとステップが残り、<code>assert_complete()</code> によって報告されます。</p>
+<p>テストフレームワークがティアダウンまたはファイナライザーをサポートしており、別のアサーションが失敗した後にも未消費ステップを報告したい場合は、そこに <code>assert_complete()</code> を配置してください。通常の回帰テストでは、不一致エラーをキャッチしないでください。</p>
+<table>
+<thead>
+<tr>
+<th>エラー</th>
+<th>構造化フィールド</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>InvalidModelStep</code></td>
+<td><code>reason</code>、<code>input_index</code></td>
+<td>ステップの形式が不正であり、キューに入る前に拒否されました</td>
+</tr>
+<tr>
+<td><code>UnexpectedModelCall</code></td>
+<td><code>call</code>、<code>call_index</code></td>
+<td>スクリプトの終了後にワークフローが別のモデル呼び出しを行いました</td>
+</tr>
+<tr>
+<td><code>UnconsumedModelSteps</code></td>
+<td><code>remaining_steps</code></td>
+<td>すべてのステップを使用する前にワークフローが終了しました</td>
+</tr>
+</tbody>
+</table>
+<h2 id="sandbox-agent-recipes">Sandbox エージェントのレシピ</h2>
+<h3 id="test-a-sandbox-agent-workflow">Sandbox エージェントワークフローのテスト</h3>
+<p><code>ScriptedModel</code> と <code>scripted_sandbox_session()</code> を組み合わせると、ローカルコンテナまたはリモート Sandbox を作成せずに、実際の <code>SandboxAgent</code> ランタイムを実行できます。モデルスクリプトは機能ツールを選択し、Sandbox スクリプトは対応する <code>SandboxSession</code> メソッドが返す内容を定義します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecResult</span><span class="p">,</span> <span class="n">SandboxAgent</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="n">Shell</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="n">ScriptedModel</span><span class="p">,</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="n">assistant_message</span><span class="p">,</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    <span class="n">function_call</span><span class="p">,</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    <span class="n">scripted_sandbox_session</span><span class="p">,</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="p">)</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_sandbox_workflow</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-5-16"><a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    <span class="n">sandbox</span> <span class="o">=</span> <span class="n">scripted_sandbox_session</span><span class="p">(</span>
+</span><span id="__span-5-17"><a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a>        <span class="p">[</span>
+</span><span id="__span-5-18"><a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>            <span class="p">{</span>
+</span><span id="__span-5-19"><a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a>                <span class="s2">&quot;method&quot;</span><span class="p">:</span> <span class="s2">&quot;exec&quot;</span><span class="p">,</span>
+</span><span id="__span-5-20"><a id="__codelineno-5-20" name="__codelineno-5-20" href="#__codelineno-5-20"></a>                <span class="s2">&quot;match&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">call</span><span class="p">:</span> <span class="n">call</span><span class="o">.</span><span class="n">args</span> <span class="o">==</span> <span class="p">(</span><span class="s2">&quot;pwd&quot;</span><span class="p">,),</span>
+</span><span id="__span-5-21"><a id="__codelineno-5-21" name="__codelineno-5-21" href="#__codelineno-5-21"></a>                <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="n">ExecResult</span><span class="p">(</span>
+</span><span id="__span-5-22"><a id="__codelineno-5-22" name="__codelineno-5-22" href="#__codelineno-5-22"></a>                    <span class="n">stdout</span><span class="o">=</span><span class="sa">b</span><span class="s2">&quot;/workspace</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-5-23"><a id="__codelineno-5-23" name="__codelineno-5-23" href="#__codelineno-5-23"></a>                    <span class="n">stderr</span><span class="o">=</span><span class="sa">b</span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+</span><span id="__span-5-24"><a id="__codelineno-5-24" name="__codelineno-5-24" href="#__codelineno-5-24"></a>                    <span class="n">exit_code</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+</span><span id="__span-5-25"><a id="__codelineno-5-25" name="__codelineno-5-25" href="#__codelineno-5-25"></a>                <span class="p">),</span>
+</span><span id="__span-5-26"><a id="__codelineno-5-26" name="__codelineno-5-26" href="#__codelineno-5-26"></a>            <span class="p">}</span>
+</span><span id="__span-5-27"><a id="__codelineno-5-27" name="__codelineno-5-27" href="#__codelineno-5-27"></a>        <span class="p">]</span>
+</span><span id="__span-5-28"><a id="__codelineno-5-28" name="__codelineno-5-28" href="#__codelineno-5-28"></a>    <span class="p">)</span>
+</span><span id="__span-5-29"><a id="__codelineno-5-29" name="__codelineno-5-29" href="#__codelineno-5-29"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedModel</span><span class="p">(</span>
+</span><span id="__span-5-30"><a id="__codelineno-5-30" name="__codelineno-5-30" href="#__codelineno-5-30"></a>        <span class="p">[</span>
+</span><span id="__span-5-31"><a id="__codelineno-5-31" name="__codelineno-5-31" href="#__codelineno-5-31"></a>            <span class="p">[</span><span class="n">function_call</span><span class="p">(</span><span class="s2">&quot;exec_command&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;cmd&quot;</span><span class="p">:</span> <span class="s2">&quot;pwd&quot;</span><span class="p">},</span> <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;call_1&quot;</span><span class="p">)],</span>
+</span><span id="__span-5-32"><a id="__codelineno-5-32" name="__codelineno-5-32" href="#__codelineno-5-32"></a>            <span class="p">[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;The workspace is /workspace.&quot;</span><span class="p">)],</span>
+</span><span id="__span-5-33"><a id="__codelineno-5-33" name="__codelineno-5-33" href="#__codelineno-5-33"></a>        <span class="p">]</span>
+</span><span id="__span-5-34"><a id="__codelineno-5-34" name="__codelineno-5-34" href="#__codelineno-5-34"></a>    <span class="p">)</span>
+</span><span id="__span-5-35"><a id="__codelineno-5-35" name="__codelineno-5-35" href="#__codelineno-5-35"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">SandboxAgent</span><span class="p">(</span>
+</span><span id="__span-5-36"><a id="__codelineno-5-36" name="__codelineno-5-36" href="#__codelineno-5-36"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Workspace assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-5-37"><a id="__codelineno-5-37" name="__codelineno-5-37" href="#__codelineno-5-37"></a>        <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+</span><span id="__span-5-38"><a id="__codelineno-5-38" name="__codelineno-5-38" href="#__codelineno-5-38"></a>        <span class="n">capabilities</span><span class="o">=</span><span class="p">[</span><span class="n">Shell</span><span class="p">()],</span>
+</span><span id="__span-5-39"><a id="__codelineno-5-39" name="__codelineno-5-39" href="#__codelineno-5-39"></a>    <span class="p">)</span>
+</span><span id="__span-5-40"><a id="__codelineno-5-40" name="__codelineno-5-40" href="#__codelineno-5-40"></a>
+</span><span id="__span-5-41"><a id="__codelineno-5-41" name="__codelineno-5-41" href="#__codelineno-5-41"></a>    <span class="k">async</span> <span class="k">with</span> <span class="n">sandbox</span><span class="p">:</span>
+</span><span id="__span-5-42"><a id="__codelineno-5-42" name="__codelineno-5-42" href="#__codelineno-5-42"></a>        <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-5-43"><a id="__codelineno-5-43" name="__codelineno-5-43" href="#__codelineno-5-43"></a>            <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-5-44"><a id="__codelineno-5-44" name="__codelineno-5-44" href="#__codelineno-5-44"></a>            <span class="s2">&quot;Which directory are you in?&quot;</span><span class="p">,</span>
+</span><span id="__span-5-45"><a id="__codelineno-5-45" name="__codelineno-5-45" href="#__codelineno-5-45"></a>            <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span>
+</span><span id="__span-5-46"><a id="__codelineno-5-46" name="__codelineno-5-46" href="#__codelineno-5-46"></a>                <span class="n">sandbox</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;session&quot;</span><span class="p">:</span> <span class="n">sandbox</span><span class="p">},</span>
+</span><span id="__span-5-47"><a id="__codelineno-5-47" name="__codelineno-5-47" href="#__codelineno-5-47"></a>                <span class="n">tracing_disabled</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-5-48"><a id="__codelineno-5-48" name="__codelineno-5-48" href="#__codelineno-5-48"></a>            <span class="p">),</span>
+</span><span id="__span-5-49"><a id="__codelineno-5-49" name="__codelineno-5-49" href="#__codelineno-5-49"></a>        <span class="p">)</span>
+</span><span id="__span-5-50"><a id="__codelineno-5-50" name="__codelineno-5-50" href="#__codelineno-5-50"></a>
+</span><span id="__span-5-51"><a id="__codelineno-5-51" name="__codelineno-5-51" href="#__codelineno-5-51"></a>    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">final_output</span> <span class="o">==</span> <span class="s2">&quot;The workspace is /workspace.&quot;</span>
+</span><span id="__span-5-52"><a id="__codelineno-5-52" name="__codelineno-5-52" href="#__codelineno-5-52"></a>    <span class="k">assert</span> <span class="p">[</span><span class="n">call</span><span class="o">.</span><span class="n">method</span> <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">sandbox</span><span class="o">.</span><span class="n">calls</span><span class="p">]</span> <span class="o">==</span> <span class="p">[</span><span class="s2">&quot;exec&quot;</span><span class="p">]</span>
+</span><span id="__span-5-53"><a id="__codelineno-5-53" name="__codelineno-5-53" href="#__codelineno-5-53"></a>    <span class="n">sandbox</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span><span id="__span-5-54"><a id="__codelineno-5-54" name="__codelineno-5-54" href="#__codelineno-5-54"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>このテストは、正規化された 2 つの SDK 境界を通過します。ツール引数の検証、機能のルーティング、Sandbox セッションの呼び出し、次のモデルターンへのツール実行結果の受け渡し、および最終出力の処理をカバーします。実際のモデルがコマンドを選択するかどうかや、実際の Sandbox プロバイダーがそれをどのように実行するかはテストしません。</p>
+<h3 id="configure-sandbox-steps">Sandbox ステップの設定</h3>
+<p>一致する各 Sandbox 呼び出しは、1 つのグローバル FIFO シーケンスから次のステップを消費します。メソッドの不一致、マッチャーによる拒否、またはマッチャーの例外が発生した場合、そのステップは保留中のままになります。<code>method</code> を設定し、結果を厳密に 1 つ選択し、呼び出しの詳細が重要な場合にのみ <code>match</code> を追加してください。</p>
+<table>
+<thead>
+<tr>
+<th>ステップメンバー</th>
+<th>使用する場合</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>result</code></td>
+<td>メソッドが固定の型付き値を返す場合</td>
+</tr>
+<tr>
+<td><code>responder</code></td>
+<td>実行結果が切り離された <code>SandboxCall</code> に依存する場合</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>メソッドが特定の例外を発生させる場合</td>
+</tr>
+<tr>
+<td><code>match</code></td>
+<td>マッチャーが <code>False</code> 以外の値を返さない限り、結果を生成する前に呼び出しを拒否する場合</td>
+</tr>
+</tbody>
+</table>
+<p>サポートされるスクリプト化メソッド名は、<code>apply_patch</code>、<code>exec</code>、<code>ls</code>、<code>mkdir</code>、<code>pty_exec_start</code>、<code>pty_write_stdin</code>、<code>read</code>、<code>rm</code>、および <code>write</code> です。設定されたモデル向け機能のみが公開されます。2 つの PTY メソッドは 1 つの対話型シェル機能を構成するため、いずれかの PTY メソッドが設定されると、両方がまとめて公開されます。ただし、呼び出しは引き続きグローバル FIFO スクリプトを消費します。</p>
+<p><code>sandbox.calls</code> には、0 始まりの <code>call_index</code>、<code>method</code>、位置引数の <code>args</code>、および読み取り専用の <code>kwargs</code> を持つ、切り離された <code>SandboxCall</code> スナップショットが含まれます。静的な実行結果も、スクリプトの作成時にスナップショットされます。<code>io.BytesIO</code> と <code>io.StringIO</code> の値がサポートされています。その他のライブストリームオブジェクトまたはライフサイクル動作には、カスタム Sandbox セッションを使用してください。</p>
+<table>
+<thead>
+<tr>
+<th>エラー</th>
+<th>構造化フィールド</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>InvalidSandboxStep</code></td>
+<td><code>reason</code>、<code>input_index</code>、<code>method</code></td>
+<td>ステップの形式が不正であるか、サポートされていないメソッド名が指定されています</td>
+</tr>
+<tr>
+<td><code>UnexpectedSandboxCall</code></td>
+<td><code>call</code>、<code>call_index</code>、<code>actual_method</code>、<code>expected_method</code>、<code>remaining_steps</code></td>
+<td>ワークフローが誤ったメソッドを呼び出したか、スクリプトの終了後も続行しました</td>
+</tr>
+<tr>
+<td><code>SandboxCallMatcherError</code></td>
+<td><code>call</code>、<code>call_index</code>、<code>method</code></td>
+<td>ステップマッチャーが <code>False</code> を返しました</td>
+</tr>
+<tr>
+<td><code>UnconsumedSandboxSteps</code></td>
+<td><code>remaining_steps</code>、<code>pending_methods</code></td>
+<td>すべてのステップを使用する前にワークフローが終了しました</td>
+</tr>
+</tbody>
+</table>
+<p>返されるオブジェクトはセッション自体です。<code>RunConfig(sandbox={"session": sandbox})</code> に直接渡してください。ラッパーの <code>.session</code> 属性はありません。</p>
+<h2 id="realtime-recipes">Realtime のレシピ</h2>
+<h3 id="test-a-realtime-session">Realtime セッションのテスト</h3>
+<p><code>ScriptedRealtimeModel</code> は、Python SDK の正規化済み <code>RealtimeModel</code> 境界を実装します。各 <code>RealtimeStep</code> は、1 つの送信 <code>RealtimeModelSendEvent</code> と照合し、その後、正規化済みの受信 <code>RealtimeModelEvent</code> オブジェクトを発行するか、注入されたエラーを発生させます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.realtime</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">RealtimeAgent</span><span class="p">,</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">RealtimeModelOutputTextDeltaEvent</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">RealtimeModelSendUserInput</span><span class="p">,</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">RealtimeRawModelEvent</span><span class="p">,</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="n">RealtimeRunner</span><span class="p">,</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="p">)</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.realtime.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">RealtimeStep</span><span class="p">,</span> <span class="n">ScriptedRealtimeModel</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_realtime_message</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>    <span class="n">reply</span> <span class="o">=</span> <span class="n">RealtimeModelOutputTextDeltaEvent</span><span class="p">(</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>        <span class="n">item_id</span><span class="o">=</span><span class="s2">&quot;item_1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>        <span class="n">delta</span><span class="o">=</span><span class="s2">&quot;Hello!&quot;</span><span class="p">,</span>
+</span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>        <span class="n">response_id</span><span class="o">=</span><span class="s2">&quot;response_1&quot;</span><span class="p">,</span>
+</span><span id="__span-6-19"><a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>    <span class="p">)</span>
+</span><span id="__span-6-20"><a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedRealtimeModel</span><span class="p">(</span>
+</span><span id="__span-6-21"><a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a>        <span class="p">[</span>
+</span><span id="__span-6-22"><a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a>            <span class="n">RealtimeStep</span><span class="p">(</span>
+</span><span id="__span-6-23"><a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a>                <span class="n">expect</span><span class="o">=</span><span class="n">RealtimeModelSendUserInput</span><span class="p">(</span><span class="n">user_input</span><span class="o">=</span><span class="s2">&quot;Hello&quot;</span><span class="p">),</span>
+</span><span id="__span-6-24"><a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a>                <span class="n">emit</span><span class="o">=</span><span class="p">[</span><span class="n">reply</span><span class="p">],</span>
+</span><span id="__span-6-25"><a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a>            <span class="p">)</span>
+</span><span id="__span-6-26"><a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a>        <span class="p">]</span>
+</span><span id="__span-6-27"><a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a>    <span class="p">)</span>
+</span><span id="__span-6-28"><a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a>    <span class="n">runner</span> <span class="o">=</span> <span class="n">RealtimeRunner</span><span class="p">(</span>
+</span><span id="__span-6-29"><a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a>        <span class="n">RealtimeAgent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">),</span>
+</span><span id="__span-6-30"><a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a>        <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+</span><span id="__span-6-31"><a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;tracing_disabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+</span><span id="__span-6-32"><a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a>    <span class="p">)</span>
+</span><span id="__span-6-33"><a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a>
+</span><span id="__span-6-34"><a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a>    <span class="n">observed_reply</span> <span class="o">=</span> <span class="kc">False</span>
+</span><span id="__span-6-35"><a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a>    <span class="k">async</span> <span class="k">with</span> <span class="k">await</span> <span class="n">runner</span><span class="o">.</span><span class="n">run</span><span class="p">()</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-6-36"><a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a>        <span class="k">await</span> <span class="n">session</span><span class="o">.</span><span class="n">send_message</span><span class="p">(</span><span class="s2">&quot;Hello&quot;</span><span class="p">)</span>
+</span><span id="__span-6-37"><a id="__codelineno-6-37" name="__codelineno-6-37" href="#__codelineno-6-37"></a>        <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">session</span><span class="p">:</span>
+</span><span id="__span-6-38"><a id="__codelineno-6-38" name="__codelineno-6-38" href="#__codelineno-6-38"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">RealtimeRawModelEvent</span><span class="p">)</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">data</span> <span class="o">==</span> <span class="n">reply</span><span class="p">:</span>
+</span><span id="__span-6-39"><a id="__codelineno-6-39" name="__codelineno-6-39" href="#__codelineno-6-39"></a>                <span class="n">observed_reply</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-6-40"><a id="__codelineno-6-40" name="__codelineno-6-40" href="#__codelineno-6-40"></a>                <span class="k">break</span>
+</span><span id="__span-6-41"><a id="__codelineno-6-41" name="__codelineno-6-41" href="#__codelineno-6-41"></a>
+</span><span id="__span-6-42"><a id="__codelineno-6-42" name="__codelineno-6-42" href="#__codelineno-6-42"></a>    <span class="k">assert</span> <span class="n">observed_reply</span>
+</span><span id="__span-6-43"><a id="__codelineno-6-43" name="__codelineno-6-43" href="#__codelineno-6-43"></a>    <span class="k">assert</span> <span class="n">model</span><span class="o">.</span><span class="n">sent_events</span> <span class="o">==</span> <span class="p">(</span><span class="n">RealtimeModelSendUserInput</span><span class="p">(</span><span class="n">user_input</span><span class="o">=</span><span class="s2">&quot;Hello&quot;</span><span class="p">),)</span>
+</span><span id="__span-6-44"><a id="__codelineno-6-44" name="__codelineno-6-44" href="#__codelineno-6-44"></a>    <span class="k">assert</span> <span class="n">model</span><span class="o">.</span><span class="n">closed</span> <span class="ow">is</span> <span class="kc">True</span>
+</span><span id="__span-6-45"><a id="__codelineno-6-45" name="__codelineno-6-45" href="#__codelineno-6-45"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>期待値には、厳密なイベント値、<code>isinstance</code> で照合されるイベントクラス、または送信イベントを受け取り、一致した場合に <code>True</code> を返す callable を指定できます。デフォルトでは厳格モードが有効です。<code>strict=False</code> を使用すると、無関係な送信イベントは記録されますが、保留中のステップは消費されません。これは、テスト対象の動作に含まれない付随的なイベントをセッションが発行する場合に便利です。</p>
+<p>接続中に受信イベントを発行するには、<code>connect_events</code> を使用します。ライフサイクルの障害には <code>connect_error</code> または <code>close_error</code> を使用し、1 回の照合済み送信に関連付けられた障害には <code>RealtimeStep(error=...)</code> を使用します。1 つのステップに <code>emit</code> と <code>error</code> の両方を定義することはできません。</p>
+<h3 id="test-a-realtime-tool-workflow">Realtime ツールワークフローのテスト</h3>
+<p>実際の関数ツールを <code>RealtimeAgent</code> に接続し、正規化済みツール呼び出しを発行して、SDK がモデル境界を通じてツール出力を送信することを期待します。<code>async_tool_calls</code> を <code>False</code> に設定すると、この小さなコード例は、テスト専用の待機機構を使用せずに接続中に完了します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.realtime</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">RealtimeAgent</span><span class="p">,</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">RealtimeModelSendToolOutput</span><span class="p">,</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    <span class="n">RealtimeModelToolCallEvent</span><span class="p">,</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="n">RealtimeRunner</span><span class="p">,</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="p">)</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.realtime.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">RealtimeStep</span><span class="p">,</span> <span class="n">ScriptedRealtimeModel</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="nd">@tool</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="k">def</span><span class="w"> </span><span class="nf">lookup_order</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Look up an order by ID.&quot;&quot;&quot;</span>
+</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;Order </span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2"> has shipped.&quot;</span>
+</span><span id="__span-7-17"><a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a>
+</span><span id="__span-7-18"><a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a>
+</span><span id="__span-7-19"><a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-7-20"><a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_realtime_tool_workflow</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-7-21"><a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a>    <span class="n">tool_call</span> <span class="o">=</span> <span class="n">RealtimeModelToolCallEvent</span><span class="p">(</span>
+</span><span id="__span-7-22"><a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;lookup_order&quot;</span><span class="p">,</span>
+</span><span id="__span-7-23"><a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a>        <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;call_1&quot;</span><span class="p">,</span>
+</span><span id="__span-7-24"><a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>        <span class="n">arguments</span><span class="o">=</span><span class="s1">&#39;{&quot;order_id&quot;:&quot;order_123&quot;}&#39;</span><span class="p">,</span>
+</span><span id="__span-7-25"><a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a>    <span class="p">)</span>
+</span><span id="__span-7-26"><a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a>
+</span><span id="__span-7-27"><a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">matches_tool_output</span><span class="p">(</span><span class="n">event</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+</span><span id="__span-7-28"><a id="__codelineno-7-28" name="__codelineno-7-28" href="#__codelineno-7-28"></a>        <span class="k">return</span> <span class="p">(</span>
+</span><span id="__span-7-29"><a id="__codelineno-7-29" name="__codelineno-7-29" href="#__codelineno-7-29"></a>            <span class="nb">isinstance</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">RealtimeModelSendToolOutput</span><span class="p">)</span>
+</span><span id="__span-7-30"><a id="__codelineno-7-30" name="__codelineno-7-30" href="#__codelineno-7-30"></a>            <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">call_id</span> <span class="o">==</span> <span class="s2">&quot;call_1&quot;</span>
+</span><span id="__span-7-31"><a id="__codelineno-7-31" name="__codelineno-7-31" href="#__codelineno-7-31"></a>            <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">output</span> <span class="o">==</span> <span class="s2">&quot;Order order_123 has shipped.&quot;</span>
+</span><span id="__span-7-32"><a id="__codelineno-7-32" name="__codelineno-7-32" href="#__codelineno-7-32"></a>        <span class="p">)</span>
+</span><span id="__span-7-33"><a id="__codelineno-7-33" name="__codelineno-7-33" href="#__codelineno-7-33"></a>
+</span><span id="__span-7-34"><a id="__codelineno-7-34" name="__codelineno-7-34" href="#__codelineno-7-34"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedRealtimeModel</span><span class="p">(</span>
+</span><span id="__span-7-35"><a id="__codelineno-7-35" name="__codelineno-7-35" href="#__codelineno-7-35"></a>        <span class="p">[</span><span class="n">RealtimeStep</span><span class="p">(</span><span class="n">expect</span><span class="o">=</span><span class="n">matches_tool_output</span><span class="p">)],</span>
+</span><span id="__span-7-36"><a id="__codelineno-7-36" name="__codelineno-7-36" href="#__codelineno-7-36"></a>        <span class="n">connect_events</span><span class="o">=</span><span class="p">[</span><span class="n">tool_call</span><span class="p">],</span>
+</span><span id="__span-7-37"><a id="__codelineno-7-37" name="__codelineno-7-37" href="#__codelineno-7-37"></a>    <span class="p">)</span>
+</span><span id="__span-7-38"><a id="__codelineno-7-38" name="__codelineno-7-38" href="#__codelineno-7-38"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">RealtimeAgent</span><span class="p">(</span>
+</span><span id="__span-7-39"><a id="__codelineno-7-39" name="__codelineno-7-39" href="#__codelineno-7-39"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Order assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-7-40"><a id="__codelineno-7-40" name="__codelineno-7-40" href="#__codelineno-7-40"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">lookup_order</span><span class="p">],</span>
+</span><span id="__span-7-41"><a id="__codelineno-7-41" name="__codelineno-7-41" href="#__codelineno-7-41"></a>    <span class="p">)</span>
+</span><span id="__span-7-42"><a id="__codelineno-7-42" name="__codelineno-7-42" href="#__codelineno-7-42"></a>    <span class="n">runner</span> <span class="o">=</span> <span class="n">RealtimeRunner</span><span class="p">(</span>
+</span><span id="__span-7-43"><a id="__codelineno-7-43" name="__codelineno-7-43" href="#__codelineno-7-43"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-7-44"><a id="__codelineno-7-44" name="__codelineno-7-44" href="#__codelineno-7-44"></a>        <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+</span><span id="__span-7-45"><a id="__codelineno-7-45" name="__codelineno-7-45" href="#__codelineno-7-45"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;async_tool_calls&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;tracing_disabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+</span><span id="__span-7-46"><a id="__codelineno-7-46" name="__codelineno-7-46" href="#__codelineno-7-46"></a>    <span class="p">)</span>
+</span><span id="__span-7-47"><a id="__codelineno-7-47" name="__codelineno-7-47" href="#__codelineno-7-47"></a>
+</span><span id="__span-7-48"><a id="__codelineno-7-48" name="__codelineno-7-48" href="#__codelineno-7-48"></a>    <span class="k">async</span> <span class="k">with</span> <span class="k">await</span> <span class="n">runner</span><span class="o">.</span><span class="n">run</span><span class="p">():</span>
+</span><span id="__span-7-49"><a id="__codelineno-7-49" name="__codelineno-7-49" href="#__codelineno-7-49"></a>        <span class="k">pass</span>
+</span><span id="__span-7-50"><a id="__codelineno-7-50" name="__codelineno-7-50" href="#__codelineno-7-50"></a>
+</span><span id="__span-7-51"><a id="__codelineno-7-51" name="__codelineno-7-51" href="#__codelineno-7-51"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>これにより、実際の Realtime ツール検索、引数検証、実行、および出力ルーティングが実行されます。実際のモデルがツールを選択することを証明するものではありません。</p>
+<h3 id="inspect-realtime-calls-and-lifecycle">Realtime の呼び出しとライフサイクルの検査</h3>
+<table>
+<thead>
+<tr>
+<th>メンバー</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>connect_calls</code></td>
+<td>認証情報を含まない、切り離された接続スナップショット</td>
+</tr>
+<tr>
+<td><code>sent_events</code></td>
+<td>呼び出し順の、切り離された送信イベントのスナップショット</td>
+</tr>
+<tr>
+<td><code>remaining_steps</code></td>
+<td>残っている想定送信</td>
+</tr>
+<tr>
+<td><code>listeners</code></td>
+<td>現在登録されているリスナーオブジェクト</td>
+</tr>
+<tr>
+<td><code>connected</code>、<code>closed</code>、<code>close_calls</code></td>
+<td>現在のメモリ内ライフサイクル状態</td>
+</tr>
+</tbody>
+</table>
+<p>接続履歴には、API キーまたはヘッダーフィールドが指定されたかどうかのみが記録され、その値は保存されません。URL のスナップショットからは、ユーザー情報、クエリパラメーター、およびフラグメントが削除されます。可変のイベントデータと設定は切り離されますが、ツール、ハンドオフ、再生トラッカーなどのライブ SDK オブジェクトは同一性を維持します。</p>
+<p>最後に <code>model.assert_complete()</code> を使用し、<code>RealtimeSession</code> 非同期コンテキストマネージャーによってモデルを閉じてください。Python ユーティリティは、保留中の期待値を表す Promise、暗黙的なタイムアウト、または個別の <code>assert_closed()</code> ヘルパーを意図的に提供していません。</p>
+<table>
+<thead>
+<tr>
+<th>エラー</th>
+<th>構造化フィールド</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>UnexpectedRealtimeSend</code></td>
+<td><code>actual</code>、<code>expected</code></td>
+<td>厳格な送信が次のステップと一致しなかったか、ステップが残っていませんでした</td>
+</tr>
+<tr>
+<td><code>UnconsumedRealtimeSteps</code></td>
+<td><code>remaining_steps</code></td>
+<td>想定されたすべての送信を使用する前にセッションが終了しました</td>
+</tr>
+<tr>
+<td><code>RealtimeScriptError</code></td>
+<td>なし</td>
+<td>切断中の送信など、無効なライフサイクル状態でスクリプトが使用されました</td>
+</tr>
+</tbody>
+</table>
+<h2 id="voice-pipeline-recipes">Voice パイプラインのレシピ</h2>
+<h3 id="test-a-voice-pipeline">Voice パイプラインのテスト</h3>
+<p>スクリプト化された STT および TTS モデルを、<code>SingleAgentVoiceWorkflow</code> と <code>ScriptedModel</code> を基盤とするエージェントと組み合わせると、プロバイダーへのリクエストを行わずに、音声テキスト変換 -&gt; エージェント -&gt; テキスト音声変換のパイプライン全体をテストできます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScriptedModel</span><span class="p">,</span> <span class="n">assistant_message</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice</span><span class="w"> </span><span class="kn">import</span> <span class="n">AudioInput</span><span class="p">,</span> <span class="n">SingleAgentVoiceWorkflow</span><span class="p">,</span> <span class="n">VoicePipeline</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice.testing</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>    <span class="n">ScriptedSTTModel</span><span class="p">,</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    <span class="n">ScriptedTTSModel</span><span class="p">,</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">TTSResult</span><span class="p">,</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">pcm16_samples</span><span class="p">,</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="p">)</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">asyncio</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_voice_pipeline</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-8-17"><a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">ScriptedModel</span><span class="p">([[</span><span class="n">assistant_message</span><span class="p">(</span><span class="s2">&quot;Hello there.&quot;</span><span class="p">)]])</span>
+</span><span id="__span-8-18"><a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>    <span class="n">stt</span> <span class="o">=</span> <span class="n">ScriptedSTTModel</span><span class="p">(</span><span class="s2">&quot;hello&quot;</span><span class="p">)</span>
+</span><span id="__span-8-19"><a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a>    <span class="n">pcm</span> <span class="o">=</span> <span class="n">pcm16_samples</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">100</span><span class="p">,</span> <span class="o">-</span><span class="mi">100</span><span class="p">,</span> <span class="mi">0</span><span class="p">])</span>
+</span><span id="__span-8-20"><a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a>    <span class="n">tts</span> <span class="o">=</span> <span class="n">ScriptedTTSModel</span><span class="p">([</span><span class="n">TTSResult</span><span class="p">([</span><span class="n">pcm</span><span class="p">])])</span>
+</span><span id="__span-8-21"><a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a>    <span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span>
+</span><span id="__span-8-22"><a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a>        <span class="n">workflow</span><span class="o">=</span><span class="n">SingleAgentVoiceWorkflow</span><span class="p">(</span>
+</span><span id="__span-8-23"><a id="__codelineno-8-23" name="__codelineno-8-23" href="#__codelineno-8-23"></a>            <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Voice assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">)</span>
+</span><span id="__span-8-24"><a id="__codelineno-8-24" name="__codelineno-8-24" href="#__codelineno-8-24"></a>        <span class="p">),</span>
+</span><span id="__span-8-25"><a id="__codelineno-8-25" name="__codelineno-8-25" href="#__codelineno-8-25"></a>        <span class="n">stt_model</span><span class="o">=</span><span class="n">stt</span><span class="p">,</span>
+</span><span id="__span-8-26"><a id="__codelineno-8-26" name="__codelineno-8-26" href="#__codelineno-8-26"></a>        <span class="n">tts_model</span><span class="o">=</span><span class="n">tts</span><span class="p">,</span>
+</span><span id="__span-8-27"><a id="__codelineno-8-27" name="__codelineno-8-27" href="#__codelineno-8-27"></a>        <span class="n">config</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;tracing_disabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;tts_settings&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;buffer_size&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">}},</span>
+</span><span id="__span-8-28"><a id="__codelineno-8-28" name="__codelineno-8-28" href="#__codelineno-8-28"></a>    <span class="p">)</span>
+</span><span id="__span-8-29"><a id="__codelineno-8-29" name="__codelineno-8-29" href="#__codelineno-8-29"></a>
+</span><span id="__span-8-30"><a id="__codelineno-8-30" name="__codelineno-8-30" href="#__codelineno-8-30"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">AudioInput</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int16</span><span class="p">)))</span>
+</span><span id="__span-8-31"><a id="__codelineno-8-31" name="__codelineno-8-31" href="#__codelineno-8-31"></a>    <span class="n">events</span> <span class="o">=</span> <span class="p">[</span><span class="n">event</span> <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream</span><span class="p">()]</span>
+</span><span id="__span-8-32"><a id="__codelineno-8-32" name="__codelineno-8-32" href="#__codelineno-8-32"></a>
+</span><span id="__span-8-33"><a id="__codelineno-8-33" name="__codelineno-8-33" href="#__codelineno-8-33"></a>    <span class="k">assert</span> <span class="n">events</span>
+</span><span id="__span-8-34"><a id="__codelineno-8-34" name="__codelineno-8-34" href="#__codelineno-8-34"></a>    <span class="k">assert</span> <span class="p">[</span><span class="n">call</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">tts</span><span class="o">.</span><span class="n">calls</span><span class="p">]</span> <span class="o">==</span> <span class="p">[</span><span class="s2">&quot;Hello there.&quot;</span><span class="p">]</span>
+</span><span id="__span-8-35"><a id="__codelineno-8-35" name="__codelineno-8-35" href="#__codelineno-8-35"></a>    <span class="n">stt</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span><span id="__span-8-36"><a id="__codelineno-8-36" name="__codelineno-8-36" href="#__codelineno-8-36"></a>    <span class="n">tts</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span><span id="__span-8-37"><a id="__codelineno-8-37" name="__codelineno-8-37" href="#__codelineno-8-37"></a>    <span class="n">model</span><span class="o">.</span><span class="n">assert_complete</span><span class="p">()</span>
+</span></code></pre></div>
+<p>パイプラインの STT/TTS ライフサイクルがテスト対象で、エージェントオーケストレーションが対象ではない場合は、代わりに <code>ScriptedVoiceWorkflow</code> を使用してください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScriptedVoiceWorkflow</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">workflow</span> <span class="o">=</span> <span class="n">ScriptedVoiceWorkflow</span><span class="p">(</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">turns</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Hello there.&quot;</span><span class="p">],</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">start</span><span class="o">=</span><span class="s2">&quot;Welcome.&quot;</span><span class="p">,</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>start</code> ステップは、<code>on_start()</code> によって消費されます。<code>VoicePipeline</code> が <code>on_start()</code> を呼び出すのは <code>StreamedAudioInput</code> の場合のみです。静的な <code>AudioInput</code> 実行では、<code>start</code> は消費されません。通常の各ターンでは、文字起こしが記録され、設定された実行結果が 1 つ消費されます。文字列は 1 つのフラグメントです。文字列のシーケンスでは、テキスト分割と TTS の前のフラグメント境界を制御できます。</p>
+<h3 id="test-streamed-transcription">ストリーミング文字起こしのテスト</h3>
+<p><code>ScriptedSTTModel</code> は、静的な <code>transcriptions</code> と、個別にスクリプト化されたストリーミング <code>sessions</code> を受け付けます。セッションには、<code>ScriptedTranscriptionSession</code>、文字起こしターンのシーケンス、例外、または単一の文字列を指定できます。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScriptedSTTModel</span><span class="p">,</span> <span class="n">ScriptedTranscriptionSession</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">session</span> <span class="o">=</span> <span class="n">ScriptedTranscriptionSession</span><span class="p">([</span><span class="s2">&quot;first turn&quot;</span><span class="p">,</span> <span class="s2">&quot;second turn&quot;</span><span class="p">])</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">stt</span> <span class="o">=</span> <span class="n">ScriptedSTTModel</span><span class="p">(</span><span class="n">sessions</span><span class="o">=</span><span class="p">[</span><span class="n">session</span><span class="p">])</span>
+</span></code></pre></div>
+<p><code>ScriptedTranscriptionSession</code> を閉じると反復が停止し、スキップされたターンは <code>assert_complete()</code> による報告対象として残ります。同様に、<code>ScriptedTTSModel</code> は、呼び出しごとに 1 つの <code>TTSResult</code>、バイトチャンクのシーケンス、または例外を消費します。</p>
+<h3 id="inspect-voice-calls">Voice 呼び出しの検査</h3>
+<table>
+<thead>
+<tr>
+<th>コンポーネント</th>
+<th>記録される履歴</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ScriptedSTTModel</code></td>
+<td><code>calls</code>、<code>session_calls</code>、およびライブ <code>created_sessions</code> の同一性</td>
+</tr>
+<tr>
+<td><code>ScriptedTTSModel</code></td>
+<td>テキストと切り離された設定を含む <code>calls</code></td>
+</tr>
+<tr>
+<td><code>ScriptedVoiceWorkflow</code></td>
+<td>ターン順の <code>transcriptions</code></td>
+</tr>
+</tbody>
+</table>
+<p>静的な音声バッファと可変の設定は、呼び出し時にスナップショットされます。<code>StreamedAudioInput</code> および作成された文字起こしセッションオブジェクトは、パイプラインが引き続き使用するため、ライブオブジェクトとしての同一性を維持します。</p>
+<table>
+<thead>
+<tr>
+<th>エラー</th>
+<th>構造化フィールド</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>UnexpectedVoiceCall</code></td>
+<td><code>operation</code></td>
+<td>静的な文字起こし、ストリーミングセッション、TTS 呼び出し、ワークフロー開始、またはワークフローターンに設定済みステップがありませんでした</td>
+</tr>
+<tr>
+<td><code>UnconsumedVoiceSteps</code></td>
+<td><code>remaining_steps</code></td>
+<td>1 つ以上の設定済み Voice ステップが残っています</td>
+</tr>
+</tbody>
+</table>
+<p>テストで設定するスクリプト化された各 Voice コンポーネントに対して、<code>assert_complete()</code> を呼び出してください。<code>ScriptedSTTModel.assert_complete()</code> は、それが作成した文字起こしセッション内のターンも確認します。</p>
+<h2 id="choose-the-correct-boundary">適切な境界の選択</h2>
+<p>モデルプロバイダーに依存せずに、SDK の実行ループ、ツール、ハンドオフ、ガードレール、セッション、再試行、または正規化済みストリーミングをテストする場合は、<code>ScriptedModel</code> を使用します。</p>
+<p>Sandbox プロバイダーを起動せずに <code>SandboxAgent</code> の機能とオーケストレーションをテストする場合は、<code>ScriptedModel</code> とともに <code>scripted_sandbox_session()</code> を使用します。プロバイダーの作成、プロセス実行、ファイルシステムの忠実性、永続性、リソース制限、および分離の検証は、実際の Sandbox プロバイダーに対する統合テストで行ってください。</p>
+<p>WebSocket 接続を開かずに <code>RealtimeSession</code> の動作、または <code>RealtimeAgent</code> のツールとハンドオフのオーケストレーションをテストする場合は、<code>ScriptedRealtimeModel</code> を使用します。raw Realtime クライアント／サーバーイベント、認証、ネットワーク復旧、および音声トランスポートの動作は、実際のトランスポートまたは統合環境でテストしてください。Realtime API セッションでは、クライアントが入力を送信してイベントを受信している間、接続を開いたままにします。そのため、これらのネットワークおよびプロトコルに関する事項は、正規化済みモデル境界より下位に属します。本番環境の接続アーキテクチャについては、<a href="https://developers.openai.com/api/docs/guides/realtime">OpenAI Realtime API ガイド</a>を参照してください。</p>
+<p>音声プロバイダーを使用せずに、STT/TTS の順序、ストリーミング文字起こしのクリーンアップ、ワークフローフラグメントの受け渡し、または Voice パイプライン全体の構成をテストする場合は、Voice テストコンポーネントを使用します。文字起こし品質、生成音声、エンコード互換性、レイテンシ、または再生がテスト対象の場合は、実際の音声モデルと代表的な音声を使用してください。</p>
+<p>Responses API または Chat Completions のリクエストシリアライズ、認証ヘッダー、プロバイダーのデフォルト値、HTTP ペイロード、プロバイダーのストリームチャンク、Realtime ワイヤーフレーム、またはプロバイダー固有のライフサイクル動作のテストには、これらのユーティリティを使用しないでください。そのようなテストでは実際のアダプターを維持し、そのネットワーク境界を置き換えるか制御してください。<code>openai</code> v3 では、OpenAI アダプターのテストに <code>httpx2</code> のリクエスト、レスポンス、トランスポート、および例外の型を使用する必要があります。従来の <code>httpx</code> は、Agents SDK のコア依存関係ではありません。</p>
+<h2 id="final-checklist">最終チェックリスト</h2>
+<ul>
+<li>正規化済みモデル、Sandbox セッション、Realtime モデル、または Voice パイプライン境界が管理するやり取りのみをスクリプト化します。</li>
+<li>ランナーのプライベート状態ではなく、重要な公開リクエストフィールドまたは呼び出しフィールドをアサートします。</li>
+<li>固定レスポンスステップを優先し、リクエスト依存の動作にのみレスポンダーを使用します。</li>
+<li>モデルの自動ストリーミングを優先し、イベントレベルの動作が重要な場合にのみ厳密なストリームを使用します。</li>
+<li>スクリプト化された各コンポーネントのテストを、その <code>assert_complete()</code> メソッドで終了します。</li>
+<li>周囲のテストが Realtime および Sandbox のライフサイクルを管理する場合は、非同期コンテキストマネージャーを使用してライフサイクルをクリーンアップします。</li>
+<li>人が読めるメッセージを解析するのではなく、構造化されたエラーフィールドをアサートします。</li>
+<li>プロバイダーのワイヤーテストでは、制御されたネットワークトランスポートを備えた実際のアダプターを使用します。</li>
+</ul>
+<h2 id="scope-and-current-limitations">スコープと現在の制限</h2>
+<p>テストモジュールは、意図的に以下を提供していません。</p>
+<ul>
+<li>正規化済みモデル出力項目ごとの便利なビルダー。一般的なケースには <code>assistant_message()</code> と <code>function_call()</code> を使用し、その他の正規化済み項目は直接渡してください。</li>
+<li>プロバイダープロトコルのシミュレーター。厳密なモデルストリームでは、Responses API または Chat Completions のワイヤーチャンクではなく、正規化済み SDK イベントを使用します。</li>
+<li>高レベルのシミュレートされた Realtime サーバー。テストでは、正規化済みの送信を明示的に照合し、シナリオに必要な正規化済み受信イベントを発行します。</li>
+<li>順不同の Sandbox または Realtime の期待値。どちらのユーティリティも、1 つのグローバルな順序で想定ステップを消費します。</li>
+<li>テストランナー固有のマッチャー、フィクスチャ、暗黙的なタイムアウト、または自動ティアダウン。</li>
+<li>リセット API。<code>ScriptedModel</code> は段階的なスクリプト用の <code>enqueue()</code> と <code>extend()</code> をサポートしますが、独立したシナリオには新しいスクリプト化コンポーネントを作成してください。</li>
+</ul>
+<p>不正な形式のストリーム、制御された中断または並行処理、厳密なキャンセル、またはスクリプト化ユーティリティでは維持できないライフサイクル境界がテストで必要な場合は、対応する公開インターフェースのカスタム実装を使用してください。その特殊な境界をテスト内に記載してください。</p>
+<h2 id="api-reference">API リファレンス</h2>
+<ul>
+<li><a href="../ref/testing/"><code>agents.testing</code></a></li>
+<li><a href="../ref/realtime/testing/"><code>agents.realtime.testing</code></a></li>
+<li><a href="../ref/voice/testing/"><code>agents.voice.testing</code></a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f", "clipboard.copy": "\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u3078\u30b3\u30d4\u30fc", "search.result.more.one": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3082\u30461\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.more.other": "\u3053\u306e\u30da\u30fc\u30b8\u5185\u306b\u3042\u3068#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.none": "\u4f55\u3082\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f", "search.result.one": "1\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.other": "#\u4ef6\u898b\u3064\u304b\u308a\u307e\u3057\u305f", "search.result.placeholder": "\u691c\u7d22\u30ad\u30fc\u30ef\u30fc\u30c9\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044", "search.result.term.missing": "\u691c\u7d22\u306b\u542b\u307e\u308c\u306a\u3044", "select.version": "\u30d0\u30fc\u30b8\u30e7\u30f3\u5207\u308a\u66ff\u3048"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
