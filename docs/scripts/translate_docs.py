@@ -8,7 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 from openai import OpenAI
-import markdown
+from markdown import Markdown
+from markdown.blockprocessors import HashHeaderProcessor
+from markdown.extensions.attr_list import AttrListTreeprocessor
 from mkdocs.utils import yaml_load
 from concurrent.futures import ThreadPoolExecutor
 
@@ -350,11 +352,14 @@ def remove_fenced_code_blocks(markdown: str) -> str:
     return "".join(parts)
 
 
-HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6}) (?P<text>.+?)\s*$")
-HEADING_ID_ATTR_PATTERN = re.compile(r"\s*\{#[^}]*\}\s*$")
+# The parser's own grammars, so nothing here has to agree with them by hand.
+ATX_HEADING_RE = HashHeaderProcessor.RE
+ATTR_LIST_RE = AttrListTreeprocessor.HEADER_RE
+# The only attribute list this script writes, and therefore the only one it rewrites.
+OWN_ID_ATTR_RE = re.compile(r"^#[A-Za-z0-9_-]+$")
 
 
-def mkdocs_markdown() -> markdown.Markdown:
+def mkdocs_markdown() -> Markdown:
     """Build the Markdown parser the same way mkdocs does from mkdocs.yml.
 
     Heading ids have to come from the same parse that renders the site, so the
@@ -372,7 +377,7 @@ def mkdocs_markdown() -> markdown.Markdown:
                 extension_configs[name] = options or {}
         else:
             extensions.append(item)
-    return markdown.Markdown(extensions=extensions, extension_configs=extension_configs)
+    return Markdown(extensions=extensions, extension_configs=extension_configs)
 
 
 def heading_ids(source_markdown: str) -> list[tuple[int, str]]:
@@ -390,53 +395,75 @@ def heading_ids(source_markdown: str) -> list[tuple[int, str]]:
     return ids
 
 
-def headings_outside_code(markdown: str) -> list[tuple[int, int, str]]:
+def headings_outside_code(markdown_text: str) -> list[tuple[int, int, str]]:
     """Return (line index, level, text) for every ATX heading outside fenced code."""
     headings: list[tuple[int, int, str]] = []
     open_fence: tuple[str, int] | None = None
-    for index, line in enumerate(markdown.splitlines()):
+    for index, line in enumerate(markdown_text.splitlines()):
         if open_fence is None:
             opening = opening_fence(line)
             if opening is not None:
                 open_fence = opening
                 continue
-            match = HEADING_PATTERN.match(line)
+            match = ATX_HEADING_RE.match(line)
             if match is not None:
-                headings.append((index, len(match.group("hashes")), match.group("text")))
+                headings.append((index, len(match.group("level")), match.group("header").strip()))
         elif is_closing_fence(line, *open_fence):
             open_fence = None
     return headings
 
 
-def preserve_heading_anchors(source_markdown: str, translated_markdown: str) -> str:
+def preserve_heading_anchors(
+    source_markdown: str, translated_markdown: str, *, name: str = "translation"
+) -> str:
     """Give each translated heading the id mkdocs derives from the English heading.
 
     mkdocs builds a heading id from the rendered heading text, so a translated heading
     gets a different id and every `#...` link written against the English page stops
     resolving. With `attr_list` enabled a heading can carry an explicit `{#id}`, which
     the toc extension uses instead of slugifying the text.
+
+    The contract is the shape the docs use: one ATX heading per English heading, with
+    no attribute list other than the `{#id}` written here. A page outside it is
+    reported and returned unchanged. Before the result is returned it is parsed again
+    and has to render exactly the English ids, so a written page is a correct page.
     """
     source_headings = heading_ids(source_markdown)
     translated_headings = headings_outside_code(translated_markdown)
     source_levels = [level for level, _ in source_headings]
     translated_levels = [level for _, level, _ in translated_headings]
     if source_levels != translated_levels:
-        print("Skipping heading anchors: translated headings do not line up with the source.")
+        print(f"Skipping heading anchors for {name}: headings do not line up with the source.")
         return translated_markdown
 
     lines = translated_markdown.splitlines(keepends=True)
-    for (level, heading_id), (index, _, translated_text) in zip(
-        source_headings, translated_headings
-    ):
+    for (level, heading_id), (index, _, text) in zip(source_headings, translated_headings):
         # Leave the H1 alone: mkdocs reads the page title from it.
         if level == 1:
             continue
-        text = HEADING_ID_ATTR_PATTERN.sub("", translated_text)
+        attrs = ATTR_LIST_RE.search(text)
+        if attrs is not None:
+            if OWN_ID_ATTR_RE.match(attrs.group(1).strip()) is None:
+                print(
+                    f"Skipping heading anchors for {name}: heading carries an attribute list "
+                    f"this script does not manage: {text!r}"
+                )
+                return translated_markdown
+            text = text[: attrs.start()]
         line = lines[index]
         ending = line[len(line.rstrip("\r\n")) :]
         hashes = "#" * level
         lines[index] = f"{hashes} {text} {{#{heading_id}}}{ending}"
-    return "".join(lines)
+    rewritten = "".join(lines)
+
+    # The H1 keeps its translated id; everything else has to come out as the English id.
+    def without_h1_ids(headings: list[tuple[int, str]]) -> list[tuple[int, str | None]]:
+        return [(level, heading_id if level > 1 else None) for level, heading_id in headings]
+
+    if without_h1_ids(heading_ids(rewritten)) != without_h1_ids(source_headings):
+        print(f"Skipping heading anchors for {name}: the rewritten page does not render the ids.")
+        return translated_markdown
+    return rewritten
 
 
 def protect_fenced_code(markdown: str, *, namespace: str) -> tuple[str, list[str]]:
@@ -653,7 +680,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
             f"Protected Markdown changed after 3 translation attempts for {file_path} to {lang_code}"
         )
 
-    translated_text = preserve_heading_anchors(content, translated_text)
+    translated_text = preserve_heading_anchors(content, translated_text, name=target_path)
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text
     # Save the combined translated content
@@ -702,7 +729,7 @@ def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
             continue
         with open(target_path, encoding="utf-8", newline="") as f:
             translated_text = f.read()
-        updated_text = preserve_heading_anchors(content, translated_text)
+        updated_text = preserve_heading_anchors(content, translated_text, name=target_path)
         if updated_text == translated_text:
             continue
         print(f"Refreshing heading anchors in {target_path}")

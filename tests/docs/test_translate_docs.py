@@ -89,9 +89,41 @@ def test_preserve_heading_anchors_is_idempotent(translate_docs: ModuleType) -> N
     assert translate_docs.preserve_heading_anchors(SOURCE, once) == once
 
 
+def test_an_id_written_earlier_follows_the_english_heading(translate_docs: ModuleType) -> None:
+    result = translate_docs.preserve_heading_anchors("## Alpha\n", "## アルファ {#old}\n")
+
+    assert result == "## アルファ {#alpha}\n"
+
+
 def test_mismatched_headings_are_left_alone(translate_docs: ModuleType) -> None:
     missing_one_heading = TRANSLATED.replace("\n## 例\n", "\n", 1)
 
     result = translate_docs.preserve_heading_anchors(SOURCE, missing_one_heading)
 
     assert result == missing_one_heading
+
+
+def test_an_english_setext_heading_still_yields_its_id(translate_docs: ModuleType) -> None:
+    # The English side goes through the parser, so setext is just another heading there.
+    source = "Alpha\n-----\n\n## Beta\n"
+    translated = "## アルファ\n\n## ベータ\n"
+
+    result = translate_docs.preserve_heading_anchors(source, translated)
+
+    assert result == "## アルファ {#alpha}\n\n## ベータ {#beta}\n"
+
+
+def test_a_setext_heading_in_the_translation_is_outside_the_contract(
+    translate_docs: ModuleType,
+) -> None:
+    source = "## Alpha\n\n## Beta\n"
+    translated = "アルファ\n-----\n\n## ベータ\n"
+
+    assert translate_docs.preserve_heading_anchors(source, translated) == translated
+
+
+def test_a_heading_with_its_own_attribute_list_is_not_rewritten(translate_docs: ModuleType) -> None:
+    source = "## Alpha\n\n## Beta\n"
+    translated = "## アルファ {.lead}\n\n## ベータ\n"
+
+    assert translate_docs.preserve_heading_anchors(source, translated) == translated
