@@ -1013,8 +1013,16 @@ class ModalSandboxSession(BaseSandboxSession):
         # A stream task can complete between the final poll and the deadline check.
         # Perform one last non-blocking read so that completed output is not deferred
         # to a later pty_write_stdin call.
-        stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
-        stderr_chunk = await self._read_modal_stream(entry=entry, stream_name="stderr")
+        stdout_chunk = await self._read_modal_stream(
+            entry=entry,
+            stream_name="stdout",
+            allow_new_read=False,
+        )
+        stderr_chunk = await self._read_modal_stream(
+            entry=entry,
+            stream_name="stderr",
+            allow_new_read=False,
+        )
         if stdout_chunk:
             chunks.extend(stdout_chunk)
         if stderr_chunk:
@@ -1048,6 +1056,7 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         stream_name: Literal["stdout", "stderr"],
         await_pending: bool = False,
+        allow_new_read: bool = True,
     ) -> bytes:
         stream = entry.process.stdout if stream_name == "stdout" else entry.process.stderr
         if stream is None:
@@ -1055,6 +1064,10 @@ class ModalSandboxSession(BaseSandboxSession):
 
         iter_attr = "stdout_iter" if stream_name == "stdout" else "stderr_iter"
         task_attr = "stdout_read_task" if stream_name == "stdout" else "stderr_read_task"
+        task = getattr(entry, task_attr)
+        if task is None and not allow_new_read:
+            return b""
+
         stream_iter = getattr(entry, iter_attr)
         if stream_iter is None:
             aiter_method = getattr(stream, "__aiter__", None)
@@ -1066,7 +1079,6 @@ class ModalSandboxSession(BaseSandboxSession):
                 else:
                     setattr(entry, iter_attr, stream_iter)
 
-        task = getattr(entry, task_attr)
         if task is None and stream_iter is not None:
             task = asyncio.create_task(stream_iter.__anext__())
             setattr(entry, task_attr, task)
