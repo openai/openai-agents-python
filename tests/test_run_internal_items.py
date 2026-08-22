@@ -898,6 +898,29 @@ def test_run_item_to_input_item_strips_tool_search_created_by() -> None:
     assert "created_by" not in converted_output
 
 
+def test_run_item_to_input_item_strips_function_call_created_by() -> None:
+    agent = Agent(name="A")
+    tool_call = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall.model_validate(
+            {
+                "id": "fc_1",
+                "arguments": "{}",
+                "call_id": "call_1",
+                "name": "lookup",
+                "type": "function_call",
+                "created_by": "server",
+            }
+        ),
+    )
+
+    converted = run_items.run_item_to_input_item(tool_call)
+
+    assert isinstance(converted, dict)
+    assert converted["type"] == "function_call"
+    assert "created_by" not in converted
+
+
 def test_run_item_to_input_item_omits_tool_call_metadata() -> None:
     agent = Agent(name="A")
     tool_call = ToolCallItem(
