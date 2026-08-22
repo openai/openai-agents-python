@@ -769,12 +769,12 @@ async def test_inactivity_timeout():
     )
 
     # We'll artificially manipulate the "time" to simulate inactivity quickly.
-    # The code checks time.time() for inactivity over EVENT_INACTIVITY_TIMEOUT.
+    # The code checks time.monotonic() for inactivity over EVENT_INACTIVITY_TIMEOUT.
     # We'll increment the return_value manually.
     with (
         patch("websockets.connect", return_value=mock_ws),
         patch(
-            "time.time",
+            "time.monotonic",
             side_effect=[
                 1000.0,
                 1000.0 + EVENT_INACTIVITY_TIMEOUT + 1,
