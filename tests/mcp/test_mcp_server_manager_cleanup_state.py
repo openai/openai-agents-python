@@ -1,5 +1,4 @@
 import asyncio
-
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
@@ -28,6 +27,7 @@ async def test_cleanup_all_removes_cleaned_servers_from_active_servers() -> None
 
     assert await manager.connect_all() == [server]
     assert server.connect.await_count == 2
+
 
 @pytest.mark.asyncio
 async def test_cleanup_all_refreshes_active_servers_when_cancellation_propagates() -> None:
