@@ -63,13 +63,24 @@ def test_translated_headings_carry_the_english_ids(translate_docs: ModuleType) -
     assert "# not a heading {#" not in result
 
 
-def test_heading_ids_match_the_rendered_english_text(translate_docs: ModuleType) -> None:
-    source = "## Using `Agent` with [tools](tools.md)\n"
-    translated = "## `Agent` とツール\n"
+def test_heading_ids_come_from_the_rendered_english_headings(translate_docs: ModuleType) -> None:
+    source = (
+        "## Using `Agent` with [tools](tools.md)\n\n"
+        "## [API][ref]\n\n"
+        "## A &amp; B\n\n"
+        "## <code>run</code> loop\n\n"
+        "[ref]: https://example.com\n"
+    )
+    translated = "## `Agent` とツール\n\n## API\n\n## A と B\n\n## 実行ループ\n"
 
     result = translate_docs.preserve_heading_anchors(source, translated)
 
-    assert result == "## `Agent` とツール {#using-agent-with-tools}\n"
+    assert result == (
+        "## `Agent` とツール {#using-agent-with-tools}\n\n"
+        "## API {#api}\n\n"
+        "## A と B {#a-b}\n\n"
+        "## 実行ループ {#run-loop}\n"
+    )
 
 
 def test_preserve_heading_anchors_is_idempotent(translate_docs: ModuleType) -> None:

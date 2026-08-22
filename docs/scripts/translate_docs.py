@@ -6,8 +6,10 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 from openai import OpenAI
-from markdown.extensions import toc as markdown_toc
+import markdown
+from mkdocs.utils import yaml_load
 from concurrent.futures import ThreadPoolExecutor
 
 # import logging
@@ -352,11 +354,40 @@ HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6}) (?P<text>.+?)\s*$")
 HEADING_ID_ATTR_PATTERN = re.compile(r"\s*\{#[^}]*\}\s*$")
 
 
-def heading_slug_text(text: str) -> str:
-    # The toc extension slugifies the rendered heading text, which has no
-    # backticks and only the label of a Markdown link.
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    return text.replace("`", "")
+def mkdocs_markdown() -> markdown.Markdown:
+    """Build the Markdown parser the same way mkdocs does from mkdocs.yml.
+
+    Heading ids have to come from the same parse that renders the site, so the
+    extension list is read from the config rather than kept in a second place.
+    """
+    with open(REPO_ROOT / "mkdocs.yml", encoding="utf-8") as f:
+        config = yaml_load(f)
+    # mkdocs puts these in front of the configured extensions.
+    extensions: list[str] = ["toc", "tables", "fenced_code"]
+    extension_configs: dict[str, dict[str, Any]] = {}
+    for item in config.get("markdown_extensions", []):
+        if isinstance(item, dict):
+            for name, options in item.items():
+                extensions.append(name)
+                extension_configs[name] = options or {}
+        else:
+            extensions.append(item)
+    return markdown.Markdown(extensions=extensions, extension_configs=extension_configs)
+
+
+def heading_ids(source_markdown: str) -> list[tuple[int, str]]:
+    """Return (level, id) for every heading in document order, as the toc extension assigns them."""
+    parser = mkdocs_markdown()
+    parser.convert(source_markdown)
+    ids: list[tuple[int, str]] = []
+
+    def walk(tokens: list[dict[str, Any]]) -> None:
+        for token in tokens:
+            ids.append((token["level"], token["id"]))
+            walk(token.get("children", []))
+
+    walk(parser.toc_tokens)
+    return ids
 
 
 def headings_outside_code(markdown: str) -> list[tuple[int, int, str]]:
@@ -380,30 +411,24 @@ def headings_outside_code(markdown: str) -> list[tuple[int, int, str]]:
 def preserve_heading_anchors(source_markdown: str, translated_markdown: str) -> str:
     """Give each translated heading the id mkdocs derives from the English heading.
 
-    mkdocs builds a heading id from the heading text, so a translated heading gets a
-    different id and every `#...` link written against the English page stops
-    resolving. With `attr_list` enabled a heading can carry an explicit `{#id}`,
-    which the toc extension uses instead of slugifying the text.
+    mkdocs builds a heading id from the rendered heading text, so a translated heading
+    gets a different id and every `#...` link written against the English page stops
+    resolving. With `attr_list` enabled a heading can carry an explicit `{#id}`, which
+    the toc extension uses instead of slugifying the text.
     """
-    source_headings = headings_outside_code(source_markdown)
+    source_headings = heading_ids(source_markdown)
     translated_headings = headings_outside_code(translated_markdown)
-    source_levels = [level for _, level, _ in source_headings]
+    source_levels = [level for level, _ in source_headings]
     translated_levels = [level for _, level, _ in translated_headings]
     if source_levels != translated_levels:
         print("Skipping heading anchors: translated headings do not line up with the source.")
         return translated_markdown
 
-    ids: set[str] = set()
     lines = translated_markdown.splitlines(keepends=True)
-    for (_, level, source_text), (index, _, translated_text) in zip(
+    for (level, heading_id), (index, _, translated_text) in zip(
         source_headings, translated_headings
     ):
-        # Run every heading through unique() so repeated headings number the same way
-        # as in the English page, but leave the H1 alone: mkdocs reads the page title
-        # from it.
-        heading_id = markdown_toc.unique(
-            markdown_toc.slugify(heading_slug_text(source_text), "-"), ids
-        )
+        # Leave the H1 alone: mkdocs reads the page title from it.
         if level == 1:
             continue
         text = HEADING_ID_ATTR_PATTERN.sub("", translated_text)
