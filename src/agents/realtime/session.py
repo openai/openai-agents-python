@@ -1774,7 +1774,10 @@ class RealtimeSession(RealtimeModelListener):
         next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
 
         if current_length >= next_run_threshold:
-            self._item_guardrail_run_counts[item_id] += 1
+            crossed_thresholds = current_length // threshold if threshold > 0 else 1
+            self._item_guardrail_run_counts[item_id] = max(
+                self._item_guardrail_run_counts[item_id] + 1, crossed_thresholds
+            )
             self._enqueue_guardrail_task(
                 self._item_transcripts[item_id],
                 response_id,

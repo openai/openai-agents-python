@@ -5589,6 +5589,39 @@ class TestGuardrailFunctionality:
         assert len(mock_model.sent_messages) == 1
 
     @pytest.mark.asyncio
+    async def test_large_transcript_delta_advances_past_each_crossed_threshold(
+        self, mock_model, mock_agent
+    ):
+        calls = 0
+
+        async def guardrail_func(context, agent, output):
+            nonlocal calls
+            calls += 1
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        guardrail = OutputGuardrail(guardrail_function=guardrail_func)
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="123456789012", response_id="resp_1"
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+        assert calls == 1
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="3", response_id="resp_1")
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert calls == 1
+
+    @pytest.mark.asyncio
     async def test_transcript_delta_different_items_tracked_separately(
         self, mock_model, mock_agent, safe_guardrail
     ):
