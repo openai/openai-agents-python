@@ -67,6 +67,22 @@ options = DockerSandboxClientOptions(
 
 The only supported explicit network mode is `"none"`; omit `network_mode` to preserve Docker's default behavior. A network-disabled sandbox cannot expose ports, so combining `network_mode="none"` with a non-empty `exposed_ports` tuple fails during option validation. The setting is stored in sandbox session state and reapplied if the SDK must create a replacement container while resuming that state.
 
+### Label Docker containers
+
+Set `labels` when an application needs to identify or manage the Docker containers created for sandbox sessions:
+
+```python
+options = DockerSandboxClientOptions(
+    image="python:3.14-slim",
+    labels={
+        "com.example.owner": "agents-sdk",
+        "com.example.environment": "development",
+    },
+)
+```
+
+The SDK passes these key-value pairs to Docker when it creates the container and stores them in [`DockerSandboxSessionState`][agents.sandbox.sandboxes.docker.DockerSandboxSessionState]. When a resumed session reconnects to an existing container, the SDK verifies that every persisted label still has the expected value and raises `ValueError` if the labels do not match. When the SDK creates a replacement container from the saved state, it reapplies the persisted labels.
+
 ## Mounts and remote storage
 
 Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. Import the built-in mount entries and generic strategies from `agents.sandbox.entries`. Hosted-provider strategies are available from `agents.extensions.sandbox` or the provider-specific extension package.
