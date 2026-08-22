@@ -30,6 +30,22 @@ async def test_cleanup_all_removes_cleaned_servers_from_active_servers() -> None
 
 
 @pytest.mark.asyncio
+async def test_manager_owns_repeated_server_instance_once() -> None:
+    server = cast(MCPServer, Mock(spec=MCPServer))
+    server.connect = AsyncMock()
+    server.cleanup = AsyncMock()
+
+    manager = MCPServerManager([server, server])
+
+    assert manager.all_servers == [server]
+    assert await manager.connect_all() == [server]
+    await manager.cleanup_all()
+
+    server.connect.assert_awaited_once()
+    server.cleanup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_all_refreshes_active_servers_when_cancellation_propagates() -> None:
     server = cast(MCPServer, Mock(spec=MCPServer))
     server.connect = AsyncMock()
