@@ -7,6 +7,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 from openai import OpenAI
+from markdown.extensions import toc as markdown_toc
 from concurrent.futures import ThreadPoolExecutor
 
 # import logging
@@ -347,6 +348,72 @@ def remove_fenced_code_blocks(markdown: str) -> str:
     return "".join(parts)
 
 
+HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6}) (?P<text>.+?)\s*$")
+HEADING_ID_ATTR_PATTERN = re.compile(r"\s*\{#[^}]*\}\s*$")
+
+
+def heading_slug_text(text: str) -> str:
+    # The toc extension slugifies the rendered heading text, which has no
+    # backticks and only the label of a Markdown link.
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    return text.replace("`", "")
+
+
+def headings_outside_code(markdown: str) -> list[tuple[int, int, str]]:
+    """Return (line index, level, text) for every ATX heading outside fenced code."""
+    headings: list[tuple[int, int, str]] = []
+    open_fence: tuple[str, int] | None = None
+    for index, line in enumerate(markdown.splitlines()):
+        if open_fence is None:
+            opening = opening_fence(line)
+            if opening is not None:
+                open_fence = opening
+                continue
+            match = HEADING_PATTERN.match(line)
+            if match is not None:
+                headings.append((index, len(match.group("hashes")), match.group("text")))
+        elif is_closing_fence(line, *open_fence):
+            open_fence = None
+    return headings
+
+
+def preserve_heading_anchors(source_markdown: str, translated_markdown: str) -> str:
+    """Give each translated heading the id mkdocs derives from the English heading.
+
+    mkdocs builds a heading id from the heading text, so a translated heading gets a
+    different id and every `#...` link written against the English page stops
+    resolving. With `attr_list` enabled a heading can carry an explicit `{#id}`,
+    which the toc extension uses instead of slugifying the text.
+    """
+    source_headings = headings_outside_code(source_markdown)
+    translated_headings = headings_outside_code(translated_markdown)
+    source_levels = [level for _, level, _ in source_headings]
+    translated_levels = [level for _, level, _ in translated_headings]
+    if source_levels != translated_levels:
+        print("Skipping heading anchors: translated headings do not line up with the source.")
+        return translated_markdown
+
+    ids: set[str] = set()
+    lines = translated_markdown.splitlines(keepends=True)
+    for (_, level, source_text), (index, _, translated_text) in zip(
+        source_headings, translated_headings
+    ):
+        # Run every heading through unique() so repeated headings number the same way
+        # as in the English page, but leave the H1 alone: mkdocs reads the page title
+        # from it.
+        heading_id = markdown_toc.unique(
+            markdown_toc.slugify(heading_slug_text(source_text), "-"), ids
+        )
+        if level == 1:
+            continue
+        text = HEADING_ID_ATTR_PATTERN.sub("", translated_text)
+        line = lines[index]
+        ending = line[len(line.rstrip("\r\n")) :]
+        hashes = "#" * level
+        lines[index] = f"{hashes} {text} {{#{heading_id}}}{ending}"
+    return "".join(lines)
+
+
 def protect_fenced_code(markdown: str, *, namespace: str) -> tuple[str, list[str]]:
     parts: list[str] = []
     code_blocks: list[str] = []
@@ -561,6 +628,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
             f"Protected Markdown changed after 3 translation attempts for {file_path} to {lang_code}"
         )
 
+    translated_text = preserve_heading_anchors(content, translated_text)
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text
     # Save the combined translated content
@@ -599,6 +667,24 @@ def should_translate_based_on_translation(file_path: str) -> bool:
     return ja_timestamp < en_timestamp
 
 
+def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
+    """Re-apply the English heading ids to existing translations without retranslating."""
+    with open(file_path, encoding="utf-8") as f:
+        content = f.read()
+    for lang_code in languages:
+        target_path = os.path.join(source_dir, lang_code, relative_path)
+        if not os.path.exists(target_path):
+            continue
+        with open(target_path, encoding="utf-8", newline="") as f:
+            translated_text = f.read()
+        updated_text = preserve_heading_anchors(content, translated_text)
+        if updated_text == translated_text:
+            continue
+        print(f"Refreshing heading anchors in {target_path}")
+        with open(target_path, "w", encoding="utf-8", newline="") as f:
+            f.write(updated_text)
+
+
 def translate_single_source_file(
     file_path: str, *, check_translation_outdated: bool = True
 ) -> None:
@@ -607,6 +693,7 @@ def translate_single_source_file(
         return
     if check_translation_outdated and not should_translate_based_on_translation(file_path):
         print(f"Skipping {file_path}: The translated one is up-to-date.")
+        refresh_heading_anchors(file_path, relative_path)
         return
 
     for lang_code in languages:
