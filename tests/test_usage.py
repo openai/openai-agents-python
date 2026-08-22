@@ -223,7 +223,8 @@ def test_usage_add_ignores_zero_token_requests():
 
     u1.add(u2)
 
-    # Should not create a request_usage_entry for zero tokens
+    assert u1.requests == 1
+    # The aggregate request count remains authoritative when token usage is unavailable.
     assert len(u1.request_usage_entries) == 0
 
 

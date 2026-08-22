@@ -315,16 +315,6 @@ async def _await_model_attempt(
     raise timeout_error from None
 
 
-def _build_zero_request_usage_entry() -> RequestUsage:
-    return RequestUsage(
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
-        input_tokens_details=Usage().input_tokens_details,
-        output_tokens_details=Usage().output_tokens_details,
-    )
-
-
 def _build_request_usage_entry_from_usage(usage: Usage) -> RequestUsage:
     return RequestUsage(
         input_tokens=usage.input_tokens,
@@ -339,14 +329,14 @@ def apply_retry_attempt_usage(usage: Usage, failed_attempts: int) -> Usage:
     if failed_attempts <= 0:
         return usage
 
-    successful_request_entries = list(usage.request_usage_entries)
-    if not successful_request_entries:
-        successful_request_entries.append(_build_request_usage_entry_from_usage(usage))
+    request_entries = list(usage.request_usage_entries)
+    if not request_entries and usage.total_tokens > 0:
+        request_entries.append(_build_request_usage_entry_from_usage(usage))
 
     usage.requests = max(usage.requests, 1) + failed_attempts
-    usage.request_usage_entries = [
-        _build_zero_request_usage_entry() for _ in range(failed_attempts)
-    ] + successful_request_entries
+    # Failed attempts do not carry provider usage. Keep them in the aggregate request count,
+    # but do not synthesize zero-valued entries that look like known per-request usage.
+    usage.request_usage_entries = request_entries
     return usage
 
 

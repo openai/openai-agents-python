@@ -921,15 +921,14 @@ async def test_get_response_with_retry_preserves_successful_request_usage_entry(
     )
 
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].input_tokens == 11
-    assert result.usage.request_usage_entries[1].output_tokens == 7
-    assert result.usage.request_usage_entries[1].total_tokens == 18
+    assert len(result.usage.request_usage_entries) == 1
+    assert result.usage.request_usage_entries[0].input_tokens == 11
+    assert result.usage.request_usage_entries[0].output_tokens == 7
+    assert result.usage.request_usage_entries[0].total_tokens == 18
 
 
 @pytest.mark.asyncio
-async def test_get_response_with_retry_preserves_zero_token_successful_request_usage_entry(
+async def test_get_response_with_retry_omits_unknown_successful_request_usage_entry(
     monkeypatch,
 ) -> None:
     calls = 0
@@ -967,9 +966,7 @@ async def test_get_response_with_retry_preserves_zero_token_successful_request_u
     )
 
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].total_tokens == 0
+    assert result.usage.request_usage_entries == []
 
 
 @pytest.mark.asyncio
@@ -1126,9 +1123,8 @@ async def test_get_response_with_retry_preserves_conversation_locked_compatibili
     assert rewinds == 1
     assert sleeps == [1.0]
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].total_tokens == 5
+    assert len(result.usage.request_usage_entries) == 1
+    assert result.usage.request_usage_entries[0].total_tokens == 5
 
 
 @pytest.mark.asyncio

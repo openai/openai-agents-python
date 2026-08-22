@@ -431,11 +431,10 @@ async def test_streamed_run_preserves_request_usage_entries_after_retry() -> Non
 
     usage = result.context_wrapper.usage
     assert usage.requests == 2
-    assert len(usage.request_usage_entries) == 2
-    assert usage.request_usage_entries[0].total_tokens == 0
-    assert usage.request_usage_entries[1].input_tokens == 10
-    assert usage.request_usage_entries[1].output_tokens == 5
-    assert usage.request_usage_entries[1].total_tokens == 15
+    assert len(usage.request_usage_entries) == 1
+    assert usage.request_usage_entries[0].input_tokens == 10
+    assert usage.request_usage_entries[0].output_tokens == 5
+    assert usage.request_usage_entries[0].total_tokens == 15
 
 
 @pytest.mark.asyncio
@@ -483,9 +482,7 @@ async def test_streamed_run_counts_retry_attempts_when_terminal_usage_missing() 
     usage = result.context_wrapper.usage
     assert len(model.calls) == 2
     assert usage.requests == 2
-    assert len(usage.request_usage_entries) == 2
-    assert usage.request_usage_entries[0].total_tokens == 0
-    assert usage.request_usage_entries[1].total_tokens == 0
+    assert usage.request_usage_entries == []
 
 
 @pytest.mark.asyncio
@@ -557,11 +554,10 @@ async def test_streamed_run_preserves_request_usage_entries_after_conversation_l
 
     usage = result.context_wrapper.usage
     assert usage.requests == 2
-    assert len(usage.request_usage_entries) == 2
-    assert usage.request_usage_entries[0].total_tokens == 0
-    assert usage.request_usage_entries[1].input_tokens == 10
-    assert usage.request_usage_entries[1].output_tokens == 5
-    assert usage.request_usage_entries[1].total_tokens == 15
+    assert len(usage.request_usage_entries) == 1
+    assert usage.request_usage_entries[0].input_tokens == 10
+    assert usage.request_usage_entries[0].output_tokens == 5
+    assert usage.request_usage_entries[0].total_tokens == 15
 
 
 @pytest.mark.allow_call_model_methods

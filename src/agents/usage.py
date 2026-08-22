@@ -218,8 +218,9 @@ class Usage:
     request_usage_entries: list[RequestUsage] = field(default_factory=list)
     """List of RequestUsage entries for accurate per-request cost calculation.
 
-    Each call to `add()` automatically creates an entry in this list if the added usage
-    represents a new request (i.e., has non-zero tokens).
+    Entries are created only when token usage is known for an individual request. A request whose
+    provider reports no usage still increments `requests`, but it does not create a synthetic
+    zero-valued entry. As a result, this list can contain fewer entries than `requests`.
 
     Example:
         For a run that makes 3 API calls with 100K, 150K, and 80K input tokens each,
