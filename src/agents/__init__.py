@@ -111,6 +111,8 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    OutputGuardrailBlockedMessageArgs,
+    OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
     RunConfig,
     Runner,
@@ -481,6 +483,8 @@ __all__ = [
     "RunResultStreaming",
     "ResponsesWebSocketSession",
     "RunConfig",
+    "OutputGuardrailBlockedMessageArgs",
+    "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",

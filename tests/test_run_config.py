@@ -7,6 +7,7 @@ import pytest
 
 from agents import (
     Agent,
+    OutputGuardrailBlockedMessageArgs,
     RunConfig,
     Runner,
     SessionSettings,
@@ -96,6 +97,43 @@ def test_run_config_preserves_typed_configuration_instances() -> None:
 
     assert config.model_settings is settings
     assert config.session_settings is session_settings
+
+
+def test_run_config_accepts_output_guardrail_blocked_message_customizers() -> None:
+    def formatter(_args: OutputGuardrailBlockedMessageArgs[Any]) -> str:
+        return "custom"
+
+    assert RunConfig(
+        output_guardrail_blocked_message="custom"
+    ).output_guardrail_blocked_message == ("custom")
+    assert RunConfig(
+        output_guardrail_blocked_message=formatter
+    ).output_guardrail_blocked_message is (formatter)
+
+
+def test_run_config_rejects_async_output_guardrail_blocked_message_formatter() -> None:
+    async def formatter(_args: OutputGuardrailBlockedMessageArgs[Any]) -> str:
+        return "custom"
+
+    with pytest.raises(
+        TypeError,
+        match="output_guardrail_blocked_message formatter must be synchronous",
+    ):
+        RunConfig(output_guardrail_blocked_message=cast(Any, formatter))
+
+
+class _BlockedMessageStringSubclass(str):
+    def __len__(self) -> int:
+        raise RuntimeError("string-subclass-hook")
+
+
+@pytest.mark.parametrize("value", ["", 123, _BlockedMessageStringSubclass("custom")])
+def test_run_config_rejects_invalid_output_guardrail_blocked_message(value: object) -> None:
+    with pytest.raises(
+        (TypeError, ValueError),
+        match="output_guardrail_blocked_message",
+    ):
+        RunConfig(output_guardrail_blocked_message=cast(Any, value))
 
 
 def test_run_config_rejects_untrusted_manifest_path_grants() -> None:

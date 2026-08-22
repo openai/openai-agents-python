@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -102,6 +103,33 @@ class ToolErrorFormatterArgs(Generic[TContext]):
 
 
 ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
+
+
+@dataclass
+class OutputGuardrailBlockedMessageArgs(Generic[TContext]):
+    """Data passed to output guardrail blocked-message formatters."""
+
+    default_message: str
+    """The SDK default data-free placeholder."""
+
+    guardrail_name: str
+    """The name of the output guardrail that triggered the tripwire."""
+
+    agent: Agent[Any]
+    """The agent whose final output was rejected."""
+
+    run_context: RunContextWrapper[TContext]
+    """The active run context wrapper."""
+
+
+# Keep this formatter synchronous. It runs after a terminal tool output is rejected but before
+# every replay and persistence owner is rebuilt with the data-free replacement. Awaiting
+# application code at that boundary can leave the rejected output reachable through cancellation
+# traceback locals or partially sanitized state. Async support therefore requires a redesign of
+# the redaction boundary, not merely awaiting the formatter result here.
+OutputGuardrailBlockedMessageFormatter = Callable[
+    [OutputGuardrailBlockedMessageArgs[Any]], str | None
+]
 
 
 @dataclass
@@ -458,6 +486,15 @@ class RunConfig:
     Existing strict validation for namespaced and deferred-loading tools is unchanged.
     """
 
+    output_guardrail_blocked_message: str | OutputGuardrailBlockedMessageFormatter | None = None
+    """Customize the data-free placeholder retained for terminal tool output rejected by an
+    output guardrail.
+
+    Pass a non-empty string or a synchronous formatter that receives safe run metadata. Returning
+    ``None`` or an invalid value, or raising from the formatter, uses the SDK default. The rejected
+    output and guardrail ``output_info`` are never passed to the formatter.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -486,11 +523,26 @@ class RunConfig:
             tool_execution: ToolExecutionConfig | dict[str, Any] | None = None,
             tool_not_found_behavior: ToolNotFoundBehavior = "raise_error",
             tool_name_collision_policy: ToolNameCollisionPolicy = "warn",
+            output_guardrail_blocked_message: (
+                str | OutputGuardrailBlockedMessageFormatter | None
+            ) = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
+        blocked_message = self.output_guardrail_blocked_message
+        if type(blocked_message) is str:
+            if not blocked_message:
+                raise ValueError("output_guardrail_blocked_message must be non-empty")
+        elif isinstance(blocked_message, str):
+            raise TypeError(
+                "output_guardrail_blocked_message must be a built-in string, callable, or None"
+            )
+        elif blocked_message is not None and not callable(blocked_message):
+            raise TypeError("output_guardrail_blocked_message must be a string, callable, or None")
+        elif inspect.iscoroutinefunction(blocked_message):
+            raise TypeError("output_guardrail_blocked_message formatter must be synchronous")
         if self.model_settings is not None:
             self.model_settings = _coerce_model_settings(
                 self.model_settings,
@@ -562,6 +614,8 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ModelInputData",
+    "OutputGuardrailBlockedMessageArgs",
+    "OutputGuardrailBlockedMessageFormatter",
     "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",

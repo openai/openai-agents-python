@@ -114,6 +114,7 @@ from .blocked_output import (
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
+    _resolve_output_guardrail_blocked_message,
     _retained_items_for_blocked_response,
     _sanitize_blocked_output_guardrail_results,
     _should_defer_interrupted_session_items,
@@ -530,13 +531,30 @@ async def _finalize_streamed_final_output(
             *streamed_result.output_guardrail_results[:output_guardrail_result_start],
             *sanitized_results,
         ]
+        blocked_message = _resolve_output_guardrail_blocked_message(
+            exc,
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+        )
+        if blocked_message != OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT:
+            sanitized_results = _sanitize_blocked_output_guardrail_results(
+                sanitized_results,
+                exc,
+                blocked_message,
+            )
+            streamed_result.output_guardrail_results = [
+                *streamed_result.output_guardrail_results[:output_guardrail_result_start],
+                *sanitized_results,
+            ]
         retained_items = _retained_items_for_blocked_response(
             items,
             model_response,
             streamed_result._state,
             processed_response,
-            streamed_result,
-            owner_starts,
+            streamed_result=streamed_result,
+            owner_starts=owner_starts,
+            blocked_message=blocked_message,
         )
         if retained_items:
             try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses as _dc
+import inspect
 from collections.abc import Sequence
 from typing import Any, TypeVar, cast
 
@@ -22,7 +23,12 @@ from ..guardrail import GuardrailFunctionOutput, OutputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolCallItem, ToolCallOutputItem
 from ..memory import Session
 from ..result import RunResultStreaming
-from ..run_config import RunConfig
+from ..run_config import (
+    OutputGuardrailBlockedMessageArgs,
+    OutputGuardrailBlockedMessageFormatter,
+    RunConfig,
+)
+from ..run_context import RunContextWrapper
 from ..run_state import RunState
 from ..tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -158,6 +164,7 @@ _SIDE_EFFECT_ITEM_TYPES = frozenset({"tool_call_item", "tool_call_output_item"})
 def _sanitize_blocked_output_guardrail_results(
     results: Sequence[OutputGuardrailResult],
     tripwire: OutputGuardrailTripwireTriggered,
+    blocked_message: str = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
 ) -> list[OutputGuardrailResult]:
     """Build data-free guardrail results and detach the tripwire from raw output."""
     sanitized_by_id: dict[int, OutputGuardrailResult] = {}
@@ -168,7 +175,7 @@ def _sanitize_blocked_output_guardrail_results(
             return existing
         sanitized = OutputGuardrailResult(
             guardrail=result.guardrail,
-            agent_output=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+            agent_output=blocked_message,
             agent=result.agent,
             output=GuardrailFunctionOutput(
                 output_info=None,
@@ -183,6 +190,44 @@ def _sanitize_blocked_output_guardrail_results(
     _mark_error_data_redacted(tripwire)
     _detach_data_redacted_error_traceback(tripwire)
     return sanitized_results
+
+
+def _resolve_output_guardrail_blocked_message(
+    tripwire: OutputGuardrailTripwireTriggered,
+    *,
+    agent: Agent[Any],
+    run_config: RunConfig,
+    context_wrapper: RunContextWrapper[Any],
+) -> str:
+    """Resolve a custom placeholder without suspending the redaction pipeline."""
+    blocked_message = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    configured = run_config.output_guardrail_blocked_message
+    if configured is None:
+        return blocked_message
+    if type(configured) is str:
+        resolved: Any = configured
+    else:
+        try:
+            formatter = cast(OutputGuardrailBlockedMessageFormatter, configured)
+            resolved = formatter(
+                OutputGuardrailBlockedMessageArgs(
+                    default_message=blocked_message,
+                    guardrail_name=tripwire.guardrail_result.guardrail.get_name(),
+                    agent=agent,
+                    run_context=context_wrapper,
+                )
+            )
+        except BaseException:
+            return blocked_message
+    if inspect.iscoroutine(resolved):
+        try:
+            resolved.close()
+        except BaseException:
+            pass
+        return blocked_message
+    if type(resolved) is not str or not resolved:
+        return blocked_message
+    return resolved
 
 
 @_dc.dataclass(frozen=True)
@@ -419,6 +464,7 @@ def _is_terminal_tool_output_response(
 def _prepare_blocked_output_snapshot(
     boundary: _CurrentResponseBoundary,
     model_response: ModelResponse | None,
+    blocked_message: str,
 ) -> _BlockedOutputSnapshot:
     """Build an allowlist-only function call/output snapshot before changing live state."""
     current_items = list(boundary.items)
@@ -448,6 +494,7 @@ def _prepare_blocked_output_snapshot(
             )
         elif isinstance(item, ToolCallOutputItem):
             payload = blocked_function_output_payload(item.raw_item)
+            payload["output"] = blocked_message
             call_id = cast(str, payload["call_id"])
             if call_id in outputs_by_id:
                 raise AgentsException("Cannot sanitize duplicate function outputs.")
@@ -455,7 +502,7 @@ def _prepare_blocked_output_snapshot(
             replacements[index] = ToolCallOutputItem(
                 agent=item.agent,
                 raw_item=cast(Any, payload),
-                output=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                output=blocked_message,
                 tool_origin=item.tool_origin,
                 custom_data=None,
             )
@@ -640,6 +687,7 @@ def _sever_blocked_output_replay_graph(cleanup_plan: _BlockedOutputOwnerPlan) ->
 
 def _data_free_tool_output_guardrail_results(
     results: Sequence[ToolOutputGuardrailResult],
+    blocked_message: str,
 ) -> tuple[ToolOutputGuardrailResult, ...]:
     """Rebuild current-turn tool guardrail results without retaining caller output data."""
     replacements: list[ToolOutputGuardrailResult] = []
@@ -656,16 +704,16 @@ def _data_free_tool_output_guardrail_results(
                 return ()
             if str.__eq__(behavior_type, "allow") is True:
                 sanitized_output = ToolGuardrailFunctionOutput.allow(
-                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                    output_info=blocked_message,
                 )
             elif str.__eq__(behavior_type, "reject_content") is True:
                 sanitized_output = ToolGuardrailFunctionOutput.reject_content(
-                    message=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
-                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                    message=blocked_message,
+                    output_info=blocked_message,
                 )
             elif str.__eq__(behavior_type, "raise_exception") is True:
                 sanitized_output = ToolGuardrailFunctionOutput.raise_exception(
-                    output_info=OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+                    output_info=blocked_message,
                 )
             else:
                 return ()
@@ -688,6 +736,7 @@ def _prepare_blocked_output_owner_plan(
     streamed_result: RunResultStreaming | None,
     prefixes: _BlockedOutputOwnerPrefixes,
     cleanup_plan: _BlockedOutputOwnerPlan,
+    blocked_message: str,
 ) -> _BlockedOutputOwnerPlan:
     """Build every owner replacement before applying any of them."""
     safe_items = list(snapshot.items) if snapshot is not None else []
@@ -706,7 +755,10 @@ def _prepare_blocked_output_owner_plan(
         )
     else:
         current_results = []
-    safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(current_results)
+    safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(
+        current_results,
+        blocked_message,
+    )
     if streamed_result is not None:
         public_safe_results = [
             *prefixes.streamed_tool_output_guardrail_results,
@@ -793,6 +845,7 @@ def _retained_items_for_blocked_response(
     processed_response: ProcessedResponse | None = None,
     streamed_result: RunResultStreaming | None = None,
     owner_starts: _BlockedOutputOwnerStarts | None = None,
+    blocked_message: str = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
 ) -> list[RunItem]:
     """Return a complete data-free response or discard the entire unsupported suffix."""
     boundary = _current_response_boundary(items, processed_response, run_state)
@@ -805,7 +858,11 @@ def _retained_items_for_blocked_response(
     snapshot: _BlockedOutputSnapshot | None = None
     try:
         if boundary.proven:
-            snapshot = _prepare_blocked_output_snapshot(boundary, model_response)
+            snapshot = _prepare_blocked_output_snapshot(
+                boundary,
+                model_response,
+                blocked_message,
+            )
     except Exception:
         snapshot = None
     except BaseException:
@@ -820,6 +877,7 @@ def _retained_items_for_blocked_response(
             streamed_result,
             prefixes,
             cleanup_plan,
+            blocked_message,
         )
         _apply_blocked_output_owner_plan(owner_plan)
     except Exception as error:

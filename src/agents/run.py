@@ -45,6 +45,8 @@ from .run_config import (
     CallModelData,
     CallModelInputFilter,
     ModelInputData,
+    OutputGuardrailBlockedMessageArgs,
+    OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
     RunConfig,
     RunOptions,
@@ -82,12 +84,14 @@ from .run_internal.agent_runner_helpers import (
 )
 from .run_internal.approvals import approvals_from_step
 from .run_internal.blocked_output import (
+    OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
     _blocked_output_failure_items,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
+    _resolve_output_guardrail_blocked_message,
     _retained_items_for_blocked_response,
     _sanitize_blocked_output_guardrail_results,
     _should_defer_interrupted_session_items,
@@ -170,6 +174,8 @@ __all__ = [
     "ModelInputData",
     "CallModelData",
     "CallModelInputFilter",
+    "OutputGuardrailBlockedMessageArgs",
+    "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
@@ -1262,12 +1268,30 @@ class AgentRunner:
                                         (),
                                         blocked_output_owner_starts,
                                     )
+                                    blocked_message = _resolve_output_guardrail_blocked_message(
+                                        exc,
+                                        agent=current_agent,
+                                        run_config=run_config,
+                                        context_wrapper=context_wrapper,
+                                    )
+                                    if blocked_message != OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT:
+                                        sanitized_results = (
+                                            _sanitize_blocked_output_guardrail_results(
+                                                sanitized_results,
+                                                exc,
+                                                blocked_message,
+                                            )
+                                        )
+                                        output_guardrail_results[output_guardrail_result_start:] = (
+                                            sanitized_results
+                                        )
                                     retained_items = _retained_items_for_blocked_response(
                                         turn_session_items,
                                         turn_result.model_response,
                                         run_state,
                                         current_processed_response,
                                         owner_starts=blocked_output_owner_starts,
+                                        blocked_message=blocked_message,
                                     )
                                     list.extend(session_items, retained_items)
                                     try:
@@ -1865,8 +1889,7 @@ class AgentRunner:
                                 ):
                                     raise
                                 sanitized_results = _sanitize_blocked_output_guardrail_results(
-                                    output_guardrail_results[output_guardrail_result_start:],
-                                    exc,
+                                    output_guardrail_results[output_guardrail_result_start:], exc
                                 )
                                 output_guardrail_results[output_guardrail_result_start:] = (
                                     sanitized_results
@@ -1876,12 +1899,28 @@ class AgentRunner:
                                     (),
                                     blocked_output_owner_starts,
                                 )
+                                blocked_message = _resolve_output_guardrail_blocked_message(
+                                    exc,
+                                    agent=current_agent,
+                                    run_config=run_config,
+                                    context_wrapper=context_wrapper,
+                                )
+                                if blocked_message != OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT:
+                                    sanitized_results = _sanitize_blocked_output_guardrail_results(
+                                        sanitized_results,
+                                        exc,
+                                        blocked_message,
+                                    )
+                                    output_guardrail_results[output_guardrail_result_start:] = (
+                                        sanitized_results
+                                    )
                                 retained_items = _retained_items_for_blocked_response(
                                     turn_session_items,
                                     turn_result.model_response,
                                     run_state,
                                     turn_result.processed_response,
                                     owner_starts=blocked_output_owner_starts,
+                                    blocked_message=blocked_message,
                                 )
                                 list.extend(session_items, retained_items)
                                 try:

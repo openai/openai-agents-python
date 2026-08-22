@@ -35,6 +35,7 @@ from agents import (
     OpenAIChatCompletionsModel,
     OpenAIResponsesWSModel,
     OutputGuardrail,
+    OutputGuardrailBlockedMessageArgs,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
@@ -48,7 +49,13 @@ from agents import (
     handoff,
     retry_policies,
 )
-from agents.items import RunItem, ToolApprovalItem, TResponseInputItem, TResponseStreamEvent
+from agents.items import (
+    RunItem,
+    ToolApprovalItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+    TResponseStreamEvent,
+)
 from agents.memory.openai_conversations_session import OpenAIConversationsSession
 from agents.models.interface import Model
 from agents.run import RunConfig
@@ -2902,6 +2909,275 @@ async def test_stop_on_first_tool_final_persists_committed_tool_items_on_tripwir
     )
     assert replayed_output == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
     assert "committed-result" not in json.dumps(model_input)
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("customizer_kind", ["fixed", "sync"])
+@pytest.mark.asyncio
+async def test_terminal_tool_trip_uses_custom_blocked_message_everywhere(
+    mode: str,
+    customizer_kind: str,
+) -> None:
+    blocked_message = "出力ガードレールにより非表示になりました。"
+    formatter_args: list[OutputGuardrailBlockedMessageArgs[dict[str, str]]] = []
+    context = {"locale": "ja"}
+
+    def sync_formatter(
+        args: OutputGuardrailBlockedMessageArgs[dict[str, str]],
+    ) -> str:
+        formatter_args.append(args)
+        return blocked_message
+
+    customizer: Any
+    if customizer_kind == "fixed":
+        customizer = blocked_message
+    else:
+        customizer = sync_formatter
+
+    @tool_output_guardrail
+    def retain_tool_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        name_override="secret_tool",
+        tool_output_guardrails=[retain_tool_output],
+    )
+    def secret_tool() -> str:
+        return "blocked-secret"
+
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info={"secret": "blocked-output-info"},
+            tripwire_triggered=True,
+        )
+
+    model = ScriptedModel([[get_function_tool_call("secret_tool", "{}", call_id="call-secret")]])
+    guardrail = OutputGuardrail(
+        guardrail_function=reject_output,
+        name="localized_guardrail",
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[secret_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[guardrail],
+    )
+    session = SimpleListSession()
+    run_config = RunConfig(output_guardrail_blocked_message=customizer)
+    streamed_result = None
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        if mode == "non_streamed":
+            await Runner.run(
+                agent,
+                "run",
+                context=context,
+                session=session,
+                run_config=run_config,
+            )
+        else:
+            streamed_result = Runner.run_streamed(
+                agent,
+                "run",
+                context=context,
+                session=session,
+                run_config=run_config,
+            )
+            await consume_stream(streamed_result)
+
+    assert exc_info.value.guardrail_result.agent_output == blocked_message
+    assert exc_info.value.guardrail_result.output.output_info is None
+    saved_items = await session.get_items()
+    assert cast(dict[str, Any], saved_items[-1])["output"] == blocked_message
+    assert "blocked-secret" not in json.dumps(saved_items)
+    assert "blocked-output-info" not in json.dumps(saved_items)
+
+    if customizer_kind == "fixed":
+        assert formatter_args == []
+    else:
+        assert len(formatter_args) == 1
+        args = formatter_args[0]
+        assert vars(args).keys() == {
+            "default_message",
+            "guardrail_name",
+            "agent",
+            "run_context",
+        }
+        assert args.default_message == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+        assert args.guardrail_name == "localized_guardrail"
+        assert args.agent is agent
+        assert args.run_context.context is context
+
+    if streamed_result is not None:
+        streamed_outputs = [
+            item for item in streamed_result.new_items if isinstance(item, ToolCallOutputItem)
+        ]
+        assert [item.output for item in streamed_outputs] == [blocked_message]
+        assert (
+            streamed_result.tool_output_guardrail_results[0].output.output_info == blocked_message
+        )
+        serialized_state = streamed_result.to_state().to_json()
+        assert blocked_message in json.dumps(serialized_state, ensure_ascii=False)
+        assert "blocked-secret" not in json.dumps(serialized_state)
+        assert "blocked-output-info" not in json.dumps(serialized_state)
+
+    agent.output_guardrails = []
+    model.enqueue([get_text_message("done")])
+    if mode == "non_streamed":
+        followup: Any = await Runner.run(
+            agent,
+            "continue",
+            context=context,
+            session=session,
+            run_config=run_config,
+        )
+    else:
+        followup = Runner.run_streamed(
+            agent,
+            "continue",
+            context=context,
+            session=session,
+            run_config=run_config,
+        )
+        await consume_stream(followup)
+    assert followup.final_output == "done"
+    assert blocked_message in json.dumps(model.calls[-1].input, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "formatter_outcome",
+    [
+        "none",
+        "empty",
+        "non_string",
+        "string_subclass",
+        "awaitable",
+        "awaitable_close_error",
+        "error",
+        "cancel",
+    ],
+)
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_terminal_tool_trip_falls_back_when_blocked_message_formatter_fails(
+    formatter_outcome: str,
+    mode: str,
+) -> None:
+    formatter_calls = 0
+
+    class FormatterStringSubclass(str):
+        def __len__(self) -> int:
+            raise RuntimeError("formatter-subclass-secret")
+
+        def __str__(self) -> str:
+            raise RuntimeError("formatter-subclass-secret")
+
+    def formatter(_args: OutputGuardrailBlockedMessageArgs[Any]) -> Any:
+        nonlocal formatter_calls
+        formatter_calls += 1
+        if formatter_outcome == "none":
+            return None
+        if formatter_outcome == "empty":
+            return ""
+        if formatter_outcome == "non_string":
+            return 123
+        if formatter_outcome == "string_subclass":
+            return FormatterStringSubclass("formatter-subclass-secret")
+        if formatter_outcome == "awaitable":
+
+            async def async_value() -> str:
+                return "formatter-awaitable-secret"
+
+            return async_value()
+        if formatter_outcome == "awaitable_close_error":
+
+            async def async_value_with_failing_close() -> str:
+                try:
+                    await asyncio.sleep(0)
+                finally:
+                    raise RuntimeError("formatter-close-secret")
+
+            coroutine = async_value_with_failing_close()
+            coroutine.send(None)
+            return coroutine
+        if formatter_outcome == "error":
+            raise RuntimeError("formatter-secret")
+        raise asyncio.CancelledError("formatter-cancel-secret")
+
+    @function_tool(name_override="secret_tool")
+    def secret_tool() -> str:
+        return "blocked-secret"
+
+    def reject_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info="blocked-output-info",
+            tripwire_triggered=True,
+        )
+
+    model = ScriptedModel([[get_function_tool_call("secret_tool", "{}", call_id="call-secret")]])
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[secret_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=reject_output)],
+    )
+    session = SimpleListSession()
+    streamed_result = None
+
+    with pytest.raises(OutputGuardrailTripwireTriggered) as exc_info:
+        if mode == "non_streamed":
+            await Runner.run(
+                agent,
+                "run",
+                session=session,
+                run_config=RunConfig(output_guardrail_blocked_message=formatter),
+            )
+        else:
+            streamed_result = Runner.run_streamed(
+                agent,
+                "run",
+                session=session,
+                run_config=RunConfig(output_guardrail_blocked_message=formatter),
+            )
+            await consume_stream(streamed_result)
+
+    default_message = run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+    assert formatter_calls == 1
+    assert exc_info.value.guardrail_result.agent_output == default_message
+    assert exc_info.value.guardrail_result.output.output_info is None
+    saved_items = await session.get_items()
+    assert cast(dict[str, Any], saved_items[-1])["output"] == default_message
+    serialized = json.dumps(saved_items)
+    assert "blocked-secret" not in serialized
+    assert "blocked-output-info" not in serialized
+    assert "formatter-secret" not in serialized
+    assert "formatter-cancel-secret" not in serialized
+    assert "formatter-subclass-secret" not in serialized
+    assert "formatter-awaitable-secret" not in serialized
+    assert "formatter-close-secret" not in serialized
+
+    if streamed_result is not None:
+        streamed_views = [
+            repr(streamed_result.new_items),
+            repr(streamed_result._model_input_items),
+            repr(streamed_result.raw_responses),
+            repr(streamed_result.tool_output_guardrail_results),
+            json.dumps(streamed_result.to_state().to_json()),
+        ]
+        assert all("blocked-secret" not in view for view in streamed_views)
+        assert all("blocked-output-info" not in view for view in streamed_views)
+        assert all("formatter-close-secret" not in view for view in streamed_views)
+        assert default_message in streamed_views[-1]
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
