@@ -315,16 +315,6 @@ async def _await_model_attempt(
     raise timeout_error from None
 
 
-def _build_zero_request_usage_entry() -> RequestUsage:
-    return RequestUsage(
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
-        input_tokens_details=Usage().input_tokens_details,
-        output_tokens_details=Usage().output_tokens_details,
-    )
-
-
 def _build_request_usage_entry_from_usage(usage: Usage) -> RequestUsage:
     return RequestUsage(
         input_tokens=usage.input_tokens,
@@ -336,17 +326,22 @@ def _build_request_usage_entry_from_usage(usage: Usage) -> RequestUsage:
 
 
 def apply_retry_attempt_usage(usage: Usage, failed_attempts: int) -> Usage:
+    """Fold failed attempts into a retried request's usage totals.
+
+    Failed attempts never receive a `request_usage_entries` entry: the SDK has no usage
+    payload for them, and `Usage.add()` applies the same "no entry without known tokens"
+    rule to every other request it has no usage for. Callers must read `requests` for the
+    full attempt count; `request_usage_entries` only ever covers requests with known usage.
+    """
     if failed_attempts <= 0:
         return usage
 
     successful_request_entries = list(usage.request_usage_entries)
-    if not successful_request_entries:
+    if not successful_request_entries and usage.total_tokens > 0:
         successful_request_entries.append(_build_request_usage_entry_from_usage(usage))
 
     usage.requests = max(usage.requests, 1) + failed_attempts
-    usage.request_usage_entries = [
-        _build_zero_request_usage_entry() for _ in range(failed_attempts)
-    ] + successful_request_entries
+    usage.request_usage_entries = successful_request_entries
     return usage
 
 

@@ -219,7 +219,10 @@ class Usage:
     """List of RequestUsage entries for accurate per-request cost calculation.
 
     Each call to `add()` automatically creates an entry in this list if the added usage
-    represents a new request (i.e., has non-zero tokens).
+    represents a new request (i.e., has non-zero tokens). Requests with no known usage
+    (for example a provider that reports no usage, or a failed attempt that is retried)
+    are still counted in `requests` but do not get an entry here, so this list is a
+    subset of the requests the run made, not a 1:1 breakdown of `requests`.
 
     Example:
         For a run that makes 3 API calls with 100K, 150K, and 80K input tokens each,

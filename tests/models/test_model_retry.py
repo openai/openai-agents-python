@@ -921,17 +921,23 @@ async def test_get_response_with_retry_preserves_successful_request_usage_entry(
     )
 
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].input_tokens == 11
-    assert result.usage.request_usage_entries[1].output_tokens == 7
-    assert result.usage.request_usage_entries[1].total_tokens == 18
+    # The failed attempt has no known usage, so it does not get an entry.
+    assert len(result.usage.request_usage_entries) == 1
+    assert result.usage.request_usage_entries[0].input_tokens == 11
+    assert result.usage.request_usage_entries[0].output_tokens == 7
+    assert result.usage.request_usage_entries[0].total_tokens == 18
 
 
 @pytest.mark.asyncio
-async def test_get_response_with_retry_preserves_zero_token_successful_request_usage_entry(
+async def test_get_response_with_retry_omits_zero_token_request_usage_entries(
     monkeypatch,
 ) -> None:
+    """Requests with no known usage never get a request_usage_entries entry.
+
+    This holds for both the failed attempt and a "successful" final attempt whose usage is
+    all zero (e.g. a provider that reports no usage), matching Usage.add()'s rule that an
+    entry is only created for a request with known (non-zero) tokens.
+    """
     calls = 0
 
     async def fake_sleep(_delay: float) -> None:
@@ -967,9 +973,7 @@ async def test_get_response_with_retry_preserves_zero_token_successful_request_u
     )
 
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].total_tokens == 0
+    assert result.usage.request_usage_entries == []
 
 
 @pytest.mark.asyncio
@@ -1126,9 +1130,9 @@ async def test_get_response_with_retry_preserves_conversation_locked_compatibili
     assert rewinds == 1
     assert sleeps == [1.0]
     assert result.usage.requests == 2
-    assert len(result.usage.request_usage_entries) == 2
-    assert result.usage.request_usage_entries[0].total_tokens == 0
-    assert result.usage.request_usage_entries[1].total_tokens == 5
+    # The conversation-locked attempt has no known usage, so it does not get an entry.
+    assert len(result.usage.request_usage_entries) == 1
+    assert result.usage.request_usage_entries[0].total_tokens == 5
 
 
 @pytest.mark.asyncio
