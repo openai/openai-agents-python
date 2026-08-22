@@ -484,8 +484,7 @@ class ToolCallOutputItem(RunItemBase[Any]):
                         if isinstance(outcome, dict):
                             if outcome.get("type") == "exit":
                                 entry["outcome"] = outcome
-            payload.pop("created_by", None)
-            return cast(TResponseInputItem, payload)
+            return _output_item_to_input_item(payload)
 
         return super().to_input_item()
 

@@ -661,6 +661,45 @@ def test_tool_call_output_item_to_input_item_strips_created_by() -> None:
     assert item.raw_item["created_by"] == "server"
 
 
+def test_dict_shell_call_output_item_to_input_item_sanitizes_without_mutation() -> None:
+    agent = Agent(name="A")
+    raw_item = {
+        "type": "shell_call_output",
+        "call_id": "call_1",
+        "status": "completed",
+        "shell_output": "legacy",
+        "provider_data": {"provider": "value"},
+        "created_by": "server",
+        "output": [
+            {
+                "stdout": "ok",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
+                "created_by": "server",
+            }
+        ],
+    }
+    original_chunk = raw_item["output"][0]
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="ok")
+
+    replayed = item.to_input_item()
+
+    assert replayed == {
+        "type": "shell_call_output",
+        "call_id": "call_1",
+        "output": [
+            {
+                "stdout": "ok",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
+            }
+        ],
+    }
+    assert raw_item["created_by"] == "server"
+    assert original_chunk["created_by"] == "server"
+    assert raw_item["output"][0] is original_chunk
+
+
 def test_to_input_items_strips_nested_created_by_from_shell_call_output() -> None:
     """``shell_call_output`` carries ``created_by`` at the item level and inside each output chunk.
 
