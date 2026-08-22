@@ -358,10 +358,12 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     logger.error("Listener task not initialized")
                     raise AgentsException("Listener task not initialized")
         except _ListenerError as e:
+            wrapped_err = STTWebsocketConnectionError("Error parsing events")
+            self._stored_exception = wrapped_err
             if self._process_events_task is None:
                 self._process_events_task = asyncio.create_task(self._handle_events())
             await self._process_events_task
-            raise STTWebsocketConnectionError("Error parsing events") from e.__cause__
+            raise wrapped_err from e.__cause__
         except Exception as e:
             await self._output_queue.put(ErrorSentinel(e))
             raise
