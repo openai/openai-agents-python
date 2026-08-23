@@ -281,7 +281,7 @@ async def test_shell_tool_structured_output_is_rendered() -> None:
     assert isinstance(input_payload, dict)
     payload_dict = cast(dict[str, Any], input_payload)
     assert payload_dict["type"] == "shell_call_output"
-    assert "status" not in payload_dict
+    assert payload_dict["status"] == "completed"
     assert "shell_output" not in payload_dict
     assert "provider_data" not in payload_dict
 

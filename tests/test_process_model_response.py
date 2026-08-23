@@ -312,7 +312,7 @@ def test_process_model_response_sanitizes_shell_call_output_model_object() -> No
     next_input = item.to_input_item()
     assert isinstance(next_input, dict)
     assert next_input["type"] == "shell_call_output"
-    assert "status" not in next_input
+    assert next_input["status"] == "completed"
     assert "created_by" not in next_input
     next_outputs = next_input.get("output")
     assert isinstance(next_outputs, list)

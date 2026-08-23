@@ -661,12 +661,13 @@ def test_tool_call_output_item_to_input_item_strips_created_by() -> None:
     assert item.raw_item["created_by"] == "server"
 
 
-def test_dict_shell_call_output_item_to_input_item_sanitizes_without_mutation() -> None:
+@pytest.mark.parametrize("status", ["in_progress", "completed", "incomplete"])
+def test_dict_shell_call_output_item_to_input_item_sanitizes_without_mutation(status: str) -> None:
     agent = Agent(name="A")
     raw_item = {
         "type": "shell_call_output",
         "call_id": "call_1",
-        "status": "completed",
+        "status": status,
         "shell_output": "legacy",
         "provider_data": {"provider": "value"},
         "created_by": "server",
@@ -687,6 +688,7 @@ def test_dict_shell_call_output_item_to_input_item_sanitizes_without_mutation() 
     assert replayed == {
         "type": "shell_call_output",
         "call_id": "call_1",
+        "status": status,
         "output": [
             {
                 "stdout": "ok",

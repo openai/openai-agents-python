@@ -462,9 +462,8 @@ class ToolCallOutputItem(RunItemBase[Any]):
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.
 
-        Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
-        book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
-        payload we send back to the model while keeping the original raw item intact.
+        Hosted tool outputs can carry SDK-only metadata that the Responses API does not accept.
+        Strip that metadata while keeping input-supported fields and the original raw item intact.
         """
 
         if isinstance(self.raw_item, dict):
@@ -472,7 +471,8 @@ class ToolCallOutputItem(RunItemBase[Any]):
             payload_type = payload.get("type")
             if payload_type == "shell_call_output":
                 payload = dict(payload)
-                payload.pop("status", None)
+                if payload.get("status") not in ("in_progress", "completed", "incomplete"):
+                    payload.pop("status", None)
                 payload.pop("shell_output", None)
                 payload.pop("provider_data", None)
                 outputs = payload.get("output")
