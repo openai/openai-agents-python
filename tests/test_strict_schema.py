@@ -709,6 +709,25 @@ def test_default_removal_on_non_object():
     assert "default" not in result
 
 
+def test_non_null_default_removal():
+    # Non-null defaults must also be stripped: every property is forced into `required`
+    # in strict mode, so the default is never used, and the API rejects non-null
+    # `default` values within property definitions.
+    schema = {
+        "type": "object",
+        "properties": {
+            "currency": {"type": "string", "enum": ["EUR", "USD"], "default": "EUR"},
+            "count": {"type": "integer", "default": 0},
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
+    result = ensure_strict_json_schema(schema)
+    assert "default" not in result["properties"]["currency"]
+    assert "default" not in result["properties"]["count"]
+    assert set(result["required"]) == {"currency", "count"}
+
+
 def test_ref_expansion():
     # Construct a schema with a definitions section and a property with a $ref.
     schema = {
