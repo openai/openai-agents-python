@@ -30,6 +30,25 @@ async def test_cleanup_all_removes_cleaned_servers_from_active_servers() -> None
 
 
 @pytest.mark.asyncio
+async def test_cleanup_all_removes_cleaned_servers_from_active_servers_when_keeping_failed() -> (
+    None
+):
+    """`drop_failed_servers=False` keeps connect-phase failures listed, but a server that was
+    cleaned up is disconnected and must not remain advertised as active."""
+    server = cast(MCPServer, Mock(spec=MCPServer))
+    server.connect = AsyncMock()
+    server.cleanup = AsyncMock()
+
+    manager = MCPServerManager([server], drop_failed_servers=False)
+    assert await manager.connect_all() == [server]
+
+    await manager.cleanup_all()
+
+    assert manager.active_servers == []
+    assert manager._connected_servers == set()
+
+
+@pytest.mark.asyncio
 async def test_manager_owns_repeated_server_instance_once() -> None:
     server = cast(MCPServer, Mock(spec=MCPServer))
     server.connect = AsyncMock()
