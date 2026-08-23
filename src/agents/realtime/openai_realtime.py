@@ -2011,7 +2011,7 @@ class _ConversionHelper:
                 "type": item.type,
                 "role": item.role,
                 "content": content,
-                "status": "in_progress",
+                "status": item.status or "in_progress",
             },
         )
 
