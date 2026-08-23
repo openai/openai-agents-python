@@ -34,6 +34,18 @@ def test_empty_schema_has_additional_properties_false():
     assert strict_schema["additionalProperties"] is False
 
 
+def test_non_null_property_defaults_are_removed():
+    schema = {
+        "type": "object",
+        "properties": {"currency": {"type": "string", "default": "EUR"}},
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert "default" not in result["properties"]["currency"]
+    assert result["required"] == ["currency"]
+
+
 def test_empty_schema_returns_fresh_copy():
     first = ensure_strict_json_schema({})
     first["additionalProperties"] = True
