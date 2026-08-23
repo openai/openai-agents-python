@@ -901,7 +901,7 @@ agent = Agent(
 
 참조:
 
--   [Codex 도구 API 레퍼런스](ref/extensions/experimental/codex/codex_tool.md)
--   [ThreadOptions 레퍼런스](ref/extensions/experimental/codex/thread_options.md)
--   [TurnOptions 레퍼런스](ref/extensions/experimental/codex/turn_options.md)
+-   [Codex 도구 API 레퍼런스](../ref/extensions/experimental/codex/codex_tool.md)
+-   [ThreadOptions 레퍼런스](../ref/extensions/experimental/codex/thread_options.md)
+-   [TurnOptions 레퍼런스](../ref/extensions/experimental/codex/turn_options.md)
 -   완전한 실행 가능 샘플은 `examples/tools/codex.py` 및 `examples/tools/codex_same_thread.py`을 참고하세요.

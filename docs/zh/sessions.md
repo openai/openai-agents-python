@@ -455,6 +455,6 @@ if __name__ == "__main__":
 
 -   [`Session`][agents.memory.Session] - 协议接口
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 实现
--   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 实现
+-   [`OpenAIConversationsSession`](../ref/memory/openai_conversations_session.md) - OpenAI Conversations API 实现
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 由 SQLAlchemy 驱动的实现
 -   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 具有 TTL 的加密会话封装器

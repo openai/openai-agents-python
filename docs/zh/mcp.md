@@ -367,7 +367,7 @@ async with MCPServerStdio(
 
 ## 5. MCP 服务器管理器 {#5-mcp-server-manager}
 
-如果有多个 MCP 服务器，请使用 `MCPServerManager` 预先连接它们，并向智能体公开其中成功连接的服务器子集。有关构造函数选项和重新连接行为，请参阅 [MCPServerManager API 参考](ref/mcp/manager.md)。
+如果有多个 MCP 服务器，请使用 `MCPServerManager` 预先连接它们，并向智能体公开其中成功连接的服务器子集。有关构造函数选项和重新连接行为，请参阅 [MCPServerManager API 参考](../ref/mcp/manager.md)。
 
 ```python
 from agents import Agent, Runner

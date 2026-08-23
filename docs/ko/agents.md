@@ -300,7 +300,7 @@ result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
 print(result.final_output)
 ```
 
-전체 콜백 인터페이스는 [수명 주기 API 레퍼런스](ref/lifecycle.md)를 참조하세요.
+전체 콜백 인터페이스는 [수명 주기 API 레퍼런스](../ref/lifecycle.md)를 참조하세요.
 
 ## 가드레일 {#guardrails}
 

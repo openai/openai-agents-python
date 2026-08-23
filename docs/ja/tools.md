@@ -901,7 +901,7 @@ agent = Agent(
 
 リファレンス:
 
--   [Codex ツール API リファレンス](ref/extensions/experimental/codex/codex_tool.md)
--   [ThreadOptions リファレンス](ref/extensions/experimental/codex/thread_options.md)
--   [TurnOptions リファレンス](ref/extensions/experimental/codex/turn_options.md)
+-   [Codex ツール API リファレンス](../ref/extensions/experimental/codex/codex_tool.md)
+-   [ThreadOptions リファレンス](../ref/extensions/experimental/codex/thread_options.md)
+-   [TurnOptions リファレンス](../ref/extensions/experimental/codex/turn_options.md)
 -   完全に実行可能なサンプルについては、`examples/tools/codex.py` と `examples/tools/codex_same_thread.py` を参照してください。
