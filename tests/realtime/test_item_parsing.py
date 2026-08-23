@@ -50,11 +50,12 @@ def test_user_message_conversion() -> None:
     assert isinstance(converted, UserMessageItem)
 
 
-def test_assistant_message_conversion() -> None:
+def test_assistant_message_conversion_preserves_status() -> None:
     item = RealtimeConversationItemAssistantMessage(
         id="123",
         type="message",
         role="assistant",
+        status="completed",
         content=[AssistantMessageContent(type="output_text", text=None)],
     )
 
@@ -63,6 +64,22 @@ def test_assistant_message_conversion() -> None:
     )
 
     assert isinstance(converted, AssistantMessageItem)
+    assert converted.status == "completed"
+
+
+def test_assistant_message_conversion_preserves_missing_status() -> None:
+    item = RealtimeConversationItemAssistantMessage(
+        id="123",
+        type="message",
+        role="assistant",
+        status=None,
+        content=[AssistantMessageContent(type="output_text", text=None)],
+    )
+
+    converted = _ConversionHelper.conversation_item_to_realtime_message_item(item, None)
+
+    assert isinstance(converted, AssistantMessageItem)
+    assert converted.status is None
 
 
 def test_system_message_conversion() -> None:
