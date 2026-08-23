@@ -388,7 +388,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     )
                     self._errors[server] = exc
         finally:
-            self._refresh_active_servers()
+            # Cleanup discards every processed server from the connected set, so no cleaned
+            # server may remain advertised as active regardless of `drop_failed_servers`:
+            # that flag only governs whether connect-phase failures stay listed.
+            self._active_servers = [
+                server for server in self._all_servers if server in self._connected_servers
+            ]
 
     async def _run_with_timeout(
         self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
