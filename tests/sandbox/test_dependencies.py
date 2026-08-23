@@ -44,6 +44,15 @@ class _AsyncCloseMethod:
         self.calls += 1
 
 
+class _CancellingAsyncClosable:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def aclose(self) -> None:
+        self.calls += 1
+        raise asyncio.CancelledError("dependency close cancelled")
+
+
 class _SyncClosable:
     def __init__(self) -> None:
         self.calls = 0
@@ -433,6 +442,34 @@ async def test_dependencies_aclose_continues_after_waiter_cancellation() -> None
     await dependencies.aclose()
     assert value.calls == 1
     assert value.completed
+
+
+@pytest.mark.asyncio
+async def test_dependencies_aclose_finishes_owned_cleanup_before_propagating_cancellation() -> None:
+    dependencies = Dependencies()
+    earlier = _AsyncClosable()
+    cancelling = _CancellingAsyncClosable()
+    dependencies.bind_factory(
+        "tests.earlier_owned", lambda _dependencies: earlier, owns_result=True
+    )
+    dependencies.bind_factory(
+        "tests.cancelling_owned", lambda _dependencies: cancelling, owns_result=True
+    )
+
+    _ = await dependencies.require("tests.earlier_owned")
+    _ = await dependencies.require("tests.cancelling_owned")
+
+    with pytest.raises(asyncio.CancelledError):
+        await dependencies.aclose()
+
+    assert cancelling.calls == 1
+    assert earlier.calls == 1
+
+    with pytest.raises(asyncio.CancelledError):
+        await dependencies.aclose()
+
+    assert cancelling.calls == 1
+    assert earlier.calls == 1
 
 
 @pytest.mark.asyncio

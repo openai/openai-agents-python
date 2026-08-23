@@ -268,14 +268,22 @@ class Dependencies:
             await asyncio.gather(*active_tasks, return_exceptions=True)
 
         seen_ids: set[int] = set()
+        cancellation: asyncio.CancelledError | None = None
         for value in reversed(self._owned_results):
             value_id = id(value)
             if value_id in seen_ids:
                 continue
             seen_ids.add(value_id)
-            await _close_best_effort(value)
+            try:
+                await _close_best_effort(value)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
 
         self._pending.clear()
         self._active_tasks.clear()
         self._cache.clear()
         self._owned_results.clear()
+
+        if cancellation is not None:
+            raise cancellation
