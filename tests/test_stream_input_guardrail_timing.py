@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from typing import Any
 
 import pytest
 from openai.types.responses import ResponseCompletedEvent
 
-from agents import Agent, GuardrailFunctionOutput, InputGuardrail, RunContextWrapper, Runner
+from agents import (
+    Agent,
+    GuardrailFunctionOutput,
+    InputGuardrail,
+    MaxTurnsExceeded,
+    RunContextWrapper,
+    Runner,
+)
 from agents.exceptions import InputGuardrailTripwireTriggered
 from agents.items import TResponseInputItem
 from agents.testing import ScriptedModel
-from tests.test_responses import get_text_message
+from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.testing_processor import fetch_events, fetch_ordered_spans
 
 FAST_GUARDRAIL_DELAY = 0.005
@@ -171,6 +179,68 @@ async def test_run_streamed_input_guardrail_tripwire_raises(guardrail_delay: flo
     assert (
         exc.run_data.input_guardrail_results[0].guardrail.get_name() == "tripping_input_guardrail"
     )
+
+
+@pytest.mark.asyncio
+async def test_max_turns_does_not_clobber_input_guardrail_tripwire():
+    """A guardrail tripwire recorded before max_turns fires must win over MaxTurnsExceeded.
+
+    Regression test: RunResultStreaming._check_errors() re-creates a fresh
+    MaxTurnsExceeded and overwrites self._stored_exception on *every* call once
+    current_turn > max_turns, because self._max_turns_handled is only ever set
+    True by the max_turns error-handler path -- never in the default (no
+    handler) path. stream_events() calls _check_errors() again unconditionally
+    in its `finally` block, so a guardrail trip that was already captured as
+    InputGuardrailTripwireTriggered got silently replaced with MaxTurnsExceeded
+    by that final call. Callers using the documented
+    `except InputGuardrailTripwireTriggered` pattern never saw the tripwire.
+    """
+
+    async def tripping_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        # A real moderation/safety guardrail call takes tens to hundreds of ms,
+        # i.e. longer than these fast scripted model turns need to blow
+        # through max_turns=1. This timing is the default, not an edge case.
+        await asyncio.sleep(0.05)
+        return GuardrailFunctionOutput(output_info={"reason": "blocked"}, tripwire_triggered=True)
+
+    model = ScriptedModel()
+    func_output = json.dumps({"a": "b"})
+    model.extend(
+        [
+            [
+                get_text_message(str(i)),
+                get_function_tool_call("some_function", func_output, str(i)),
+            ]
+            for i in range(1, 10)
+        ]
+    )
+
+    agent = Agent(
+        name="MaxTurnsGuardrailAgent",
+        model=model,
+        tools=[get_function_tool("some_function", "result")],
+        # run_in_parallel defaults to True -- this is the default configuration,
+        # not an opt-in one.
+        input_guardrails=[InputGuardrail(guardrail_function=tripping_guardrail, name="trip")],
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", max_turns=1)
+
+    raised: BaseException | None = None
+    try:
+        async for _ in result.stream_events():
+            pass
+    except BaseException as exc:  # noqa: BLE001 - we need to inspect the exact type raised
+        raised = exc
+
+    assert isinstance(raised, InputGuardrailTripwireTriggered), (
+        f"Expected InputGuardrailTripwireTriggered, got "
+        f"{type(raised).__name__ if raised else None}. The tripped guardrail "
+        "result was silently clobbered by a freshly-minted MaxTurnsExceeded."
+    )
+    assert not isinstance(raised, MaxTurnsExceeded)
 
 
 class SlowCompleteScriptedModel(ScriptedModel):
