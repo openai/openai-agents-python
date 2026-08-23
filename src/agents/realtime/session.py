@@ -523,6 +523,14 @@ class RealtimeSession(RealtimeModelListener):
                 and existing_item.type == "message"
                 and incoming_item.type == "message"
             ):
+                if (
+                    isinstance(existing_item, AssistantMessageItem)
+                    and isinstance(incoming_item, AssistantMessageItem)
+                    and incoming_item.status is None
+                ):
+                    incoming_item = incoming_item.model_copy(
+                        update={"status": existing_item.status}
+                    )
                 try:
                     # Merge transcripts for matching content indices
                     existing_content = existing_item.content

@@ -6182,6 +6182,36 @@ class TestTranscriptPreservation:
     """Tests ensuring assistant transcripts are preserved across updates."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("incoming_status", ["completed", "incomplete", None])
+    async def test_assistant_status_preserved_or_updated_on_item_update(
+        self, mock_model, mock_agent, incoming_status
+    ):
+        session = RealtimeSession(mock_model, mock_agent, None)
+        session._history = [
+            AssistantMessageItem(
+                item_id="assist_status",
+                status="completed",
+                role="assistant",
+                content=[AssistantAudio(audio=None, transcript="Hello there")],
+            )
+        ]
+
+        await session.on_event(
+            RealtimeModelItemUpdatedEvent(
+                item=AssistantMessageItem(
+                    item_id="assist_status",
+                    status=incoming_status,
+                    role="assistant",
+                    content=[AssistantAudio(audio=None, transcript=None)],
+                )
+            )
+        )
+
+        updated_item = cast(AssistantMessageItem, session._history[0])
+        assert updated_item.status == (incoming_status or "completed")
+        assert updated_item.content[0].transcript == "Hello there"
+
+    @pytest.mark.asyncio
     async def test_assistant_transcript_preserved_on_item_update(self, mock_model, mock_agent):
         session = RealtimeSession(mock_model, mock_agent, None)
 
