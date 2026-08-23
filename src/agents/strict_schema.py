@@ -3,8 +3,6 @@ from __future__ import annotations
 import copy
 from typing import Any, TypeGuard, cast
 
-from openai import NOT_GIVEN
-
 from .exceptions import UserError
 
 _EMPTY_SCHEMA = {
@@ -361,11 +359,11 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
-    if json_schema.get("default", NOT_GIVEN) is None:
-        json_schema.pop("default")
+    # Strip all defaults, not just `None`: every property is already forced into
+    # `required` above, so the model must always supply an explicit value regardless of
+    # any Python-level default. The API also rejects non-null `default` values within
+    # property definitions in strict mode.
+    json_schema.pop("default", None)
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
