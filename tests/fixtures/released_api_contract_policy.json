@@ -775,6 +775,10 @@
     {
       "module": "agents.voice.events",
       "name": "VoiceStreamEvent"
+    },
+    {
+      "module": "agents",
+      "name": "OutputGuardrailBlockedMessageFormatter"
     }
   ],
   "public_typed_dicts": [
