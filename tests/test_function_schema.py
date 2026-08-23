@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 
 import pytest
+from annotated_types import Gt, MinLen
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
@@ -710,6 +711,51 @@ def test_function_with_field_multiple_constraints():
 
 
 # --- Annotated + Field: same behavior as Field as default ---
+
+
+def test_function_with_annotated_types_constraints():
+    """annotated_types constraints in Annotated are preserved in schema and validation."""
+
+    def func_with_annotated_types_constraints(
+        count: Annotated[int, Gt(0)],
+        label: Annotated[str, MinLen(3)],
+    ) -> str:
+        return f"{label}: {count}"
+
+    fs = function_schema(func_with_annotated_types_constraints, use_docstring_info=False)
+
+    # Constraints must appear in the JSON schema, matching the equivalent Field spelling.
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["count"].get("exclusiveMinimum") == 0  # Gt(0)
+    assert properties["label"].get("minLength") == 3  # MinLen(3)
+
+    # Valid input works and reconstructs the call correctly.
+    parsed = fs.params_pydantic_model(**{"count": 2, "label": "abc"})
+    args, kwargs_dict = fs.to_call_args(parsed)
+    assert func_with_annotated_types_constraints(*args, **kwargs_dict) == "abc: 2"
+
+    # Constraint violations must be rejected at validation time.
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model(**{"count": -1, "label": "abc"})
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model(**{"count": 2, "label": "ab"})
+
+
+def test_function_with_annotated_types_constraints_combined_with_field():
+    """annotated_types constraints combine with a Field in the same Annotated."""
+
+    def func_with_mixed_constraints(
+        score: Annotated[float, Field(description="A score"), Gt(0.0)],
+    ) -> float:
+        return score * 2
+
+    fs = function_schema(func_with_mixed_constraints, use_docstring_info=False)
+    score_schema = fs.params_json_schema["properties"]["score"]
+    assert score_schema.get("description") == "A score"
+    assert score_schema.get("exclusiveMinimum") == 0.0
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model(**{"score": -1.0})
 
 
 def test_function_with_annotated_field_required_constraints():
