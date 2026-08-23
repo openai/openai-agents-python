@@ -434,6 +434,15 @@ def function_schema(
             metadata = param_metadata.get(name, ())
             field_info_from_annotated = _extract_field_info_from_metadata(metadata)
 
+            # Preserve constraint metadata (for example `annotated_types.Gt`) by re-wrapping it
+            # into the annotation; Pydantic applies `Annotated` constraints natively on model
+            # fields, so dropping them would silently weaken both the schema and validation.
+            constraint_metadata = tuple(
+                item for item in metadata if not isinstance(item, str | FieldInfo)
+            )
+            if constraint_metadata:
+                ann = Annotated[(ann, *constraint_metadata)]
+
             if field_info_from_annotated is not None:
                 merged = FieldInfo.merge_field_infos(
                     field_info_from_annotated,
