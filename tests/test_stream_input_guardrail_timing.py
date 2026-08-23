@@ -194,15 +194,29 @@ async def test_max_turns_does_not_clobber_input_guardrail_tripwire():
     InputGuardrailTripwireTriggered got silently replaced with MaxTurnsExceeded
     by that final call. Callers using the documented
     `except InputGuardrailTripwireTriggered` pattern never saw the tripwire.
+
+    This race must not be ordered with a real-time sleep: a fixed delay only
+    approximates "the guardrail finishes after max_turns is exceeded", and
+    under CI load, tracing overhead, or slower model instrumentation the
+    guardrail can instead finish *before* current_turn > max_turns is ever
+    reached, in which case the test would observe the correct exception even
+    against the unpatched (buggy) implementation and silently stop being a
+    regression test. Instead, an `error_handlers={"max_turns": ...}` hook
+    (returning None, so it falls through to the exact same default raise path
+    as if no handler were registered) sets an `asyncio.Event` at the precise
+    moment the run loop establishes current_turn > max_turns. The guardrail
+    awaits that event before returning its tripwire, so it can only ever
+    resolve *after* the max-turns condition genuinely holds.
     """
+
+    max_turns_reached = asyncio.Event()
 
     async def tripping_guardrail(
         ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
     ) -> GuardrailFunctionOutput:
-        # A real moderation/safety guardrail call takes tens to hundreds of ms,
-        # i.e. longer than these fast scripted model turns need to blow
-        # through max_turns=1. This timing is the default, not an edge case.
-        await asyncio.sleep(0.05)
+        # Wait for the run loop to have actually established current_turn >
+        # max_turns, rather than guessing at a delay long enough to outlast it.
+        await max_turns_reached.wait()
         return GuardrailFunctionOutput(output_info={"reason": "blocked"}, tripwire_triggered=True)
 
     model = ScriptedModel()
@@ -226,7 +240,15 @@ async def test_max_turns_does_not_clobber_input_guardrail_tripwire():
         input_guardrails=[InputGuardrail(guardrail_function=tripping_guardrail, name="trip")],
     )
 
-    result = Runner.run_streamed(agent, input="user_message", max_turns=1)
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=1,
+        # Declining (returning None) preserves the exact default max_turns
+        # behavior; the handler exists purely to signal, deterministically,
+        # the moment current_turn > max_turns is established.
+        error_handlers={"max_turns": lambda data: max_turns_reached.set()},
+    )
 
     raised: BaseException | None = None
     try:
