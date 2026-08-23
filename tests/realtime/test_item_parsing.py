@@ -78,3 +78,33 @@ def test_system_message_conversion() -> None:
     )
 
     assert isinstance(converted, SystemMessageItem)
+
+
+def test_status_is_taken_from_the_server_item() -> None:
+    """A retrieved item reports its real status; overriding it regressed history (#4597)."""
+    item = RealtimeConversationItemAssistantMessage(
+        id="123",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[AssistantMessageContent(type="output_text", text="hi")],
+    )
+
+    converted = _ConversionHelper.conversation_item_to_realtime_message_item(item, None)
+
+    assert isinstance(converted, AssistantMessageItem)
+    assert converted.status == "completed"
+
+
+def test_status_defaults_to_in_progress_when_the_server_omits_it() -> None:
+    item = RealtimeConversationItemAssistantMessage(
+        id="123",
+        type="message",
+        role="assistant",
+        content=[AssistantMessageContent(type="output_text", text="hi")],
+    )
+
+    converted = _ConversionHelper.conversation_item_to_realtime_message_item(item, None)
+
+    assert isinstance(converted, AssistantMessageItem)
+    assert converted.status == "in_progress"

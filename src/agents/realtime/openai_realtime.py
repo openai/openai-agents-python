@@ -2011,7 +2011,9 @@ class _ConversionHelper:
                 "type": item.type,
                 "role": item.role,
                 "content": content,
-                "status": "in_progress",
+                # Keep the server's status: hardcoding "in_progress" regressed
+                # completed items every time one was retrieved (#4597).
+                "status": item.status or "in_progress",
             },
         )
 

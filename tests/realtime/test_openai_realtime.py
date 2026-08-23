@@ -554,6 +554,29 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert item_updated_event.item.previous_item_id == ""
 
     @pytest.mark.asyncio
+    async def test_retrieved_item_keeps_the_status_the_server_reported(self, model):
+        """A retrieve of a finished item must not regress it to in_progress (#4597)."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+        server_event = {
+            "type": "conversation.item.retrieved",
+            "event_id": "event_1",
+            "item": {
+                "id": "item_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_audio", "transcript": "hello there"}],
+            },
+        }
+
+        await model._handle_ws_event(server_event)
+
+        assert mock_listener.on_event.call_count == 2
+        item_updated_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert item_updated_event.item.status == "completed"
+
+    @pytest.mark.asyncio
     async def test_handle_malformed_json_logs_error_continues(self, model):
         """Test that malformed JSON emits error event but doesn't crash."""
         mock_listener = AsyncMock()
