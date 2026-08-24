@@ -62,9 +62,42 @@ Tool guardrails wrap **`FunctionTool` instances** and let you validate or block 
 - Input tool guardrails run before the tool executes and can skip the call, replace the output with a message, or raise a tripwire.
 - Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
 - If a function tool requires approval, input tool guardrails normally run after approval and immediately before execution. Set [`RunConfig.tool_execution`][agents.run.RunConfig.tool_execution] to [`ToolExecutionConfig(pre_approval_tool_input_guardrails=True)`][agents.run.ToolExecutionConfig] when you want those input checks to run before the pending approval interruption is emitted. Calls that pass this pre-approval check are still checked again after approval before the tool executes.
-- Tool guardrails apply only to function tools created with [`function_tool`][agents.tool.function_tool]. Handoffs run through the SDK's handoff pipeline rather than the normal function-tool pipeline, so tool guardrails do not apply to the handoff call itself. Hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) also do not use this guardrail pipeline, and [`Agent.as_tool()`][agents.agent.Agent.as_tool] does not currently expose tool-guardrail options directly.
+- Tool guardrails apply to function tools created with [`function_tool`][agents.tool.function_tool] and to locally executed MCP tools when their server is configured with server-wide tool guardrails. Handoffs run through the SDK's handoff pipeline rather than the normal function-tool pipeline, so tool guardrails do not apply to the handoff call itself. Hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and built-in execution tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) also do not use this guardrail pipeline, and [`Agent.as_tool()`][agents.agent.Agent.as_tool] does not currently expose tool-guardrail options directly.
 
-See the code snippet below for details.
+### Local MCP tool guardrails
+
+Local MCP servers are converted to `FunctionTool` instances by the SDK, so one set of input and output guardrails can protect every tool exposed by a server. Pass `tool_input_guardrails` and `tool_output_guardrails` to the local MCP server constructor:
+
+```python
+from agents import ToolGuardrailFunctionOutput
+from agents.decorators import tool_input_guardrail, tool_output_guardrail
+from agents.mcp import MCPServerStdio
+
+
+@tool_input_guardrail
+def validate_mcp_input(data):
+    return ToolGuardrailFunctionOutput.allow()
+
+
+@tool_output_guardrail
+def validate_mcp_output(data):
+    return ToolGuardrailFunctionOutput.allow()
+
+
+server = MCPServerStdio(
+    name="filesystem",
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    },
+    tool_input_guardrails=[validate_mcp_input],
+    tool_output_guardrails=[validate_mcp_output],
+)
+```
+
+These lists are server-wide: every local MCP tool converted from that server receives the configured guardrails. Input guardrails use the same approval ordering as other function tools, including [`ToolExecutionConfig(pre_approval_tool_input_guardrails=True)`][agents.run.ToolExecutionConfig]. Hosted MCP tools execute on the Responses API side and are not affected by these local server settings.
+
+See the code snippet below for a regular function-tool example.
 
 ## Tripwires
 
