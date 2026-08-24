@@ -2685,6 +2685,87 @@ async def test_serialized_approval_checkpoint_with_output_guardrail_resumes_afte
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_serialized_approval_without_owner_index_map_retains_blocked_output(
+    mode: str,
+) -> None:
+    """A resumed approval checkpoint whose output guardrail trips must retain the
+    blocked call/output pair even when the serialized state predates the
+    generated/session shared-reference index map, leaving the two owners as
+    independently deserialized copies of the same response."""
+
+    @function_tool(name_override="normal_tool")
+    def normal_tool() -> str:
+        return "normal result"
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "approval-secret"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    def stop_on_approval(_context: RunContextWrapper[Any], results: list[Any]) -> Any:
+        return ToolsToFinalOutputResult(
+            is_final_output=any(result.tool.name == "approval_tool" for result in results)
+        )
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("normal_tool", "{}", call_id="call-normal")],
+            [get_function_tool_call("approval_tool", "{}", call_id="call-approval")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[normal_tool, approval_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+        tool_use_behavior=stop_on_approval,
+    )
+
+    first = await Runner.run(agent, "Use normal_tool then approval_tool")
+    assert len(first.interruptions) == 1
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    # Serialize without the generated/session shared-reference index map so the
+    # two owners deserialize as independent copies of the same response.
+    state_json = state.to_json()
+    del state_json["generated_session_item_indexes"]
+    restored = await RunState.from_json(agent, state_json)
+
+    session = SimpleListSession()
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        if mode == "non_streamed":
+            await Runner.run(agent, restored, session=session)
+        else:
+            streamed = Runner.run_streamed(agent, restored, session=session)
+            await consume_stream(streamed)
+
+    saved_items = await session.get_items()
+    saved = [
+        (item.get("type"), item.get("call_id")) for item in saved_items if isinstance(item, dict)
+    ]
+    assert saved.count(("function_call", "call-approval")) == 1
+    assert saved.count(("function_call_output", "call-approval")) == 1
+    assert "approval-secret" not in json.dumps(saved_items)
+    blocked_output = next(
+        item
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call-approval"
+    )
+    assert blocked_output.get("output") == run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize("serialized", [False, True], ids=["live", "serialized"])
 @pytest.mark.parametrize("attach_session", [False, True], ids=["without-session", "with-session"])
 @pytest.mark.asyncio
