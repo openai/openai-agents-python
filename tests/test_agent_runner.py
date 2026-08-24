@@ -91,7 +91,11 @@ from agents.run_internal.items import (
 )
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
-from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
+from agents.run_internal.run_steps import (
+    NextStepFinalOutput,
+    ProcessedResponse,
+    SingleStepResult,
+)
 from agents.run_internal.session_persistence import (
     _collect_retry_owned_tail_serializations,
     persist_session_items_for_guardrail_trip,
@@ -288,6 +292,43 @@ def test_blocked_function_batch_rejects_equality_impostor_discriminators_without
 
     assert run_loop._retained_items_for_blocked_output([call, output]) == []
     assert equality_calls == []
+
+
+def test_boundary_preserves_distinct_items_with_same_structural_key() -> None:
+    """Two distinct items reusing the same id/call_id must both be retained.
+
+    Structural deduplication must only collapse independently deserialized
+    owner copies, not distinct occurrences within the processed response
+    itself (a custom model may legitimately reuse an identifier).
+    """
+    agent = Agent(name="test")
+    raw_call = {
+        "type": "function_call",
+        "name": "echo",
+        "arguments": "{}",
+        "call_id": "call-reused",
+        "id": "call-reused",
+    }
+    first = ToolCallItem(agent=agent, raw_item=dict(raw_call))
+    second = ToolCallItem(agent=agent, raw_item=dict(raw_call))
+
+    processed = ProcessedResponse(
+        new_items=[first, second],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=["echo"],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    boundary = blocked_output._current_response_boundary((), processed, None)
+    assert len(boundary.items) == 2
+    assert first in boundary.items
+    assert second in boundary.items
 
 
 def test_blocked_function_batch_rejects_non_direct_typed_callers() -> None:

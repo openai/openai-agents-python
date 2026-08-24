@@ -496,13 +496,27 @@ def _current_response_boundary(
     current_items: list[RunItem] = []
     seen_ids: set[int] = set()
     seen_keys: set[tuple[str | None, str | None, str | None]] = set()
-    for item in (*processed_items, *suffixes, *response_items):
-        key = _structural_item_key(item)
-        if id(item) in seen_ids or (key != (None, None, None) and key in seen_keys):
-            continue
+
+    def _remember(item: RunItem) -> None:
         seen_ids.add(id(item))
+        key = _structural_item_key(item)
         if key != (None, None, None):
             seen_keys.add(key)
+
+    # Preserve distinct occurrences within the processed and supplied
+    # sequences; only collapse independently deserialized owner copies when
+    # merging the suffixes.
+    for item in (*processed_items, *response_items):
+        if id(item) not in seen_ids:
+            _remember(item)
+            current_items.append(item)
+    for item in suffixes:
+        if id(item) in seen_ids:
+            continue
+        key = _structural_item_key(item)
+        if key != (None, None, None) and key in seen_keys:
+            continue
+        _remember(item)
         current_items.append(item)
     return _CurrentResponseBoundary(
         items=tuple(current_items),
