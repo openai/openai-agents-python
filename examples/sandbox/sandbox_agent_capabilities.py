@@ -48,12 +48,11 @@ from agents.sandbox.capabilities import (
 from agents.sandbox.capabilities.capabilities import Capabilities
 from agents.sandbox.entries import File, LocalDir
 from agents.sandbox.errors import WorkspaceReadNotFoundError
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
+from examples.sandbox.misc.example_support import unix_local_client
 
 DEFAULT_MODEL = "gpt-5.5"
 COMPACTION_THRESHOLD = 1_000
@@ -363,7 +362,7 @@ async def main(model_name: str) -> None:
         _write_local_skill(skills_root)
 
         agent = _build_agent(model, skills_root)
-        client = UnixLocalSandboxClient()
+        client = unix_local_client()
         sandbox = await client.create(manifest=agent.default_manifest)
 
         try:

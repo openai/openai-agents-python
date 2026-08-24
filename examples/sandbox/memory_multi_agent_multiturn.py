@@ -10,10 +10,10 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, MemoryLayoutConfig, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Memory, Shell
 from agents.sandbox.entries import Dir, File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from examples.sandbox.misc.example_support import unix_local_client
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GTM_SESSION_ID = "gtm-q2-pipeline-review"
@@ -167,7 +167,7 @@ async def main(*, model: str) -> None:
     manifest = _build_manifest()
     gtm_agent = _build_gtm_agent(model=model, manifest=manifest)
     engineering_agent = _build_engineering_agent(model=model, manifest=manifest)
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
     sandbox = await client.create(manifest=manifest)
     workspace_root = Path(sandbox.state.manifest.root)
 

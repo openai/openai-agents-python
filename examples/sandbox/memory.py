@@ -11,11 +11,11 @@ from agents.run import RunConfig
 from agents.sandbox import LocalSnapshotSpec, Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Memory, Shell
 from agents.sandbox.entries import File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from examples.sandbox.misc.example_support import unix_local_client
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 FIRST_PROMPT = "Inspect workspace and fix invoice total bug in src/acme_metrics/report.py."
@@ -173,7 +173,7 @@ def _run_config(*, sandbox: BaseSandboxSession, workflow_name: str) -> RunConfig
 async def main(*, model: str) -> None:
     manifest = _build_manifest()
     agent = _build_agent(model=model, manifest=manifest)
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
 
     with tempfile.TemporaryDirectory(prefix="sandbox-memory-example-") as snapshot_dir:
         # Use a local snapshot so the second run resumes the same workspace in a new sandbox

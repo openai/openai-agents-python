@@ -24,12 +24,15 @@ from agents import (
 from agents.decorators import tool
 from agents.run import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest, tool_call_name
+from examples.sandbox.misc.example_support import (
+    text_manifest,
+    tool_call_name,
+    unix_local_client,
+)
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 DEFAULT_QUESTION = (
@@ -157,8 +160,8 @@ async def main(model: str, question: str) -> None:
     )
 
     # Each sandbox-backed tool gets its own run configuration so the workspaces stay isolated.
-    pricing_run_config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    rollout_run_config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    pricing_run_config = RunConfig(sandbox=SandboxRunConfig(client=unix_local_client()))
+    rollout_run_config = RunConfig(sandbox=SandboxRunConfig(client=unix_local_client()))
 
     orchestrator = Agent(
         name="Revenue Operations Coordinator",

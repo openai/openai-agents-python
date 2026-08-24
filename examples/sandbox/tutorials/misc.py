@@ -44,7 +44,6 @@ from agents.items import (
 )
 from agents.sandbox import Manifest
 from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session import BaseSandboxClient, SandboxSession
 from agents.stream_events import (
     AgentUpdatedStreamEvent,
@@ -52,6 +51,7 @@ from agents.stream_events import (
     StreamEvent,
 )
 from examples.auto_mode import input_with_fallback, is_auto_mode
+from examples.sandbox.misc.example_support import unix_local_client
 
 DEFAULT_SANDBOX_IMAGE = "sandbox-tutorials:latest"
 console = Console()
@@ -127,7 +127,7 @@ async def create_sandbox_client_and_session(
         )
         return client, sandbox
 
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
     sandbox = await client.create(manifest=manifest)
     return client, sandbox
 

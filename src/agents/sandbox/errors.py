@@ -59,6 +59,8 @@ class ErrorCode(str, Enum):
 OpName = Literal[
     "start",
     "stop",
+    "create",
+    "resume",
     "exec",
     "read",
     "write",

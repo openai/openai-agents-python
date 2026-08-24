@@ -2,7 +2,10 @@
 Start here if you want the simplest Unix-local sandbox example.
 
 This file mirrors the Docker example, but the sandbox runs as a temporary local
-workspace on macOS or Linux instead of inside a Docker container.
+workspace instead of inside a Docker container. Unix-local confinement relies on
+macOS sandbox-exec; on Linux it runs unconfined on the host, so the shared
+example client helper requires AGENTS_ALLOW_UNCONFINED_LINUX=1 to opt in (the
+Docker example is the safer choice there).
 """
 
 import argparse
@@ -18,12 +21,11 @@ from agents import Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.errors import WorkspaceArchiveWriteError
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest
+from examples.sandbox.misc.example_support import text_manifest, unix_local_client
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 DEFAULT_QUESTION = (
@@ -91,7 +93,7 @@ async def _verify_extra_path_grants() -> None:
         exec_output = scratch_dir / "exec_output.txt"
         external_input.write_text("external grant input\n", encoding="utf-8")
 
-        client = UnixLocalSandboxClient()
+        client = unix_local_client()
         sandbox = await client.create(manifest=_build_manifest(external_dir, scratch_dir))
         try:
             async with sandbox:
@@ -169,7 +171,7 @@ async def main(model: str, question: str, stream: bool) -> None:
 
         # With Unix-local sandboxes, the runner creates and cleans up the temporary workspace for us.
         run_config = RunConfig(
-            sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()),
+            sandbox=SandboxRunConfig(client=unix_local_client()),
             workflow_name="Unix local sandbox review",
             tracing_disabled=True,
         )

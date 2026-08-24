@@ -22,7 +22,6 @@ from agents.decorators import tool
 from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.entries import Dir, File, LocalDir
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.tool_context import ToolContext
 from examples.sandbox.healthcare_support.data import HealthcareSupportDataStore
 from examples.sandbox.healthcare_support.models import (
@@ -37,6 +36,7 @@ from examples.sandbox.healthcare_support.support_agents import (
     memory_recap_agent,
 )
 from examples.sandbox.healthcare_support.tools import HealthcareSupportContext
+from examples.sandbox.misc.example_support import unix_local_client
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent
 POLICIES_ROOT = EXAMPLE_ROOT / "policies"
@@ -428,7 +428,7 @@ async def run_healthcare_support_workflow(
     await context.emit("memory_ready", session_id=conversation_session.session_id)
 
     hooks = WorkflowHooks()
-    sandbox_client = UnixLocalSandboxClient()
+    sandbox_client = unix_local_client()
     sandbox = await sandbox_client.create(manifest=_build_manifest(scenario))
     await context.emit(
         "sandbox_ready",

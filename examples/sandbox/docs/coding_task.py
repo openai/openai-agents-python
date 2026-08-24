@@ -20,7 +20,6 @@ from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import LocalDirLazySkillSource, Skills
 from agents.sandbox.capabilities.capabilities import Capabilities
 from agents.sandbox.entries import LocalDir
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 TARGET_TEST_CMD = "sh tests/test_credit_note.sh"
@@ -32,6 +31,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parent
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from examples.sandbox.misc.example_support import unix_local_client  # noqa: E402
 
 
 def build_agent(model: str) -> SandboxAgent[None]:
@@ -188,7 +188,7 @@ def _saw_target_test_success(new_items: Sequence[object]) -> bool:
 
 async def main(model: str, prompt: str) -> None:
     agent = build_agent(model)
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
     sandbox = await client.create(manifest=agent.default_manifest)
 
     try:

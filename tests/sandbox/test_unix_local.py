@@ -354,7 +354,9 @@ class _EnvProbeSession(UnixLocalSandboxSession):
 
 
 @pytest.mark.asyncio
-async def test_exec_environment_is_allowlisted_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_exec_environment_is_allowlisted_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
@@ -436,14 +438,47 @@ async def test_resume_ignores_untrusted_state_flags_and_enforces_linux_opt_in(
 
 @pytest.mark.asyncio
 async def test_inherit_environment_never_persists_in_session_state(tmp_path: Path) -> None:
-    from agents.sandbox.sandboxes.unix_local import (
-        UnixLocalSandboxClient,
-        UnixLocalSandboxSessionState,
-    )
-    from agents.sandbox.snapshot import NoopSnapshot as _NoopSnapshot
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
     client = UnixLocalSandboxClient(allow_unconfined_linux=True, inherit_environment=True)
     session = await client.create(manifest=Manifest(root=str(tmp_path / "ws")))
     payload = client.serialize_session_state(session.state)
     assert "inherit_environment" not in payload
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_linux_guard_error_survives_mount_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys as _sys
+
+    from agents.sandbox.entries import S3Mount
+    from agents.sandbox.entries.mounts import InContainerMountStrategy
+    from agents.sandbox.entries.mounts.patterns import RcloneMountPattern
+    from agents.sandbox.errors import ConfigurationError, ErrorCode
+
+    monkeypatch.setattr(_sys, "platform", "linux")
+    manifest = Manifest(
+        root=str(tmp_path / "ws"),
+        entries={
+            "data": S3Mount(
+                bucket="example-bucket",
+                access_key_id="example-access-key",
+                secret_access_key="example-secret-key",
+                mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern()),
+            )
+        },
+    )
+
+    # A credentialed manifest puts create() behind the mount-redaction boundary;
+    # the guard's structured error must survive it as a ConfigurationError with
+    # its machine-readable code intact (not collapse into a generic RuntimeError).
+    with pytest.raises(ConfigurationError) as exc_info:
+        await UnixLocalSandboxClient().create(manifest=manifest)
+
+    error = exc_info.value
+    assert error.error_code == ErrorCode.UNCONFINED_LINUX_NOT_ALLOWED
+    assert error.op == "create"
+    assert error.retryable is False
+    assert "example-secret-key" not in str(error)

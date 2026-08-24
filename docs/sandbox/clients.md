@@ -36,7 +36,7 @@ Unix-local is the easiest way to start developing against a local filesystem. Mo
 Environment isolation notes:
 
 - On macOS, commands are wrapped with a `sandbox-exec` profile that confines filesystem access to the workspace.
-- On Linux there is no equivalent confinement: creating a session raises by default. Pass `allow_unconfined_linux=True` to explicitly accept unconfined host execution (intended for disposable development machines), or use `DockerSandboxClient`.
+- On Linux there is no equivalent confinement: creating a session raises by default. Pass `allow_unconfined_linux=True` to explicitly accept unconfined host execution (intended for disposable development machines), or use `DockerSandboxClient`. The sandbox examples gate this opt-in behind `AGENTS_ALLOW_UNCONFINED_LINUX=1` in a shared helper (`examples/sandbox/misc/example_support.py`).
 - Sandboxed commands inherit only a minimal allowlist of host environment variables (`PATH`, locale, `TZ`, `TERM`, `TMPDIR`, certificate/CA locations) plus anything declared in the manifest environment. This prevents a sandboxed command from reading host credentials such as `OPENAI_API_KEY` via `printenv`. Pass `inherit_environment=True` to restore full inheritance when a workflow depends on it.
 
 `SandboxPathGrant.host_path` is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See [Manifest path grants](guide.md#manifest) for details.

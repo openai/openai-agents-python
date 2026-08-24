@@ -19,12 +19,11 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.entries import File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import tool_call_name
+from examples.sandbox.misc.example_support import tool_call_name, unix_local_client
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_QUESTION = (
@@ -82,7 +81,7 @@ def _raw_item_call_id(raw_item: object) -> str | None:
 
 async def main(model: str, question: str) -> None:
     agent = _build_agent(model)
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
     sandbox = await client.create(manifest=agent.default_manifest)
 
     try:

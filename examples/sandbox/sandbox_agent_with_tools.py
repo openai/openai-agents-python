@@ -18,12 +18,15 @@ from agents.decorators import tool
 from agents.mcp import MCPServerStdio
 from agents.run import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest, tool_call_name
+from examples.sandbox.misc.example_support import (
+    text_manifest,
+    tool_call_name,
+    unix_local_client,
+)
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 DEFAULT_QUESTION = (
@@ -94,7 +97,7 @@ async def main(model: str, question: str) -> None:
         result = await Runner.run(
             agent,
             question,
-            run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
+            run_config=RunConfig(sandbox=SandboxRunConfig(client=unix_local_client())),
         )
         tool_names: list[str] = []
         for item in result.new_items:

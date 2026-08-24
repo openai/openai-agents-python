@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import base64
 import json
+import sys
 from pathlib import Path
 
 from agents import ModelSettings, Runner, RunResult, ToolOutputImage
@@ -18,12 +19,16 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.entries import BaseEntry, Dir, File
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session import BaseSandboxSession
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from examples.sandbox.misc.example_support import unix_local_client
 
 
 async def main(*, model: str) -> None:
-    client = UnixLocalSandboxClient()
+    client = unix_local_client()
     agent_a = _build_agent(name="Task A worker", model=model)
     agent_b = _build_agent(name="Task B worker", model=model)
     shared_sandbox = await client.create(manifest=_build_manifest())

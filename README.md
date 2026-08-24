@@ -92,6 +92,8 @@ agent = SandboxAgent(
 result = Runner.run_sync(
     agent,
     "Inspect the repo README and summarize what this project does.",
+    # macOS: sandbox-exec confined. On Linux this raises unless the client is
+    # constructed with allow_unconfined_linux=True; prefer Docker there.
     run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
 )
 print(result.final_output)

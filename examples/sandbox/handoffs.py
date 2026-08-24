@@ -14,12 +14,11 @@ from pathlib import Path
 from agents import Agent, Runner
 from agents.run import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest
+from examples.sandbox.misc.example_support import text_manifest, unix_local_client
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 DEFAULT_QUESTION = (
@@ -90,7 +89,7 @@ async def main(model: str, question: str) -> None:
     result = await Runner.run(
         intake_agent,
         question,
-        run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
+        run_config=RunConfig(sandbox=SandboxRunConfig(client=unix_local_client())),
     )
     print(result.final_output)
 

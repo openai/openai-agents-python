@@ -79,6 +79,8 @@ async def main() -> None:
         build_agent("gpt-5.6-sol"),
         "Open `repo/task.md`, fix the issue, run the targeted test, and summarize the change.",
         run_config=RunConfig(
+            # macOS: sandbox-exec confined. On Linux this raises unless the client
+            # is constructed with allow_unconfined_linux=True; prefer Docker there.
             sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()),
             workflow_name="Sandbox coding example",
         ),

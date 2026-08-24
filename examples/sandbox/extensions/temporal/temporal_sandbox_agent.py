@@ -81,6 +81,7 @@ for _p in (_THIS_DIR, _REPO_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from examples.sandbox.misc.example_support import unix_local_client  # noqa: E402
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability  # noqa: E402
 
 
@@ -638,10 +639,10 @@ async def run_worker() -> None:
     )
 
     from agents.extensions.sandbox import DaytonaSandboxClient, E2BSandboxClient
-    from agents.sandbox.sandboxes import DockerSandboxClient, UnixLocalSandboxClient
+    from agents.sandbox.sandboxes import DockerSandboxClient
 
     sandbox_clients: list[SandboxClientProvider] = [
-        SandboxClientProvider("local", UnixLocalSandboxClient()),
+        SandboxClientProvider("local", unix_local_client()),
     ]
     if _os.environ.get("DAYTONA_API_KEY"):
         sandbox_clients.append(SandboxClientProvider("daytona", DaytonaSandboxClient()))

@@ -35,7 +35,8 @@ from agents.run import RunConfig
 from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.entries import File
-from agents.sandbox.sandboxes import UnixLocalSandboxClient, UnixLocalSandboxClientOptions
+from agents.sandbox.sandboxes import UnixLocalSandboxClientOptions
+from examples.sandbox.misc.example_support import unix_local_client
 
 TASK_QUEUE = "local-temporal-sandbox-agent"
 WORKFLOW_ID = "local-temporal-sandbox-agent-workflow"
@@ -89,7 +90,7 @@ class LocalSandboxAgentWorkflow:
 def _client_with_plugin(client: Client, trace_mode: str) -> Client:
     plugin = OpenAIAgentsPlugin(
         model_params=ModelActivityParameters(start_to_close_timeout=timedelta(seconds=120)),
-        sandbox_clients=[SandboxClientProvider("local", UnixLocalSandboxClient())],
+        sandbox_clients=[SandboxClientProvider("local", unix_local_client())],
         add_temporal_spans=trace_mode == TRACE_MODE_OPENAI_WITH_TEMPORAL_SPANS,
     )
     config = client.config()

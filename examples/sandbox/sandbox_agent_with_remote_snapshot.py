@@ -17,13 +17,12 @@ from pathlib import Path
 from agents import ModelSettings, Runner
 from agents.run import RunConfig
 from agents.sandbox import Manifest, RemoteSnapshotSpec, SandboxAgent, SandboxRunConfig
-from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.sandbox.session import Dependencies
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.sandbox.misc.example_support import text_manifest
+from examples.sandbox.misc.example_support import text_manifest, unix_local_client
 from examples.sandbox.misc.workspace_shell import WorkspaceShellCapability
 
 S3_BUCKET_ENV_VAR = "S3_MOUNT_BUCKET"
@@ -117,7 +116,7 @@ async def _verify_remote_snapshot_round_trip(*, model: str) -> None:
         SNAPSHOT_CLIENT_DEPENDENCY_KEY,
         S3SnapshotClient(bucket=_require_s3_bucket(), prefix=SNAPSHOT_OBJECT_PREFIX),
     )
-    client = UnixLocalSandboxClient(dependencies=dependencies)
+    client = unix_local_client(dependencies=dependencies)
 
     sandbox = await client.create(
         manifest=manifest,
