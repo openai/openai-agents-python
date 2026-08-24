@@ -182,6 +182,7 @@ def _default_run_state_validation_error(
 CURRENT_SCHEMA_VERSION = "1.17"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
+_CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -213,7 +214,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker network-isolation state and lets an exact call approval decision "
         "override a sticky decision for the same tool."
     ),
-    "1.17": "Persists Docker container labels across sandbox resume and replacement.",
+    "1.17": (
+        "Persists Docker container labels and current-response generated-item ownership across "
+        "resume flows."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1457,6 +1461,46 @@ class RunState(Generic[TContext, TAgent]):
             indexes.append(session_index)
         return indexes
 
+    def _current_response_generated_item_ownership(
+        self,
+        generated_items: Sequence[RunItem],
+    ) -> dict[str, Any] | None:
+        """Record the response range and approval occurrences from live item identities."""
+        from .run_internal.run_steps import NextStepInterruption
+
+        if self._last_processed_response is None:
+            return None
+        if not isinstance(self._current_step, NextStepInterruption):
+            return None
+
+        processed_items = self._last_processed_response.new_items
+        interruptions = self._current_step.interruptions
+        if not processed_items or not interruptions or len(processed_items) > len(generated_items):
+            return None
+
+        candidate_starts = [
+            start
+            for start in range(len(generated_items) - len(processed_items) + 1)
+            if all(
+                generated_items[start + offset] is item
+                for offset, item in enumerate(processed_items)
+            )
+        ]
+        if len(candidate_starts) != 1:
+            return None
+
+        start = candidate_starts[0]
+        indexes_by_identity: dict[int, list[int]] = {}
+        for index in range(start + len(processed_items), len(generated_items)):
+            indexes_by_identity.setdefault(id(generated_items[index]), []).append(index)
+        interruption_indexes: list[int] = []
+        for item in interruptions:
+            indexes = indexes_by_identity.pop(id(item), [])
+            if len(indexes) != 1:
+                return None
+            interruption_indexes.append(indexes[0])
+        return {"start": start, "end": len(generated_items), "interruptions": interruption_indexes}
+
     def _serialize_context_payload(
         self,
         *,
@@ -1804,6 +1848,14 @@ class RunState(Generic[TContext, TAgent]):
             ],
             "generated_session_item_indexes": self._generated_session_item_indexes(generated_items),
         }
+
+        current_response_generated_item_ownership = self._current_response_generated_item_ownership(
+            generated_items
+        )
+        if current_response_generated_item_ownership is not None:
+            result["current_response_generated_item_ownership"] = (
+                current_response_generated_item_ownership
+            )
 
         result["generated_items"] = [
             self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
@@ -4250,6 +4302,24 @@ async def _build_run_state_from_json(
                 current_step_data.get("data", {}).get("llm_end_hooks_started", True)
             ),
         )
+        _restore_current_response_item_identities(
+            state,
+            serialized_generated_items=serialized_generated_items,
+            generated_source_indexes=generated_source_indexes,
+            last_processed_response_data=last_processed_response_data,
+            current_step_data=current_step_data,
+            current_response_generated_item_ownership=(
+                state_json.get("current_response_generated_item_ownership")
+                if (schema_major, schema_minor)
+                >= tuple(
+                    int(part)
+                    for part in _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION.split(
+                        ".", maxsplit=1
+                    )
+                )
+                else None
+            ),
+        )
         if state._current_step.response_accepted:
             state._clear_generated_items_last_processed_marker()
         for approval_item in state._current_step.interruptions:
@@ -5394,6 +5464,112 @@ def _deserialize_items_with_source_indexes(
         items.extend(deserialized)
         source_indexes.extend([source_index] * len(deserialized))
     return items, source_indexes
+
+
+def _restore_current_response_item_identities(
+    state: RunState[Any],
+    *,
+    serialized_generated_items: Any,
+    generated_source_indexes: Sequence[int],
+    last_processed_response_data: Any,
+    current_step_data: Mapping[str, Any],
+    current_response_generated_item_ownership: Any,
+) -> None:
+    """Relink one response from explicit generated-item ownership after deserialization."""
+    from .run_internal.run_steps import NextStepInterruption
+
+    processed_response = state._last_processed_response
+    if processed_response is None:
+        return
+    current_step = state._current_step
+    if not isinstance(current_step, NextStepInterruption):
+        return
+    if not isinstance(serialized_generated_items, list):
+        return
+    if not isinstance(last_processed_response_data, Mapping):
+        return
+
+    serialized_processed_items = last_processed_response_data.get("new_items")
+    if not isinstance(serialized_processed_items, list) or not serialized_processed_items:
+        return
+    if len(processed_response.new_items) != len(serialized_processed_items):
+        return
+    current_step_payload = current_step_data.get("data")
+    if not isinstance(current_step_payload, Mapping):
+        return
+    serialized_interruptions = current_step_payload.get("interruptions")
+    if not isinstance(serialized_interruptions, list) or not serialized_interruptions:
+        return
+    if len(current_step.interruptions) != len(serialized_interruptions):
+        return
+    ownership = current_response_generated_item_ownership
+    if not isinstance(ownership, Mapping):
+        return
+    source_start = ownership.get("start")
+    source_end = ownership.get("end")
+    interruption_indexes = ownership.get("interruptions")
+    if type(source_start) is not int or type(source_end) is not int:
+        return
+    if source_start < 0 or source_end != len(serialized_generated_items):
+        return
+    processed_end = source_start + len(serialized_processed_items)
+    # Handoff filters can clear prior items without resetting the model turn count.
+    if processed_end > source_end:
+        return
+    if not isinstance(interruption_indexes, list):
+        return
+    if len(interruption_indexes) != len(serialized_interruptions) or any(
+        type(index) is not int or index < processed_end or index >= source_end
+        for index in interruption_indexes
+    ):
+        return
+    if len(set(interruption_indexes)) != len(interruption_indexes):
+        return
+    source_indexes = [*range(source_start, processed_end), *interruption_indexes]
+    serialized_current_response_items = [*serialized_processed_items, *serialized_interruptions]
+    if any(
+        serialized_generated_items[source_index] != expected_item
+        for source_index, expected_item in zip(
+            source_indexes,
+            serialized_current_response_items,
+            strict=True,
+        )
+    ):
+        return
+
+    restored_indexes_by_source: dict[int, list[int]] = {}
+    for restored_index, source_index in enumerate(generated_source_indexes):
+        restored_indexes_by_source.setdefault(source_index, []).append(restored_index)
+
+    restored_current_response_items: list[RunItem] = []
+    for source_index in range(source_start, source_end):
+        restored_indexes = restored_indexes_by_source.get(source_index)
+        if restored_indexes is None or len(restored_indexes) != 1:
+            return
+        restored_current_response_items.append(state._generated_items[restored_indexes[0]])
+
+    processed_item_count = len(serialized_processed_items)
+    restored_processed_items = restored_current_response_items[:processed_item_count]
+    restored_interruptions = [
+        restored_current_response_items[index - source_start] for index in interruption_indexes
+    ]
+    if not all(isinstance(item, ToolApprovalItem) for item in restored_interruptions):
+        return
+
+    # The complete current response must be the same terminal suffix in both histories.
+    session_start = len(state._session_items) - len(restored_current_response_items)
+    if session_start < 0 or any(
+        generated_item is not session_item
+        for generated_item, session_item in zip(
+            restored_current_response_items,
+            state._session_items[session_start:],
+            strict=True,
+        )
+    ):
+        return
+
+    processed_response.new_items = restored_processed_items
+    current_step.interruptions = cast(list[ToolApprovalItem], restored_interruptions)
 
 
 def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:

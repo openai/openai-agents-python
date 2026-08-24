@@ -2572,16 +2572,363 @@ async def test_resumed_approved_tool_final_persists_complete_post_verdict_batch(
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("attach_session", [False, True], ids=["without-session", "with-session"])
+@pytest.mark.parametrize("mixed_tool_position", [None, "before", "after"])
 @pytest.mark.asyncio
-async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
+async def test_serialized_later_turn_approval_with_output_guardrail_resumes(
     mode: str,
+    attach_session: bool,
+    mixed_tool_position: str | None,
 ) -> None:
-    tool_calls = 0
+    tool_calls = {"normal": 0, "approval": 0}
+
+    @function_tool(name_override="normal_tool")
+    def normal_tool() -> str:
+        tool_calls["normal"] += 1
+        return "normal-result"
 
     @function_tool(name_override="approval_tool", needs_approval=True)
     def approval_tool() -> str:
+        tool_calls["approval"] += 1
+        return "approved-result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    approval_response = [get_function_tool_call("approval_tool", "{}", call_id="call-approved")]
+    if mixed_tool_position is not None:
+        extra_call = get_function_tool_call("normal_tool", "{}", call_id="call-extra")
+        approval_response.insert(0 if mixed_tool_position == "before" else 1, extra_call)
+    expected_normal_calls = 1 if mixed_tool_position is None else 2
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("normal_tool", "{}", call_id="call-normal")],
+            approval_response,
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[normal_tool, approval_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+    session = SimpleListSession() if attach_session else None
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    first = await run_once("Use normal_tool, then approval_tool")
+    state = first.to_state()
+    assert state._current_turn == 2
+    assert [item.tool_name for item in first.interruptions] == ["approval_tool"]
+    assert tool_calls == {"normal": expected_normal_calls, "approval": 0}
+
+    serialized = state.to_json()
+    assert serialized["current_response_generated_item_ownership"] == {
+        "start": 2,
+        "end": 4 if mixed_tool_position is None else 6,
+        "interruptions": [
+            3 if mixed_tool_position is None else (5 if mixed_tool_position == "before" else 4)
+        ],
+    }
+
+    released_payload = json.loads(json.dumps(serialized))
+    released_payload["$schemaVersion"] = "1.16"
+    released = await RunState.from_string(agent, json.dumps(released_payload))
+    released.approve(released.get_interruptions()[0])
+    with pytest.raises(UserError, match="current response boundary cannot be proven"):
+        await run_once(released)
+    assert tool_calls == {"normal": expected_normal_calls, "approval": 0}
+
+    malformed_payload = json.loads(json.dumps(serialized))
+    malformed_payload["current_response_generated_item_ownership"]["interruptions"][0] = True
+    malformed = await RunState.from_string(agent, json.dumps(malformed_payload))
+    malformed.approve(malformed.get_interruptions()[0])
+    with pytest.raises(UserError, match="current response boundary cannot be proven"):
+        await run_once(malformed)
+    assert tool_calls == {"normal": expected_normal_calls, "approval": 0}
+
+    restored_once = await RunState.from_string(agent, json.dumps(serialized))
+    reserialized = restored_once.to_json()
+    assert (
+        reserialized["current_response_generated_item_ownership"]
+        == serialized["current_response_generated_item_ownership"]
+    )
+
+    restored = await RunState.from_string(agent, json.dumps(reserialized))
+    assert restored._last_processed_response is not None
+    assert any(
+        restored._last_processed_response.new_items[0] is item for item in restored._generated_items
+    )
+    restored.approve(restored.get_interruptions()[0])
+
+    resumed = await run_once(restored)
+
+    assert resumed.final_output == "done"
+    assert tool_calls == {"normal": expected_normal_calls, "approval": 1}
+    if session is not None:
+        saved_items = await session.get_items()
+        saved_tool_items = [
+            item
+            for item in saved_items
+            if isinstance(item, dict)
+            and item.get("type") in {"function_call", "function_call_output"}
+        ]
+        expected_tool_items = [
+            ("function_call", "call-normal"),
+            ("function_call_output", "call-normal"),
+            ("function_call", "call-approved"),
+            ("function_call_output", "call-approved"),
+        ]
+        if mixed_tool_position is not None:
+            expected_tool_items.insert(
+                2 if mixed_tool_position == "before" else 3, ("function_call", "call-extra")
+            )
+            expected_tool_items.insert(4, ("function_call_output", "call-extra"))
+        assert [(item.get("type"), item.get("call_id")) for item in saved_tool_items] == (
+            expected_tool_items
+        )
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "session_ownership",
+    [
+        "valid",
+        "missing-prefix",
+        "missing",
+        "invalid",
+        "missing-current",
+        "prefix-anchor",
+        "nonterminal-session",
+    ],
+)
+@pytest.mark.asyncio
+async def test_serialized_mixed_approval_guardrail_preserves_only_accepted_outputs(
+    mode: str,
+    session_ownership: str,
+) -> None:
+    tool_calls = {"normal": 0, "approval": 0}
+
+    @function_tool
+    def normal_tool() -> str:
+        tool_calls["normal"] += 1
+        return "accepted-result" if tool_calls["normal"] == 1 else "sibling-secret"
+
+    @function_tool(needs_approval=True)
+    def approval_tool() -> str:
+        tool_calls["approval"] += 1
+        return "approved-secret"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("normal_tool", "{}", call_id="call-normal")],
+            [
+                get_function_tool_call("normal_tool", "{}", call_id="call-extra"),
+                get_function_tool_call("approval_tool", "{}", call_id="call-approved"),
+            ],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[normal_tool, approval_tool],
+        tool_use_behavior={"stop_at_tool_names": ["approval_tool"]},
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda *_: GuardrailFunctionOutput(
+                    output_info=None, tripwire_triggered=True
+                )
+            )
+        ],
+    )
+    session = SimpleListSession()
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(agent, input_value, session=session)
+        result = Runner.run_streamed(agent, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    first = await run_once("Use the tools")
+    payload = first.to_state().to_json()
+    if session_ownership == "missing":
+        payload.pop("generated_session_item_indexes")
+    elif session_ownership == "missing-prefix":
+        payload["generated_session_item_indexes"][0] = None
+    elif session_ownership == "invalid":
+        payload["generated_session_item_indexes"][0] = True
+    elif session_ownership == "missing-current":
+        current_start = payload["current_response_generated_item_ownership"]["start"]
+        payload["generated_session_item_indexes"][current_start] = None
+    elif session_ownership == "prefix-anchor":
+        earlier_copies = json.loads(json.dumps(payload["last_processed_response"]["new_items"]))
+        payload["session_items"][:0] = earlier_copies
+        payload["generated_session_item_indexes"] = [
+            index + len(earlier_copies) if index is not None else None
+            for index in payload["generated_session_item_indexes"]
+        ]
+        current_start = payload["current_response_generated_item_ownership"]["start"]
+        for offset in range(len(earlier_copies)):
+            payload["generated_session_item_indexes"][current_start + offset] = offset
+    elif session_ownership == "nonterminal-session":
+        payload["session_items"].append(json.loads(json.dumps(payload["session_items"][0])))
+    restored = await RunState.from_string(agent, json.dumps(payload))
+    restored = await RunState.from_string(agent, restored.to_string())
+    restored.approve(restored.get_interruptions()[0])
+    if session_ownership not in {"valid", "missing-prefix"}:
+        saved_before = json.loads(json.dumps(await session.get_items()))
+        state_session_before = restored.to_json()["session_items"]
+        with pytest.raises(UserError, match="current response boundary cannot be proven"):
+            await run_once(restored)
+        assert tool_calls == {"normal": 2, "approval": 0}
+        assert await session.get_items() == saved_before
+        assert restored.to_json()["session_items"] == state_session_before
+        assert "accepted-result" in json.dumps(state_session_before)
+        return
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await run_once(restored)
+
+    assert tool_calls == {"normal": 2, "approval": 1}
+    outputs = [
+        (item["call_id"], item["output"])
+        for item in await session.get_items()
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+    assert outputs == [
+        ("call-normal", "accepted-result"),
+        ("call-extra", run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT),
+        ("call-approved", run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT),
+    ]
+    serialized = restored.to_string()
+    assert "accepted-result" in serialized
+    assert "sibling-secret" not in serialized
+    assert "approved-secret" not in serialized
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("attach_session", [False, True], ids=["without-session", "with-session"])
+@pytest.mark.parametrize("tripwire", [False, True], ids=["accepted", "blocked"])
+@pytest.mark.asyncio
+async def test_serialized_filtered_handoff_approval_with_empty_prefix_resumes(
+    mode: str,
+    attach_session: bool,
+    tripwire: bool,
+) -> None:
+    tool_calls = 0
+
+    @function_tool(needs_approval=True)
+    def approval_tool() -> str:
         nonlocal tool_calls
         tool_calls += 1
+        return "approved-secret"
+
+    def clear_generated_history(data: HandoffInputData) -> HandoffInputData:
+        return HandoffInputData(
+            input_history=data.input_history,
+            pre_handoff_items=(),
+            new_items=(),
+            run_context=data.run_context,
+        )
+
+    target = Agent(
+        name="target",
+        model=ScriptedModel(
+            [[get_function_tool_call("approval_tool", "{}", call_id="call-approved")]]
+        ),
+        tools=[approval_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[
+            OutputGuardrail(
+                guardrail_function=lambda *_: GuardrailFunctionOutput(
+                    output_info=None, tripwire_triggered=tripwire
+                )
+            )
+        ],
+    )
+    starting = Agent(
+        name="starting",
+        model=ScriptedModel([[get_handoff_tool_call(target)]]),
+        handoffs=[handoff(target, input_filter=clear_generated_history)],
+    )
+    session = SimpleListSession() if attach_session else None
+
+    async def run_once(input_value: Any) -> Any:
+        if mode == "non_streamed":
+            return await Runner.run(starting, input_value, session=session)
+        result = Runner.run_streamed(starting, input_value, session=session)
+        await consume_stream(result)
+        return result
+
+    first = await run_once("Transfer and run approval_tool")
+    state = first.to_state()
+    assert state._current_turn == 2
+    assert tool_calls == 0
+    ownership = {"start": 0, "end": 2, "interruptions": [1]}
+    assert state.to_json()["current_response_generated_item_ownership"] == ownership
+    restored = await RunState.from_string(starting, state.to_string())
+    assert restored.to_json()["current_response_generated_item_ownership"] == ownership
+    restored = await RunState.from_string(starting, restored.to_string())
+    restored.approve(restored.get_interruptions()[0])
+
+    if tripwire:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await run_once(restored)
+        assert "approved-secret" not in restored.to_string()
+    else:
+        resumed = await run_once(restored)
+        assert resumed.final_output == "approved-secret"
+    assert tool_calls == 1
+    if session is not None:
+        saved_outputs = [
+            item
+            for item in await session.get_items()
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ]
+        assert [(item["call_id"], item["output"]) for item in saved_outputs] == [
+            (
+                "call-approved",
+                run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT if tripwire else "approved-secret",
+            )
+        ]
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing-prefix",
+        "nonterminal-indexes",
+        "invalid-interruption-index",
+        "processed-mismatch",
+        "interruption-mismatch",
+    ],
+)
+@pytest.mark.asyncio
+async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
+    mode: str,
+    corruption: str,
+) -> None:
+    tool_calls = {"normal": 0, "approval": 0}
+
+    @function_tool(name_override="normal_tool")
+    def normal_tool() -> str:
+        tool_calls["normal"] += 1
+        return "normal-result"
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        tool_calls["approval"] += 1
         return "secret-result"
 
     def output_guardrail(
@@ -2592,19 +2939,43 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
 
     model = ScriptedModel(
-        [[get_function_tool_call("approval_tool", "{}", call_id="call-approved")]]
+        [
+            [get_function_tool_call("normal_tool", "{}", call_id="call-normal")],
+            [
+                get_function_tool_call("normal_tool", "{}", call_id="call-extra"),
+                get_function_tool_call("approval_tool", "{}", call_id="call-approved"),
+            ],
+        ]
     )
     agent = Agent(
         name="test",
         model=model,
-        tools=[approval_tool],
+        tools=[normal_tool, approval_tool],
         output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
     )
-    first = await Runner.run(agent, "Use approval_tool")
+    first = await Runner.run(agent, "Use normal_tool, then approval_tool")
     state = first.to_state()
-    state._current_turn = 2
-    state._current_turn_persisted_item_count = 1
-    restored = await RunState.from_json(agent, state.to_json())
+    assert state._current_turn == 2
+    assert tool_calls == {"normal": 2, "approval": 0}
+    serialized = state.to_json()
+    ownership = serialized["current_response_generated_item_ownership"]
+    assert ownership == {"start": 2, "end": 6, "interruptions": [5]}
+
+    if corruption == "missing-prefix":
+        serialized["generated_items"] = serialized["generated_items"][2:]
+    elif corruption == "nonterminal-indexes":
+        trailing_item = json.loads(json.dumps(serialized["generated_items"][0]))
+        trailing_item["raw_item"]["call_id"] = "call-trailing"
+        serialized["generated_items"].append(trailing_item)
+    elif corruption == "invalid-interruption-index":
+        ownership["interruptions"] = [3]
+    elif corruption == "processed-mismatch":
+        serialized["generated_items"][ownership["start"]]["raw_item"]["call_id"] = "call-mismatch"
+    elif corruption == "interruption-mismatch":
+        serialized["generated_items"][ownership["interruptions"][0]]["raw_item"]["call_id"] = (
+            "call-mismatch"
+        )
+    restored = await RunState.from_json(agent, serialized)
     restored.approve(restored.get_interruptions()[0])
 
     with pytest.raises(UserError, match="current response boundary cannot be proven"):
@@ -2614,7 +2985,7 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
             result = Runner.run_streamed(agent, restored, session=None)
             await consume_stream(result)
 
-    assert tool_calls == 0
+    assert tool_calls == {"normal": 2, "approval": 0}
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
