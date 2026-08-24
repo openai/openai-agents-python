@@ -838,6 +838,80 @@ Disabled tools are completely hidden from the LLM at runtime, making this useful
 -   A/B testing different tool configurations
 -   Dynamic tool filtering based on runtime state
 
+
+#### Use one capability policy across tools, MCP, and handoffs
+
+When function tools, local MCP tools, and handoffs depend on the same request state, keep the decision in one application policy and adapt that policy to each SDK hook. This avoids maintaining separate visibility rules that can drift apart.
+
+```python
+from dataclasses import dataclass
+
+from agents import Agent, RunContextWrapper, handoff
+from agents.decorators import tool
+from agents.mcp import MCPServerStreamableHttp, ToolFilterContext
+
+
+@dataclass
+class AppContext:
+    role: str
+    workflow_stage: str
+
+
+def capability_enabled(context: AppContext, capability: str) -> bool:
+    if capability == "refund_order":
+        return context.role == "billing" and context.workflow_stage == "review"
+    if capability == "lookup_invoice":
+        return context.role in {"support", "billing"}
+    if capability == "billing_handoff":
+        return context.role == "support"
+    return False
+
+
+def refund_enabled(ctx: RunContextWrapper[AppContext], _agent) -> bool:
+    return capability_enabled(ctx.context, "refund_order")
+
+
+@tool(is_enabled=refund_enabled)
+def refund_order(order_id: str) -> str:
+    """Request a refund for an order."""
+    return f"refund requested for {order_id}"
+
+
+def mcp_tool_enabled(ctx: ToolFilterContext, mcp_tool) -> bool:
+    return capability_enabled(ctx.run_context.context, mcp_tool.name)
+
+
+billing_mcp = MCPServerStreamableHttp(
+    name="billing",
+    params={"url": "https://mcp.example.com/mcp"},
+    tool_filter=mcp_tool_enabled,
+)
+
+billing_agent = Agent(name="Billing specialist", instructions="Handle billing questions.")
+
+
+def billing_handoff_enabled(ctx: RunContextWrapper[AppContext], _agent) -> bool:
+    return capability_enabled(ctx.context, "billing_handoff")
+
+
+triage_agent = Agent(
+    name="Triage",
+    tools=[refund_order],
+    mcp_servers=[billing_mcp],
+    handoffs=[handoff(billing_agent, is_enabled=billing_handoff_enabled)],
+)
+```
+
+The three adapters above answer the same question at different SDK boundaries:
+
+-   `FunctionTool.is_enabled` controls whether a function tool is visible to the model.
+-   MCP `tool_filter` controls whether a local MCP tool is included in the model-visible MCP tool set.
+-   `Handoff.is_enabled` controls whether a handoff is visible to the model.
+
+These visibility checks are not an authorization boundary. Application code inside a function tool should still authorize the requested resource or action before performing a side effect. An MCP server should enforce its own authorization when it executes the protected operation. After a handoff, the destination agent resolves its own enabled tools and handoffs from the current run context.
+
+For debugging, agent tracing records the effective tool and handoff names on `AgentSpanData.tools` and `AgentSpanData.handoffs`. Because one agent span can cover multiple turns, these fields contain the most recently resolved set for that span; they do not preserve a separate set for every turn.
+
 ## Experimental: Codex tool
 
 The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools) during a tool call. This surface is experimental and may change.
