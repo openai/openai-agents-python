@@ -22,6 +22,7 @@ from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .._tool_identity import (
+    get_function_tool_trace_name,
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
 )
@@ -333,19 +334,31 @@ def _record_effective_model_capabilities(
     handoffs: list[Handoff],
 ) -> None:
     """Record the resolved model-visible capability set for the agent and current turn."""
-    handoff_names = [handoff.agent_name for handoff in handoffs]
-    tool_names = [
-        tool_name for tool in tools if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+    agent_handoff_names = [handoff.agent_name for handoff in handoffs]
+    turn_handoff_names = [handoff.tool_name for handoff in handoffs]
+    agent_tool_names = [
+        tool_name
+        for tool in tools
+        if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+    ]
+    turn_tool_names = [
+        trace_name
+        for tool in tools
+        if (
+            trace_name := get_function_tool_trace_name(tool)
+            or get_tool_trace_name_for_tool(tool)
+        )
+        is not None
     ]
 
     if agent_span is not None:
-        agent_span.span_data.handoffs = handoff_names
-        agent_span.span_data.tools = tool_names
+        agent_span.span_data.handoffs = agent_handoff_names
+        agent_span.span_data.tools = agent_tool_names
 
     current_span = get_current_span()
     if current_span is not None and isinstance(current_span.span_data, TurnSpanData):
-        current_span.span_data.handoffs = list(handoff_names)
-        current_span.span_data.tools = list(tool_names)
+        current_span.span_data.handoffs = turn_handoff_names
+        current_span.span_data.tools = turn_tool_names
 
 
 async def _should_persist_stream_items(
@@ -1192,7 +1205,7 @@ async def start_streaming(
                 response_id=response_id,
                 reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
                 store=store_setting,
-                wrapper=streamed_result.context_wrapper,
+                wrapper=context_wrapper,
             )
             streamed_result._current_turn_persisted_item_count += saved_count
     except BaseException:

@@ -185,8 +185,8 @@ async def test_turn_span_snapshots_effective_capabilities_per_model_turn(
         ["send_invoice"],
     ]
     assert [span.span_data.handoffs for span in turn_spans] == [
-        ["Draft Review"],
-        ["Send Review"],
+        ["transfer_to_draft_review"],
+        ["transfer_to_send_review"],
     ]
 
     agent_spans = [span for span in spans if span.span_data.type == "agent"]
