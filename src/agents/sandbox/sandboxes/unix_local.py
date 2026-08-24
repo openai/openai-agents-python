@@ -122,24 +122,27 @@ class UnixLocalSandboxSessionState(SandboxSessionState):
 
 
 class UnixLocalSandboxClientOptions(BaseSandboxClientOptions):
+    """Per-call options for Unix-local sessions.
+
+    ``inherit_environment`` and ``allow_unconfined_linux`` are deliberately
+    NOT options: per-call options do not flow through the ``resume()`` path,
+    so accepting them here would let a session be created but fail to resume
+    under the same run config. Both are constructor arguments on
+    ``UnixLocalSandboxClient`` — the single trusted channel that applies to
+    ``create()`` and ``resume()`` alike.
+    """
+
     type: Literal["unix_local"] = "unix_local"
     exposed_ports: tuple[int, ...] = ()
-    inherit_environment: bool = False
-    allow_unconfined_linux: bool = False
-
     def __init__(
         self,
         exposed_ports: tuple[int, ...] = (),
         *,
         type: Literal["unix_local"] = "unix_local",
-        inherit_environment: bool = False,
-        allow_unconfined_linux: bool = False,
     ) -> None:
         super().__init__(
             type=type,
             exposed_ports=exposed_ports,
-            inherit_environment=inherit_environment,
-            allow_unconfined_linux=allow_unconfined_linux,
         )
 
 
@@ -1165,15 +1168,15 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
         manifest = manifest if manifest is not None else Manifest()
-        allow_unconfined_linux = self._allow_unconfined_linux or resolved_options.allow_unconfined_linux
+        allow_unconfined_linux = self._allow_unconfined_linux
         if sys.platform != "darwin" and not allow_unconfined_linux:
             raise ConfigurationError(
                 message=(
                     "UnixLocalSandboxClient provides OS-level confinement (sandbox-exec) on "
                     "macOS only; on Linux it executes commands directly on the host with no "
                     "namespace, seccomp or container isolation. Use DockerSandboxClient on "
-                    "Linux, or pass allow_unconfined_linux=True to explicitly accept "
-                    "unconfined host execution."
+                    "Linux, or construct the client with allow_unconfined_linux=True "
+                    "to explicitly accept unconfined host execution."
                 ),
                 error_code=ErrorCode.UNCONFINED_LINUX_NOT_ALLOWED,
                 op="create",
@@ -1204,7 +1207,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             snapshot=snapshot_instance,
             workspace_root_owned=workspace_root_owned,
             exposed_ports=resolved_options.exposed_ports,
-            inherit_environment=self._inherit_environment or resolved_options.inherit_environment,
+            inherit_environment=self._inherit_environment,
         )
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)

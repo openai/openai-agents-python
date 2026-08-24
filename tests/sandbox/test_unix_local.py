@@ -386,7 +386,7 @@ async def test_linux_requires_explicit_unconfined_opt_in(
     import sys as _sys
 
     from agents.sandbox.errors import ConfigurationError
-    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxClientOptions
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
     monkeypatch.setattr(_sys, "platform", "linux")
     client = UnixLocalSandboxClient()
@@ -394,11 +394,12 @@ async def test_linux_requires_explicit_unconfined_opt_in(
     with pytest.raises(ConfigurationError, match="allow_unconfined_linux"):
         await client.create(manifest=Manifest(root=str(tmp_path / "ws")))
 
-    session = await client.create(
-        manifest=Manifest(root=str(tmp_path / "ws2")),
-        options=UnixLocalSandboxClientOptions(allow_unconfined_linux=True),
-    )
+    opted_in = UnixLocalSandboxClient(allow_unconfined_linux=True)
+    session = await opted_in.create(manifest=Manifest(root=str(tmp_path / "ws2")))
     await session.stop()
+    # the opt-in must also unlock resume with the SAME client configuration
+    resumed = await opted_in.resume(session.state)
+    await resumed.stop()
 
 
 @pytest.mark.asyncio
