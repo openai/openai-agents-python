@@ -8,6 +8,7 @@ from inline_snapshot import snapshot
 from openai.types.responses.response_usage import InputTokensDetails
 
 from agents import Agent, RunConfig, Runner, RunState, custom_span, function_tool, trace
+from agents.handoffs import handoff
 from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.usage import Usage
@@ -130,6 +131,70 @@ async def test_agent_span_uses_resolved_tool_name_collision_view(
     assert agent_spans[0].span_data.handoffs == expected_handoffs
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_turn_span_snapshots_effective_capabilities_per_model_turn(
+    streamed: bool,
+) -> None:
+    phase = {"value": "draft"}
+
+    def draft_enabled(_ctx: object, _agent: object) -> bool:
+        return phase["value"] == "draft"
+
+    def send_enabled(_ctx: object, _agent: object) -> bool:
+        return phase["value"] == "send"
+
+    @function_tool(name_override="draft_invoice", is_enabled=draft_enabled)
+    def draft_invoice() -> str:
+        phase["value"] = "send"
+        return "drafted"
+
+    @function_tool(name_override="send_invoice", is_enabled=send_enabled)
+    def send_invoice() -> str:
+        return "sent"
+
+    model = ScriptedModel(emit_traces=True)
+    model.extend(
+        [
+            [get_function_tool_call("draft_invoice", "{}", call_id="call-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test_agent",
+        model=model,
+        tools=[draft_invoice, send_invoice],
+        handoffs=[
+            handoff(Agent(name="Draft Review"), is_enabled=draft_enabled),
+            handoff(Agent(name="Send Review"), is_enabled=send_enabled),
+        ],
+    )
+
+    if streamed:
+        result = Runner.run_streamed(agent, input="test")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, input="test")
+
+    spans = fetch_ordered_spans()
+    turn_spans = [span for span in spans if span.span_data.type == "turn"]
+    assert len(turn_spans) == 2
+    assert [span.span_data.tools for span in turn_spans] == [
+        ["draft_invoice"],
+        ["send_invoice"],
+    ]
+    assert [span.span_data.handoffs for span in turn_spans] == [
+        ["Draft Review"],
+        ["Send Review"],
+    ]
+
+    agent_spans = [span for span in spans if span.span_data.type == "agent"]
+    assert len(agent_spans) == 1
+    assert agent_spans[0].span_data.tools == ["send_invoice"]
+    assert agent_spans[0].span_data.handoffs == ["Send Review"]
+
+
 @pytest.mark.asyncio
 async def test_task_and_turn_spans_export_aggregate_usage():
     @function_tool
@@ -205,6 +270,8 @@ async def test_task_and_turn_spans_export_aggregate_usage():
                 "sdk_span_type": "turn",
                 "turn": 1,
                 "agent_name": "test_agent",
+                "tools": ["foo_tool"],
+                "handoffs": [],
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 3,
@@ -220,6 +287,8 @@ async def test_task_and_turn_spans_export_aggregate_usage():
                 "sdk_span_type": "turn",
                 "turn": 2,
                 "agent_name": "test_agent",
+                "tools": ["foo_tool"],
+                "handoffs": [],
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 3,

@@ -85,10 +85,18 @@ from ..tool import (
     dispose_resolved_computers,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from ..tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
+from ..tracing import (
+    Span,
+    SpanError,
+    agent_span,
+    get_current_span,
+    get_current_trace,
+    task_span,
+    turn_span,
+)
 from ..tracing.config import include_task_and_turn_spans
 from ..tracing.model_tracing import get_model_tracing_impl
-from ..tracing.span_data import AgentSpanData, TaskSpanData
+from ..tracing.span_data import AgentSpanData, TaskSpanData, TurnSpanData
 from ..usage import (
     Usage,
     _extract_raw_usage_snapshot,
@@ -317,6 +325,27 @@ async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> Non
 
 def _agent_diagnostic_extra(agent: Agent[Any]) -> dict[str, object]:
     return {"agent_name": agent.name}
+
+
+def _record_effective_model_capabilities(
+    agent_span: Span[AgentSpanData] | None,
+    tools: list[Tool],
+    handoffs: list[Handoff],
+) -> None:
+    """Record the resolved model-visible capability set for the agent and current turn."""
+    handoff_names = [handoff.agent_name for handoff in handoffs]
+    tool_names = [
+        tool_name for tool in tools if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+    ]
+
+    if agent_span is not None:
+        agent_span.span_data.handoffs = handoff_names
+        agent_span.span_data.tools = tool_names
+
+    current_span = get_current_span()
+    if current_span is not None and isinstance(current_span.span_data, TurnSpanData):
+        current_span.span_data.handoffs = list(handoff_names)
+        current_span.span_data.tools = list(tool_names)
 
 
 async def _should_persist_stream_items(
@@ -2105,13 +2134,11 @@ async def run_single_turn_streamed(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
-    if agent_span is not None:
-        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
-        agent_span.span_data.tools = [
-            tool_name
-            for tool in all_tools
-            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
-        ]
+    _record_effective_model_capabilities(
+        agent_span=agent_span,
+        tools=all_tools,
+        handoffs=handoffs,
+    )
 
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
@@ -2432,13 +2459,11 @@ async def run_single_turn(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
-    if agent_span is not None:
-        agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
-        agent_span.span_data.tools = [
-            tool_name
-            for tool in all_tools
-            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
-        ]
+    _record_effective_model_capabilities(
+        agent_span=agent_span,
+        tools=all_tools,
+        handoffs=handoffs,
+    )
 
     output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:

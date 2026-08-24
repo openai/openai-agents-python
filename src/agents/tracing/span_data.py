@@ -98,7 +98,7 @@ class TaskSpanData(SpanData):
 class TurnSpanData(SpanData):
     """Represents one agent loop turn."""
 
-    __slots__ = ("turn", "agent_name", "usage", "metadata")
+    __slots__ = ("turn", "agent_name", "usage", "metadata", "tools", "handoffs")
 
     def __init__(
         self,
@@ -106,11 +106,15 @@ class TurnSpanData(SpanData):
         agent_name: str,
         usage: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        tools: list[str] | None = None,
+        handoffs: list[str] | None = None,
     ):
         self.turn = turn
         self.agent_name = agent_name
         self.usage = usage
         self.metadata = metadata
+        self.tools = tools
+        self.handoffs = handoffs
 
     @property
     def type(self) -> str:
@@ -122,6 +126,10 @@ class TurnSpanData(SpanData):
             "turn": self.turn,
             "agent_name": self.agent_name,
         }
+        if self.tools is not None:
+            data["tools"] = self.tools
+        if self.handoffs is not None:
+            data["handoffs"] = self.handoffs
         if self.usage is not None:
             data["usage"] = self.usage
 
