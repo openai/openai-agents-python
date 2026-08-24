@@ -66,16 +66,24 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
     custom configs), subclass `VoiceWorkflowBase` and implement your own logic.
     """
 
-    def __init__(self, agent: Agent[Any], callbacks: SingleAgentWorkflowCallbacks | None = None):
+    def __init__(
+        self,
+        agent: Agent[Any],
+        callbacks: SingleAgentWorkflowCallbacks | None = None,
+        *,
+        context: Any = None,
+    ):
         """Create a new single agent voice workflow.
 
         Args:
             agent: The agent to run.
             callbacks: Optional callbacks to call during the workflow.
+            context: Optional application context forwarded to every agent run.
         """
         self._input_history: list[TResponseInputItem] = []
         self._current_agent = agent
         self._callbacks = callbacks
+        self._context = context
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
         if self._callbacks is not None:
@@ -90,7 +98,11 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
         )
 
         # Run the agent
-        result = Runner.run_streamed(self._current_agent, self._input_history)
+        result = Runner.run_streamed(
+            self._current_agent,
+            self._input_history,
+            context=self._context,
+        )
 
         # Stream the text from the result
         async for chunk in VoiceWorkflowHelper.stream_text_from(result):

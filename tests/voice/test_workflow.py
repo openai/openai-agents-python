@@ -5,7 +5,8 @@ import json
 import pytest
 from inline_snapshot import snapshot
 
-from agents import Agent
+from agents import Agent, RunContextWrapper
+from agents.decorators import tool
 from agents.testing import ScriptedModel
 
 from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
@@ -136,3 +137,35 @@ async def test_single_agent_workflow(monkeypatch) -> None:
         ]
     )
     assert workflow._current_agent == agent
+
+
+@pytest.mark.asyncio
+async def test_single_agent_workflow_forwards_context_on_every_turn() -> None:
+    @tool
+    def read_user_id(ctx: RunContextWrapper[dict[str, str]]) -> str:
+        """Return the current user ID."""
+        return ctx.context["user_id"]
+
+    model = ScriptedModel()
+    model.extend(
+        [
+            [get_function_tool_call("read_user_id", "{}", call_id="context_call_1")],
+            [get_text_message("first turn done")],
+            [get_function_tool_call("read_user_id", "{}", call_id="context_call_2")],
+            [get_text_message("second turn done")],
+        ]
+    )
+    agent = Agent("context_agent", model=model, tools=[read_user_id])
+    workflow = SingleAgentVoiceWorkflow(agent, context={"user_id": "user-123"})
+
+    first_output = [chunk async for chunk in workflow.run("first transcription")]
+    second_output = [chunk async for chunk in workflow.run("second transcription")]
+
+    assert first_output == ["first turn done"]
+    assert second_output == ["second turn done"]
+    tool_outputs = [
+        item["output"]
+        for item in workflow._input_history
+        if item.get("type") == "function_call_output"
+    ]
+    assert tool_outputs == ["user-123", "user-123"]
