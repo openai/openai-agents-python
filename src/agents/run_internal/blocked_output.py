@@ -475,11 +475,15 @@ def _current_response_boundary(
                     proven = True
 
     current_items: list[RunItem] = []
-    seen: set[int] = set()
+    seen_ids: set[int] = set()
+    seen_keys: set[tuple[str | None, str | None, str | None]] = set()
     for item in (*processed_items, *suffixes, *response_items):
-        if id(item) in seen:
+        key = _structural_item_key(item)
+        if id(item) in seen_ids or (key != (None, None, None) and key in seen_keys):
             continue
-        seen.add(id(item))
+        seen_ids.add(id(item))
+        if key != (None, None, None):
+            seen_keys.add(key)
         current_items.append(item)
     return _CurrentResponseBoundary(
         items=tuple(current_items),
