@@ -337,17 +337,12 @@ def _record_effective_model_capabilities(
     agent_handoff_names = [handoff.agent_name for handoff in handoffs]
     turn_handoff_names = [handoff.tool_name for handoff in handoffs]
     agent_tool_names = [
-        tool_name
-        for tool in tools
-        if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        tool_name for tool in tools if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
     ]
     turn_tool_names = [
         trace_name
         for tool in tools
-        if (
-            trace_name := get_function_tool_trace_name(tool)
-            or get_tool_trace_name_for_tool(tool)
-        )
+        if (trace_name := get_function_tool_trace_name(tool) or get_tool_trace_name_for_tool(tool))
         is not None
     ]
 
@@ -1205,7 +1200,7 @@ async def start_streaming(
                 response_id=response_id,
                 reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
                 store=store_setting,
-                wrapper=context_wrapper,
+                wrapper=streamed_result.context_wrapper,
             )
             streamed_result._current_turn_persisted_item_count += saved_count
     except BaseException:
