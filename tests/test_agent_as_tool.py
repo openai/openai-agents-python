@@ -31,6 +31,9 @@ from agents import (
     SessionSettings,
     ToolApprovalItem,
     ToolCallOutputItem,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolOutputGuardrail,
     TResponseInputItem,
     Usage,
     UserError,
@@ -217,6 +220,68 @@ async def test_agent_as_tool_derived_names_are_disambiguated_by_namespace():
         "sales.refund",
         "support.refund",
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_input_guardrail_can_block_nested_run():
+    nested_model = ScriptedModel([[get_text_message("nested result")]])
+    nested_agent = Agent(name="delegate", model=nested_model)
+    input_guardrail = ToolInputGuardrail(
+        guardrail_function=lambda _: ToolGuardrailFunctionOutput.reject_content(
+            "delegation blocked"
+        )
+    )
+    delegate_tool = nested_agent.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate work",
+        tool_input_guardrails=[input_guardrail],
+    )
+    outer_model = ScriptedModel(
+        [
+            [get_function_tool_call("delegate", json.dumps({"input": "do work"}))],
+            [get_text_message("done")],
+        ]
+    )
+    outer_agent = Agent(name="outer", model=outer_model, tools=[delegate_tool])
+
+    result = await Runner.run(outer_agent, "start")
+
+    assert result.final_output == "done"
+    assert nested_model.calls == ()
+    assert len(result.tool_input_guardrail_results) == 1
+    outputs = [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)]
+    assert outputs == ["delegation blocked"]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_output_guardrail_can_replace_nested_result():
+    nested_model = ScriptedModel([[get_text_message("sensitive nested result")]])
+    nested_agent = Agent(name="delegate", model=nested_model)
+    output_guardrail = ToolOutputGuardrail(
+        guardrail_function=lambda _: ToolGuardrailFunctionOutput.reject_content(
+            "delegation output withheld"
+        )
+    )
+    delegate_tool = nested_agent.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate work",
+        tool_output_guardrails=[output_guardrail],
+    )
+    outer_model = ScriptedModel(
+        [
+            [get_function_tool_call("delegate", json.dumps({"input": "do work"}))],
+            [get_text_message("done")],
+        ]
+    )
+    outer_agent = Agent(name="outer", model=outer_model, tools=[delegate_tool])
+
+    result = await Runner.run(outer_agent, "start")
+
+    assert result.final_output == "done"
+    assert len(nested_model.calls) == 1
+    assert len(result.tool_output_guardrail_results) == 1
+    outputs = [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)]
+    assert outputs == ["delegation output withheld"]
 
 
 @pytest.mark.asyncio

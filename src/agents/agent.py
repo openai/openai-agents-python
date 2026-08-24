@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from .run import RunConfig
     from .run_state import RunState
     from .stream_events import StreamEvent
+    from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 
 
 @dataclass
@@ -602,6 +603,8 @@ class Agent(AgentBase, Generic[TContext]):
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ) -> FunctionTool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -631,6 +634,8 @@ class Agent(AgentBase, Generic[TContext]):
             parameters: Structured input type for the tool arguments (dataclass or Pydantic model).
             input_builder: Optional function to build the nested agent input from structured data.
             include_input_schema: Whether to include the full JSON schema in structured input.
+            tool_input_guardrails: Optional guardrails to run before this agent tool executes.
+            tool_output_guardrails: Optional guardrails to run after this agent tool returns.
         """
 
         if run_config is not None:
@@ -1025,6 +1030,8 @@ class Agent(AgentBase, Generic[TContext]):
             failure_error_function=failure_error_function,
             strict_json_schema=True,
             is_enabled=is_enabled,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
             needs_approval=needs_approval,
             tool_origin=ToolOrigin(
                 type=ToolOriginType.AGENT_AS_TOOL,
