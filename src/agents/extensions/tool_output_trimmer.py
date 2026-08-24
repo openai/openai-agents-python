@@ -98,8 +98,8 @@ class ToolOutputTrimmer:
             trimmed. Defaults to 2.
         max_output_chars: Tool outputs above this character count are candidates for
             trimming. Structured outputs count their model-facing string payloads without
-            Python or JSON representation overhead, and their replacements fit within this
-            budget. Defaults to 500.
+            Python or JSON representation overhead. String function-output summaries and
+            structured function-output replacements fit within this budget. Defaults to 500.
         preview_chars: Maximum number of characters of a string output, or the text parts of
             a structured output, to preserve as a preview when trimming. Structured previews
             may be shorter when needed to fit ``max_output_chars``. Defaults to 200.
@@ -258,12 +258,34 @@ class ToolOutputTrimmer:
         tool_name = tool_names[0] if tool_names else ""
         display_name = tool_name or "unknown_tool"
         preview = output_str[: self.preview_chars]
-        summary = (
+        detailed_summary = (
             f"[Trimmed: {display_name} output — {output_len} chars → "
             f"{self.preview_chars} char preview]\n{preview}..."
         )
-        if len(summary) >= output_len:
+        if len(detailed_summary) >= output_len:
             return None, 0
+        if len(detailed_summary) <= self.max_output_chars:
+            summary = detailed_summary
+        else:
+            minimal_header = "[Trimmed]"
+            if self.max_output_chars < len(minimal_header):
+                summary = minimal_header[: self.max_output_chars]
+            else:
+                preview_budget = self.max_output_chars - len(minimal_header) - 1
+                preview_len = min(len(output_str), self.preview_chars, max(0, preview_budget))
+                body = f"\n{output_str[:preview_len]}" if preview_len else ""
+                if (
+                    preview_len < len(output_str)
+                    and len(minimal_header) + len(body) + len("...") <= self.max_output_chars
+                ):
+                    body += "..."
+
+                headers = [f"[Trimmed: {display_name}]", minimal_header]
+                summary = next(
+                    header + body
+                    for header in headers
+                    if len(header) + len(body) <= self.max_output_chars
+                )
 
         trimmed_item = dict(item)
         trimmed_item["output"] = summary

@@ -206,6 +206,32 @@ class TestTrimming:
         assert "1000 chars" in trimmed
         assert len(trimmed) < len(large)
 
+    @pytest.mark.parametrize("max_output_chars", [1, len("[Trimmed]"), 40])
+    def test_string_output_respects_tight_budget(self, max_output_chars: int) -> None:
+        """String summaries should stay within the configured output budget."""
+        large = "x" * 1000
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+
+        trimmer = ToolOutputTrimmer(
+            max_output_chars=max_output_chars,
+            preview_chars=100,
+        )
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        assert isinstance(trimmed, str)
+        assert len(trimmed) <= max_output_chars
+        assert trimmer(_make_data(result.input)).input == result.input
+
     def test_preserves_small_old_output(self) -> None:
         """Small outputs should never be trimmed."""
         small = "x" * 100
