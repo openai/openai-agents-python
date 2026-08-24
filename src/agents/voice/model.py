@@ -143,6 +143,20 @@ class STTModelSettings:
     turn_detection: dict[str, Any] | None = None
     """The turn detection settings for the model when using streamed audio input."""
 
+    languages: list[str] | None = None
+    """Possible languages of the audio input, in ISO-639-1 format, when using streamed audio
+    input. Supported by `gpt-transcribe` and `gpt-live-transcribe`. Takes precedence over
+    `language`."""
+
+    keywords: list[str] | None = None
+    """Words or phrases to guide transcription of the audio input when using streamed audio
+    input. Supported by `gpt-transcribe` and `gpt-live-transcribe`."""
+
+    delay: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
+    """How long the model waits before emitting transcription text when using streamed audio
+    input. Higher values can improve transcription accuracy at the cost of latency. Only
+    supported with `gpt-realtime-whisper`."""
+
 
 class STTModel(abc.ABC):
     """A speech-to-text model that can convert audio input into text."""

@@ -59,3 +59,49 @@ async def test_streaming_stt_omits_unset_language_and_prompt() -> None:
 
     payload = json.loads(websocket.send.await_args.args[0])
     assert payload["session"]["audio"]["input"]["transcription"] == {"model": "gpt-4o-transcribe"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-4o-transcribe", "gpt-transcribe", "gpt-live-transcribe"])
+async def test_streaming_stt_sends_languages_over_language(model: str) -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model=model,
+        settings=STTModelSettings(language="fr", languages=["fr", "en"]),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    websocket = AsyncMock()
+    session._websocket = websocket
+
+    await session._configure_session()
+
+    payload = json.loads(websocket.send.await_args.args[0])
+    assert payload["session"]["audio"]["input"]["transcription"] == {
+        "model": model,
+        "languages": ["fr", "en"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_streaming_stt_sends_keywords_and_delay() -> None:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="gpt-live-transcribe",
+        settings=STTModelSettings(keywords=["agents", "sdk"], delay="low"),
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    websocket = AsyncMock()
+    session._websocket = websocket
+
+    await session._configure_session()
+
+    payload = json.loads(websocket.send.await_args.args[0])
+    assert payload["session"]["audio"]["input"]["transcription"] == {
+        "model": "gpt-live-transcribe",
+        "keywords": ["agents", "sdk"],
+        "delay": "low",
+    }
