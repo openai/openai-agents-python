@@ -70,7 +70,7 @@ If you do not need access to files or a stateful, mutable filesystem, keep using
 
 ## Choose a sandbox client
 
-Start with `UnixLocalSandboxClient` for local development on macOS or Linux. On Windows, use `DockerSandboxClient` or a hosted provider instead. On any supported platform, move to `DockerSandboxClient` when you need container isolation or image parity, or to a hosted provider when you need provider-managed execution.
+Start with `UnixLocalSandboxClient` for local development on macOS (it confines commands with `sandbox-exec`). On Linux and Windows, use `DockerSandboxClient` or a hosted provider instead — the Unix-local client has no OS-level confinement on Linux and refuses to start there unless `allow_unconfined_linux=True` is set explicitly. On any supported platform, move to `DockerSandboxClient` when you need container isolation or image parity, or to a hosted provider when you need provider-managed execution.
 
 In most cases, the `SandboxAgent` definition stays the same while the sandbox client and its options change in [`SandboxRunConfig`][agents.run_config.SandboxRunConfig]. See [Sandbox clients](clients.md) for local, Docker, hosted, and remote-mount options.
 

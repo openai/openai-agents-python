@@ -26,6 +26,7 @@ class ErrorCode(str, Enum):
     APPLY_PATCH_INVALID_DIFF = "apply_patch_invalid_diff"
     APPLY_PATCH_FILE_NOT_FOUND = "apply_patch_file_not_found"
     APPLY_PATCH_DECODE_ERROR = "apply_patch_decode_error"
+    UNCONFINED_LINUX_NOT_ALLOWED = "unconfined_linux_not_allowed"
 
     WORKSPACE_READ_NOT_FOUND = "workspace_read_not_found"
     WORKSPACE_ARCHIVE_READ_ERROR = "workspace_archive_read_error"

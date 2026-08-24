@@ -26,12 +26,18 @@ For most users, start with one of these two sandbox clients:
 
 | Client | Install | Choose it when | Example |
 | --- | --- | --- | --- |
-| `UnixLocalSandboxClient` | none | Fastest local iteration on macOS or Linux. Good default for local development. | [Unix-local starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py) |
+| `UnixLocalSandboxClient` | none | Fastest local iteration on macOS (Seatbelt confinement). On Linux it requires `allow_unconfined_linux=True` because there is no OS-level confinement — prefer `DockerSandboxClient` there. | [Unix-local starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py) |
 | `DockerSandboxClient` | `openai-agents[docker]` | You want container isolation or a specific image to reproduce a target environment locally. | [Docker starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py) |
 
 </div>
 
 Unix-local is the easiest way to start developing against a local filesystem. Move to Docker or a hosted provider when you need stronger environment isolation or production-style parity.
+
+Environment isolation notes:
+
+- On macOS, commands are wrapped with a `sandbox-exec` profile that confines filesystem access to the workspace.
+- On Linux there is no equivalent confinement: creating a session raises by default. Pass `allow_unconfined_linux=True` to explicitly accept unconfined host execution (intended for disposable development machines), or use `DockerSandboxClient`.
+- Sandboxed commands inherit only a minimal allowlist of host environment variables (`PATH`, locale, `TZ`, `TERM`, `TMPDIR`, certificate/CA locations) plus anything declared in the manifest environment. This prevents a sandboxed command from reading host credentials such as `OPENAI_API_KEY` via `printenv`. Pass `inherit_environment=True` to restore full inheritance when a workflow depends on it.
 
 `SandboxPathGrant.host_path` is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See [Manifest path grants](guide.md#manifest) for details.
 

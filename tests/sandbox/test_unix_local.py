@@ -327,3 +327,75 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class _EnvProbeSession(UnixLocalSandboxSession):
+    """Captures the resolved exec environment instead of spawning processes."""
+
+    def __init__(self, root: Path, inherit_environment: bool = False) -> None:
+        super().__init__(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(root=str(root)),
+                snapshot=NoopSnapshot(id="noop"),
+                inherit_environment=inherit_environment,
+            )
+        )
+        self.captured_env: dict[str, str] = {}
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        env, _ = await self._resolved_exec_context()
+        self.captured_env = env
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+@pytest.mark.asyncio
+async def test_exec_environment_is_allowlisted_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    session = _EnvProbeSession(tmp_path)
+    await session._exec_internal("true")
+
+    assert "OPENAI_API_KEY" not in session.captured_env
+    assert "AWS_SECRET_ACCESS_KEY" not in session.captured_env
+    assert session.captured_env["PATH"] == "/usr/bin:/bin"
+    assert session.captured_env["HOME"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_exec_environment_inherit_restores_full_host_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret")
+
+    session = _EnvProbeSession(tmp_path, inherit_environment=True)
+    await session._exec_internal("true")
+
+    assert session.captured_env.get("OPENAI_API_KEY") == "sk-test-secret"
+
+
+@pytest.mark.asyncio
+async def test_linux_requires_explicit_unconfined_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys as _sys
+
+    from agents.sandbox.errors import ConfigurationError
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient, UnixLocalSandboxClientOptions
+
+    monkeypatch.setattr(_sys, "platform", "linux")
+    client = UnixLocalSandboxClient()
+
+    with pytest.raises(ConfigurationError, match="allow_unconfined_linux"):
+        await client.create(manifest=Manifest(root=str(tmp_path / "ws")))
+
+    session = await client.create(
+        manifest=Manifest(root=str(tmp_path / "ws2")),
+        options=UnixLocalSandboxClientOptions(allow_unconfined_linux=True),
+    )
+    await session.stop()

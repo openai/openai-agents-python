@@ -31,6 +31,8 @@ from typing import Literal, cast
 from ...logger import log_tool_action_warning
 from .._mount_security import redact_mount_error_data
 from ..errors import (
+    ConfigurationError,
+    ErrorCode,
     ExecNonZeroError,
     ExecTimeoutError,
     ExecTransportError,
@@ -92,24 +94,53 @@ def _restore_pty_child_signal_defaults() -> None:
         signal.signal(signum, signal.SIG_DFL)
 
 
+# Host environment variables safe to expose to sandboxed commands by default:
+# toolchain discovery and locale/encoding only — never credentials.
+_ENV_INHERIT_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "PIP_INDEX_URL",
+        "UV_PYTHON",
+        "NO_COLOR",
+        "FORCE_COLOR",
+        "CI",
+    }
+)
+
+
 class UnixLocalSandboxSessionState(SandboxSessionState):
     type: Literal["unix_local"] = "unix_local"
     workspace_root_owned: bool = False
+    inherit_environment: bool = False
 
 
 class UnixLocalSandboxClientOptions(BaseSandboxClientOptions):
     type: Literal["unix_local"] = "unix_local"
     exposed_ports: tuple[int, ...] = ()
+    inherit_environment: bool = False
+    allow_unconfined_linux: bool = False
 
     def __init__(
         self,
         exposed_ports: tuple[int, ...] = (),
         *,
         type: Literal["unix_local"] = "unix_local",
+        inherit_environment: bool = False,
+        allow_unconfined_linux: bool = False,
     ) -> None:
         super().__init__(
             type=type,
             exposed_ports=exposed_ports,
+            inherit_environment=inherit_environment,
+            allow_unconfined_linux=allow_unconfined_linux,
         )
 
 
@@ -440,7 +471,19 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await self._terminate_pty_entry(entry)
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
-        env = os.environ.copy()
+        # Sandboxed commands must not see host secrets: by default only a
+        # minimal allowlist of the host environment is inherited (a
+        # `printenv` inside the sandbox previously exposed OPENAI_API_KEY,
+        # AWS_*, GITHUB_TOKEN, ...). Callers that rely on the old behavior
+        # can pass inherit_environment=True.
+        if self.state.inherit_environment:
+            env = dict(os.environ)
+        else:
+            env = {
+                name: value
+                for name, value in os.environ.items()
+                if name in _ENV_INHERIT_ALLOWLIST or name.startswith("LC_")
+            }
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
@@ -1115,6 +1158,25 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
         manifest = manifest if manifest is not None else Manifest()
+        if sys.platform != "darwin" and not resolved_options.allow_unconfined_linux:
+            raise ConfigurationError(
+                message=(
+                    "UnixLocalSandboxClient provides OS-level confinement (sandbox-exec) on "
+                    "macOS only; on Linux it executes commands directly on the host with no "
+                    "namespace, seccomp or container isolation. Use DockerSandboxClient on "
+                    "Linux, or pass allow_unconfined_linux=True to explicitly accept "
+                    "unconfined host execution."
+                ),
+                error_code=ErrorCode.UNCONFINED_LINUX_NOT_ALLOWED,
+                op="create",
+                context={"platform": sys.platform, "backend_id": self.backend_id},
+                retryable=False,
+            )
+        if sys.platform != "darwin" and resolved_options.allow_unconfined_linux:
+            logger.warning(
+                "UnixLocalSandboxClient running with allow_unconfined_linux=True: sandboxed "
+                "commands execute on the host without OS-level confinement."
+            )
         _assert_unix_local_host_path_grants_unsupported(manifest)
         self._validate_manifest_for_create(manifest)
         # For local execution, runner-created sessions should always get an isolated temp root
@@ -1134,6 +1196,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             snapshot=snapshot_instance,
             workspace_root_owned=workspace_root_owned,
             exposed_ports=resolved_options.exposed_ports,
+            inherit_environment=resolved_options.inherit_environment,
         )
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
