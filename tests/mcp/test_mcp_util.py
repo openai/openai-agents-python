@@ -18,6 +18,9 @@ from agents import (
     FunctionTool,
     Handoff,
     RunContextWrapper,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolOutputGuardrail,
     default_tool_error_function,
     handoff,
 )
@@ -27,7 +30,13 @@ from agents.exceptions import (
     ModelBehaviorError,
     UserError,
 )
-from agents.mcp import MCPServer, MCPUtil
+from agents.mcp import (
+    MCPServer,
+    MCPServerSse,
+    MCPServerStdio,
+    MCPServerStreamableHttp,
+    MCPUtil,
+)
 from agents.mcp._compat import MCPError, tool_input_schema
 from agents.tool_context import ToolContext
 
@@ -115,6 +124,117 @@ async def test_get_all_function_tools():
     tools = await MCPUtil.get_all_function_tools(servers, True, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_guardrails_apply_to_every_converted_tool_with_isolated_lists():
+    input_guardrail = ToolInputGuardrail(
+        guardrail_function=lambda _: ToolGuardrailFunctionOutput.allow()
+    )
+    output_guardrail = ToolOutputGuardrail(
+        guardrail_function=lambda _: ToolGuardrailFunctionOutput.allow()
+    )
+    server = FakeMCPServer(
+        tool_input_guardrails=[input_guardrail],
+        tool_output_guardrails=[output_guardrail],
+    )
+    server.add_tool("first", {})
+    server.add_tool("second", {})
+
+    tools = await MCPUtil.get_all_function_tools(
+        [server],
+        False,
+        RunContextWrapper(context=None),
+        Agent(name="test_agent"),
+    )
+
+    assert [tool.name for tool in tools] == ["first", "second"]
+    first, second = tools
+    assert isinstance(first, FunctionTool)
+    assert isinstance(second, FunctionTool)
+    assert first.tool_input_guardrails is not None
+    assert first.tool_output_guardrails is not None
+    assert first.tool_input_guardrails == [input_guardrail]
+    assert second.tool_input_guardrails == [input_guardrail]
+    assert first.tool_output_guardrails == [output_guardrail]
+    assert second.tool_output_guardrails == [output_guardrail]
+    assert first.tool_input_guardrails is not server.tool_input_guardrails
+    assert first.tool_input_guardrails is not second.tool_input_guardrails
+    assert first.tool_output_guardrails is not server.tool_output_guardrails
+    assert first.tool_output_guardrails is not second.tool_output_guardrails
+
+    first.tool_input_guardrails.clear()
+    first.tool_output_guardrails.clear()
+    assert server.tool_input_guardrails == [input_guardrail]
+    assert server.tool_output_guardrails == [output_guardrail]
+    assert second.tool_input_guardrails == [input_guardrail]
+    assert second.tool_output_guardrails == [output_guardrail]
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_guardrails_do_not_leak_across_servers_or_filtered_tools():
+    input_guardrail = ToolInputGuardrail(
+        guardrail_function=lambda _: ToolGuardrailFunctionOutput.allow()
+    )
+    guarded_server = FakeMCPServer(
+        tool_filter={"allowed_tool_names": ["guarded"]},
+        tool_input_guardrails=[input_guardrail],
+    )
+    guarded_server.add_tool("guarded", {})
+    guarded_server.add_tool("filtered_out", {})
+    unguarded_server = FakeMCPServer()
+    unguarded_server.add_tool("unguarded", {})
+
+    tools = await MCPUtil.get_all_function_tools(
+        [guarded_server, unguarded_server],
+        False,
+        RunContextWrapper(context=None),
+        Agent(name="test_agent"),
+    )
+
+    assert [tool.name for tool in tools] == ["guarded", "unguarded"]
+    guarded, unguarded = tools
+    assert isinstance(guarded, FunctionTool)
+    assert isinstance(unguarded, FunctionTool)
+    assert guarded.tool_input_guardrails == [input_guardrail]
+    assert guarded.tool_output_guardrails is None
+    assert unguarded.tool_input_guardrails is None
+    assert unguarded.tool_output_guardrails is None
+
+
+def test_public_mcp_server_constructors_forward_guardrail_configuration():
+    input_guardrails: list[ToolInputGuardrail[Any]] = []
+    output_guardrails: list[ToolOutputGuardrail[Any]] = []
+    servers = [
+        MCPServerStdio(
+            params={"command": "test"},
+            tool_input_guardrails=input_guardrails,
+            tool_output_guardrails=output_guardrails,
+        ),
+        MCPServerSse(
+            params={"url": "https://example.test/sse"},
+            tool_input_guardrails=input_guardrails,
+            tool_output_guardrails=output_guardrails,
+        ),
+        MCPServerStreamableHttp(
+            params={"url": "https://example.test/mcp"},
+            tool_input_guardrails=input_guardrails,
+            tool_output_guardrails=output_guardrails,
+        ),
+    ]
+
+    assert all(server.tool_input_guardrails is input_guardrails for server in servers)
+    assert all(server.tool_output_guardrails is output_guardrails for server in servers)
+
+    tool = MCPUtil.to_function_tool(
+        MCPTool(name="test", inputSchema={}),
+        servers[0],
+        convert_schemas_to_strict=False,
+    )
+    assert tool.tool_input_guardrails == []
+    assert tool.tool_output_guardrails == []
+    assert tool.tool_input_guardrails is not input_guardrails
+    assert tool.tool_output_guardrails is not output_guardrails
 
 
 @pytest.mark.asyncio

@@ -10,15 +10,30 @@ from agents import (
     ModelBehaviorError,
     RunContextWrapper,
     Runner,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    ToolOutputGuardrailData,
     UserError,
     default_tool_error_function,
     handoff,
 )
 from agents.exceptions import AgentsException
 from agents.testing import ScriptedModel
+from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
+
+
+def _model_tool_outputs(model: ScriptedModel) -> list[Any]:
+    values: list[Any] = []
+    for item in model.calls[-1].input:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if item_type == "function_call_output":
+            values.append(
+                item.get("output") if isinstance(item, dict) else getattr(item, "output", None)
+            )
+    return values
 
 
 @pytest.mark.asyncio
@@ -53,6 +68,75 @@ async def test_runner_calls_mcp_tool(streaming: bool):
         await Runner.run(agent, input="user_message")
 
     assert server.tool_calls == ["test_tool_2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_mcp_input_guardrail_rejection_prevents_server_call(streaming: bool):
+    seen_inputs: list[tuple[str, str]] = []
+
+    @tool_input_guardrail
+    def reject_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        seen_inputs.append((data.context.tool_name, data.context.tool_arguments))
+        return ToolGuardrailFunctionOutput.reject_content("blocked MCP input")
+
+    server = FakeMCPServer(tool_input_guardrails=[reject_input])
+    server.add_tool("sensitive", {})
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("sensitive", '{"secret":"value"}')],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert server.tool_calls == []
+    assert seen_inputs == [("sensitive", '{"secret":"value"}')]
+    assert len(result.tool_input_guardrail_results) == 1
+    assert _model_tool_outputs(model) == ["blocked MCP input"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_mcp_output_guardrail_checks_converted_output_before_model_input(streaming: bool):
+    seen_outputs: list[Any] = []
+
+    @tool_output_guardrail
+    def reject_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        seen_outputs.append(data.output)
+        return ToolGuardrailFunctionOutput.reject_content("blocked MCP output")
+
+    server = FakeMCPServer(tool_output_guardrails=[reject_output])
+    server.add_tool("lookup", {})
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("lookup", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert server.tool_calls == ["lookup"]
+    assert seen_outputs == [{"type": "text", "text": server.tool_results[0]}]
+    assert len(result.tool_output_guardrail_results) == 1
+    assert _model_tool_outputs(model) == ["blocked MCP output"]
+    assert server.tool_results[0] not in str(model.calls[-1].input)
 
 
 @pytest.mark.asyncio

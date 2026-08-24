@@ -44,6 +44,7 @@ from ..logger import (
 )
 from ..run_context import RunContextWrapper
 from ..tool import ToolErrorFunction
+from ..tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from ..util._types import MaybeAwaitable
 from . import _compat as mcp_compat
 from ._compat import (
@@ -549,6 +550,9 @@ class MCPServer(abc.ABC):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        *,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ):
         """
         Args:
@@ -570,6 +574,10 @@ class MCPServer(abc.ABC):
                 tool calls. It is invoked by the Agents SDK before calling `call_tool`.
             custom_data_extractor: Optional callable that produces SDK-only custom data for
                 emitted MCP tool output items.
+            tool_input_guardrails: Optional list of guardrails applied to every tool on this
+                server before the tool is invoked.
+            tool_output_guardrails: Optional list of guardrails applied to every tool on this
+                server after the tool returns.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
@@ -578,6 +586,8 @@ class MCPServer(abc.ABC):
         self._failure_error_function = failure_error_function
         self.tool_meta_resolver = tool_meta_resolver
         self.custom_data_extractor = custom_data_extractor
+        self.tool_input_guardrails = tool_input_guardrails
+        self.tool_output_guardrails = tool_output_guardrails
 
     @abc.abstractmethod
     async def connect(self):
@@ -879,6 +889,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
         retry_backoff_seconds_max: float | None = None,
+        *,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ):
         """
         Args:
@@ -918,6 +931,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 emitted MCP tool output items.
             retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
                 retries. Defaults to `None`, which leaves exponential backoff uncapped.
+            tool_input_guardrails: Optional list of guardrails applied to every tool on this
+                server before the tool is invoked.
+            tool_output_guardrails: Optional list of guardrails applied to every tool on this
+                server after the tool returns.
         """
         mcp_compat.enable_legacy_httpx_compat()
         super().__init__(
@@ -926,6 +943,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
         )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -1888,6 +1907,9 @@ class MCPServerStdio(_MCPServerWithClientSession):
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
         retry_backoff_seconds_max: float | None = None,
+        *,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -1932,6 +1954,10 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 emitted MCP tool output items.
             retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
                 retries. Defaults to `None`, which leaves exponential backoff uncapped.
+            tool_input_guardrails: Optional list of guardrails applied to every tool on this
+                server before the tool is invoked.
+            tool_output_guardrails: Optional list of guardrails applied to every tool on this
+                server after the tool returns.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1946,6 +1972,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
         )
 
         self.params = StdioServerParameters(
@@ -2021,6 +2049,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
         retry_backoff_seconds_max: float | None = None,
+        *,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -2067,6 +2098,10 @@ class MCPServerSse(_MCPServerWithClientSession):
                 emitted MCP tool output items.
             retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
                 retries. Defaults to `None`, which leaves exponential backoff uncapped.
+            tool_input_guardrails: Optional list of guardrails applied to every tool on this
+                server before the tool is invoked.
+            tool_output_guardrails: Optional list of guardrails applied to every tool on this
+                server after the tool returns.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2081,6 +2116,8 @@ class MCPServerSse(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
         )
 
         self.params = params
@@ -2182,6 +2219,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
         retry_backoff_seconds_max: float | None = None,
+        *,
+        tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
+        tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -2229,6 +2269,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 emitted MCP tool output items.
             retry_backoff_seconds_max: The non-negative finite maximum delay, in seconds, between
                 retries. Defaults to `None`, which leaves exponential backoff uncapped.
+            tool_input_guardrails: Optional list of guardrails applied to every tool on this
+                server before the tool is invoked.
+            tool_output_guardrails: Optional list of guardrails applied to every tool on this
+                server after the tool returns.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2243,6 +2287,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
         )
 
         self.params = params
