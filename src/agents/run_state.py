@@ -58,6 +58,7 @@ from ._tool_invocation import (
     tool_output_identity,
 )
 from .agent import Agent
+from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .exceptions import (
     ModelBehaviorError,
     UserError,
@@ -146,6 +147,7 @@ if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
     from .run_internal.run_steps import (
+        NextStepFinalOutput,
         NextStepInterruption,
         NextStepRunAgain,
         ProcessedResponse,
@@ -183,6 +185,8 @@ CURRENT_SCHEMA_VERSION = "1.17"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
+_PENDING_SESSION_ITEMS_MIN_SCHEMA_VERSION = "1.17"
+_PENDING_FINAL_OUTPUT_MIN_SCHEMA_VERSION = "1.17"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -216,7 +220,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows."
+        "resume flows, plus incomplete atomic resumed-turn Session appends and terminal "
+        "continuations."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -827,7 +832,7 @@ class RunState(Generic[TContext, TAgent]):
     _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
     """Results from tool output guardrails applied during the run."""
 
-    _current_step: NextStepInterruption | NextStepRunAgain | None = None
+    _current_step: NextStepInterruption | NextStepRunAgain | NextStepFinalOutput | None = None
     """Current resumable step, or ``None`` when the state is terminal."""
 
     _last_processed_response: ProcessedResponse | None = None
@@ -838,6 +843,15 @@ class RunState(Generic[TContext, TAgent]):
 
     _current_turn_persisted_item_count: int = 0
     """Tracks how many items from this turn were already written to the session."""
+
+    _pending_session_items: list[RunItem] = field(default_factory=list, repr=False)
+    """Exact resumed-turn items whose atomic Session append has not completed."""
+
+    _pending_session_id: str | None = field(default=None, repr=False)
+    """Session identifier that owns the incomplete resumed-turn append."""
+
+    _pending_session_store: bool | None = field(default=None, repr=False)
+    """Resolved response storage mode that must be reused after an incomplete append."""
 
     _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
     """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
@@ -890,6 +904,9 @@ class RunState(Generic[TContext, TAgent]):
         self._last_processed_response = None
         self._generated_items_last_processed_marker = None
         self._current_turn_persisted_item_count = 0
+        self._pending_session_items = []
+        self._pending_session_id = None
+        self._pending_session_store = None
         self._tool_use_tracker_snapshot = {}
         self._trace_state = None
         self._sandbox = None
@@ -949,7 +966,10 @@ class RunState(Generic[TContext, TAgent]):
         The input remains pending until its guardrails and conversation ownership boundary accept
         it. Terminal states reject new input before mutating the state.
         """
-        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+        from .run_internal.run_steps import (
+            NextStepInterruption,
+            NextStepRunAgain,
+        )
 
         if not isinstance(self._current_step, NextStepInterruption | NextStepRunAgain):
             raise UserError("Cannot add input to a terminal RunState")
@@ -1865,6 +1885,21 @@ class RunState(Generic[TContext, TAgent]):
             self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
             for item in list(self._session_items)
         ]
+        result["pending_session_write"] = (
+            {
+                "session_id": self._pending_session_id,
+                "store": self._pending_session_store,
+                "items": [
+                    self._serialize_item(
+                        item,
+                        agent_identity_keys_by_id=agent_identity_keys_by_id,
+                    )
+                    for item in self._pending_session_items
+                ],
+            }
+            if self._pending_session_items
+            else None
+        )
         result["current_step"] = self._serialize_current_step()
         result["last_model_response"] = _serialize_last_model_response(model_responses)
         result["last_processed_response"] = (
@@ -1949,7 +1984,11 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current resumable step."""
         # Import at runtime to avoid circular import
-        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+        from .run_internal.run_steps import (
+            NextStepFinalOutput,
+            NextStepInterruption,
+            NextStepRunAgain,
+        )
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
@@ -1959,6 +1998,31 @@ class RunState(Generic[TContext, TAgent]):
 
         if isinstance(self._current_step, NextStepRunAgain):
             return {"type": "next_step_run_again"}
+
+        if isinstance(self._current_step, NextStepFinalOutput):
+            output_type = cast(Agent[Any], self._current_agent).output_type
+            if isinstance(output_type, AgentOutputSchemaBase):
+                if not isinstance(output_type, AgentOutputSchema):
+                    raise UserError(
+                        "Cannot serialize a pending final output that uses a custom output schema"
+                    )
+                output_type = output_type.output_type
+            if output_type is None or output_type is str:
+                if not isinstance(self._current_step.output, str):
+                    raise UserError("Cannot serialize an invalid pending final output")
+                serialized_output = self._current_step.output
+            else:
+                try:
+                    serialized_output = TypeAdapter(output_type).dump_python(
+                        self._current_step.output,
+                        mode="json",
+                    )
+                except Exception as exc:
+                    raise UserError("Cannot serialize an invalid pending final output") from exc
+            return {
+                "type": "next_step_final_output",
+                "data": {"output": serialized_output},
+            }
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -3951,6 +4015,34 @@ async def _build_run_state_from_json(
             UserError,
         )
 
+    pending_session_major, pending_session_minor = (
+        int(part) for part in _PENDING_SESSION_ITEMS_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+    )
+    if state_json.get("pending_session_write") is not None and (schema_major, schema_minor) < (
+        pending_session_major,
+        pending_session_minor,
+    ):
+        raise validation_error_factory(
+            "Run state pending_session_write requires schema version "
+            f"{_PENDING_SESSION_ITEMS_MIN_SCHEMA_VERSION} or newer",
+            UserError,
+        )
+
+    serialized_current_step = state_json.get("current_step")
+    if isinstance(serialized_current_step, Mapping):
+        pending_final_major, pending_final_minor = (
+            int(part) for part in _PENDING_FINAL_OUTPUT_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        )
+        if serialized_current_step.get("type") == "next_step_final_output" and (
+            schema_major,
+            schema_minor,
+        ) < (pending_final_major, pending_final_minor):
+            raise validation_error_factory(
+                "Run state pending final output requires schema version "
+                f"{_PENDING_FINAL_OUTPUT_MIN_SCHEMA_VERSION} or newer",
+                UserError,
+            )
+
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
@@ -4132,6 +4224,57 @@ async def _build_run_state_from_json(
         serialized_session_items = []
         state._session_items = state._merge_generated_items_with_processed()
         session_source_indexes = list(range(len(state._session_items)))
+
+    serialized_pending_session_write = state_json.get("pending_session_write")
+    if serialized_pending_session_write is None:
+        serialized_pending_session_items: list[Any] = []
+        pending_session_id = None
+        pending_session_store = None
+    elif not isinstance(serialized_pending_session_write, Mapping):
+        raise validation_error_factory(
+            "Run state pending_session_write must be an object or null",
+            UserError,
+        )
+    else:
+        serialized_pending_session_items = serialized_pending_session_write.get("items", [])
+        pending_session_id = serialized_pending_session_write.get("session_id")
+        pending_session_store = serialized_pending_session_write.get("store")
+    if not isinstance(serialized_pending_session_items, list):
+        raise validation_error_factory(
+            "Run state pending_session_write items must be a list",
+            UserError,
+        )
+    if serialized_pending_session_write is not None and not serialized_pending_session_items:
+        raise validation_error_factory(
+            "Run state pending_session_write items must not be empty",
+            UserError,
+        )
+    if serialized_pending_session_write is not None and not isinstance(pending_session_id, str):
+        raise validation_error_factory(
+            "Run state pending_session_write session_id must be a string",
+            UserError,
+        )
+    if pending_session_store is not None and not isinstance(pending_session_store, bool):
+        raise validation_error_factory(
+            "Run state pending_session_write store must be a boolean or null",
+            UserError,
+        )
+    state._pending_session_items, pending_session_source_indexes = (
+        _deserialize_items_with_source_indexes(
+            serialized_pending_session_items,
+            agent_map,
+            agent_identity_map=agent_identity_map,
+            validation_error_factory=validation_error_factory,
+        )
+    )
+    if pending_session_source_indexes != list(range(len(serialized_pending_session_items))):
+        raise validation_error_factory(
+            "Run state pending_session_write items must all be valid",
+            UserError,
+        )
+    state._pending_session_id = pending_session_id if state._pending_session_items else None
+    state._pending_session_store = pending_session_store if state._pending_session_items else None
+
     restored_session_indexes = {
         source_index: restored_index
         for restored_index, source_index in enumerate(session_source_indexes)
@@ -4272,10 +4415,43 @@ async def _build_run_state_from_json(
     )
 
     current_step_data = state_json.get("current_step")
+    if current_step_data is not None and not isinstance(current_step_data, Mapping):
+        raise validation_error_factory(
+            "Run state current_step must be an object or null",
+            UserError,
+        )
     if current_step_data and current_step_data.get("type") == "next_step_run_again":
         from .run_internal.run_steps import NextStepRunAgain
 
         state._current_step = NextStepRunAgain()
+    elif current_step_data and current_step_data.get("type") == "next_step_final_output":
+        from .run_internal.run_steps import NextStepFinalOutput
+
+        final_output_data = current_step_data.get("data")
+        if not isinstance(final_output_data, Mapping) or "output" not in final_output_data:
+            raise validation_error_factory(
+                "Run state pending final output data must contain output",
+                UserError,
+            )
+        serialized_final_output = final_output_data["output"]
+        output_type = current_agent.output_type
+        try:
+            if isinstance(output_type, AgentOutputSchemaBase):
+                if not isinstance(output_type, AgentOutputSchema):
+                    raise ValueError("custom output schema")
+                output_type = output_type.output_type
+            if output_type is None or output_type is str:
+                if not isinstance(serialized_final_output, str):
+                    raise ValueError("plain-text final output must be a string")
+                final_output = serialized_final_output
+            else:
+                final_output = TypeAdapter(output_type).validate_python(serialized_final_output)
+        except Exception:
+            raise validation_error_factory(
+                "Run state pending final output is invalid",
+                UserError,
+            ) from None
+        state._current_step = NextStepFinalOutput(final_output)
     elif current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
@@ -4325,9 +4501,24 @@ async def _build_run_state_from_json(
         for approval_item in state._current_step.interruptions:
             context._mark_restored_unbound_pending_approval(approval_item)
 
-    state._current_turn_persisted_item_count = state_json.get(
-        "current_turn_persisted_item_count", 0
-    )
+    from .run_internal.run_steps import NextStepFinalOutput, NextStepRunAgain
+
+    if state._pending_session_items and not isinstance(
+        state._current_step,
+        NextStepRunAgain | NextStepFinalOutput,
+    ):
+        raise validation_error_factory(
+            "Run state pending_session_write requires a resumable continuation step",
+            UserError,
+        )
+
+    persisted_item_count = state_json.get("current_turn_persisted_item_count", 0)
+    if type(persisted_item_count) is not int or persisted_item_count < 0:
+        raise validation_error_factory(
+            "Run state current_turn_persisted_item_count must be a non-negative integer",
+            UserError,
+        )
+    state._current_turn_persisted_item_count = persisted_item_count
     serialized_policy = state_json.get("reasoning_item_id_policy")
     if serialized_policy in {"preserve", "omit"}:
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
@@ -5591,6 +5782,25 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         ),
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
+        (
+            "Run state pending_session_write requires schema version "
+            f"{_PENDING_SESSION_ITEMS_MIN_SCHEMA_VERSION} or newer"
+        ),
+        (
+            "Run state pending final output requires schema version "
+            f"{_PENDING_FINAL_OUTPUT_MIN_SCHEMA_VERSION} or newer"
+        ),
+        "Run state current_step must be an object or null",
+        "Run state pending final output data must contain output",
+        "Run state pending_session_write must be an object or null",
+        "Run state pending_session_write items must be a list",
+        "Run state pending_session_write items must not be empty",
+        "Run state pending_session_write items must all be valid",
+        "Run state pending_session_write session_id must be a string",
+        "Run state pending_session_write store must be a boolean or null",
+        "Run state pending_session_write requires a resumable continuation step",
+        "Run state pending final output is invalid",
+        "Run state current_turn_persisted_item_count must be a non-negative integer",
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "

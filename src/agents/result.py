@@ -149,6 +149,15 @@ def _populate_state_from_result(
         state._generated_prompt_cache_key = source_state._generated_prompt_cache_key
         state._pending_input = copy.deepcopy(source_state._pending_input)
         state._current_step = source_state._current_step
+        if source_state._current_step is not None:
+            state._current_agent = source_state._current_agent
+            state._current_turn_persisted_item_count = (
+                source_state._current_turn_persisted_item_count
+            )
+        if source_state._pending_session_items:
+            state._pending_session_items = list(source_state._pending_session_items)
+            state._pending_session_id = source_state._pending_session_id
+            state._pending_session_store = source_state._pending_session_store
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
         state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))

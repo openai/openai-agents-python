@@ -140,6 +140,7 @@ from .run_internal.session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resumed_turn_items,
+    retry_pending_resumed_turn_session_items,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
@@ -1160,6 +1161,14 @@ class AgentRunner:
                                         ),
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        run_state=(
+                                            run_state
+                                            if isinstance(
+                                                turn_result.next_step,
+                                                NextStepRunAgain | NextStepHandoff,
+                                            )
+                                            else None
+                                        ),
                                     )
                                 )
 
@@ -1293,6 +1302,8 @@ class AgentRunner:
                                         owner_starts=blocked_output_owner_starts,
                                         blocked_message=blocked_message,
                                     )
+                                    if run_state is not None:
+                                        run_state._current_step = NextStepRunAgain()
                                     list.extend(session_items, retained_items)
                                     try:
                                         await save_final_turn_items_after_guardrails(
@@ -1308,6 +1319,7 @@ class AgentRunner:
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
+                                            track_pending_write=True,
                                         )
                                     except BaseException as persistence_error:
                                         raise _safe_redacted_persistence_error(
@@ -1340,6 +1352,7 @@ class AgentRunner:
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
+                                            track_pending_write=True,
                                         )
                                     raise
 
@@ -1350,6 +1363,13 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                if run_state is not None:
+                                    run_state._current_step = NextStepFinalOutput(
+                                        turn_result.next_step.output
+                                    )
+                                    run_state._output_guardrail_results = list(
+                                        output_guardrail_results
+                                    )
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,
@@ -1359,6 +1379,7 @@ class AgentRunner:
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
+                                    track_pending_write=True,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
@@ -1408,6 +1429,44 @@ class AgentRunner:
                     if run_state is not None:
                         if run_state._current_step is None:
                             run_state._current_step = NextStepRunAgain()
+
+                        await retry_pending_resumed_turn_session_items(
+                            session=session,
+                            run_state=run_state,
+                            response_id=(
+                                run_state._model_responses[-1].response_id
+                                if run_state._model_responses
+                                else None
+                            ),
+                            wrapper=context_wrapper,
+                        )
+
+                        if isinstance(run_state._current_step, NextStepFinalOutput):
+                            pending_final_output = run_state._current_step.output
+                            run_state._current_step = None
+                            result = RunResult(
+                                input=original_input,
+                                new_items=session_items,
+                                raw_responses=model_responses,
+                                final_output=pending_final_output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                interruptions=[],
+                                _tool_use_tracker_snapshot=_tool_use_tracker_snapshot(),
+                                max_turns=max_turns,
+                            )
+                            result._current_turn = current_turn
+                            result._model_input_items = list(generated_items)
+                            result._replay_from_model_input_items = list(generated_items) != list(
+                                session_items
+                            )
+                            result._trace_state = run_state._trace_state
+                            result._original_input = copy_input_items(original_input)
+                            return _finalize_result(result)
 
                         pending_input = run_state.pending_input
                         if pending_input:

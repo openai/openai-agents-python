@@ -178,6 +178,7 @@ from .session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resumed_turn_items,
+    retry_pending_resumed_turn_session_items,
     rewind_session_items,
     save_result_to_session,
     save_resumed_turn_items,
@@ -399,6 +400,12 @@ async def _save_resumed_stream_items(
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
         store=store,
         wrapper=streamed_result.context_wrapper,
+        run_state=(
+            run_state
+            if run_state is not None
+            and isinstance(run_state._current_step, NextStepRunAgain | NextStepFinalOutput)
+            else None
+        ),
     )
     if run_state is not None:
         run_state._current_turn_persisted_item_count = (
@@ -501,6 +508,7 @@ async def _finalize_streamed_final_output(
     response_id: str | None,
     store_setting: bool | None,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
+    track_pending_write: bool = False,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
@@ -556,6 +564,8 @@ async def _finalize_streamed_final_output(
             owner_starts=owner_starts,
             blocked_message=blocked_message,
         )
+        if track_pending_write and streamed_result._state is not None:
+            streamed_result._state._current_step = NextStepRunAgain()
         if retained_items:
             try:
                 await save_items(retained_items, response_id, store_setting)
@@ -622,6 +632,11 @@ async def _finalize_streamed_final_output(
         agent,
         run_config,
     )
+    if track_pending_write and streamed_result._state is not None:
+        streamed_result._state._current_step = NextStepFinalOutput(output)
+        streamed_result._state._output_guardrail_results = list(
+            streamed_result.output_guardrail_results
+        )
 
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
@@ -1429,6 +1444,7 @@ async def start_streaming(
                             owner_starts=blocked_output_owner_starts,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
+                            track_pending_write=True,
                         )
                         if streamed_result._stored_exception is not None:
                             break
@@ -1457,6 +1473,27 @@ async def start_streaming(
 
             if streamed_result.is_complete:
                 break
+
+            if run_state is not None:
+                streamed_result._current_turn_persisted_item_count = (
+                    await retry_pending_resumed_turn_session_items(
+                        session=session,
+                        run_state=run_state,
+                        response_id=(
+                            run_state._model_responses[-1].response_id
+                            if run_state._model_responses
+                            else None
+                        ),
+                        wrapper=streamed_result.context_wrapper,
+                    )
+                )
+
+                if isinstance(run_state._current_step, NextStepFinalOutput):
+                    streamed_result.final_output = run_state._current_step.output
+                    run_state._current_step = None
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
 
             if run_state is not None and run_state._pending_input:
                 if run_state._current_step is None:

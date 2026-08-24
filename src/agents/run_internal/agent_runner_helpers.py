@@ -565,23 +565,32 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    track_pending_write: bool = False,
 ) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
     if not session_persistence_enabled or not items:
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
-    if run_state is not None and run_state._current_turn_persisted_item_count > 0:
-        run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
+    resumable_state = (
+        run_state
+        if track_pending_write
+        and run_state is not None
+        and isinstance(run_state._current_step, NextStepRunAgain | NextStepFinalOutput)
+        else None
+    )
+    if resumable_state is not None:
+        resumable_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
             items=items,
-            persisted_count=run_state._current_turn_persisted_item_count,
+            persisted_count=resumable_state._current_turn_persisted_item_count,
             response_id=response_id,
-            reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            reasoning_item_id_policy=resumable_state._reasoning_item_id_policy,
             store=store,
             wrapper=wrapper,
+            run_state=resumable_state,
         )
-        return run_state._current_turn_persisted_item_count
+        return resumable_state._current_turn_persisted_item_count
     return await save_result_to_session(
         session,
         [],

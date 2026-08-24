@@ -6,15 +6,18 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool
+from agents import Agent, ModelSettings, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
+from agents.exceptions import UserError
+from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.items import (
     MessageOutputItem,
     ModelResponse,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
@@ -32,7 +35,7 @@ from agents.run_internal.run_loop import (
 from agents.run_state import RunState
 from agents.testing import ScriptedModel
 from agents.usage import Usage
-from tests.test_responses import get_function_tool_call, get_text_message
+from tests.test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from tests.utils.hitl import (
     make_agent,
     make_context_wrapper,
@@ -40,6 +43,78 @@ from tests.utils.hitl import (
     queue_function_call_and_text,
 )
 from tests.utils.simple_session import SimpleListSession
+
+
+class _FailNextAtomicAddSession(SimpleListSession):
+    """Fail selected atomic appends before mutating the in-memory history."""
+
+    def __init__(self) -> None:
+        super().__init__(session_id="fail-next-atomic-add")
+        self.fail_next_add = False
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self.fail_next_add:
+            self.fail_next_add = False
+            raise RuntimeError("injected atomic Session.add_items failure")
+        await super().add_items(items)
+
+
+class _FailAfterAppendCompactionSession(_FailNextAtomicAddSession):
+    """Fail deferred compaction after the resumed output batch was appended."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_deferred_compaction = False
+        self.deferred_compaction_calls: list[tuple[str, bool | None]] = []
+
+    async def run_compaction(self, args: Any = None) -> None:
+        pass
+
+    async def _defer_compaction(self, response_id: str, *, store: bool | None = None) -> None:
+        self.deferred_compaction_calls.append((response_id, store))
+        if self.fail_deferred_compaction:
+            self.fail_deferred_compaction = False
+            raise RuntimeError("injected post-append compaction failure")
+
+
+async def _run_in_mode(
+    mode: str,
+    agent: Agent[Any],
+    input_value: Any,
+    session: SimpleListSession,
+    run_config: RunConfig,
+) -> Any:
+    if mode == "non_streamed":
+        return await Runner.run(agent, input_value, session=session, run_config=run_config)
+    result = Runner.run_streamed(agent, input_value, session=session, run_config=run_config)
+    async for _ in result.stream_events():
+        pass
+    return result
+
+
+async def _run_expecting_atomic_failure(
+    mode: str,
+    agent: Agent[Any],
+    state: RunState[Any],
+    session: _FailNextAtomicAddSession,
+    run_config: RunConfig,
+) -> Any | None:
+    if mode == "non_streamed":
+        with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+            await Runner.run(agent, state, session=session, run_config=run_config)
+        return None
+    result = Runner.run_streamed(agent, state, session=session, run_config=run_config)
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        async for _ in result.stream_events():
+            pass
+    return result
+
+
+def _count_call_items(items: list[TResponseInputItem], item_type: str, call_id: str) -> int:
+    return sum(
+        isinstance(item, dict) and item.get("type") == item_type and item.get("call_id") == call_id
+        for item in items
+    )
 
 
 @pytest.mark.asyncio
@@ -458,6 +533,525 @@ async def test_resumed_approval_does_not_duplicate_session_items() -> None:
 
     assert call_count == 1
     assert output_count == 1
+
+
+@pytest.mark.parametrize(
+    ("pause_mode", "failing_mode", "retry_mode", "round_trip"),
+    [
+        ("non_streamed", "non_streamed", "non_streamed", False),
+        ("non_streamed", "non_streamed", "streamed", True),
+        ("non_streamed", "streamed", "non_streamed", True),
+        ("non_streamed", "streamed", "streamed", False),
+        ("streamed", "non_streamed", "streamed", False),
+        ("streamed", "non_streamed", "non_streamed", True),
+        ("streamed", "streamed", "non_streamed", False),
+        ("streamed", "streamed", "streamed", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resumed_approval_retries_failed_atomic_session_write_before_model_call(
+    pause_mode: str,
+    failing_mode: str,
+    retry_mode: str,
+    round_trip: bool,
+) -> None:
+    side_effects: list[int] = []
+
+    @function_tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        side_effects.append(amount)
+        return f"charged:{amount}"
+
+    call_id = "call-charge"
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", json.dumps({"amount": 7}), call_id=call_id)],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="agent", model=model, tools=[charge])
+    session = _FailNextAtomicAddSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await _run_in_mode(pause_mode, agent, "charge 7", session, run_config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.fail_next_add = True
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        await _run_in_mode(failing_mode, agent, state, session, run_config)
+
+    assert side_effects == [7]
+    assert len(model.calls) == 1
+    assert _count_call_items(await session.get_items(), "function_call", call_id) == 1
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 0
+
+    with pytest.raises(UserError, match="without the original Session"):
+        await Runner.run(agent, state, run_config=run_config)
+    with pytest.raises(UserError, match="using a different Session"):
+        await Runner.run(
+            agent,
+            state,
+            session=SimpleListSession(session_id="different-session"),
+            run_config=run_config,
+        )
+    assert len(model.calls) == 1
+
+    if round_trip:
+        serialized_state = state.to_json()
+        assert serialized_state["$schemaVersion"] == "1.17"
+        assert serialized_state["pending_session_write"]["session_id"] == session.session_id
+        assert serialized_state["pending_session_write"]["items"]
+        malformed_state = json.loads(json.dumps(serialized_state))
+        malformed_state["pending_session_write"]["items"] = [{"type": "bogus"}]
+        with pytest.raises(UserError, match="pending_session_write items must all be valid"):
+            await RunState.from_json(agent, malformed_state)
+        empty_pending_state = json.loads(json.dumps(serialized_state))
+        empty_pending_state["pending_session_write"]["items"] = []
+        with pytest.raises(UserError, match="pending_session_write items must not be empty"):
+            await RunState.from_json(agent, empty_pending_state)
+        legacy_labeled_state = json.loads(json.dumps(serialized_state))
+        legacy_labeled_state["$schemaVersion"] = "1.16"
+        with pytest.raises(UserError, match="pending_session_write requires schema version 1.17"):
+            await RunState.from_json(agent, legacy_labeled_state)
+        for invalid_count in ("0", True, -1):
+            invalid_count_state = json.loads(json.dumps(serialized_state))
+            invalid_count_state["current_turn_persisted_item_count"] = invalid_count
+            with pytest.raises(UserError, match="must be a non-negative integer"):
+                await RunState.from_json(agent, invalid_count_state)
+        missing_count_state = json.loads(json.dumps(serialized_state))
+        missing_count_state.pop("current_turn_persisted_item_count")
+        missing_count_restored = await RunState.from_json(agent, missing_count_state)
+        assert missing_count_restored._current_turn_persisted_item_count == 0
+        state = await RunState.from_json(agent, serialized_state)
+
+    session.fail_next_add = True
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        await _run_in_mode(retry_mode, agent, state, session, run_config)
+
+    assert side_effects == [7]
+    assert len(model.calls) == 1
+
+    resumed = await _run_in_mode(retry_mode, agent, state, session, run_config)
+
+    assert resumed.final_output == "done"
+    assert side_effects == [7]
+    assert len(model.calls) == 2
+    saved_items = await session.get_items()
+    replay_items = resumed.to_input_list()
+    assert _count_call_items(saved_items, "function_call", call_id) == 1
+    assert _count_call_items(saved_items, "function_call_output", call_id) == 1
+    assert _count_call_items(replay_items, "function_call", call_id) == 1
+    assert _count_call_items(replay_items, "function_call_output", call_id) == 1
+
+
+@pytest.mark.parametrize(
+    ("failing_mode", "retry_mode", "round_trip"),
+    [
+        ("non_streamed", "non_streamed", False),
+        ("non_streamed", "streamed", True),
+        ("streamed", "non_streamed", True),
+        ("streamed", "streamed", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resumed_approval_and_handoff_retries_session_write_before_target_model(
+    failing_mode: str,
+    retry_mode: str,
+    round_trip: bool,
+) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def approved_tool() -> str:
+        side_effects.append("ran")
+        return "approved"
+
+    source_model = ScriptedModel()
+    target_model = ScriptedModel([[get_text_message("done")]])
+    target = Agent(
+        name="target",
+        model=target_model,
+        model_settings=ModelSettings(store=True),
+    )
+    source = Agent(
+        name="source",
+        model=source_model,
+        model_settings=ModelSettings(store=False),
+        tools=[approved_tool],
+        handoffs=[target],
+    )
+    approved_call_id = "call-approved-before-handoff"
+    handoff_call_id = "call-handoff-after-approval"
+    source_model.enqueue(
+        [
+            get_function_tool_call("approved_tool", "{}", call_id=approved_call_id),
+            get_handoff_tool_call(target, call_id=handoff_call_id),
+        ]
+    )
+    session = _FailAfterAppendCompactionSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(
+        source, "approve and hand off", session=session, run_config=run_config
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.fail_next_add = True
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        await _run_in_mode(failing_mode, source, state, session, run_config)
+
+    assert side_effects == ["ran"]
+    assert len(source_model.calls) == 1
+    assert len(target_model.calls) == 0
+    assert isinstance(state._current_step, NextStepRunAgain)
+    assert state._current_agent is target
+    assert (
+        _count_call_items(await session.get_items(), "function_call_output", approved_call_id) == 0
+    )
+    assert (
+        _count_call_items(await session.get_items(), "function_call_output", handoff_call_id) == 0
+    )
+
+    if round_trip:
+        serialized_state = state.to_json()
+        assert serialized_state["pending_session_write"] is not None
+        assert serialized_state["pending_session_write"]["store"] is False
+        invalid_store_state = json.loads(json.dumps(serialized_state))
+        invalid_store_state["pending_session_write"]["store"] = "false"
+        with pytest.raises(UserError, match="store must be a boolean or null"):
+            await RunState.from_json(source, invalid_store_state)
+        state = await RunState.from_json(source, serialized_state)
+        assert state._current_agent is target
+
+    session.fail_next_add = True
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        await _run_in_mode(retry_mode, source, state, session, run_config)
+
+    assert side_effects == ["ran"]
+    assert len(source_model.calls) == 1
+    assert len(target_model.calls) == 0
+
+    resumed = await _run_in_mode(retry_mode, source, state, session, run_config)
+
+    assert resumed.final_output == "done"
+    assert resumed.last_agent is target
+    assert side_effects == ["ran"]
+    assert len(source_model.calls) == 1
+    assert len(target_model.calls) == 1
+    saved_items = await session.get_items()
+    assert _count_call_items(saved_items, "function_call_output", approved_call_id) == 1
+    assert _count_call_items(saved_items, "function_call_output", handoff_call_id) == 1
+    assert len(session.deferred_compaction_calls) == 1
+    assert session.deferred_compaction_calls[0][1] is False
+
+
+@pytest.mark.parametrize(
+    ("failing_mode", "retry_mode", "round_trip"),
+    [
+        ("non_streamed", "non_streamed", True),
+        ("non_streamed", "streamed", False),
+        ("streamed", "non_streamed", False),
+        ("streamed", "streamed", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_approval_retries_session_write_without_another_model_call(
+    failing_mode: str,
+    retry_mode: str,
+    round_trip: bool,
+) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def terminal_tool() -> str:
+        side_effects.append("ran")
+        return "terminal-output"
+
+    call_id = "call-terminal-after-approval"
+    model = ScriptedModel([[get_function_tool_call("terminal_tool", "{}", call_id=call_id)]])
+    agent = Agent(
+        name="terminal-agent",
+        model=model,
+        tools=[terminal_tool],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = _FailNextAtomicAddSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "run terminal tool", session=session, run_config=run_config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    session.fail_next_add = True
+    failed_result = await _run_expecting_atomic_failure(
+        failing_mode,
+        agent,
+        state,
+        session,
+        run_config,
+    )
+
+    assert side_effects == ["ran"]
+    assert len(model.calls) == 1
+    assert isinstance(state._current_step, NextStepFinalOutput)
+    assert state._pending_session_items
+
+    if failed_result is not None:
+        state = failed_result.to_state()
+        assert isinstance(state._current_step, NextStepFinalOutput)
+        assert state._pending_session_items
+
+    if round_trip:
+        payload = state.to_json()
+        assert payload["current_step"]["type"] == "next_step_final_output"
+
+        legacy_final_payload = json.loads(json.dumps(payload))
+        legacy_final_payload["$schemaVersion"] = "1.16"
+        legacy_final_payload["pending_session_write"] = None
+        with pytest.raises(UserError, match="pending final output requires schema version 1.17"):
+            await RunState.from_json(agent, legacy_final_payload)
+
+        malformed_final_payload = json.loads(json.dumps(payload))
+        malformed_final_payload["current_step"]["data"] = []
+        with pytest.raises(UserError, match="pending final output data must contain output"):
+            await RunState.from_json(agent, malformed_final_payload)
+
+        malformed_step_payload = json.loads(json.dumps(payload))
+        malformed_step_payload["current_step"] = []
+        with pytest.raises(UserError, match="current_step must be an object or null"):
+            await RunState.from_json(agent, malformed_step_payload)
+
+        state = await RunState.from_json(agent, payload)
+
+    resumed = await _run_in_mode(retry_mode, agent, state, session, run_config)
+
+    assert resumed.final_output == "terminal-output"
+    assert side_effects == ["ran"]
+    assert len(model.calls) == 1
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_terminal_guardrail_failure_retries_session_write_before_model() -> None:
+    side_effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def terminal_tool() -> str:
+        side_effects.append("ran")
+        return "terminal-output"
+
+    def block_output(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    call_id = "call-terminal-guardrail-failure"
+    model = ScriptedModel([[get_function_tool_call("terminal_tool", "{}", call_id=call_id)]])
+    agent = Agent(
+        name="terminal-guardrail-agent",
+        model=model,
+        tools=[terminal_tool],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[OutputGuardrail(guardrail_function=block_output)],
+    )
+    session = _FailNextAtomicAddSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "run terminal tool", session=session, run_config=run_config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.fail_next_add = True
+    with pytest.raises(UserError):
+        await Runner.run(agent, state, session=session, run_config=run_config)
+    assert state._pending_session_items
+    assert len(model.calls) == 1
+    assert side_effects == ["ran"]
+
+    session.fail_next_add = True
+    with pytest.raises(RuntimeError, match="injected atomic Session.add_items failure"):
+        await Runner.run(agent, state, session=session, run_config=run_config)
+    assert state._pending_session_items
+    assert len(model.calls) == 1
+    assert side_effects == ["ran"]
+
+    agent.output_guardrails = []
+    model.enqueue([get_text_message("continued")])
+    resumed = await Runner.run(agent, state, session=session, run_config=run_config)
+
+    assert resumed.final_output == "continued"
+    assert len(model.calls) == 2
+    assert side_effects == ["ran"]
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 1
+
+
+@pytest.mark.parametrize("continuation", ["run_again", "handoff"])
+@pytest.mark.asyncio
+async def test_failed_stream_to_state_preserves_pending_session_barrier(
+    continuation: str,
+) -> None:
+    side_effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def approved_tool() -> str:
+        side_effects.append("ran")
+        return "approved"
+
+    source_model = ScriptedModel()
+    target_model = ScriptedModel([[get_text_message("target-done")]])
+    target = Agent(name="target", model=target_model)
+    source = Agent(
+        name="source",
+        model=source_model,
+        tools=[approved_tool],
+        handoffs=[target] if continuation == "handoff" else [],
+    )
+    call_id = f"call-stream-state-{continuation}"
+    first_response = [get_function_tool_call("approved_tool", "{}", call_id=call_id)]
+    if continuation == "handoff":
+        first_response.append(get_handoff_tool_call(target, call_id="call-stream-handoff"))
+        source_model.enqueue(first_response)
+        expected_output = "target-done"
+    else:
+        source_model = ScriptedModel([first_response, [get_text_message("source-done")]])
+        source.model = source_model
+        expected_output = "source-done"
+
+    session = _FailNextAtomicAddSession()
+    run_config = RunConfig(tracing_disabled=True)
+    paused = await Runner.run(source, "approve", session=session, run_config=run_config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    session.fail_next_add = True
+
+    failed_result = await _run_expecting_atomic_failure(
+        "streamed",
+        source,
+        state,
+        session,
+        run_config,
+    )
+    assert failed_result is not None
+    copied = failed_result.to_state()
+
+    assert copied._pending_session_items
+    if continuation == "handoff":
+        assert copied._current_agent is target
+
+    resumed = await Runner.run(source, copied, session=session, run_config=run_config)
+    assert resumed.final_output == expected_output
+    assert side_effects == ["ran"]
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_approval_does_not_retry_after_post_append_compaction_failure() -> None:
+    side_effects: list[int] = []
+
+    @function_tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        side_effects.append(amount)
+        return f"charged:{amount}"
+
+    call_id = "call-charge-post-append"
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", json.dumps({"amount": 9}), call_id=call_id)],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="agent", model=model, tools=[charge])
+    session = _FailAfterAppendCompactionSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "charge 9", session=session, run_config=run_config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.fail_deferred_compaction = True
+    with pytest.raises(RuntimeError, match="injected post-append compaction failure"):
+        await Runner.run(agent, state, session=session, run_config=run_config)
+
+    assert side_effects == [9]
+    assert len(model.calls) == 1
+    assert state.to_json()["pending_session_write"] is None
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 1
+
+    resumed = await Runner.run(agent, state, session=session, run_config=run_config)
+
+    assert resumed.final_output == "done"
+    assert side_effects == [9]
+    assert len(model.calls) == 2
+    assert _count_call_items(await session.get_items(), "function_call_output", call_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_to_state_preserves_handoff_after_post_append_failure() -> None:
+    side_effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def approved_tool() -> str:
+        side_effects.append("ran")
+        return "approved"
+
+    source_model = ScriptedModel()
+    target_model = ScriptedModel([[get_text_message("target-done")]])
+    target = Agent(name="target", model=target_model)
+    source = Agent(
+        name="source",
+        model=source_model,
+        tools=[approved_tool],
+        handoffs=[target],
+    )
+    approved_call_id = "call-post-append-approved"
+    source_model.enqueue(
+        [
+            get_function_tool_call("approved_tool", "{}", call_id=approved_call_id),
+            get_handoff_tool_call(target, call_id="call-post-append-handoff"),
+        ]
+    )
+    session = _FailAfterAppendCompactionSession()
+    run_config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(
+        source, "approve and hand off", session=session, run_config=run_config
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    session.fail_deferred_compaction = True
+
+    failed_result = Runner.run_streamed(
+        source,
+        state,
+        session=session,
+        run_config=run_config,
+    )
+    with pytest.raises(RuntimeError, match="injected post-append compaction failure"):
+        async for _ in failed_result.stream_events():
+            pass
+
+    assert state._pending_session_items == []
+    assert state._current_agent is target
+    assert isinstance(state._current_step, NextStepRunAgain)
+
+    copied = failed_result.to_state()
+    assert copied._pending_session_items == []
+    assert copied._current_agent is target
+    assert isinstance(copied._current_step, NextStepRunAgain)
+
+    resumed = await Runner.run(source, copied, session=session, run_config=run_config)
+
+    assert resumed.final_output == "target-done"
+    assert resumed.last_agent is target
+    assert side_effects == ["ran"]
+    assert len(source_model.calls) == 1
+    assert len(target_model.calls) == 1
+    assert (
+        _count_call_items(await session.get_items(), "function_call_output", approved_call_id) == 1
+    )
 
 
 @pytest.mark.asyncio

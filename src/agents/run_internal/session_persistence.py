@@ -10,7 +10,7 @@ import copy
 import inspect
 import json
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 from .. import _debug
@@ -60,7 +60,14 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
-from .run_steps import NextStepInterruption, ProcessedResponse, SingleStepResult
+from .run_steps import (
+    NextStepFinalOutput,
+    NextStepHandoff,
+    NextStepInterruption,
+    NextStepRunAgain,
+    ProcessedResponse,
+    SingleStepResult,
+)
 
 __all__ = [
     "admit_pending_input",
@@ -72,6 +79,7 @@ __all__ = [
     "session_items_for_turn",
     "resumed_turn_items",
     "save_result_to_session",
+    "retry_pending_resumed_turn_session_items",
     "save_resumed_turn_items",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -539,7 +547,17 @@ def update_run_state_after_resume(
     run_state._generated_items = generated_items
     if session_items is not None:
         run_state._session_items = list(session_items)
-    run_state._current_step = turn_result.next_step  # type: ignore[assignment]
+    if isinstance(turn_result.next_step, NextStepHandoff):
+        # Advance the durable continuation before persisting the resumed outputs. If the
+        # atomic Session append fails, the RunState can retry that exact batch and then enter
+        # the target agent without re-running the approved tool or losing the handoff.
+        run_state._current_agent = turn_result.next_step.new_agent
+        run_state._current_step = NextStepRunAgain()
+    elif isinstance(turn_result.next_step, NextStepFinalOutput):
+        # Output guardrails still run before a terminal continuation becomes retryable.
+        run_state._current_step = NextStepRunAgain()
+    else:
+        run_state._current_step = turn_result.next_step
 
 
 async def save_result_to_session(
@@ -552,6 +570,7 @@ async def save_result_to_session(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    on_session_items_persisted: Callable[[int], None] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -646,12 +665,16 @@ async def save_result_to_session(
     if len(items_to_save) == 0:
         if run_state is not None:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
+        if on_session_items_persisted is not None:
+            on_session_items_persisted(saved_run_items_count)
         return saved_run_items_count
 
     await _session_add_items(session, items_to_save, wrapper=wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
+    if on_session_items_persisted is not None:
+        on_session_items_persisted(saved_run_items_count)
 
     if response_id and is_openai_responses_compaction_aware_session(session):
         has_local_tool_outputs = any(
@@ -707,10 +730,26 @@ async def save_resumed_turn_items(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    run_state: RunState | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
         return persisted_count
+    if type(persisted_count) is not int or persisted_count < 0:
+        raise UserError("Resumed Session persisted count must be a non-negative integer")
+    if run_state is not None:
+        run_state._pending_session_items = list(items)
+        run_state._pending_session_id = session.session_id
+        run_state._pending_session_store = store
+
+    def acknowledge_session_write(saved_count: int) -> None:
+        if run_state is None:
+            return
+        run_state._current_turn_persisted_item_count = persisted_count + saved_count
+        run_state._pending_session_items = []
+        run_state._pending_session_id = None
+        run_state._pending_session_store = None
+
     saved_count = await save_result_to_session(
         session,
         [],
@@ -720,8 +759,48 @@ async def save_resumed_turn_items(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        on_session_items_persisted=acknowledge_session_write,
     )
-    return persisted_count + saved_count
+    updated_persisted_count = persisted_count + saved_count
+    return updated_persisted_count
+
+
+async def retry_pending_resumed_turn_session_items(
+    *,
+    session: Session | None,
+    run_state: RunState,
+    response_id: str | None,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> int:
+    """Retry an incomplete atomic resumed-turn append before the next model call."""
+    if not run_state._pending_session_items:
+        return run_state._current_turn_persisted_item_count
+    if session is None:
+        raise UserError(
+            "Cannot resume a RunState with an incomplete Session write without the original "
+            "Session. Pass the same Session and retry."
+        )
+    if session.session_id != run_state._pending_session_id:
+        raise UserError(
+            "Cannot resume a RunState with an incomplete Session write using a different "
+            "Session. Pass the Session with id "
+            f"{run_state._pending_session_id!r} and retry."
+        )
+    if not isinstance(run_state._current_step, NextStepRunAgain | NextStepFinalOutput):
+        raise UserError(
+            "Cannot retry a pending Session write from a RunState without a resumable "
+            "continuation. Start a new run from safe input."
+        )
+    return await save_resumed_turn_items(
+        session=session,
+        items=list(run_state._pending_session_items),
+        persisted_count=run_state._current_turn_persisted_item_count,
+        response_id=response_id,
+        reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+        store=run_state._pending_session_store,
+        wrapper=wrapper,
+        run_state=run_state,
+    )
 
 
 async def rewind_session_items(
