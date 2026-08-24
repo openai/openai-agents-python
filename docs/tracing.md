@@ -201,10 +201,12 @@ await Runner.run(
 
 The following community and vendor integrations support the tracing API surface of the OpenAI Agents SDK.
 
+For Arize users, [Arize AX](https://arize.com/docs/ax/integrations/python-agent-frameworks/openai-agents/openai-agents-sdk-tracing) is the managed production option for tracing, monitoring, and evaluating OpenAI Agents SDK applications. [Arize Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk) is the open-source and self-hosted path for local or team-managed tracing workflows. The Arize guides for [agent evaluation](https://arize.com/guides/ai-agent-handbook/agent-evaluation/) and [LLM evaluation](https://arize.com/resources/llm-evaluation/) show how teams use traces to debug agent behavior and improve model outputs.
+
 ### External tracing processors list
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
--   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
+-   [Arize Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
 -   [Future AGI](https://docs.futureagi.com/docs/tracing/auto/openai_agents/)
 -   [MLflow (self-hosted/OSS)](https://mlflow.org/docs/latest/tracing/integrations/openai-agent)
 -   [MLflow (Databricks hosted)](https://docs.databricks.com/aws/en/mlflow/mlflow-tracing#-automatic-tracing)
