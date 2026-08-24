@@ -97,12 +97,12 @@ class ToolOutputTrimmer:
         recent_turns: Number of recent user messages whose surrounding items are never
             trimmed. Defaults to 2.
         max_output_chars: Tool outputs above this character count are candidates for
-            trimming. Structured outputs count their model-facing string payloads without
-            Python or JSON representation overhead, and their replacements fit within this
-            budget. Defaults to 500.
+            trimming, and every replacement summary fits within this budget. Structured
+            outputs count their model-facing string payloads without Python or JSON
+            representation overhead. Defaults to 500.
         preview_chars: Maximum number of characters of a string output, or the text parts of
-            a structured output, to preserve as a preview when trimming. Structured previews
-            may be shorter when needed to fit ``max_output_chars``. Defaults to 200.
+            a structured output, to preserve as a preview when trimming. Previews may be
+            shorter when needed to fit ``max_output_chars``. Defaults to 200.
         trimmable_tools: Optional tool name or set of tool names whose outputs can be trimmed.
             For namespaced tools, both bare names and qualified ``namespace.name`` entries are
             supported. If ``None``, all tool outputs are eligible for trimming. Defaults
@@ -257,17 +257,58 @@ class ToolOutputTrimmer:
 
         tool_name = tool_names[0] if tool_names else ""
         display_name = tool_name or "unknown_tool"
-        preview = output_str[: self.preview_chars]
-        summary = (
-            f"[Trimmed: {display_name} output — {output_len} chars → "
-            f"{self.preview_chars} char preview]\n{preview}..."
-        )
-        if len(summary) >= output_len:
+        summary = self._string_output_summary(display_name, output_str)
+        if summary is None:
             return None, 0
 
         trimmed_item = dict(item)
         trimmed_item["output"] = summary
         return trimmed_item, output_len - len(summary)
+
+    def _string_output_summary(self, display_name: str, output_str: str) -> str | None:
+        """Summarize a string output within ``max_output_chars``, or ``None`` to keep it.
+
+        The full preview summary is kept verbatim when it fits. When it would exceed the
+        budget, the preview shrinks first and the header falls back to shorter forms,
+        matching the structured-output summaries.
+        """
+        output_len = len(output_str)
+        full_preview = output_str[: self.preview_chars]
+        summary = (
+            f"[Trimmed: {display_name} output — {output_len} chars → "
+            f"{self.preview_chars} char preview]\n{full_preview}..."
+        )
+        if len(summary) >= output_len:
+            return None
+        if len(summary) <= self.max_output_chars:
+            return summary
+
+        minimal_header = "[Trimmed]"
+        if self.max_output_chars < len(minimal_header):
+            return minimal_header[: self.max_output_chars]
+
+        preview_budget = self.max_output_chars - len(minimal_header) - 1
+        preview_len = min(output_len, self.preview_chars, max(0, preview_budget))
+        body = f"\n{output_str[:preview_len]}" if preview_len else ""
+        if preview_len and len(minimal_header) + len(body) + len("...") <= self.max_output_chars:
+            body += "..."
+
+        headers: list[str] = []
+        if preview_len:
+            headers.append(
+                f"[Trimmed: {display_name} output — {output_len} chars → "
+                f"{preview_len} char preview]"
+            )
+        headers.extend(
+            [
+                f"[Trimmed: {display_name} output — {output_len} chars]",
+                f"[Trimmed: {display_name}]",
+                minimal_header,
+            ]
+        )
+        return next(
+            header + body for header in headers if len(header) + len(body) <= self.max_output_chars
+        )
 
     def _trim_structured_function_call_output(
         self,
@@ -421,12 +462,8 @@ class ToolOutputTrimmer:
         if output_len <= self.max_output_chars:
             return None, 0
 
-        preview = serialized_results[: self.preview_chars]
-        summary = (
-            f"[Trimmed: tool_search output — {output_len} chars → "
-            f"{self.preview_chars} char preview]\n{preview}..."
-        )
-        if len(summary) >= output_len:
+        summary = self._string_output_summary("tool_search", serialized_results)
+        if summary is None:
             return None, 0
 
         trimmed_item = dict(item)

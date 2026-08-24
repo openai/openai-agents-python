@@ -1128,6 +1128,77 @@ class TestEdgeCases:
         # Output left untouched because summary would be longer
         assert _output(result, 2) == borderline
 
+    @pytest.mark.parametrize("max_output_chars", [1, len("[Trimmed]"), 15, 40, 100])
+    @pytest.mark.parametrize("preview_chars", [0, 20, 200, 990])
+    @pytest.mark.parametrize("output_len", [200, 501, 1000, 5000])
+    def test_string_output_respects_budget(
+        self, max_output_chars: int, preview_chars: int, output_len: int
+    ) -> None:
+        """A trimmed string summary never exceeds ``max_output_chars`` at any budget."""
+        large = "x" * output_len
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", large),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(max_output_chars=max_output_chars, preview_chars=preview_chars)
+        result = trimmer(_make_data(items))
+        trimmed = _output(result, 2)
+
+        # Either left untrimmed (rich summary was not shorter) or bounded by the budget.
+        if trimmed != large:
+            assert isinstance(trimmed, str)
+            assert len(trimmed) <= max_output_chars
+        # Trimming is idempotent regardless of which branch ran.
+        assert trimmer(_make_data(result.input)).input == result.input
+
+    def test_string_output_matches_issue_repro(self) -> None:
+        """The reported case (1000 chars, budget 40) yields a summary within the budget."""
+        items = [
+            _user("q1"),
+            _func_call("c1", "search"),
+            _func_output("c1", "x" * 1000),
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        result = ToolOutputTrimmer(max_output_chars=40)(_make_data(items))
+        trimmed = _output(result, 2)
+        assert isinstance(trimmed, str)
+        assert trimmed != "x" * 1000
+        assert len(trimmed) <= 40
+        assert trimmed.startswith("[Trimmed")
+
+    def test_legacy_tool_search_output_respects_budget(self) -> None:
+        """Legacy free-text tool_search results are also bounded by ``max_output_chars``."""
+        items = [
+            _user("q1"),
+            {
+                "type": "tool_search_output",
+                "call_id": "ts1",
+                "results": [{"text": "y" * 1000}],
+            },
+            _assistant("a1"),
+            _user("q2"),
+            _assistant("a2"),
+            _user("q3"),
+            _assistant("a3"),
+        ]
+        trimmer = ToolOutputTrimmer(max_output_chars=40, preview_chars=200)
+        result = trimmer(_make_data(items))
+        trimmed_item = cast(dict[str, Any], result.input[1])
+        text = trimmed_item["results"][0]["text"]
+        assert len(text) <= 40
+        assert text.startswith("[Trimmed")
+        assert trimmer(_make_data(result.input)).input == result.input
+
     def test_unknown_tool_name_fallback(self) -> None:
         """When a function_call_output has no matching function_call, the summary
         should show 'unknown_tool' instead of a blank name."""
