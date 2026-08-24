@@ -337,9 +337,10 @@ class _EnvProbeSession(UnixLocalSandboxSession):
             state=UnixLocalSandboxSessionState(
                 manifest=Manifest(root=str(root)),
                 snapshot=NoopSnapshot(id="noop"),
-                inherit_environment=inherit_environment,
             )
         )
+        # runtime-only opt-in wired by the client (never persisted on state)
+        self._inherit_environment = inherit_environment
         self.captured_env: dict[str, str] = {}
 
     async def _exec_internal(
@@ -420,8 +421,6 @@ async def test_resume_ignores_untrusted_state_flags_and_enforces_linux_opt_in(
     state = UnixLocalSandboxSessionState(
         manifest=Manifest(root=str(tmp_path / "ws")),
         snapshot=_NoopSnapshot(id="noop"),
-        # untrusted serialized payload claims both opt-ins
-        inherit_environment=True,
     )
 
     with pytest.raises(ConfigurationError, match="allow_unconfined_linux"):
@@ -429,6 +428,22 @@ async def test_resume_ignores_untrusted_state_flags_and_enforces_linux_opt_in(
 
     client = UnixLocalSandboxClient(allow_unconfined_linux=True, inherit_environment=False)
     session = await client.resume(state)
-    # serialized claim must not win over the trusted constructor value
-    assert session.state.inherit_environment is False
+    await session.stop()
+    # the opt-in is runtime-only on the session object: it never serializes
+    # into the persisted session-state payload (older SDKs reading a
+    # snapshot cannot be downgraded back to full host-env inheritance)
+
+
+@pytest.mark.asyncio
+async def test_inherit_environment_never_persists_in_session_state(tmp_path: Path) -> None:
+    from agents.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxSessionState,
+    )
+    from agents.sandbox.snapshot import NoopSnapshot as _NoopSnapshot
+
+    client = UnixLocalSandboxClient(allow_unconfined_linux=True, inherit_environment=True)
+    session = await client.create(manifest=Manifest(root=str(tmp_path / "ws")))
+    payload = client.serialize_session_state(session.state)
+    assert "inherit_environment" not in payload
     await session.stop()

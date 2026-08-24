@@ -118,7 +118,6 @@ _ENV_INHERIT_ALLOWLIST = frozenset(
 class UnixLocalSandboxSessionState(SandboxSessionState):
     type: Literal["unix_local"] = "unix_local"
     workspace_root_owned: bool = False
-    inherit_environment: bool = False
 
 
 class UnixLocalSandboxClientOptions(BaseSandboxClientOptions):
@@ -175,6 +174,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
         self.state = state
+        # Runtime-only opt-in set by the client from its trusted constructor
+        # value; deliberately NOT on the state so it never persists into
+        # RunState snapshots (schema readers would ignore it and silently
+        # resume with full host-environment inheritance).
+        self._inherit_environment = False
         self._running = False
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
@@ -478,7 +482,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         # `printenv` inside the sandbox previously exposed OPENAI_API_KEY,
         # AWS_*, GITHUB_TOKEN, ...). Callers that rely on the old behavior
         # can pass inherit_environment=True.
-        if self.state.inherit_environment:
+        if self._inherit_environment:
             env = dict(os.environ)
         else:
             env = {
@@ -1207,9 +1211,9 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             snapshot=snapshot_instance,
             workspace_root_owned=workspace_root_owned,
             exposed_ports=resolved_options.exposed_ports,
-            inherit_environment=self._inherit_environment,
         )
         inner = UnixLocalSandboxSession.from_state(state)
+        inner._inherit_environment = self._inherit_environment
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
@@ -1267,12 +1271,12 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
                 "UnixLocalSandboxClient resuming with allow_unconfined_linux=True: sandboxed "
                 "commands execute on the host without OS-level confinement."
             )
-        # The serialized state is untrusted: whatever it claims about
-        # environment inheritance, the client-level constructor value wins.
-        state.inherit_environment = self._inherit_environment
         state.assert_path_grants_rebound()
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
+        # Environment inheritance is a client-level, runtime-only opt-in:
+        # nothing in the (untrusted) serialized state can re-enable it.
+        inner._inherit_environment = self._inherit_environment
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
