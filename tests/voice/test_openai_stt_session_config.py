@@ -1,6 +1,8 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 from agents.voice import StreamedAudioInput, STTModelSettings
@@ -146,3 +148,57 @@ async def test_streaming_stt_default_turn_detection_unchanged() -> None:
 
     payload = json.loads(websocket.send.await_args.args[0])
     assert payload["session"]["audio"]["input"]["turn_detection"] == {"type": "semantic_vad"}
+
+
+def _sent_types(websocket: AsyncMock) -> list[str]:
+    return [json.loads(call.args[0])["type"] for call in websocket.send.await_args_list]
+
+
+async def _run_stream_audio(
+    settings: STTModelSettings,
+    buffers: list[np.ndarray | None],
+) -> AsyncMock:
+    session = OpenAISTTTranscriptionSession(
+        input=StreamedAudioInput(),
+        client=AsyncMock(api_key="FAKE_KEY"),
+        model="gpt-realtime-whisper",
+        settings=settings,
+        trace_include_sensitive_data=False,
+        trace_include_sensitive_audio_data=False,
+    )
+    websocket = AsyncMock()
+    session._websocket = websocket
+    queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+    for buffer in buffers:
+        queue.put_nowait(buffer)
+    await session._stream_audio(queue)
+    session._end_turn("")
+    return websocket
+
+
+@pytest.mark.asyncio
+async def test_streaming_stt_commits_audio_when_turn_detection_disabled() -> None:
+    """Without server VAD the client has to commit the buffer to finish the turn."""
+    websocket = await _run_stream_audio(
+        STTModelSettings(delay="high", turn_detection={"type": "none"}),
+        [np.zeros(2400, dtype=np.int16), None],
+    )
+    assert _sent_types(websocket) == ["input_audio_buffer.append", "input_audio_buffer.commit"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_stt_does_not_commit_with_default_turn_detection() -> None:
+    websocket = await _run_stream_audio(
+        STTModelSettings(),
+        [np.zeros(2400, dtype=np.int16), None],
+    )
+    assert _sent_types(websocket) == ["input_audio_buffer.append"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_stt_does_not_commit_empty_buffer() -> None:
+    websocket = await _run_stream_audio(
+        STTModelSettings(turn_detection={"type": "none"}),
+        [None],
+    )
+    assert _sent_types(websocket) == []

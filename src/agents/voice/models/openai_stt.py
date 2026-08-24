@@ -321,9 +321,22 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
     ) -> None:
         assert self._websocket is not None, "Websocket not initialized"
         self._start_turn()
+        appended_audio = False
         while True:
             buffer = await audio_queue.get()
             if buffer is None:
+                # With turn detection disabled the server never finalizes a turn on its
+                # own, so commit the appended audio to receive its transcription.
+                if self._turn_detection is None and appended_audio:
+                    try:
+                        await self._websocket.send(
+                            json.dumps({"type": "input_audio_buffer.commit"})
+                        )
+                    except websockets.ConnectionClosed:
+                        pass
+                    except Exception as e:
+                        await self._output_queue.put(ErrorSentinel(e))
+                        raise
                 break
 
             if self._trace_include_sensitive_audio_data:
@@ -344,6 +357,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             except Exception as e:
                 await self._output_queue.put(ErrorSentinel(e))
                 raise
+            if buffer.size > 0:
+                appended_audio = True
 
             await asyncio.sleep(0)  # yield control
 
