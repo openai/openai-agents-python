@@ -392,7 +392,7 @@ def _structural_sequence_start(
     container: Sequence[RunItem],
     sequence: Sequence[RunItem],
 ) -> int | None:
-    """Find a contiguous sequence by structural identity (call_id, item_id, type)."""
+    """Find a contiguous sequence by structural identity (item_id, item_type, call_id)."""
     if not sequence or len(sequence) > len(container):
         return None
     sequence_keys = [_structural_item_key(item) for item in sequence]
