@@ -399,3 +399,35 @@ async def test_linux_requires_explicit_unconfined_opt_in(
         options=UnixLocalSandboxClientOptions(allow_unconfined_linux=True),
     )
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_untrusted_state_flags_and_enforces_linux_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys as _sys
+
+    from agents.sandbox.errors import ConfigurationError
+    from agents.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxSessionState,
+    )
+    from agents.sandbox.snapshot import NoopSnapshot as _NoopSnapshot
+
+    monkeypatch.setattr(_sys, "platform", "linux")
+
+    state = UnixLocalSandboxSessionState(
+        manifest=Manifest(root=str(tmp_path / "ws")),
+        snapshot=_NoopSnapshot(id="noop"),
+        # untrusted serialized payload claims both opt-ins
+        inherit_environment=True,
+    )
+
+    with pytest.raises(ConfigurationError, match="allow_unconfined_linux"):
+        await UnixLocalSandboxClient().resume(state)
+
+    client = UnixLocalSandboxClient(allow_unconfined_linux=True, inherit_environment=False)
+    session = await client.resume(state)
+    # serialized claim must not win over the trusted constructor value
+    assert session.state.inherit_environment is False
+    await session.stop()

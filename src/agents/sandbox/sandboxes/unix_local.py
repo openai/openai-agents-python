@@ -107,7 +107,6 @@ _ENV_INHERIT_ALLOWLIST = frozenset(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS",
-        "PIP_INDEX_URL",
         "UV_PYTHON",
         "NO_COLOR",
         "FORCE_COLOR",
@@ -1142,11 +1141,19 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         *,
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
+        inherit_environment: bool = False,
+        allow_unconfined_linux: bool = False,
     ) -> None:
         self._instrumentation = (
             instrumentation if instrumentation is not None else Instrumentation()
         )
         self._dependencies = dependencies
+        # Trusted, programmatic configuration: unlike the session-state flag
+        # (which is part of serialized RunState payloads and therefore
+        # untrusted on resume), these constructor values are the authority
+        # for both create() and resume().
+        self._inherit_environment = inherit_environment
+        self._allow_unconfined_linux = allow_unconfined_linux
 
     @redact_mount_error_data
     async def create(
@@ -1158,7 +1165,8 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         resolved_options = options if options is not None else UnixLocalSandboxClientOptions()
         manifest = manifest if manifest is not None else Manifest()
-        if sys.platform != "darwin" and not resolved_options.allow_unconfined_linux:
+        allow_unconfined_linux = self._allow_unconfined_linux or resolved_options.allow_unconfined_linux
+        if sys.platform != "darwin" and not allow_unconfined_linux:
             raise ConfigurationError(
                 message=(
                     "UnixLocalSandboxClient provides OS-level confinement (sandbox-exec) on "
@@ -1172,7 +1180,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
                 context={"platform": sys.platform, "backend_id": self.backend_id},
                 retryable=False,
             )
-        if sys.platform != "darwin" and resolved_options.allow_unconfined_linux:
+        if sys.platform != "darwin" and allow_unconfined_linux:
             logger.warning(
                 "UnixLocalSandboxClient running with allow_unconfined_linux=True: sandboxed "
                 "commands execute on the host without OS-level confinement."
@@ -1196,7 +1204,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             snapshot=snapshot_instance,
             workspace_root_owned=workspace_root_owned,
             exposed_ports=resolved_options.exposed_ports,
-            inherit_environment=resolved_options.inherit_environment,
+            inherit_environment=self._inherit_environment or resolved_options.inherit_environment,
         )
         inner = UnixLocalSandboxSession.from_state(state)
         return self._wrap_session(inner, instrumentation=self._instrumentation)
@@ -1237,6 +1245,28 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
+        if sys.platform != "darwin" and not self._allow_unconfined_linux:
+            raise ConfigurationError(
+                message=(
+                    "UnixLocalSandboxClient provides OS-level confinement (sandbox-exec) on "
+                    "macOS only; on Linux it executes commands directly on the host with no "
+                    "namespace, seccomp or container isolation. Use DockerSandboxClient on "
+                    "Linux, or construct the client with allow_unconfined_linux=True to "
+                    "explicitly accept unconfined host execution."
+                ),
+                error_code=ErrorCode.UNCONFINED_LINUX_NOT_ALLOWED,
+                op="resume",
+                context={"platform": sys.platform, "backend_id": self.backend_id},
+                retryable=False,
+            )
+        if sys.platform != "darwin" and self._allow_unconfined_linux:
+            logger.warning(
+                "UnixLocalSandboxClient resuming with allow_unconfined_linux=True: sandboxed "
+                "commands execute on the host without OS-level confinement."
+            )
+        # The serialized state is untrusted: whatever it claims about
+        # environment inheritance, the client-level constructor value wins.
+        state.inherit_environment = self._inherit_environment
         state.assert_path_grants_rebound()
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
