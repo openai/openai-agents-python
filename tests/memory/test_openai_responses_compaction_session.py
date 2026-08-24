@@ -1027,6 +1027,50 @@ class TestOpenAIResponsesCompactionSession:
         assert failing_session.add_calls == 2
 
     @pytest.mark.asyncio
+    async def test_run_compaction_input_uses_full_history_when_session_limit_applies(
+        self, tmp_path
+    ) -> None:
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "oldest"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "middle"},
+            ),
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "newest"}),
+        ]
+        compacted_items: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "compacted"},
+            )
+        ]
+
+        underlying = SQLiteSession(
+            "limited-compact",
+            str(tmp_path / "limited_compact.db"),
+            session_settings=SessionSettings(limit=2),
+        )
+        await underlying.add_items(history)
+        assert len(await underlying.get_items()) == 2
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = compacted_items
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        await session.run_compaction({"force": True})
+
+        compact_input = mock_client.responses.compact.call_args.kwargs["input"]
+        assert compact_input == history
+
+    @pytest.mark.asyncio
     async def test_run_compaction_does_not_restore_when_clear_fails_without_mutation(
         self,
     ) -> None:
