@@ -15,6 +15,7 @@ from agents import Agent, WebSearchTool, function_tool
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime import RealtimeAgent, RealtimeSession, RealtimeSessionModelSettings
+from agents.realtime.items import AssistantAudio, AssistantMessageItem
 from agents.realtime.model import RealtimeModelConfig, RealtimePlaybackTracker
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
@@ -930,6 +931,51 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         ]
         assert item_updated_events, "a retrieved conversation item should update listeners"
         assert item_updated_events[-1].item.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_retrieved_completed_item_keeps_status_in_session_history(
+        self, model, monkeypatch
+    ):
+        """A retrieved item must not regress a known terminal item in session history.
+
+        After assistant audio plays, the SDK retrieves that item when the user's next
+        input transcription completes. The retrieved payload reports the item's real
+        status but may omit the transcript, so the session must reconcile it into
+        history without losing either the terminal status or the stored transcript.
+        """
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+        model.add_listener(session)
+
+        session._history = [
+            AssistantMessageItem(
+                item_id="item_1",
+                role="assistant",
+                status="completed",
+                content=[AssistantAudio(audio=None, transcript="hi there")],
+            )
+        ]
+
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.retrieved",
+                "event_id": "event_1",
+                "item": {
+                    "id": "item_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_audio"}],
+                },
+            }
+        )
+
+        assert len(session._history) == 1
+        stored = cast(AssistantMessageItem, session._history[0])
+        assert stored.status == "completed"
+        assert isinstance(stored.content[0], AssistantAudio)
+        assert stored.content[0].transcript == "hi there"
 
     @pytest.mark.asyncio
     async def test_handle_unknown_event_type_ignored(self, model):
