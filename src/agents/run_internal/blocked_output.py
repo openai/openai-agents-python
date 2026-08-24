@@ -366,25 +366,39 @@ def _identity_sequence_start(
     return None
 
 
+def _structural_field(raw_item: Any, field: str) -> str | None:
+    """Read an exact string field without invoking payload equality or hashing hooks."""
+    if type(raw_item) is dict:
+        values = raw_item
+    else:
+        try:
+            values = object.__getattribute__(raw_item, "__dict__")
+        except AttributeError:
+            return None
+    if type(values) is not dict:
+        return None
+    value = _exact_dict_field(values, field)
+    if type(value) is not str:
+        return None
+    return value
+
+
 def _structural_item_key(item: RunItem) -> tuple[str | None, str | None, str | None]:
     """Return (item_id, item_type, call_id) for structural matching after deserialization."""
-    item_id: str | None = None
-    item_type: str | None = None
-    call_id: str | None = None
     raw = getattr(item, "raw_item", None)
-    if raw is not None:
-        if isinstance(raw, dict):
-            item_id = raw.get("id")
-            item_type = raw.get("type")
-            call_id = raw.get("call_id")
-        else:
-            item_id = getattr(raw, "id", None)
-            item_type = getattr(raw, "type", None)
-            call_id = getattr(raw, "call_id", None)
+    if raw is None:
+        return None, None, None
+    item_id = _structural_field(raw, "id")
+    item_type = _structural_field(raw, "type")
+    call_id = _structural_field(raw, "call_id")
     if item_id is None:
-        item_id = getattr(item, "id", None)
+        fallback_id = getattr(item, "id", None)
+        if type(fallback_id) is str:
+            item_id = fallback_id
     if item_type is None:
-        item_type = getattr(item, "type", None)
+        fallback_type = getattr(item, "type", None)
+        if type(fallback_type) is str:
+            item_type = fallback_type
     return item_id, item_type, call_id
 
 
@@ -454,8 +468,13 @@ def _current_response_boundary(
                                 sess_structural : sess_structural + len(processed_items)
                             ]
                         )
+                        suffixes.extend(run_state._session_items[sess_structural:])
+                    # When both owners match, they hold copies of the same
+                    # current response; the generated suffix extended above
+                    # is canonical so independently deserialized copies
+                    # cannot survive deduplication. The session start index
+                    # is still retained for owner cleanup.
                     session_start = sess_structural
-                    suffixes.extend(run_state._session_items[session_start:])
                 proven = True
             elif run_state._current_turn == 1:
                 # Last resort: turn one has no accepted prefix, so a type-based
