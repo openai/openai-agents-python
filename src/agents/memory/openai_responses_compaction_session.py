@@ -411,7 +411,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         async with self._mutation_lock:
-            await self.underlying_session.add_items(items)
+            try:
+                await self.underlying_session.add_items(items)
+            except (Exception, asyncio.CancelledError):
+                # The backend may have committed before acknowledgement failed. Re-read its
+                # authoritative history before compaction instead of retaining a stale cache.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                raise
             if self._compaction_candidate_items is not None:
                 new_items = _normalize_compaction_session_items(items)
                 new_candidates = select_compaction_candidate_items(new_items)

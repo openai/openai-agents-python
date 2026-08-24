@@ -177,6 +177,7 @@ from .session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    resume_pending_session_write,
     resumed_turn_items,
     rewind_session_items,
     save_result_to_session,
@@ -392,6 +393,7 @@ async def _save_resumed_stream_items(
     ):
         return
     streamed_result._current_turn_persisted_item_count = await save_resumed_turn_items(
+        run_state=run_state,
         session=session,
         items=items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
@@ -919,6 +921,12 @@ async def start_streaming(
         if run_state is not None:
             run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
+        if is_resumed_state and run_state is not None:
+            await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
+            streamed_result._current_turn_persisted_item_count = (
+                run_state._current_turn_persisted_item_count
+            )
 
         if (
             conversation_id is not None

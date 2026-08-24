@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 from collections import deque
@@ -60,7 +61,7 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
-from .run_steps import NextStepInterruption, ProcessedResponse, SingleStepResult
+from .run_steps import NextStepInterruption, NextStepRunAgain, ProcessedResponse, SingleStepResult
 
 __all__ = [
     "admit_pending_input",
@@ -73,6 +74,7 @@ __all__ = [
     "resumed_turn_items",
     "save_result_to_session",
     "save_resumed_turn_items",
+    "resume_pending_session_write",
     "update_run_state_after_resume",
     "rewind_session_items",
     "wait_for_session_cleanup",
@@ -552,6 +554,7 @@ async def save_result_to_session(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    resumed_write_state: RunState | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -648,7 +651,20 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
-    await _session_add_items(session, items_to_save, wrapper=wrapper)
+    if resumed_write_state is not None:
+        if resumed_write_state._pending_session_write is not None:
+            raise UserError("Resolve the pending Session write before saving another batch")
+        resumed_write_state._pending_session_write = {
+            "session_id": session.session_id,
+            "items": copy.deepcopy(items_to_save),
+            "before": None,
+            "persisted_count": (
+                resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
+            ),
+        }
+        await resume_pending_session_write(resumed_write_state, session, wrapper=wrapper)
+    else:
+        await _session_add_items(session, items_to_save, wrapper=wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -707,6 +723,7 @@ async def save_resumed_turn_items(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    run_state: RunState | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
@@ -720,8 +737,74 @@ async def save_resumed_turn_items(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        resumed_write_state=(
+            run_state
+            if run_state is not None and isinstance(run_state._current_step, NextStepRunAgain)
+            else None
+        ),
     )
     return persisted_count + saved_count
+
+
+async def resume_pending_session_write(
+    run_state: RunState,
+    session: Session | None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> None:
+    """Settle a resumed output batch before allowing further model work.
+
+    The application must supply the original backend and serialize access to its history,
+    including independently restored RunState copies. Session has no distributed compare-and-swap
+    or backend identity contract. A changed tail is not repaired or searched for similar items.
+    """
+    pending = run_state._pending_session_write
+    if pending is None:
+        return
+    if run_state._session_write_in_progress:
+        raise UserError("The pending Session write is already in progress for this RunState")
+    if session is None or session.session_id != pending["session_id"]:
+        raise UserError("Resume the pending Session write with the original Session and session ID")
+
+    def digests(items: Sequence[TResponseInputItem]) -> list[str]:
+        return [
+            hashlib.sha256(
+                _fingerprint_or_repr(
+                    item, ignore_ids_for_matching=_ignore_ids_for_matching(session)
+                ).encode("utf-8")
+            ).hexdigest()
+            for item in items
+        ]
+
+    run_state._session_write_in_progress = True
+    try:
+        before = pending["before"]
+        if before is None:
+            # No append has started. Retain the batch even if this first read fails.
+            tail = await _session_get_items(
+                session, limit=len(pending["items"]) + 1, wrapper=wrapper
+            )
+            pending["before"] = digests(tail)
+            append = True
+        else:
+            expected = before + digests(pending["items"])
+            tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
+            observed = digests(tail)
+            committed = observed == expected
+            unchanged = observed[-len(before) :] == before if before else not observed
+            if committed == unchanged:
+                raise UserError(
+                    "Cannot reconcile the pending Session write: history changed or is ambiguous. "
+                    "Repair the original Session before resuming; do not rerun the completed tool."
+                )
+            append = unchanged
+        if append:
+            # Backends may retain or transform their input; the durable checkpoint stays detached.
+            await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        run_state._current_turn_persisted_item_count = pending["persisted_count"]
+        run_state._pending_session_write = None
+    finally:
+        run_state._session_write_in_progress = False
 
 
 async def rewind_session_items(

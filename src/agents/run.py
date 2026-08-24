@@ -139,6 +139,7 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    resume_pending_session_write,
     resumed_turn_items,
     save_result_to_session,
     save_resumed_turn_items,
@@ -634,6 +635,7 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
+            await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
             raw_input = cast(str | list[TResponseInputItem], input)
@@ -1149,6 +1151,7 @@ class AgentRunner:
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
+                                        run_state=run_state,
                                         session=session,
                                         items=turn_session_items,
                                         persisted_count=(

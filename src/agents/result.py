@@ -148,6 +148,7 @@ def _populate_state_from_result(
     if isinstance(source_state, RunState):
         state._generated_prompt_cache_key = source_state._generated_prompt_cache_key
         state._pending_input = copy.deepcopy(source_state._pending_input)
+        state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
