@@ -366,6 +366,45 @@ def _identity_sequence_start(
     return None
 
 
+def _structural_item_key(item: RunItem) -> tuple[str | None, str | None, str | None]:
+    """Return (item_id, item_type, call_id) for structural matching after deserialization."""
+    item_id: str | None = None
+    item_type: str | None = None
+    call_id: str | None = None
+    raw = getattr(item, "raw_item", None)
+    if raw is not None:
+        if isinstance(raw, dict):
+            item_id = raw.get("id")
+            item_type = raw.get("type")
+            call_id = raw.get("call_id")
+        else:
+            item_id = getattr(raw, "id", None)
+            item_type = getattr(raw, "type", None)
+            call_id = getattr(raw, "call_id", None)
+    if item_id is None:
+        item_id = getattr(item, "id", None)
+    if item_type is None:
+        item_type = getattr(item, "type", None)
+    return item_id, item_type, call_id
+
+
+def _structural_sequence_start(
+    container: Sequence[RunItem],
+    sequence: Sequence[RunItem],
+) -> int | None:
+    """Find a contiguous sequence by structural identity (call_id, item_id, type)."""
+    if not sequence or len(sequence) > len(container):
+        return None
+    sequence_keys = [_structural_item_key(item) for item in sequence]
+    for start in range(len(container) - len(sequence) + 1):
+        if all(
+            _structural_item_key(container[start + offset]) == key
+            for offset, key in enumerate(sequence_keys)
+        ):
+            return start
+    return None
+
+
 def _current_response_boundary(
     new_items: Sequence[RunItem],
     processed_response: ProcessedResponse | None,
@@ -393,19 +432,47 @@ def _current_response_boundary(
             if session_start is not None:
                 suffixes.extend(run_state._session_items[session_start:])
                 proven = True
-        if generated_start is None and session_start is None and run_state._current_turn == 1:
-            current_response_prefix = tuple(run_state._generated_items[: len(processed_items)])
-            if len(current_response_prefix) == len(processed_items) and all(
-                type(actual) is type(expected)
-                for actual, expected in zip(current_response_prefix, processed_items, strict=False)
-            ):
-                # Serialization rebuilds item identities, but turn one has no accepted prefix.
-                processed_items = current_response_prefix
-                generated_start = 0
-                session_start = 0
-                suffixes.extend(run_state._generated_items)
-                suffixes.extend(run_state._session_items)
+        if generated_start is None and session_start is None and processed_items:
+            # Serialization rebuilds item identities.  Fall back to structural
+            # matching (call_id, item_id, type) to locate the processed response's
+            # items within the generated and session item lists.
+            gen_structural = _structural_sequence_start(run_state._generated_items, processed_items)
+            sess_structural = _structural_sequence_start(run_state._session_items, processed_items)
+            if gen_structural is not None or sess_structural is not None:
+                if gen_structural is not None:
+                    processed_items = tuple(
+                        run_state._generated_items[
+                            gen_structural : gen_structural + len(processed_items)
+                        ]
+                    )
+                    generated_start = gen_structural
+                    suffixes.extend(run_state._generated_items[generated_start:])
+                if sess_structural is not None:
+                    if gen_structural is None:
+                        processed_items = tuple(
+                            run_state._session_items[
+                                sess_structural : sess_structural + len(processed_items)
+                            ]
+                        )
+                    session_start = sess_structural
+                    suffixes.extend(run_state._session_items[session_start:])
                 proven = True
+            elif run_state._current_turn == 1:
+                # Last resort: turn one has no accepted prefix, so a type-based
+                # prefix match is safe even without call_id/item_id identifiers.
+                current_response_prefix = tuple(run_state._generated_items[: len(processed_items)])
+                if len(current_response_prefix) == len(processed_items) and all(
+                    type(actual) is type(expected)
+                    for actual, expected in zip(
+                        current_response_prefix, processed_items, strict=False
+                    )
+                ):
+                    processed_items = current_response_prefix
+                    generated_start = 0
+                    session_start = 0
+                    suffixes.extend(run_state._generated_items)
+                    suffixes.extend(run_state._session_items)
+                    proven = True
 
     current_items: list[RunItem] = []
     seen: set[int] = set()

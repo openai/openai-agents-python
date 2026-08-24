@@ -2605,6 +2605,16 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
     state._current_turn = 2
     state._current_turn_persisted_item_count = 1
     restored = await RunState.from_json(agent, state.to_json())
+    # Corrupt the processed response's item identifiers so structural matching
+    # cannot locate them within _generated_items, making the boundary unprovable.
+    if restored._last_processed_response:
+        for item in restored._last_processed_response.new_items:
+            raw = getattr(item, "raw_item", None)
+            if raw is not None and not isinstance(raw, dict):
+                if hasattr(raw, "call_id"):
+                    raw.call_id = "corrupted"
+                if hasattr(raw, "id"):
+                    raw.id = "corrupted"
     restored.approve(restored.get_interruptions()[0])
 
     with pytest.raises(UserError, match="current response boundary cannot be proven"):
@@ -2615,6 +2625,63 @@ async def test_ambiguous_serialized_approval_state_fails_before_tool_execution(
             await consume_stream(result)
 
     assert tool_calls == 0
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_serialized_approval_checkpoint_with_output_guardrail_resumes_after_earlier_turn(
+    mode: str,
+) -> None:
+    """A serialized approval checkpoint with output guardrails must resume when the
+    interruption follows an earlier model response (turn > 1)."""
+
+    @function_tool(name_override="normal_tool")
+    def normal_tool() -> str:
+        return "normal result"
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "approval result"
+
+    def output_guardrail(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _output: Any,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("normal_tool", "{}", call_id="call-normal")],
+            [get_function_tool_call("approval_tool", "{}", call_id="call-approval")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[normal_tool, approval_tool],
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail)],
+    )
+
+    first = await Runner.run(agent, "Use normal_tool then approval_tool")
+    assert len(first.interruptions) == 1
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    # Serialize and deserialize — this rebuilds all item objects, destroying
+    # object identity between processed_response.new_items and _generated_items.
+    restored = await RunState.from_json(agent, state.to_json())
+
+    if mode == "non_streamed":
+        result = await Runner.run(agent, restored, session=None)
+    else:
+        streamed = Runner.run_streamed(agent, restored, session=None)
+        await consume_stream(streamed)
+        result = streamed
+
+    assert result.final_output == "done"
 
 
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
