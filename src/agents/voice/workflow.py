@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import abc
 from collections.abc import AsyncIterator
-from typing import Any
 
 from ..agent import Agent
 from ..items import TResponseInputItem
 from ..result import RunResultStreaming
 from ..run import Runner
+from ..run_context import TContext
 
 
 class VoiceWorkflowBase(abc.ABC):
@@ -68,10 +68,10 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
 
     def __init__(
         self,
-        agent: Agent[Any],
+        agent: Agent[TContext],
         callbacks: SingleAgentWorkflowCallbacks | None = None,
         *,
-        context: Any = None,
+        context: TContext | None = None,
     ):
         """Create a new single agent voice workflow.
 
