@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import dataclasses
 import enum
 import importlib
@@ -8,12 +9,23 @@ import json
 import logging
 import sys
 import traceback
+import typing
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from importlib.util import find_spec
 from pathlib import Path
-from types import FunctionType, TracebackType, UnionType
-from typing import Any, ForwardRef, Literal, Union, cast, get_args, get_origin, get_type_hints
+from types import FunctionType, ModuleType, TracebackType, UnionType
+from typing import (
+    Any,
+    ForwardRef,
+    Literal,
+    TypeAlias,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import typing_extensions
 from pydantic import BaseModel
@@ -888,7 +900,261 @@ def _sorted_type_alias_members(members: Iterable[dict[str, object]]) -> list[dic
     )
 
 
-def _type_alias_definition(value: object) -> dict[str, object]:
+def _is_type_alias_type(value: object) -> bool:
+    native_type_alias_type = getattr(typing, "TypeAliasType", typing_extensions.TypeAliasType)
+    return isinstance(value, typing_extensions.TypeAliasType | native_type_alias_type)
+
+
+def _is_type_alias_annotation(annotation: object, module: object) -> bool:
+    if annotation is TypeAlias or annotation is typing_extensions.TypeAlias:
+        return True
+    if not isinstance(annotation, str):
+        return False
+    reference_parts = annotation.split(".")
+    if not reference_parts or not all(part.isidentifier() for part in reference_parts):
+        return False
+    missing = object()
+    resolved = getattr(module, reference_parts[0], missing)
+    for part in reference_parts[1:]:
+        if resolved is missing:
+            break
+        resolved = getattr(resolved, part, missing)
+    return resolved is TypeAlias or resolved is typing_extensions.TypeAlias
+
+
+def _module_declares_type_alias(module: object, alias_name: str, value: object) -> bool:
+    annotations = getattr(module, "__annotations__", {})
+    if not isinstance(annotations, Mapping) or alias_name not in annotations:
+        return False
+    missing = object()
+    return (
+        _is_type_alias_annotation(annotations[alias_name], module)
+        and getattr(module, alias_name, missing) is value
+    )
+
+
+class _ModuleBindingVisitor(ast.NodeVisitor):
+    def __init__(self, name: str):
+        self.name = name
+        self.count = 0
+        self.has_wildcard_import = False
+        self.from_imports: list[tuple[ast.ImportFrom, str]] = []
+        self._bindings_target_module = True
+
+    def _count(self, name: str | None) -> None:
+        if self._bindings_target_module:
+            self.count += name == self.name
+
+    def _visit_nested_scope(self, body: list[ast.stmt]) -> None:
+        bindings_target_module = _scope_declares_global(body, self.name)
+        previous_bindings_target_module = self._bindings_target_module
+        self._bindings_target_module = bindings_target_module
+        for statement in body:
+            self.visit(statement)
+        self._bindings_target_module = previous_bindings_target_module
+
+    def _visit_arguments(self, arguments: ast.arguments) -> None:
+        all_arguments = [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]
+        if arguments.vararg is not None:
+            all_arguments.append(arguments.vararg)
+        if arguments.kwarg is not None:
+            all_arguments.append(arguments.kwarg)
+        for argument in all_arguments:
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        for default in [*arguments.defaults, *arguments.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def _visit_function_definition(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._count(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_arguments(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def _visit_comprehension(
+        self, generators: list[ast.comprehension], values: list[ast.expr]
+    ) -> None:
+        for generator in generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store | ast.Del):
+            self._count(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_definition(node)
+        self._visit_nested_scope(node.body)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_definition(node)
+        self._visit_nested_scope(node.body)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._count(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._visit_nested_scope(node.body)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_arguments(node.args)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, [node.key, node.value])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        self._count(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        self._count(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        self._count(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        self._count(node.rest)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for imported in node.names:
+            self._count(imported.asname or imported.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if not self._bindings_target_module:
+            return
+        for imported in node.names:
+            if imported.name == "*":
+                self.has_wildcard_import = True
+                continue
+            binding_name = imported.asname or imported.name
+            self._count(binding_name)
+            if binding_name == self.name:
+                self.from_imports.append((node, imported.name))
+
+
+def _scope_declares_global(nodes: Iterable[ast.AST], name: str) -> bool:
+    for node in nodes:
+        if isinstance(node, ast.Global):
+            if name in node.names:
+                return True
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        if _scope_declares_global(ast.iter_child_nodes(node), name):
+            return True
+    return False
+
+
+def _direct_import_source(
+    module: object, export_name: str, *, package_root: str
+) -> tuple[ModuleType, str] | None:
+    module_name = getattr(module, "__name__", None)
+    package_name = getattr(module, "__package__", None)
+    if not isinstance(module_name, str) or not isinstance(package_name, str):
+        return None
+    try:
+        module_tree = ast.parse(inspect.getsource(module))
+    except (OSError, SyntaxError, TypeError):
+        return None
+
+    bindings = _ModuleBindingVisitor(export_name)
+    bindings.visit(module_tree)
+    if bindings.count != 1 or bindings.has_wildcard_import or len(bindings.from_imports) != 1:
+        return None
+    statement, source_name = bindings.from_imports[0]
+    if statement.level:
+        relative_name = "." * statement.level + (statement.module or "")
+        try:
+            source_module_name = importlib.util.resolve_name(relative_name, package_name)
+        except ImportError:
+            return None
+    else:
+        source_module_name = statement.module
+    if source_module_name is None or not (
+        source_module_name == package_root or source_module_name.startswith(f"{package_root}.")
+    ):
+        return None
+    source_module = sys.modules.get(source_module_name)
+    if not isinstance(source_module, ModuleType):
+        return None
+    return source_module, source_name
+
+
+def _has_explicit_type_alias_declaration(
+    agents_module: object, export_name: str, value: object
+) -> bool:
+    package_root = getattr(agents_module, "__name__", None)
+    module, alias_name = agents_module, export_name
+    visited_bindings: set[tuple[int, str]] = set()
+    missing = object()
+    while (id(module), alias_name) not in visited_bindings:
+        visited_bindings.add((id(module), alias_name))
+        if getattr(module, alias_name, missing) is not value:
+            return False
+        if _module_declares_type_alias(module, alias_name, value):
+            return True
+        if not isinstance(package_root, str):
+            return False
+        import_source = _direct_import_source(module, alias_name, package_root=package_root)
+        if import_source is None:
+            return False
+        module, alias_name = import_source
+    return False
+
+
+def _is_public_type_alias(agents_module: object, export_name: str, value: object) -> bool:
+    return (
+        get_origin(value) is not None
+        or _is_type_alias_type(value)
+        or _has_explicit_type_alias_declaration(agents_module, export_name, value)
+    )
+
+
+def _type_alias_definition(
+    value: object, *, visited_alias_ids: frozenset[int] = frozenset()
+) -> dict[str, object]:
+    if value is Any:
+        return {"kind": "any"}
+    if _is_type_alias_type(value):
+        if value.__type_params__:
+            raise TypeError(f"generic public type alias is unsupported: {value.__name__}")
+        alias_id = id(value)
+        if alias_id in visited_alias_ids:
+            alias_name = getattr(value, "__name__", repr(value))
+            raise TypeError(f"recursive public type alias is unsupported: {alias_name}")
+        try:
+            alias_value = value.__value__
+        except Exception as error:
+            raise TypeError(
+                f"cannot resolve public type alias {value.__name__} at runtime: "
+                f"{type(error).__name__}: {error}"
+            ) from None
+        return _type_alias_definition(alias_value, visited_alias_ids=visited_alias_ids | {alias_id})
     origin = get_origin(value)
     if origin is Literal:
         literal_values: list[dict[str, object]] = []
@@ -904,13 +1170,48 @@ def _type_alias_definition(value: object) -> dict[str, object]:
             "values": _sorted_type_alias_members(literal_values),
         }
     if origin in {Union, UnionType}:
-        members = [_type_alias_definition(member) for member in get_args(value)]
+        members = [
+            _type_alias_definition(member, visited_alias_ids=visited_alias_ids)
+            for member in get_args(value)
+        ]
         return {
             "kind": "union",
             "members": _sorted_type_alias_members(members),
         }
+    if origin is Callable:
+        callable_args = get_args(value)
+        if len(callable_args) != 2:
+            raise TypeError(
+                "public Callable type aliases must declare parameters and a return type"
+            )
+        parameter_types, return_type = callable_args
+        if parameter_types is Ellipsis or not isinstance(parameter_types, list | tuple):
+            raise TypeError("public Callable type aliases must declare explicit parameter types")
+        return {
+            "kind": "callable",
+            "parameters": [
+                _type_alias_definition(parameter_type, visited_alias_ids=visited_alias_ids)
+                for parameter_type in parameter_types
+            ],
+            "return": _type_alias_definition(return_type, visited_alias_ids=visited_alias_ids),
+        }
+    if origin is not None:
+        if not isinstance(origin, type) or not (
+            origin.__module__ == "agents" or origin.__module__.startswith("agents.")
+        ):
+            raise TypeError(f"unsupported public generic type alias origin: {origin!r}")
+        return {
+            "kind": "generic",
+            "origin": f"{origin.__module__}.{origin.__qualname__}",
+            "arguments": [
+                _type_alias_definition(argument, visited_alias_ids=visited_alias_ids)
+                for argument in get_args(value)
+            ],
+        }
     if isinstance(value, type) and (
-        value.__module__ == "agents" or value.__module__.startswith("agents.")
+        value.__module__ == "builtins"
+        or value.__module__ == "agents"
+        or value.__module__.startswith("agents.")
     ):
         return {
             "kind": "type",
@@ -1210,6 +1511,24 @@ def build_released_api_contract(
     released_export_order = list(contract["required_top_level_exports"])
     released_exports = set(released_export_order)
     current_export_names = set(current_exports)
+    if release_policy is not None:
+        promoted_top_level_type_aliases = {
+            entry["name"]
+            for entry in release_policy.public_type_aliases
+            if entry["module"] == "agents"
+        }
+        missing_top_level_type_aliases = sorted(
+            name
+            for name in current_export_names - released_exports
+            if _is_public_type_alias(agents, name, getattr(agents, name))
+            and name not in promoted_top_level_type_aliases
+        )
+        if missing_top_level_type_aliases:
+            raise ValueError(
+                "Cannot promote new top-level type aliases without public_type_aliases policy "
+                "entries for module 'agents': "
+                f"{missing_top_level_type_aliases!r}"
+            )
     ordered_exports = [name for name in released_export_order if name in current_export_names]
     ordered_exports.extend(name for name in current_exports if name not in released_exports)
     tracked_callables = set(contract["callables"])

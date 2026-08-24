@@ -1053,6 +1053,7 @@ class RunResultStreaming(RunResultBase):
             max_turns_exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
             max_turns_exc.run_data = self._create_error_details()
             self._stored_exception = max_turns_exc
+            self._max_turns_handled = True
 
         # Fetch all the completed guardrail results from the queue and raise if needed
         while not self._input_guardrail_queue.empty():

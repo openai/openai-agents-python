@@ -170,8 +170,10 @@ Do not treat documentation as automatically required for every public option, co
 
 - Existing user-facing docs become materially false, unsafe, or misleading.
 - Correct or safe use depends on a non-obvious constraint, migration step, compatibility boundary, or operational warning.
-- Repository policy, the accepted issue scope, or an explicit maintainer decision requires documentation in the same PR.
+- Repository policy, the accepted issue scope, or an explicit maintainer decision requires documentation in the same PR and does not require separate release timing.
 - The intended feature would be practically unusable or undiscoverable by its target users without a documented entry point, and generated API reference or clear code-level discovery is insufficient.
+
+Decide documentation necessity separately from current-pull-request timing. If the repository's Documentation Release Timing policy defers required `docs/` content because it would describe unreleased behavior, record the need as separately timed work and do not make its absence a blocker for the feature or bug-fix pull request.
 
 If docs would merely improve discoverability or completeness, keep them non-blocking. Do not change `Merge-worthy as-is` to `Merge-worthy after focused changes` solely for optional docs, and do not include optional docs in the maintainer comment's required-action paragraph. Respect an explicit maintainer choice to omit docs or defer them to a separate follow-up.
 

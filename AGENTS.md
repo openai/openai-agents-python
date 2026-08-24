@@ -7,9 +7,9 @@ This guide helps new contributors get started with the OpenAI Agents Python repo
 ## Table of Contents
 
 1. [Policies & Mandatory Rules](#policies--mandatory-rules)
-2. [Project Structure Guide](#project-structure-guide)
-3. [Operation Guide](#operation-guide)
-4. [Code Review Rules](#code-review-rules)
+2. [Code Review Rules](#code-review-rules)
+3. [Project Structure Guide](#project-structure-guide)
+4. [Operation Guide](#operation-guide)
 
 ## Policies & Mandatory Rules
 
@@ -77,6 +77,8 @@ If isolation or a different checkout is needed, explain why and ask the user bef
 
 When a feature or bug fix introduces behavior that is not yet available in the latest published release, do not include `docs/` changes that describe that unreleased behavior in the feature or bug-fix pull request, and do not expect those changes as part of that pull request. Handle them in a separate docs-only pull request so maintainers can coordinate its merge timing with the release that makes the documentation accurate. This exception applies only when the documentation would be incorrect for the latest published release; documentation that is already accurate for released behavior remains part of the normal change scope.
 
+Determine whether documentation is required separately from deciding which pull request should carry it. When required `docs/` content would describe behavior that is not available in the latest published release, classify it as separately timed documentation work rather than a missing deliverable or blocking finding for the feature or bug-fix pull request. This timing rule takes precedence over general documentation-completeness requirements in code-review rules, pull-request guidance, and repository skills. It applies to `docs/` content, not automatically to examples or code-level documentation that ships with the changed API.
+
 ### Documentation Verification Tiers
 
 Classify documentation changes before choosing review and verification work. Use the narrowest tier that covers the complete diff, and move to a higher tier when any changed file or claim requires it.
@@ -127,6 +129,40 @@ Treat the parameter and dataclass field order of exported runtime APIs as a comp
 - When redacting OpenAI tool, MCP, model, or provider payloads, consider traceback display, exception chaining, `__context__`, logs, and telemetry. Suppressing display with `raise ... from None` is not enough if the original exception object still carries sensitive input data.
 - For OpenAI platform or SDK-specific docs changes, prefer `$openai-knowledge` for authoritative platform behavior and inspect the local code path for SDK behavior. Do not rely on generic API assumptions when documenting Responses, Chat Completions, Realtime, tools, MCP, or provider adapters.
 - For Realtime tracing changes, read [Realtime tracing architecture](.agents/references/realtime-tracing.md) before proposing SDK spans. Realtime API server traces and Agents SDK client traces are separate; `group_id` can correlate them but does not create a shared trace hierarchy.
+
+## Code Review Rules
+
+### Finding threshold and supported scope
+
+- Report a runtime defect only when the changed code causes a concrete incorrect behavior on a supported path. State the triggering scenario and the caller-visible, compatibility, security, persistence, or lifecycle consequence; omit the finding when no such consequence can be established.
+- Treat added abstractions, state, validation, compatibility handling, fallback behavior, dependencies, or parallel paths as actionable only when the machinery does not map to the task, a released contract, supported durable state, or a verified runtime or platform risk. Identify the exact unnecessary machinery and recommend the smallest safe removal or direct replacement.
+- Flag runtime validation, compatibility handling, fallback behavior, or tests added only for synthetic or unsupported values when no ordinary supported producer, released contract, durable boundary, or actual untrusted-input path can produce the value with a concrete consequence. Constructibility in Python, manually corrupted typed objects, monkeypatched state, and direct helper calls that bypass the owning public or wire boundary are not sufficient justification. This includes non-finite or extreme numbers and impossible enum or discriminated-union members unless the exact category is intentionally supported.
+- Do not duplicate client-side runtime validation solely for values already excluded by the public type contract or authoritatively rejected by the upstream provider. Add fail-fast SDK validation only when delayed rejection creates a concrete SDK-owned problem before the authoritative rejection, such as an irreversible side effect, persistent corruption, security or privacy exposure, avoidable billable work, repeated resource consumption, or an error that arrives too late or is too opaque for reasonable correction. A security label alone is insufficient without a complete trace from attacker-controlled input through an actual trust boundary to the protected outcome.
+- Do not report a defect merely because another semantic choice appears cleaner, more symmetric, or easier to explain. When repository evidence does not select one contract, report only a concrete inconsistency with an already supported path or an established caller-visible expectation.
+- Flag a new public option, callback, class, compatibility branch, or parallel execution path when the exact required outcome, including its lifecycle and compatibility constraints, is already available through a reasonable supported API or composition path. Name that path and recommend removal or narrower reuse of the existing source of truth.
+- Report compatibility findings only against behavior shipped in the latest release, an explicitly supported public contract, or a durable external state or protocol boundary. Do not require compatibility shims for unreleased branch-local helpers, same-branch tests, or intermediate persisted formats that are intentionally unsupported.
+
+### Contract and lifecycle coverage
+
+- For every added or modified public field, configuration value, event, serialized value, or wire value, inspect all supported construction, forwarding, adapter, and consumption paths. Flag partial implementations where normal, specialized, default, missing-value, or error paths silently drop, reshape, or reject the value inconsistently. Include intended public imports and generated package surfaces when they are part of the changed contract.
+- Require parity across streaming and non-streaming, sync and async, initial and resumed, direct and wrapped, or provider-specific paths only when the accepted requirement or existing contract covers those paths. Do not report missing parity solely for API symmetry or conceptual similarity.
+- When changed code mutates shared state across an `await`, callback, retry, reconnect, cancellation, cleanup, or rollback boundary, check whether stale or failing work can overwrite, revert, or dispose state owned by surviving work. Report the concrete interleaving and the missing ownership, generation, identity, transaction, revalidation, or serialization invariant at the actual mutation boundary; sequential happy-path tests are insufficient.
+- When a new validation or failure path can run after resources or observable state are acquired, verify cleanup explicitly and preserve the primary failure. Report concrete leaked resources, stale state, lost handlers, or survivor corruption rather than assuming normal teardown runs after failed construction or context entry.
+- Flag persisted, resumed, serialized, provider-controlled, or manifest data that is treated as authority for a host-owned runtime, security, identity, or cleanup decision unless the supported trust boundary explicitly grants that authority. Preserve trusted current configuration and validate untrusted state before it can affect side effects, replay, or resource ownership.
+
+### Test and documentation evidence
+
+- Treat tests as contract evidence only when they exercise the highest stable caller-visible boundary that controls the observable result and derive expected behavior from the requirement, released behavior, a worked example, a baseline, or another independent oracle. Do not accept helper-only call-shape assertions or expected values recomputed with the implementation's own logic when another layer owns the outcome.
+- Require representative regression coverage for the accepted behavior and intentionally unsupported category. For concurrency findings, require controlled completion ordering plus assertions about the surviving operation and final shared state. Do not request exhaustive tests for every constructible permutation.
+- Report missing documentation or examples only when the patch makes existing guidance materially false, unsafe, or misleading; correct use depends on a non-obvious migration, compatibility boundary, constraint, or operational warning; or the accepted feature would otherwise be practically unusable. Do not report optional completeness or discoverability improvements as blocking findings.
+- Decide `docs/` delivery timing separately from documentation necessity. If required `docs/` content would describe behavior unavailable in the latest published release, apply [Documentation Release Timing](#documentation-release-timing): record it as separately timed work, and do not report its absence as a blocking finding for the feature or bug-fix pull request. This exception does not automatically defer examples or code-level documentation that ships with the changed API.
+- Do not report formatting, lint, full-suite status, commit history, or pull-request description quality as code findings; those are CI or repository-readiness conditions.
+
+### Review scope
+
+- Review the complete diff from the merge base of the intended target branch, or from the latest release tag when it is the compatibility baseline, not only the latest incremental fix. Passing tests do not justify branch-local machinery that no longer matches the original requirement.
+- Keep findings scoped to consequences introduced, exposed, or worsened by the patch. Do not block on unrelated cleanup, pre-existing bugs, optional refactors, or speculative extensibility merely discovered while reading adjacent code. A pre-existing condition is in scope when the patch newly reaches it on a supported path, relies on it for correctness, or otherwise makes its consequence part of the changed behavior.
+- Require a broader refactor only when concrete evidence shows the focused change would otherwise remain incorrect, unsafe, incompatible, or dependent on duplicated sources of truth that can observably diverge.
 
 ## Project Structure Guide
 
@@ -287,24 +323,7 @@ make tests
 
 - Use the template at `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`; include a summary, test plan, and issue number if applicable.
 - In copy-ready GitHub text, use native issue and pull-request references: exactly `#123` for this repository and `owner/repo#123` for another repository. Do not qualify same-repository references as `openai/openai-agents-python#123`. Preserve closing forms such as `Fixes #123` or `Resolves #123`. Never wrap these references in Markdown links such as `[PR #123](https://github.com/owner/repo/pull/123)` or `[#123](...)`; those Codex-friendly links require manual cleanup after pasting into GitHub. Use descriptive Markdown links only for external resources or GitHub targets that cannot be expressed as a native issue or pull-request reference.
-- Add tests for new behavior when feasible. Update documentation for user-facing changes, except unreleased-behavior documentation that must follow the separate docs-only pull request policy above.
+- Add focused regression tests for accepted new behavior when feasible. Update documentation or examples when the change would otherwise make existing guidance materially false, unsafe, or misleading; correct use depends on a non-obvious constraint, migration step, compatibility boundary, or operational warning; or the accepted feature would otherwise be practically unusable. Do not require optional documentation or examples solely for completeness.
+- Determine `docs/` delivery timing separately from documentation necessity. When required `docs/` content would describe behavior that is not yet in the latest published release, leave it out of the feature or bug-fix pull request and treat it as separately timed docs-only work, not as an incomplete current pull request. This exception does not automatically apply to examples or code-level documentation that ships with the changed API.
 - Run `make format`, `make lint`, `make typecheck`, and `make tests` before marking work ready.
 - Commit messages should be concise and written in the imperative mood. Small, focused commits are preferred.
-
-## Code Review Rules
-
-- Use `$implementation-strategy` to establish the requested outcome and latest released compatibility boundary before judging implementation scope or architecture.
-- Treat added complexity as an actionable finding only when specific machinery is not required by the task, a released contract, supported durable state, or a verified runtime or platform risk. Identify the unnecessary machinery and recommend the smallest safe removal or direct replacement.
-- Do not request speculative abstractions, general-purpose helpers, configuration knobs, dependencies, compatibility layers, feature flags, parallel code paths, or extensibility for hypothetical future consumers.
-- Do not process a sequence of related review comments as independent local fixes when they expose the same missing boundary. Classify them together, decide whether the disputed shapes belong to the supported contract, and prefer one narrowing redesign over accumulating branches.
-- Review the complete diff from the merge base of the intended target branch, or from the latest release tag when it is the compatibility baseline, not only the latest incremental fix. Passing tests do not justify branch-local machinery that no longer matches the original requirement.
-- Keep findings scoped to the patch. Do not block on unrelated cleanup, pre-existing bugs, or optional refactors; report them separately when useful.
-- Require a broader refactor only when concrete evidence shows the focused change would otherwise be incorrect, unsafe, incompatible, or materially harder to maintain.
-
-### Baseline review expectations
-
-- ✅ Checks pass (`make format`, `make lint`, `make typecheck`, `make tests`).
-- ✅ Tests cover new behavior and edge cases.
-- ✅ Code is readable, maintainable, and consistent with existing style.
-- ✅ Examples are updated if behavior changes.
-- ✅ History is clean with a clear PR description.

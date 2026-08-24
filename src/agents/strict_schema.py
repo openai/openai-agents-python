@@ -379,7 +379,7 @@ def _ensure_strict_json_schema(
         resolved = resolve_ref(root=root, ref=ref)
         if not is_dict(resolved):
             raise ValueError(
-                f"Expected `$ref: {ref}` to resolved to a dictionary but got {resolved}"
+                f"Expected `$ref: {ref}` to resolve to a dictionary but got {resolved}"
             )
 
         # Pop the current `$ref` first so that if the resolved schema is itself a `$ref`
@@ -456,7 +456,7 @@ def _resolve_non_constraining_ref_chain(
         budget.spend()
         target = resolve_ref(root=root, ref=ref)
         if not is_dict(target):
-            raise ValueError(f"Expected `$ref: {ref}` to resolved to a dictionary but got {target}")
+            raise ValueError(f"Expected `$ref: {ref}` to resolve to a dictionary but got {target}")
         resolved = target
     return {**resolved, **carried_siblings}
 

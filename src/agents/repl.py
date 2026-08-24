@@ -43,7 +43,7 @@ async def run_demo_loop(
             break
         if user_input.strip().lower() in {"exit", "quit"}:
             break
-        if not user_input:
+        if not user_input.strip():
             continue
 
         input_items.append({"role": "user", "content": user_input})

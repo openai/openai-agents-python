@@ -18,11 +18,11 @@ def _load_dont_log_tool_data() -> bool:
 
 
 DONT_LOG_MODEL_DATA = _load_dont_log_model_data()
-"""By default we don't log LLM inputs/outputs, to prevent exposing sensitive information. Set this
-flag to enable logging them.
+"""By default we don't log LLM inputs/outputs, to prevent exposing sensitive information. Set the
+`OPENAI_AGENTS_DONT_LOG_MODEL_DATA` environment variable to `0`/`false` to enable logging them.
 """
 
 DONT_LOG_TOOL_DATA = _load_dont_log_tool_data()
 """By default we don't log tool call inputs/outputs, to prevent exposing sensitive information. Set
-this flag to enable logging them.
+the `OPENAI_AGENTS_DONT_LOG_TOOL_DATA` environment variable to `0`/`false` to enable logging them.
 """

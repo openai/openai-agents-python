@@ -70,7 +70,7 @@ Give every row a stable ID. Use one row per changed public symbol, configuration
 
 Encode those columns in each `kind: "contract"` inventory object as `surface`, `producers`, `consumers`, `behavior`, `exports`, `adjacent`, and `tests`. Each field must be a nonempty string; use `none` or `not applicable` only when that is the explicit reviewed value.
 
-Include adjacent surfaces found outside the current diff. If a required update is absent, add it to the task manifest before freezing the review.
+Include adjacent surfaces found outside the current diff. If a required update is absent, add it to the task manifest before freezing the review, except for `docs/` content intentionally deferred by the repository's Documentation Release Timing policy. Record deferred documentation in the inventory and evidence as separately timed work; do not add it to the current task manifest or findings, and do not let it block clean review.
 
 ## Await-boundary or authority inventory
 
