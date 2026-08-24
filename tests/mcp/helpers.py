@@ -21,6 +21,7 @@ from agents.mcp import MCPServer
 from agents.mcp.server import _UNSET, _MCPServerWithClientSession, _UnsetType
 from agents.mcp.util import MCPToolCustomDataExtractor, MCPToolMetaResolver, ToolFilter
 from agents.tool import ToolErrorFunction
+from agents.tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 
 from .model_compat import ListResourceTemplatesResult, Tool as MCPTool
 
@@ -77,6 +78,12 @@ class FakeMCPServer(MCPServer):
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
         tool_meta_resolver: MCPToolMetaResolver | None = None,
         custom_data_extractor: MCPToolCustomDataExtractor | None = None,
+        tool_input_guardrails: (
+            list[ToolInputGuardrail[Any]] | dict[str, list[ToolInputGuardrail[Any]]] | None
+        ) = None,
+        tool_output_guardrails: (
+            list[ToolOutputGuardrail[Any]] | dict[str, list[ToolOutputGuardrail[Any]]] | None
+        ) = None,
     ):
         super().__init__(
             use_structured_content=False,
@@ -84,6 +91,8 @@ class FakeMCPServer(MCPServer):
             failure_error_function=failure_error_function,
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
+            tool_input_guardrails=tool_input_guardrails,
+            tool_output_guardrails=tool_output_guardrails,
         )
         self.tools: list[MCPToolType] = tools or []
         self.tool_calls: list[str] = []

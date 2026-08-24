@@ -576,6 +576,8 @@ class MCPUtil:
             failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
+            tool_input_guardrails=server._get_tool_input_guardrails_for_tool(tool),
+            tool_output_guardrails=server._get_tool_output_guardrails_for_tool(tool),
             mcp_title=resolve_mcp_tool_title(tool),
             tool_origin=ToolOrigin(
                 type=ToolOriginType.MCP,
