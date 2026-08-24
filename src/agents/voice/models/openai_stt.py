@@ -123,7 +123,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._client = client
         self._model = model
         self._settings = settings
-        self._turn_detection = settings.turn_detection or DEFAULT_TURN_DETECTION
+        turn_detection = settings.turn_detection or DEFAULT_TURN_DETECTION
+        # ``{"type": "none"}`` disables turn detection, which the wire schema spells as ``null``.
+        self._turn_detection = None if turn_detection.get("type") == "none" else turn_detection
         self._trace_include_sensitive_data = trace_include_sensitive_data
         self._trace_include_sensitive_audio_data = trace_include_sensitive_audio_data
 

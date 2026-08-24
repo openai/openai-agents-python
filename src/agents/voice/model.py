@@ -141,7 +141,9 @@ class STTModelSettings:
     """The temperature of the model."""
 
     turn_detection: dict[str, Any] | None = None
-    """The turn detection settings for the model when using streamed audio input."""
+    """The turn detection settings for the model when using streamed audio input. `None` uses
+    the default (`{"type": "semantic_vad"}`). Pass `{"type": "none"}` to disable turn detection,
+    which is sent as `null` and is required by `gpt-realtime-whisper`."""
 
     languages: list[str] | None = None
     """Possible languages of the audio input, in ISO-639-1 format, when using streamed audio
@@ -155,7 +157,8 @@ class STTModelSettings:
     delay: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     """How long the model waits before emitting transcription text when using streamed audio
     input. Higher values can improve transcription accuracy at the cost of latency. Only
-    supported with `gpt-realtime-whisper`."""
+    supported with `gpt-realtime-whisper`, which also requires disabling turn detection with
+    `turn_detection={"type": "none"}`."""
 
 
 class STTModel(abc.ABC):
