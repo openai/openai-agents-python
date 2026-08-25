@@ -16,7 +16,7 @@ Schema behavior is a compatibility boundary shared by Python callables, Pydantic
 
 - Strict conversion closes object schemas with `additionalProperties: false` and marks their declared properties required. Reject an explicit `additionalProperties: true` instead of silently changing its meaning.
 - Preserve the meaning of unions, intersections, definitions, and references. Normalize `oneOf` where required, process `allOf`, retain chained references, and merge a referenced schema with sibling keys without discarding the siblings.
-- Remove defaults that only encode Python `None`; a nullable type must remain represented by its type schema rather than by an unsupported default.
+- Remove every `default` keyword from strict schemas while preserving Python invocation defaults outside the provider-facing schema. Strip `default: null` before expanding `$ref` siblings so recursive references stay finite, then remove remaining defaults after reference normalization.
 - `ensure_strict_json_schema()` may mutate a non-empty input dictionary. Copy caller-owned schemas at public boundaries before conversion. Empty-schema conversion must return a fresh object rather than shared mutable state.
 - Keep strictness explicit. If a tool or output schema opts out of strict mode, preserve that choice through provider conversion instead of partially applying strict normalization.
 

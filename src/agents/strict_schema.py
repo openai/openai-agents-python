@@ -359,6 +359,11 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
+    # Strip null defaults before `$ref` expansion. A recursive `$ref` with only a null default
+    # sibling must remain a bare reference instead of being inlined into itself indefinitely.
+    if "default" in json_schema and json_schema["default"] is None:
+        json_schema.pop("default")
+
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
     #
@@ -391,9 +396,8 @@ def _ensure_strict_json_schema(
             inside_nested_resource=inside_nested_resource,
         )
 
-    # Strict-mode schemas must not include defaults because they are rejected by the Structured
-    # Outputs API. Keep this after `$ref` expansion so an allowed default sibling does not prevent
-    # the existing reference normalization from running.
+    # Strip remaining non-null defaults after `$ref` expansion so they cannot suppress the existing
+    # reference normalization and do not reach the Structured Outputs API.
     json_schema.pop("default", None)
 
     if budget.reject_open_objects and "$ref" in json_schema:

@@ -303,6 +303,39 @@ def test_non_decorator_function_tools_have_no_wrapped_callable() -> None:
         assert inspect.unwrap(cast(Callable[..., Any], non_decorator_tool)) is non_decorator_tool
 
 
+def test_strict_function_tool_preserves_recursive_ref_with_null_default() -> None:
+    async def manual_invoker(ctx: ToolContext[Any], input_json: str) -> str:
+        return input_json
+
+    recursive_schema = {
+        "$defs": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "child": {"$ref": "#/$defs/Node", "default": None},
+                },
+            }
+        },
+        "type": "object",
+        "properties": {
+            "root": {"$ref": "#/$defs/Node", "default": None},
+        },
+    }
+
+    tool = FunctionTool(
+        name="recursive",
+        description="",
+        params_json_schema=recursive_schema,
+        on_invoke_tool=manual_invoker,
+    )
+
+    node_schema = tool.params_json_schema["$defs"]["Node"]
+    assert node_schema["additionalProperties"] is False
+    assert node_schema["required"] == ["child"]
+    assert node_schema["properties"]["child"] == {"$ref": "#/$defs/Node"}
+    assert tool.params_json_schema["properties"]["root"] == {"$ref": "#/$defs/Node"}
+
+
 def test_replacing_invoker_removes_wrapped_callable() -> None:
     def original(value: int) -> int:
         return value
