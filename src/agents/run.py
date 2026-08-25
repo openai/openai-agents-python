@@ -1135,6 +1135,15 @@ class AgentRunner:
                                     generated_items=generated_items,
                                     session_items=session_items,
                                 )
+                                if isinstance(turn_result.next_step, NextStepInterruption):
+                                    run_state._tool_input_guardrail_results = [
+                                        *tool_input_guardrail_results,
+                                        *turn_result.tool_input_guardrail_results,
+                                    ]
+                                    run_state._tool_output_guardrail_results = [
+                                        *tool_output_guardrail_results,
+                                        *turn_result.tool_output_guardrail_results,
+                                    ]
 
                             if (
                                 session_persistence_enabled

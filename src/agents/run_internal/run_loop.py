@@ -1377,6 +1377,15 @@ async def start_streaming(
                         )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
+                        if run_state is not None:
+                            run_state._tool_input_guardrail_results = [
+                                *accepted_tool_input_guardrail_results,
+                                *turn_result.tool_input_guardrail_results,
+                            ]
+                            run_state._tool_output_guardrail_results = [
+                                *accepted_tool_output_guardrail_results,
+                                *turn_result.tool_output_guardrail_results,
+                            ]
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
                             save_items=_save_resumed_items,
