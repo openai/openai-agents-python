@@ -4358,11 +4358,11 @@ async def _build_run_state_from_json(
     )
     pending_write = state_json.get("pending_session_write")
     if pending_write is not None:
-        from .run_internal.run_steps import NextStepRunAgain
+        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
         if (
             (schema_major, schema_minor) < (1, 17)
-            or not isinstance(state._current_step, NextStepRunAgain)
+            or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
             or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
             or not isinstance(pending_write.get("session_id"), str)

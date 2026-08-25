@@ -210,6 +210,71 @@ async def test_resumed_session_append_survives_repeated_failure_and_late_input()
     assert effects == [7]
 
 
+async def _partially_approved_session_state(streamed: bool):
+    """Pause on two approval-gated calls in one response and approve only the first."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    @tool(needs_approval=True)
+    async def notify() -> str:
+        raise AssertionError("the unresolved approval must not execute")
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("charge", '{"amount":7}', call_id="charge-1"),
+                get_function_tool_call("notify", "{}", call_id="notify-1"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge, notify])
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7 and notify", session, streamed)
+    state = paused.to_state()
+    charge_approval = next(
+        item for item in state.get_interruptions() if item.raw_item.call_id == "charge-1"
+    )
+    state.approve(charge_approval)
+    return agent, model, session, state, effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_renewed_interruption_recovers_failed_resumed_session_append(
+    streamed: bool, round_trip: bool
+) -> None:
+    agent, model, session, state, effects = await _partially_approved_session_state(streamed)
+    session.failure = "before"
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, streamed)
+    assert error.value is session.error
+    assert effects == [7]
+    assert _charge_pair(await session.get_items()) == ["function_call"]
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    pending = await _run_session_resume(agent, state, session, streamed)
+    pending_state = pending.to_state()
+    remaining = pending_state.get_interruptions()
+    assert [item.raw_item.call_id for item in remaining] == ["notify-1"]
+    assert len(model.calls) == 1
+
+    pending_state.reject(remaining[0], rejection_message="declined")
+    result = await _run_session_resume(agent, pending_state, session, streamed)
+    assert result.final_output == "done"
+    assert effects == [7]
+    expected_pair = ["function_call", "function_call_output"]
+    assert _charge_pair(await session.get_items()) == expected_pair
+    assert _charge_pair(result.to_input_list()) == expected_pair
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])

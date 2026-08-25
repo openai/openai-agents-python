@@ -739,7 +739,8 @@ async def save_resumed_turn_items(
         wrapper=wrapper,
         resumed_write_state=(
             run_state
-            if run_state is not None and isinstance(run_state._current_step, NextStepRunAgain)
+            if run_state is not None
+            and isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
             else None
         ),
     )
