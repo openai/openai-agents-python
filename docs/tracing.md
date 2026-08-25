@@ -232,3 +232,4 @@ The following community and vendor integrations support the tracing API surface 
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
 -   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
+-   [Orq.ai](https://docs.orq.ai/docs/ai-studio/integrations/frameworks/openai-agents)
