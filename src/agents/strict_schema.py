@@ -391,9 +391,9 @@ def _ensure_strict_json_schema(
             inside_nested_resource=inside_nested_resource,
         )
 
-    # Strict schemas require every property, so defaults are not used by the model and are
-    # rejected by the Structured Outputs API. Keep this after `$ref` expansion so an allowed
-    # default sibling does not prevent the existing reference normalization from running.
+    # Strict-mode schemas must not include defaults because they are rejected by the Structured
+    # Outputs API. Keep this after `$ref` expansion so an allowed default sibling does not prevent
+    # the existing reference normalization from running.
     json_schema.pop("default", None)
 
     if budget.reject_open_objects and "$ref" in json_schema:

@@ -701,12 +701,19 @@ def test_allOf_single_entry_cannot_overwrite_strict_object(additional_properties
         ensure_strict_json_schema(schema)
 
 
-@pytest.mark.parametrize("default", [None, 0, "EUR", False])
-def test_default_removal_on_non_object(default):
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "null", "default": None},
+        {"type": "integer", "default": 0},
+        {"type": "string", "default": "EUR"},
+        {"type": "boolean", "default": False},
+    ],
+)
+def test_default_removal_on_non_object(schema):
     # Test that defaults are stripped from schemas that are not objects.
-    schema = {"type": "string", "default": default}
     result = ensure_strict_json_schema(schema)
-    assert result["type"] == "string"
+    assert result["type"] == schema["type"]
     assert "default" not in result
 
 
