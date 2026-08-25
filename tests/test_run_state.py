@@ -10739,6 +10739,19 @@ class TestToolApprovalItem:
         approval_item4 = ToolApprovalItem(agent=agent, raw_item=raw_item4)
         assert approval_item4.arguments is None
 
+        # Empty params are present arguments and must not fall through to input.
+        approval_item5 = ToolApprovalItem(
+            agent=agent,
+            raw_item={"params": {}, "input": {"wrong": "value"}},
+        )
+        assert approval_item5.arguments == "{}"
+
+        approval_item6 = ToolApprovalItem(
+            agent=agent,
+            raw_item=SimpleNamespace(arguments=None, params={}, input={"wrong": "value"}),
+        )
+        assert approval_item6.arguments == "{}"
+
     def test_tool_approval_item_tracks_namespace(self):
         """Test that ToolApprovalItem keeps namespace metadata from Responses tool calls."""
         agent = Agent(name="TestAgent")

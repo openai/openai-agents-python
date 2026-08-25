@@ -648,13 +648,15 @@ class ToolApprovalItem(RunItemBase[Any]):
         if isinstance(self.raw_item, dict):
             candidate = self.raw_item.get("arguments")
             if candidate is None:
-                candidate = self.raw_item.get("params") or self.raw_item.get("input")
-        elif hasattr(self.raw_item, "arguments"):
-            candidate = self.raw_item.arguments
-        elif hasattr(self.raw_item, "params") or hasattr(self.raw_item, "input"):
-            candidate = getattr(self.raw_item, "params", None) or getattr(
-                self.raw_item, "input", None
-            )
+                candidate = self.raw_item.get("params")
+                if candidate is None:
+                    candidate = self.raw_item.get("input")
+        else:
+            candidate = getattr(self.raw_item, "arguments", None)
+            if candidate is None:
+                candidate = getattr(self.raw_item, "params", None)
+            if candidate is None:
+                candidate = getattr(self.raw_item, "input", None)
         if candidate is None:
             return None
         if isinstance(candidate, str):
