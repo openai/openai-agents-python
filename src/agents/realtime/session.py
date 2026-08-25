@@ -384,12 +384,20 @@ class RealtimeSession(RealtimeModelListener):
         )
         updated_snapshot = self._dispatch_snapshot_from_settings(agent, updated_settings)
 
+        previous_agent = self._current_agent
+        previous_snapshot = self._current_dispatch_snapshot
         self._current_agent = agent
         self._current_dispatch_snapshot = updated_snapshot
 
-        await self._model.send_event(
-            RealtimeModelSendSessionUpdate(session_settings=updated_settings)
-        )
+        try:
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
+        except Exception:
+            if self._current_agent is agent and self._current_dispatch_snapshot is updated_snapshot:
+                self._current_agent = previous_agent
+                self._current_dispatch_snapshot = previous_snapshot
+            raise
 
     def _reconcile_output_response(self, response_id: str) -> None:
         if self._active_output_response_generation is None:

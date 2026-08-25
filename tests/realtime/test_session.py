@@ -77,7 +77,7 @@ from agents.realtime.session import (
     _PendingToolOutputSendError,
     _serialize_tool_output,
 )
-from agents.realtime.testing import RealtimeConnectCall, ScriptedRealtimeModel
+from agents.realtime.testing import RealtimeConnectCall, RealtimeStep, ScriptedRealtimeModel
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, function_tool, tool_namespace
 from agents.tool_context import ToolContext
@@ -6176,6 +6176,60 @@ class TestUpdateAgentFunctionality:
 
         assert session._current_agent is first_agent
         assert mock_model.sent_events == ()
+
+    @pytest.mark.asyncio
+    async def test_update_agent_send_failure_keeps_current_agent(self):
+        first_agent = RealtimeAgent(name="first", instructions="first")
+        second_agent = RealtimeAgent(name="second", instructions="second")
+        model = ScriptedRealtimeModel(
+            steps=[
+                RealtimeStep(
+                    expect=RealtimeModelSendSessionUpdate,
+                    error=RuntimeError("send failed"),
+                )
+            ]
+        )
+        session = RealtimeSession(model, first_agent, None)
+
+        async with session:
+            with pytest.raises(RuntimeError, match="send failed"):
+                await session.update_agent(second_agent)
+
+            assert session._current_agent is first_agent
+            assert session._current_dispatch_snapshot is not None
+            assert session._current_dispatch_snapshot.agent is first_agent
+
+    @pytest.mark.asyncio
+    async def test_failed_update_agent_does_not_rollback_newer_update(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first")
+        failing_agent = RealtimeAgent(name="failing", instructions="failing")
+        newest_agent = RealtimeAgent(name="newest", instructions="newest")
+        first_send_started = asyncio.Event()
+        release_first_send = asyncio.Event()
+        send_count = 0
+
+        async def send_event(_event):
+            nonlocal send_count
+            send_count += 1
+            if send_count == 1:
+                first_send_started.set()
+                await release_first_send.wait()
+                raise RuntimeError("send failed")
+
+        mock_model.send_event = send_event
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        failing_update = asyncio.create_task(session.update_agent(failing_agent))
+        await first_send_started.wait()
+        await session.update_agent(newest_agent)
+        release_first_send.set()
+
+        with pytest.raises(RuntimeError, match="send failed"):
+            await failing_update
+
+        assert session._current_agent is newest_agent
+        assert session._current_dispatch_snapshot is not None
+        assert session._current_dispatch_snapshot.agent is newest_agent
 
 
 class TestTranscriptPreservation:
