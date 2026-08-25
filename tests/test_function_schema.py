@@ -93,6 +93,44 @@ def test_simple_function():
         func_schema.params_pydantic_model(**{"a": "not an integer"})
 
 
+def function_with_model_extra_param(query: str, model_extra: str) -> str:
+    return f"{query}:{model_extra}"
+
+
+def function_with_model_fields_set_param(query: str, model_fields_set: int) -> str:
+    return f"{query}:{model_fields_set}"
+
+
+def test_to_call_args_does_not_shadow_pydantic_model_extra():
+    """A parameter named ``model_extra`` must not be replaced by BaseModel.model_extra."""
+
+    with pytest.warns(UserWarning, match="model_extra"):
+        func_schema = function_schema(function_with_model_extra_param, use_docstring_info=False)
+    parsed = func_schema.params_pydantic_model.model_validate(
+        {"query": "hello", "model_extra": "gpt-4.1"}
+    )
+
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = function_with_model_extra_param(*args, **kwargs_dict)
+    assert result == "hello:gpt-4.1"
+
+
+def test_to_call_args_does_not_shadow_pydantic_model_fields_set():
+    """A parameter named ``model_fields_set`` must not be replaced by BaseModel.model_fields_set."""
+
+    with pytest.warns(UserWarning, match="model_fields_set"):
+        func_schema = function_schema(
+            function_with_model_fields_set_param, use_docstring_info=False
+        )
+    parsed = func_schema.params_pydantic_model.model_validate(
+        {"query": "hello", "model_fields_set": 42}
+    )
+
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = function_with_model_fields_set_param(*args, **kwargs_dict)
+    assert result == "hello:42"
+
+
 def varargs_function(x: int, *numbers: float, flag: bool = False, **kwargs: Any):
     return x, numbers, flag, kwargs
 

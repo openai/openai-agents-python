@@ -1,6 +1,9 @@
 import asyncio
+import copy
 import json
-from typing import Any, cast
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
@@ -9,14 +12,18 @@ import agents.run as run_module
 from agents import Agent, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
+from agents.decorators import tool
+from agents.exceptions import UserError
 from agents.items import (
     MessageOutputItem,
     ModelResponse,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
+from agents.memory import OpenAIResponsesCompactionSession, Session, SQLiteSession
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop, turn_resolution
@@ -40,6 +47,418 @@ from tests.utils.hitl import (
     queue_function_call_and_text,
 )
 from tests.utils.simple_session import SimpleListSession
+
+
+class _FailingResumeSession(SimpleListSession):
+    """Control append acknowledgement at the public Session boundary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failure: str | None = None
+        self.error = RuntimeError("session append failed")
+        self.block_next_add = False
+        self.add_started = asyncio.Event()
+        self.release_add = asyncio.Event()
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        failure, self.failure = self.failure, None
+        if failure == "before":
+            raise self.error
+        if self.block_next_add:
+            self.block_next_add = False
+            self.add_started.set()
+            await self.release_add.wait()
+        if failure == "partial":
+            await super().add_items(items[:1])
+            raise self.error
+        await super().add_items(items)
+        if failure == "after":
+            raise self.error
+
+
+class _LostAckSQLiteSession(SQLiteSession):
+    fail_after_commit = False
+    error = RuntimeError("session append failed")
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        await super().add_items(items)
+        if self.fail_after_commit:
+            self.fail_after_commit = False
+            raise self.error
+
+
+async def _run_session_resume(
+    agent: Agent[Any], value: str | RunState[Any], session: Session | None, streamed: bool
+):
+    config = RunConfig(tracing_disabled=True)
+    if not streamed:
+        return await Runner.run(agent, value, session=session, run_config=config)
+    result = Runner.run_streamed(agent, value, session=session, run_config=config)
+    async for _ in result.stream_events():
+        pass
+    return result
+
+
+async def _approved_session_state(streamed: bool, session: Session | None = None):
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("done")],
+            [get_text_message("fresh")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge])
+    session = session if session is not None else _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects
+
+
+def _charge_pair(items: list[TResponseInputItem]) -> list[str]:
+    return [
+        str(item.get("type"))
+        for item in items
+        if isinstance(item, dict) and item.get("call_id") == "charge-1"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_resumed_session_append_is_recovered_before_next_model(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    agent, model, session, state, effects = await _approved_session_state(failing_streamed)
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed)
+    assert error.value is session.error
+    assert effects == [7]
+    assert len(model.calls) == 1
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    result = await _run_session_resume(agent, state, session, retry_streamed)
+    assert result.final_output == "done"
+    assert effects == [7]
+    expected_pair = ["function_call", "function_call_output"]
+    assert _charge_pair(await session.get_items()) == expected_pair
+    assert _charge_pair(result.to_input_list()) == expected_pair
+    await _run_session_resume(agent, "What was the receipt?", session, retry_streamed)
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+    assert "pending_session_write" not in result.to_state().to_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_streamed", [False, True])
+@pytest.mark.parametrize("mismatch", ["missing", "different-id", "changed-tail"])
+async def test_resumed_session_append_rejects_ambiguous_recovery(
+    retry_streamed: bool, mismatch: str
+) -> None:
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    state = await RunState.from_json(agent, state.to_json())
+    supplied_session: Session | None = session
+    if mismatch == "missing":
+        supplied_session = None
+    elif mismatch == "different-id":
+        supplied_session = SimpleListSession("other", await session.get_items())
+    else:
+        await session.add_items([{"role": "user", "content": "another writer"}])
+    before = await session.get_items()
+    with pytest.raises(UserError, match="pending Session write"):
+        await _run_session_resume(agent, state, supplied_session, retry_streamed)
+    assert len(model.calls) == 1
+    assert effects == [7]
+    assert await session.get_items() == before
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_append_survives_repeated_failure_and_late_input() -> None:
+    agent, model, session, state, effects = await _approved_session_state(False)
+    for _ in range(2):
+        session.failure = "before"
+        with pytest.raises(RuntimeError, match="session append failed"):
+            await _run_session_resume(agent, state, session, False)
+        state = await RunState.from_json(agent, state.to_json())
+        assert len(model.calls) == 1
+        assert effects == [7]
+    state.add_input("What was the receipt?")
+    result = await _run_session_resume(agent, state, session, True)
+    assert result.final_output == "done"
+    stored = await session.get_items()
+    output_index = next(
+        i for i, item in enumerate(stored) if item.get("type") == "function_call_output"
+    )
+    late_index = next(
+        i for i, item in enumerate(stored) if item.get("content") == "What was the receipt?"
+    )
+    assert output_index < late_index
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_resumed_committed_append_refreshes_compaction_input(
+    streamed: bool, round_trip: bool, tmp_path: Path
+) -> None:
+    backend = _LostAckSQLiteSession("compaction-recovery", tmp_path / "history.db")
+    compaction_inputs: list[list[TResponseInputItem]] = []
+    compact_enabled = False
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compaction_inputs.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: compact_enabled,
+    )
+    try:
+        agent, model, _, state, effects = await _approved_session_state(streamed, session)
+        # A normal declined compaction initializes the retained wrapper's history cache.
+        await session.run_compaction()
+        assert compaction_inputs == []
+        backend.fail_after_commit = True
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, streamed)
+        assert error.value is backend.error
+        expected_pair = ["function_call", "function_call_output"]
+        assert _charge_pair(await backend.get_items(limit=100)) == expected_pair
+        if round_trip:
+            state = await RunState.from_json(agent, state.to_json())
+
+        compact_enabled = True
+        result = await _run_session_resume(agent, state, session, streamed)
+        assert result.final_output == "done"
+        assert effects == [7]
+        assert len(model.calls) == 2
+        assert len(compaction_inputs) == 1
+        assert _charge_pair(compaction_inputs[0]) == expected_pair
+        assert _charge_pair(await backend.get_items(limit=100)) == expected_pair
+        assert _charge_pair(result.to_input_list()) == expected_pair
+        assert "pending_session_write" not in result.to_state().to_json()
+    finally:
+        backend.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["input", "auto"])
+async def test_compaction_reload_preserves_session_retrieval_window(
+    mode: Literal["input", "auto"], tmp_path: Path
+) -> None:
+    backend = _LostAckSQLiteSession(
+        "bounded-compaction", tmp_path / "history.db", session_settings={"limit": 1}
+    )
+    compaction_inputs: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        assert "previous_response_id" not in kwargs
+        items = copy.deepcopy(kwargs["input"])
+        compaction_inputs.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode=mode,
+    )
+    old_items: list[TResponseInputItem] = [
+        {"role": "assistant", "content": f"old message {index}"} for index in range(12)
+    ]
+    recovered_item: TResponseInputItem = {"role": "assistant", "content": "committed reply"}
+    try:
+        await backend.add_items(old_items)
+        # The configured window has one candidate, so the default threshold is not met.
+        await session.run_compaction({"response_id": "unstored-response", "store": False})
+        assert compaction_inputs == []
+        assert await backend.get_items(limit=100) == old_items
+
+        backend.fail_after_commit = True
+        with pytest.raises(RuntimeError) as error:
+            await session.add_items([recovered_item])
+        assert error.value is backend.error
+        assert await backend.get_items(limit=100) == [*old_items, recovered_item]
+
+        await session.run_compaction({"force": True, "store": False})
+        assert compaction_inputs == [[recovered_item]]
+        assert await backend.get_items(limit=100) == [recovered_item]
+    finally:
+        backend.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_compaction_append_preserves_committed_and_surviving_writes() -> None:
+    appended = asyncio.Event()
+    wait_for_ack = asyncio.Event()
+
+    class DelayedAckSession(SimpleListSession):
+        delay_next_ack = True
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            await super().add_items(items)
+            if self.delay_next_ack:
+                self.delay_next_ack = False
+                appended.set()
+                await wait_for_ack.wait()
+
+    backend = DelayedAckSession()
+    compaction_inputs: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compaction_inputs.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: False,
+    )
+    await session.run_compaction()
+    first_item: TResponseInputItem = {"role": "user", "content": "committed before cancellation"}
+    newer_item: TResponseInputItem = {"role": "user", "content": "surviving writer"}
+    first = asyncio.create_task(session.add_items([first_item]))
+    newer: asyncio.Task[None] | None = None
+    newer_started = asyncio.Event()
+
+    async def write_newer() -> None:
+        newer_started.set()
+        await session.add_items([newer_item])
+
+    try:
+        await asyncio.wait_for(appended.wait(), timeout=5)
+        newer = asyncio.create_task(write_newer())
+        await asyncio.wait_for(newer_started.wait(), timeout=5)
+        assert not newer.done()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await asyncio.wait_for(newer, timeout=5)
+        await session.run_compaction({"force": True})
+        assert compaction_inputs == [[first_item, newer_item]]
+        assert await backend.get_items() == [first_item, newer_item]
+    finally:
+        wait_for_ack.set()
+        tasks = [first, *([newer] if newer is not None else [])]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_resumed_session_append_cancellation_retains_recoverable_state(
+    streamed: bool,
+) -> None:
+    agent, model, session, state, effects = await _approved_session_state(streamed)
+    session.block_next_add = True
+    attempt = asyncio.create_task(_run_session_resume(agent, state, session, streamed))
+    try:
+        await asyncio.wait_for(session.add_started.wait(), timeout=5)
+        with pytest.raises(UserError, match="pending Session write is already in progress"):
+            await _run_session_resume(agent, state, session, not streamed)
+        assert len(model.calls) == 1
+        attempt.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await attempt
+    finally:
+        session.release_add.set()
+        if not attempt.done():
+            attempt.cancel()
+        await asyncio.gather(attempt, return_exceptions=True)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    result = await _run_session_resume(agent, restored, session, not streamed)
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_failed_streamed_result_checkpoint_retains_detached_pending_write() -> None:
+    agent, model, session, state, effects = await _approved_session_state(True)
+    session.failure = "before"
+    result = Runner.run_streamed(agent, state, session=session)
+    with pytest.raises(RuntimeError, match="session append failed"):
+        async for _ in result.stream_events():
+            pass
+    snapshot = result.to_state()
+    payload = snapshot.to_json()
+    payload["pending_session_write"]["items"][0]["output"] = "changed snapshot"
+    assert state.to_json()["pending_session_write"]["items"][0]["output"] == "receipt-7"
+    assert snapshot.to_json()["pending_session_write"]["items"][0]["output"] == "receipt-7"
+    await _run_session_resume(agent, snapshot, session, False)
+    assert effects == [7]
+    assert len(model.calls) == 2
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    if invalid == "old-schema":
+        payload["$schemaVersion"] = "1.16"
+    else:
+        payload["pending_session_write"]["items"] = "not an item batch"
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_append_partial_commit_fails_closed() -> None:
+    agent, model, session, state, effects = await _approved_session_state(False)
+    # Two approved calls produce one resumed batch, allowing an actual partial append.
+    second_call = get_function_tool_call("charge", '{"amount":7}', call_id="charge-2")
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1"), second_call],
+            [get_text_message("done")],
+        ]
+    )
+    agent.model = model
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge twice", session, False)
+    state = paused.to_state()
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    session.failure = "partial"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    before = await session.get_items()
+    restored = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="history changed or is ambiguous"):
+        await _run_session_resume(agent, restored, session, True)
+    assert effects == [7, 7]
+    assert len(model.calls) == 1
+    assert await session.get_items() == before
 
 
 @pytest.mark.asyncio

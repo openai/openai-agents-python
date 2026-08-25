@@ -833,10 +833,14 @@ The `is_enabled` parameter accepts:
 
 Disabled tools are completely hidden from the LLM at runtime, making this useful for:
 
--   Feature gating based on user permissions
+-   Request-scoped capability visibility
 -   Environment-specific tool availability (dev vs prod)
 -   A/B testing different tool configurations
 -   Dynamic tool filtering based on runtime state
+
+For locally configured function tools, the runner also reevaluates `is_enabled` before invocation. However, `is_enabled` controls visibility and dispatch; it does not replace authorization that depends on the tool arguments or the resource being accessed. Enforce those checks inside the tool implementation, or use [tool input guardrails](guardrails.md#tool-guardrails) and [approvals](human_in_the_loop.md) when appropriate. MCP servers must authorize their own protected operations.
+
+See [context management](context.md#use-local-context-for-capability-visibility) for a pattern that applies one application policy across function tools, MCP tools, and handoffs.
 
 ## Experimental: Codex tool
 

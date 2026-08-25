@@ -608,6 +608,11 @@
     },
     {
       "abstract": false,
+      "class_name": "OpenAIVoiceModelProvider",
+      "module": "agents.voice.models.openai_model_provider"
+    },
+    {
+      "abstract": false,
       "class_name": "OpenAISTTModel",
       "module": "agents.voice.models.openai_stt"
     },
@@ -626,6 +631,11 @@
         "run"
       ],
       "class_name": "VoiceWorkflowBase",
+      "module": "agents.voice.workflow"
+    },
+    {
+      "abstract": false,
+      "class_name": "SingleAgentVoiceWorkflow",
       "module": "agents.voice.workflow"
     }
   ],

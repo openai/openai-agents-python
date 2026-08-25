@@ -21,7 +21,7 @@ import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -74,6 +74,30 @@ _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
 _PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
 _PTY_FD_CLOSE_GRACE_SECONDS = 0.1
+_HOST_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_MONETARY",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "UV_PYTHON",
+        "NO_COLOR",
+        "FORCE_COLOR",
+        "CI",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +163,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _pty_processes: dict[int, _UnixPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
     _fd_close_tasks: set[asyncio.Task[None]]
+    _host_environment_allowlist: frozenset[str] | None
 
     def __init__(self, *, state: UnixLocalSandboxSessionState) -> None:
         self.state = state
@@ -147,6 +172,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
         self._fd_close_tasks = set()
+        self._host_environment_allowlist = None
 
     @classmethod
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
@@ -440,7 +466,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await self._terminate_pty_entry(entry)
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
-        env = os.environ.copy()
+        if self._host_environment_allowlist is None:
+            env = dict(os.environ)
+        else:
+            env = {
+                name: value
+                for name, value in os.environ.items()
+                if name in self._host_environment_allowlist
+            }
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
@@ -1099,11 +1132,26 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         *,
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
+        inherit_host_environment: bool = True,
+        host_environment_allowlist: Collection[str] | None = None,
     ) -> None:
+        if inherit_host_environment and host_environment_allowlist is not None:
+            raise ValueError("host_environment_allowlist requires inherit_host_environment=False")
+        if isinstance(host_environment_allowlist, str):
+            raise TypeError("host_environment_allowlist must be a collection of variable names")
+
         self._instrumentation = (
             instrumentation if instrumentation is not None else Instrumentation()
         )
         self._dependencies = dependencies
+        if inherit_host_environment:
+            self._host_environment_allowlist = None
+        else:
+            self._host_environment_allowlist = frozenset(
+                _HOST_ENVIRONMENT_ALLOWLIST
+                if host_environment_allowlist is None
+                else host_environment_allowlist
+            )
 
     @redact_mount_error_data
     async def create(
@@ -1136,6 +1184,9 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             exposed_ports=resolved_options.exposed_ports,
         )
         inner = UnixLocalSandboxSession.from_state(state)
+        # Keep host inheritance policy under trusted runtime control. Session state and manifests
+        # must not be able to change it when a session is resumed by another client.
+        inner._host_environment_allowlist = self._host_environment_allowlist
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     async def delete(self, session: SandboxSession) -> SandboxSession:
@@ -1177,6 +1228,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         state.assert_path_grants_rebound()
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
+        inner._host_environment_allowlist = self._host_environment_allowlist
         return self._wrap_session(inner, instrumentation=self._instrumentation)
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

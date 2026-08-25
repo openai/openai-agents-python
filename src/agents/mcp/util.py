@@ -575,6 +575,16 @@ class MCPUtil:
             ),
             failure_error_function=effective_failure_error_function,
             strict_json_schema=is_strict,
+            tool_input_guardrails=(
+                list(server.tool_input_guardrails)
+                if server.tool_input_guardrails is not None
+                else None
+            ),
+            tool_output_guardrails=(
+                list(server.tool_output_guardrails)
+                if server.tool_output_guardrails is not None
+                else None
+            ),
             needs_approval=needs_approval,
             mcp_title=resolve_mcp_tool_title(tool),
             tool_origin=ToolOrigin(

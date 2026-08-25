@@ -3,9 +3,19 @@ import asyncio
 import pytest
 from mcp.types import Tool as MCPTool
 
-from agents import Agent, RunContextWrapper, Runner
+from agents import (
+    Agent,
+    RunConfig,
+    RunContextWrapper,
+    Runner,
+    ToolExecutionConfig,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+)
 from agents.exceptions import UserError
+from agents.run_state import RunState
 from agents.testing import ScriptedModel
+from agents.tool_guardrails import tool_input_guardrail
 
 from ..test_responses import get_function_tool_call, get_text_message
 from ..utils.hitl import queue_function_call_and_text, resume_after_first_approval
@@ -38,6 +48,66 @@ async def test_mcp_require_approval_pauses_and_resumes():
     assert not resumed.interruptions
     assert server.tool_calls == ["add"]
     assert resumed.final_output == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("pre_approval", [False, True])
+async def test_mcp_guardrails_preserve_approval_and_serialized_resume_order(
+    streaming: bool,
+    pre_approval: bool,
+):
+    guardrail_calls: list[tuple[str, str]] = []
+
+    @tool_input_guardrail
+    def allow_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        guardrail_calls.append((data.context.tool_name, data.context.tool_arguments))
+        return ToolGuardrailFunctionOutput.allow()
+
+    server = FakeMCPServer(
+        require_approval="always",
+        tool_input_guardrails=[allow_input],
+    )
+    server.add_tool("add", {"type": "object", "properties": {}})
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("add", "{}", call_id="guarded_mcp_call")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
+    run_config = RunConfig(
+        tool_execution=ToolExecutionConfig(
+            pre_approval_tool_input_guardrails=pre_approval,
+        )
+    )
+
+    if streaming:
+        first = Runner.run_streamed(agent, "call add", run_config=run_config)
+        async for _ in first.stream_events():
+            pass
+    else:
+        first = await Runner.run(agent, "call add", run_config=run_config)
+
+    assert len(first.interruptions) == 1
+    assert server.tool_calls == []
+    assert guardrail_calls == ([("add", "{}")] if pre_approval else [])
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    restored_state = await RunState.from_string(agent, state.to_string())
+
+    if streaming:
+        resumed = Runner.run_streamed(agent, restored_state, run_config=run_config)
+        async for _ in resumed.stream_events():
+            pass
+    else:
+        resumed = await Runner.run(agent, restored_state, run_config=run_config)
+
+    expected_guardrail_runs = 2 if pre_approval else 1
+    assert resumed.final_output == "done"
+    assert server.tool_calls == ["add"]
+    assert guardrail_calls == [("add", "{}")] * expected_guardrail_runs
 
 
 @pytest.mark.asyncio

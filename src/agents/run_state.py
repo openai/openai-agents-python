@@ -165,6 +165,15 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
+class _PendingSessionWrite(TypedDict):
+    """One canonical resumed-output append awaiting acknowledgement."""
+
+    session_id: str
+    items: list[TResponseInputItem]
+    before: list[str] | None
+    persisted_count: int
+
+
 def _default_run_state_validation_error(
     message: str,
     error_type: RunStateValidationErrorType,
@@ -216,7 +225,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows."
+        "resume flows, including pending resumed Session writes."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -757,6 +766,13 @@ class RunState(Generic[TContext, TAgent]):
     enough information to continue an interrupted run, including model responses, generated
     items, approval state, and optional server-managed conversation identifiers.
 
+    A failed Session append after resumed tool work that continues to another model call remains
+    pending across serialization.
+    Resume with the original Session backend and session ID, with exclusive access to that history.
+    Runner reconciles the exact pending batch before the next model call without rerunning the tool.
+    Changed or ambiguous history requires application repair. Independently restored snapshots must
+    not be resumed concurrently against the same Session.
+
     Context serialization is intentionally conservative:
 
     - Mapping contexts round-trip directly.
@@ -854,6 +870,12 @@ class RunState(Generic[TContext, TAgent]):
     _schema_version: str = field(default=CURRENT_SCHEMA_VERSION, repr=False)
     """Schema version the snapshot was loaded from for schema-gated resume compatibility."""
 
+    _pending_session_write: _PendingSessionWrite | None = field(default=None, repr=False)
+    """Canonical Session append that must settle before another model call."""
+
+    _session_write_in_progress: bool = field(default=False, repr=False)
+    """Live ownership guard; independent serialized copies require caller serialization."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -894,6 +916,8 @@ class RunState(Generic[TContext, TAgent]):
         self._trace_state = None
         self._sandbox = None
         self._schema_version = CURRENT_SCHEMA_VERSION
+        self._pending_session_write = None
+        self._session_write_in_progress = False
         from .agent_tool_state import get_agent_tool_state_scope
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
@@ -901,6 +925,8 @@ class RunState(Generic[TContext, TAgent]):
     def _copy_for_result_checkpoint(self) -> RunState[TContext, TAgent]:
         """Copy SDK-owned decision state when nesting this checkpoint in a result snapshot."""
         copied = copy.copy(self)
+        copied._pending_session_write = copy.deepcopy(self._pending_session_write)
+        copied._session_write_in_progress = False
         if self._context is None:
             return copied
         copied._context = self._context._copy_for_run_state()
@@ -1879,6 +1905,8 @@ class RunState(Generic[TContext, TAgent]):
             else None
         )
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
+        if self._pending_session_write is not None:
+            result["pending_session_write"] = copy.deepcopy(self._pending_session_write)
         result["trace"] = self._serialize_trace_data(
             include_tracing_api_key=include_tracing_api_key
         )
@@ -4328,6 +4356,31 @@ async def _build_run_state_from_json(
     state._current_turn_persisted_item_count = state_json.get(
         "current_turn_persisted_item_count", 0
     )
+    pending_write = state_json.get("pending_session_write")
+    if pending_write is not None:
+        from .run_internal.run_steps import NextStepRunAgain
+
+        if (
+            (schema_major, schema_minor) < (1, 17)
+            or not isinstance(state._current_step, NextStepRunAgain)
+            or not isinstance(pending_write, dict)
+            or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
+            or not isinstance(pending_write.get("session_id"), str)
+            or not isinstance(pending_write.get("items"), list)
+            or not pending_write["items"]
+            or not all(isinstance(item, dict) for item in pending_write["items"])
+            or (
+                pending_write.get("before") is not None
+                and (
+                    not isinstance(pending_write["before"], list)
+                    or not all(isinstance(item, str) for item in pending_write["before"])
+                )
+            )
+            or type(pending_write.get("persisted_count")) is not int
+            or pending_write["persisted_count"] < 0
+        ):
+            raise validation_error_factory("Run state pending Session write is invalid", UserError)
+        state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))
     serialized_policy = state_json.get("reasoning_item_id_policy")
     if serialized_policy in {"preserve", "omit"}:
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
@@ -5591,6 +5644,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         ),
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
+        "Run state pending Session write is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "

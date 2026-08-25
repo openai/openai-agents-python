@@ -51,6 +51,10 @@ class FuncSchema:
         positional_args: list[Any] = []
         keyword_args: dict[str, Any] = {}
         seen_var_positional = False
+        # Read instance storage first so Pydantic properties such as ``model_extra``
+        # and ``model_fields_set`` do not shadow tool parameters of the same name.
+        # ``model_dump()`` is unsuitable here because it converts nested models to dicts.
+        instance_values = object.__getattribute__(data, "__dict__")
 
         # Use enumerate() so we can skip the first parameter if it's context.
         for idx, (name, param) in enumerate(self.signature.parameters.items()):
@@ -58,7 +62,7 @@ class FuncSchema:
             if self.takes_context and idx == 0:
                 continue
 
-            value = getattr(data, name, None)
+            value = instance_values[name] if name in instance_values else getattr(data, name, None)
             if param.kind == param.VAR_POSITIONAL:
                 # e.g. *args: extend positional args and mark that *args is now seen
                 positional_args.extend(value or [])
