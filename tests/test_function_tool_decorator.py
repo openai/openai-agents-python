@@ -360,6 +360,8 @@ async def test_all_optional_params_function():
     assert tool.strict_json_schema is False, "strict_json_schema should be False"
 
     assert tool.params_json_schema.get("required") is None, "required should be empty"
+    assert tool.params_json_schema["properties"]["x"]["default"] == 42
+    assert tool.params_json_schema["properties"]["y"]["default"] == "hello"
 
     input_data: dict[str, Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
@@ -372,6 +374,22 @@ async def test_all_optional_params_function():
     input_data = {"x": 10, "y": "world", "z": 99}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "10_world_99"
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_strips_non_null_defaults_but_keeps_python_defaults():
+    def function_with_defaults(value: int = 42, label: str = "default") -> str:
+        return f"{value}_{label}"
+
+    tool = function_tool(function_with_defaults)
+
+    assert tool.strict_json_schema is True
+    assert tool.params_json_schema["required"] == ["value", "label"]
+    assert "default" not in tool.params_json_schema["properties"]["value"]
+    assert "default" not in tool.params_json_schema["properties"]["label"]
+
+    output = await tool.on_invoke_tool(ctx_wrapper(), "{}")
+    assert output == "42_default"
 
 
 @function_tool

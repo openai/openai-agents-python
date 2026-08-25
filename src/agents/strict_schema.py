@@ -3,8 +3,6 @@ from __future__ import annotations
 import copy
 from typing import Any, TypeGuard, cast
 
-from openai import NOT_GIVEN
-
 from .exceptions import UserError
 
 _EMPTY_SCHEMA = {
@@ -361,12 +359,6 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
-    if json_schema.get("default", NOT_GIVEN) is None:
-        json_schema.pop("default")
-
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
     #
@@ -398,6 +390,11 @@ def _ensure_strict_json_schema(
             depth=next_depth,
             inside_nested_resource=inside_nested_resource,
         )
+
+    # Strict schemas require every property, so defaults are not used by the model and are
+    # rejected by the Structured Outputs API. Keep this after `$ref` expansion so an allowed
+    # default sibling does not prevent the existing reference normalization from running.
+    json_schema.pop("default", None)
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)

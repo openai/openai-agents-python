@@ -701,9 +701,10 @@ def test_allOf_single_entry_cannot_overwrite_strict_object(additional_properties
         ensure_strict_json_schema(schema)
 
 
-def test_default_removal_on_non_object():
-    # Test that "default": None is stripped from schemas that are not objects.
-    schema = {"type": "string", "default": None}
+@pytest.mark.parametrize("default", [None, 0, "EUR", False])
+def test_default_removal_on_non_object(default):
+    # Test that defaults are stripped from schemas that are not objects.
+    schema = {"type": "string", "default": default}
     result = ensure_strict_json_schema(schema)
     assert result["type"] == "string"
     assert "default" not in result
@@ -722,6 +723,27 @@ def test_ref_expansion():
     # the description from the original takes precedence, and default is removed.
     assert a_schema["type"] == "string"
     assert a_schema["description"] == "desc"
+    assert "default" not in a_schema
+
+
+def test_ref_with_non_null_default_is_expanded_before_default_removal():
+    schema = {
+        "$defs": {
+            "refObj": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            }
+        },
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/refObj", "default": {}}},
+    }
+
+    result = ensure_strict_json_schema(schema, _reject_open_objects=True)
+    a_schema = result["properties"]["a"]
+
+    assert a_schema["type"] == "object"
+    assert a_schema["additionalProperties"] is False
+    assert a_schema["required"] == ["value"]
     assert "default" not in a_schema
 
 
