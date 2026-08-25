@@ -869,6 +869,61 @@ def _merge_public_class_contracts(
     return result
 
 
+def _validate_voice_public_class_contract_policy(
+    release_policy: SubmoduleExportPolicy,
+    agents_module: Any | None,
+) -> None:
+    voice_class_exports: list[tuple[Mapping[str, str], type[Any]]] = []
+    for entry in release_policy.canonical_imports:
+        if entry["module"] != "agents.voice":
+            continue
+        canonical_module = _import_contract_module(entry["canonical_module"], agents_module)
+        value = getattr(canonical_module, entry["canonical_name"], None)
+        if isinstance(value, type):
+            voice_class_exports.append((entry, value))
+
+    abstract_bases = {
+        class_value for _, class_value in voice_class_exports if inspect.isabstract(class_value)
+    }
+    policy_by_identity = {
+        (entry["module"], entry["class_name"]): entry
+        for entry in release_policy.public_class_contracts
+    }
+    missing_entries: list[dict[str, object]] = []
+    for canonical_import, class_value in voice_class_exports:
+        is_abstract = inspect.isabstract(class_value)
+        if not is_abstract and not any(
+            issubclass(class_value, abstract_base) for abstract_base in abstract_bases
+        ):
+            continue
+
+        identity = (
+            canonical_import["canonical_module"],
+            canonical_import["canonical_name"],
+        )
+        policy_entry = policy_by_identity.get(identity)
+        has_explicit_state = policy_entry is not None and (
+            (is_abstract and ("abstract" in policy_entry or "abstract_members" in policy_entry))
+            or (not is_abstract and policy_entry.get("abstract") is False)
+        )
+        if not has_explicit_state:
+            missing_entries.append(
+                {
+                    "abstract": is_abstract,
+                    "class_name": canonical_import["canonical_name"],
+                    "module": canonical_import["canonical_module"],
+                }
+            )
+
+    if missing_entries:
+        raise ValueError(
+            "Cannot promote the public Voice API without explicit public_class_contracts "
+            "coverage for its abstract bases and concrete implementations. Add or correct "
+            f"these policy entries: {missing_entries!r}. Required classes are derived from "
+            "canonical agents.voice imports and their public abstract-base relationships."
+        )
+
+
 def _public_property_identity(entry: Mapping[str, Any]) -> tuple[str, str, str]:
     if "class_name" in entry:
         return ("class_name", cast(str, entry["module"]), cast(str, entry["class_name"]))
@@ -1493,6 +1548,9 @@ def build_released_api_contract(
 ) -> dict[str, Any]:
     """Build the next rolling release contract from the current public surface."""
     agents = agents_module or importlib.import_module("agents")
+    if release_policy is not None:
+        _validate_voice_public_class_contract_policy(release_policy, agents_module)
+
     compatibility_errors = validate_released_api_contract(contract, agents_module=agents)
     if compatibility_errors:
         details = "\n".join(f"- {error}" for error in compatibility_errors)

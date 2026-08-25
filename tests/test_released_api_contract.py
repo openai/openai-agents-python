@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from importlib.metadata import version
 from inspect import Parameter, Signature
@@ -2592,6 +2592,121 @@ def test_release_contract_policy_promotes_curated_public_state_surfaces(
     assert updated["callables"]["agents.submodule.NewPublic"] == _callable_contract(NewPublic)
 
 
+def test_release_contract_promotion_rejects_missing_voice_concrete_state_policy() -> None:
+    contract = load_api_contract(CONTRACT)
+    policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
+    omitted_classes = {"OpenAIVoiceModelProvider", "SingleAgentVoiceWorkflow"}
+    incomplete_policy = replace(
+        policy,
+        public_class_contracts=tuple(
+            entry
+            for entry in policy.public_class_contracts
+            if entry["class_name"] not in omitted_classes
+        ),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        build_released_api_contract(
+            contract,
+            baseline=contract["baseline"],
+            baseline_commit=contract["baseline_commit"],
+            release_policy=incomplete_policy,
+        )
+
+    message = str(exc_info.value)
+    assert "Cannot promote the public Voice API" in message
+    assert "OpenAIVoiceModelProvider" in message
+    assert "SingleAgentVoiceWorkflow" in message
+    assert "abstract': False" in message
+    assert "canonical agents.voice imports" in message
+
+
+def test_release_contract_promotion_rejects_new_public_voice_implementation_without_state_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PublicVoiceBase(abc.ABC):
+        @abc.abstractmethod
+        def run(self) -> None:
+            pass
+
+    class NewPublicVoiceImplementation(PublicVoiceBase):
+        def run(self) -> None:
+            pass
+
+    class UnrelatedPublicClass:
+        pass
+
+    agents_module = SimpleNamespace(__all__=[])
+    modules = {
+        "agents.voice.base": SimpleNamespace(PublicVoiceBase=PublicVoiceBase),
+        "agents.voice.implementation": SimpleNamespace(
+            NewPublicVoiceImplementation=NewPublicVoiceImplementation,
+            UnrelatedPublicClass=UnrelatedPublicClass,
+        ),
+    }
+    monkeypatch.setattr(
+        contract_support,
+        "_import_contract_module",
+        lambda module_name, _agents_module: modules[module_name],
+    )
+    contract: dict[str, Any] = {
+        "baseline": "v0.22.0",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "public_class_contracts": [],
+        "public_properties": [],
+        "public_type_aliases": [],
+        "public_typed_dicts": [],
+        "callables": {},
+    }
+    canonical_imports = (
+        {
+            "canonical_module": "agents.voice.base",
+            "canonical_name": "PublicVoiceBase",
+            "module": "agents.voice",
+            "name": "PublicVoiceBase",
+        },
+        {
+            "canonical_module": "agents.voice.implementation",
+            "canonical_name": "NewPublicVoiceImplementation",
+            "module": "agents.voice",
+            "name": "NewPublicVoiceImplementation",
+        },
+        {
+            "canonical_module": "agents.voice.implementation",
+            "canonical_name": "UnrelatedPublicClass",
+            "module": "agents.voice",
+            "name": "UnrelatedPublicClass",
+        },
+    )
+    release_policy = _release_policy(
+        {},
+        canonical_imports=canonical_imports,
+        public_class_contracts=(
+            {
+                "abstract_members": ["run"],
+                "class_name": "PublicVoiceBase",
+                "module": "agents.voice.base",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        build_released_api_contract(
+            contract,
+            baseline="v0.22.1",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            release_policy=release_policy,
+        )
+
+    message = str(exc_info.value)
+    assert "NewPublicVoiceImplementation" in message
+    assert "UnrelatedPublicClass" not in message
+
+
 def test_typed_dict_only_promotion_updates_baseline_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3529,6 +3644,7 @@ def test_repository_release_policy_declares_public_optional_modules() -> None:
 
 def test_repository_release_policy_declares_public_state_surfaces() -> None:
     policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
+    contract_support._validate_voice_public_class_contract_policy(policy, None)
     expected_modules = {
         "agents.realtime.testing",
         "agents.testing",
@@ -3639,6 +3755,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
         },
         {
             "abstract": False,
+            "class_name": "OpenAIVoiceModelProvider",
+            "module": "agents.voice.models.openai_model_provider",
+        },
+        {
+            "abstract": False,
             "class_name": "OpenAISTTModel",
             "module": "agents.voice.models.openai_stt",
         },
@@ -3656,6 +3777,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "class_name": "VoiceWorkflowBase",
             "module": "agents.voice.workflow",
             "abstract_members": ["run"],
+        },
+        {
+            "abstract": False,
+            "class_name": "SingleAgentVoiceWorkflow",
+            "module": "agents.voice.workflow",
         },
     )
     assert policy.public_type_aliases == (
