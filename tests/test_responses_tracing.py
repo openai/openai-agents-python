@@ -1,10 +1,19 @@
+from typing import Any, cast
+
 import pytest
 from inline_snapshot import snapshot
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from agents import ModelBehaviorError, ModelSettings, ModelTracing, OpenAIResponsesModel, trace
+from agents import (
+    ModelBehaviorError,
+    ModelSettings,
+    ModelTracing,
+    OpenAIResponsesModel,
+    OpenAIResponsesWSModel,
+    trace,
+)
 from agents.tracing.span_data import ResponseSpanData
 from tests import model_test_helpers
 
@@ -120,10 +129,13 @@ async def test_get_response_creates_trace(monkeypatch):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
+async def test_non_data_tracing_preserves_response_id_without_response(monkeypatch):
     with trace(workflow_name="test"):
         # Create an instance of the model
-        model = OpenAIResponsesModel(model="test-model", openai_client=AsyncOpenAI(api_key="test"))
+        model = OpenAIResponsesModel(
+            model="test-model",
+            openai_client=AsyncOpenAI(api_key="test", base_url="https://api.openai.com/v1"),
+        )
 
         # Mock _fetch_response to return a dummy response with a known id
         async def dummy_fetch_response(
@@ -162,6 +174,7 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
                     {
                         "type": "response",
                         "data": {
+                            "response_id": "dummy-id",
                             "usage": {
                                 "requests": 1,
                                 "input_tokens": 1,
@@ -172,7 +185,7 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
                                     "cache_write_tokens": 0,
                                 },
                                 "output_tokens_details": {"reasoning_tokens": 0},
-                            }
+                            },
                         },
                     }
                 ],
@@ -182,6 +195,57 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
 
     [span] = fetch_ordered_spans()
     assert span.span_data.response is None
+    assert span.span_data.input is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_non_data_tracing_omits_custom_endpoint_response_id(monkeypatch):
+    provider_response_id = "tenant-customer-123"
+    with trace(workflow_name="test"):
+        client = AsyncOpenAI(api_key="test", base_url="https://provider.example.test/v1")
+        model = OpenAIResponsesModel(
+            model="test-model",
+            openai_client=client,
+        )
+
+        async def dummy_fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id,
+            conversation_id,
+            stream,
+            prompt,
+        ):
+            response = DummyResponse()
+            response.id = provider_response_id
+            client.base_url = "https://api.openai.com/v1"
+            return response
+
+        monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
+
+        model_response = await model.get_response(
+            "instr",
+            "input",
+            ModelSettings(),
+            [],
+            None,
+            [],
+            ModelTracing.ENABLED_WITHOUT_DATA,
+            previous_response_id=None,
+        )
+
+    assert model_response.response_id == provider_response_id
+    [span] = fetch_ordered_spans()
+    assert isinstance(span.span_data, ResponseSpanData)
+    assert span.span_data.export()["response_id"] is None
+    assert span.span_data.response is None
+    assert span.span_data.input is None
+    assert span.span_data.usage is not None
 
 
 @pytest.mark.allow_call_model_methods
@@ -369,10 +433,16 @@ async def test_stream_response_failed_or_incomplete_terminal_event_creates_trace
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
+@pytest.mark.parametrize("close_at_completed", [False, True])
+async def test_stream_non_data_tracing_preserves_response_id_without_response(
+    monkeypatch, close_at_completed: bool
+):
     with trace(workflow_name="test"):
         # Create an instance of the model
-        model = OpenAIResponsesModel(model="test-model", openai_client=AsyncOpenAI(api_key="test"))
+        model = OpenAIResponsesModel(
+            model="test-model",
+            openai_client=AsyncOpenAI(api_key="test", base_url="https://api.openai.com/v1"),
+        )
 
         # Define a dummy fetch function that returns an async stream with a dummy response
         async def dummy_fetch_response(
@@ -399,8 +469,7 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
 
         monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
 
-        # Consume the stream to trigger processing of the final response
-        async for _ in model.stream_response(
+        stream = model.stream_response(
             "instr",
             "input",
             ModelSettings(),
@@ -409,8 +478,15 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
             [],
             ModelTracing.ENABLED_WITHOUT_DATA,
             previous_response_id=None,
-        ):
-            pass
+        )
+        if close_at_completed:
+            stream_agen = cast(Any, stream)
+            event = await stream_agen.__anext__()
+            assert event.type == "response.completed"
+            await stream_agen.aclose()
+        else:
+            async for _ in stream:
+                pass
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -420,6 +496,7 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
                     {
                         "type": "response",
                         "data": {
+                            "response_id": "dummy-id-123",
                             "usage": {
                                 "requests": 1,
                                 "input_tokens": 0,
@@ -430,7 +507,7 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
                                     "cache_write_tokens": 0,
                                 },
                                 "output_tokens_details": {"reasoning_tokens": 0},
-                            }
+                            },
                         },
                     }
                 ],
@@ -441,6 +518,128 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
     [span] = fetch_ordered_spans()
     assert isinstance(span.span_data, ResponseSpanData)
     assert span.span_data.response is None
+    assert span.span_data.input is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_non_data_tracing_omits_custom_endpoint_response_id(monkeypatch):
+    provider_response_id = "tenant-customer-123"
+    with trace(workflow_name="test"):
+        client = AsyncOpenAI(api_key="test", base_url="https://provider.example.test/v1")
+        model = OpenAIResponsesModel(
+            model="test-model",
+            openai_client=client,
+        )
+
+        async def dummy_fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id,
+            conversation_id,
+            stream,
+            prompt,
+        ):
+            class DummyStream:
+                async def __aiter__(self):
+                    client.base_url = "https://api.openai.com/v1"
+                    yield ResponseCompletedEvent(
+                        type="response.completed",
+                        response=model_test_helpers.get_response_obj([], provider_response_id),
+                        sequence_number=0,
+                    )
+
+            return DummyStream()
+
+        monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
+
+        events = [
+            event
+            async for event in model.stream_response(
+                "instr",
+                "input",
+                ModelSettings(),
+                [],
+                None,
+                [],
+                ModelTracing.ENABLED_WITHOUT_DATA,
+                previous_response_id=None,
+            )
+        ]
+
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.id == provider_response_id
+    [span] = fetch_ordered_spans()
+    assert isinstance(span.span_data, ResponseSpanData)
+    assert span.span_data.export()["response_id"] is None
+    assert span.span_data.response is None
+    assert span.span_data.input is None
+    assert span.span_data.usage is not None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_non_data_tracing_preserves_id_for_https_official_websocket(monkeypatch):
+    provider_response_id = "resp-official-ws"
+    with trace(workflow_name="test"):
+        model = OpenAIResponsesWSModel(
+            model="test-model",
+            openai_client=AsyncOpenAI(
+                api_key="test", websocket_base_url="https://api.openai.com/v1"
+            ),
+        )
+        assert model._supports_default_prompt_cache_key() is False
+
+        async def dummy_fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id,
+            conversation_id,
+            stream,
+            prompt,
+        ):
+            class DummyStream:
+                async def __aiter__(self):
+                    yield ResponseCompletedEvent(
+                        type="response.completed",
+                        response=model_test_helpers.get_response_obj([], provider_response_id),
+                        sequence_number=0,
+                    )
+
+            return DummyStream()
+
+        monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
+
+        events = [
+            event
+            async for event in model.stream_response(
+                "instr",
+                "input",
+                ModelSettings(),
+                [],
+                None,
+                [],
+                ModelTracing.ENABLED_WITHOUT_DATA,
+                previous_response_id=None,
+            )
+        ]
+
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.id == provider_response_id
+    [span] = fetch_ordered_spans()
+    assert isinstance(span.span_data, ResponseSpanData)
+    assert span.span_data.export()["response_id"] == provider_response_id
+    assert span.span_data.response is None
+    assert span.span_data.input is None
+    assert span.span_data.usage is not None
 
 
 @pytest.mark.allow_call_model_methods

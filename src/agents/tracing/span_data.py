@@ -215,7 +215,7 @@ class ResponseSpanData(SpanData):
     Includes response and input.
     """
 
-    __slots__ = ("response", "input", "usage")
+    __slots__ = ("response", "input", "usage", "_response_id")
 
     def __init__(
         self,
@@ -228,6 +228,7 @@ class ResponseSpanData(SpanData):
         # processor implementations
         self.input = input
         self.usage = usage
+        self._response_id: str | None = None
 
     @property
     def type(self) -> str:
@@ -236,7 +237,7 @@ class ResponseSpanData(SpanData):
     def export(self) -> dict[str, Any]:
         return {
             "type": self.type,
-            "response_id": self.response.id if self.response is not None else None,
+            "response_id": (self.response.id if self.response is not None else self._response_id),
             "usage": self.usage,
         }
 
