@@ -1354,17 +1354,18 @@ async def start_streaming(
                             generated_items=generated_items,
                             session_items=streamed_result.new_items,
                         )
-                        # Publish this turn's tool guardrail results before the resumed
-                        # Session append, which can raise and skip the interruption
-                        # branch below. The tool already ran.
-                        run_state._tool_input_guardrail_results = [
-                            *accepted_tool_input_guardrail_results,
-                            *turn_result.tool_input_guardrail_results,
-                        ]
-                        run_state._tool_output_guardrail_results = [
-                            *accepted_tool_output_guardrail_results,
-                            *turn_result.tool_output_guardrail_results,
-                        ]
+                        if isinstance(turn_result.next_step, NextStepInterruption):
+                            # Publish this turn's tool guardrail results before the resumed
+                            # Session append, which can raise and skip the interruption
+                            # branch below. The tool already ran.
+                            run_state._tool_input_guardrail_results = [
+                                *accepted_tool_input_guardrail_results,
+                                *turn_result.tool_input_guardrail_results,
+                            ]
+                            run_state._tool_output_guardrail_results = [
+                                *accepted_tool_output_guardrail_results,
+                                *turn_result.tool_output_guardrail_results,
+                            ]
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
                         )
