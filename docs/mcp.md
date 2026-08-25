@@ -297,6 +297,35 @@ server = MCPServerStreamableHttp(
 
 If your run context is a Pydantic model, dataclass, or custom class, read the tenant ID with attribute access instead.
 
+### Tool guardrails for local MCP servers
+
+Locally executed MCP tools are converted into `FunctionTool`s by the SDK, so they can opt into the same [tool guardrails](guardrails.md#tool-guardrails) used by function tools. Guardrails passed to the server apply to every tool it exposes: input guardrails run immediately before `call_tool()`, and output guardrails run on the result before it becomes model-visible.
+
+```python
+from agents.mcp import MCPServerStreamableHttp
+from agents.tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    tool_input_guardrail,
+)
+
+
+@tool_input_guardrail
+def block_pii(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+    if "ssn" in data.context.tool_arguments.lower():
+        return ToolGuardrailFunctionOutput.reject_content(message="Blocked: argument contains PII")
+    return ToolGuardrailFunctionOutput.allow()
+
+
+server = MCPServerStreamableHttp(
+    name="Billing",
+    params={"url": "http://localhost:8000/mcp"},
+    tool_input_guardrails=[block_pii],
+)
+```
+
+Guardrails receive the normal `ToolContext`, so branch on `data.context.tool_name` to apply a policy to only some of the server's tools. These checks are client-side and complement, rather than replace, authorization in the MCP server itself. `HostedMCPTool` is not covered, since the Python process does not own that round trip.
+
 ### MCP tool outputs: text, images, and other content
 
 When an MCP result uses its content blocks, the SDK forwards text content as text output and maps image content to image-type entries in the tool output. For other MCP content block types, including audio and resource blocks, the SDK forwards a text output whose value is the block's valid JSON serialization. Responses that contain multiple content blocks are forwarded as a list of output items. If `use_structured_content=True` selects a non-empty, non-error `structuredContent` payload, that structured payload takes precedence over these content blocks. Missing or empty structured content falls back to the content blocks.
