@@ -38,6 +38,11 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import RunState
 from agents.testing import ScriptedModel
+from agents.tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    tool_input_guardrail,
+    tool_output_guardrail,
+)
 from agents.usage import Usage
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import (
@@ -984,3 +989,76 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_failed_resumed_append_keeps_completed_tool_guardrail_results(
+    streamed: bool, round_trip: bool
+) -> None:
+    """A failed resumed append must not discard guardrail results the tool already produced."""
+
+    @tool_input_guardrail
+    def allow_input(_data: Any) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="input-ok")
+
+    @tool_output_guardrail
+    def allow_output(_data: Any) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="output-ok")
+
+    @tool(
+        needs_approval=True,
+        tool_input_guardrails=[allow_input],
+        tool_output_guardrails=[allow_output],
+    )
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    @tool(needs_approval=True)
+    async def notify() -> str:
+        raise AssertionError("the unresolved approval must not execute")
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("charge", '{"amount":7}', call_id="charge-1"),
+                get_function_tool_call("notify", "{}", call_id="notify-1"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge, notify])
+    session = _FailingResumeSession()
+
+    paused = await _run_session_resume(agent, "charge 7 and notify", session, streamed)
+    state = paused.to_state()
+    state.approve(
+        next(item for item in state.get_interruptions() if item.raw_item.call_id == "charge-1")
+    )
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, streamed)
+    assert error.value is session.error
+
+    # The tool ran and both guardrails completed, so the checkpoint must retain their results.
+    assert len(state._tool_input_guardrail_results) == 1
+    assert len(state._tool_output_guardrail_results) == 1
+    serialized = state.to_json()
+    assert len(serialized["tool_input_guardrail_results"]) == 1
+    assert len(serialized["tool_output_guardrail_results"]) == 1
+
+    if round_trip:
+        state = await RunState.from_json(agent, serialized)
+
+    pending = await _run_session_resume(agent, state, session, streamed)
+    pending_state = pending.to_state()
+    remaining = pending_state.get_interruptions()
+    assert [item.raw_item.call_id for item in remaining] == ["notify-1"]
+
+    pending_state.reject(remaining[0], rejection_message="declined")
+    result = await _run_session_resume(agent, pending_state, session, streamed)
+    assert result.final_output == "done"
+    assert len(result.tool_input_guardrail_results) == 1
+    assert len(result.tool_output_guardrail_results) == 1
