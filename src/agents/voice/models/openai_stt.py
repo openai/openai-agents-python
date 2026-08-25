@@ -138,6 +138,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._state_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel] = asyncio.Queue()
         self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
+        self._transcription_config: dict[str, Any] | None = None
 
         # tasks
         self._listener_task: asyncio.Task[Any] | None = None
@@ -146,13 +147,37 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._connection_task: asyncio.Task[Any] | None = None
         self._stored_exception: Exception | None = None
 
+    def _get_transcription_config(self) -> dict[str, Any]:
+        transcription_config: dict[str, Any] = {"model": self._model}
+        if self._settings.languages is not None:
+            transcription_config["languages"] = list(self._settings.languages)
+        elif self._settings.language is not None:
+            if self._model in {"gpt-transcribe", "gpt-live-transcribe"}:
+                transcription_config["languages"] = [self._settings.language]
+            else:
+                transcription_config["language"] = self._settings.language
+        if self._settings.prompt is not None:
+            transcription_config["prompt"] = self._settings.prompt
+        if self._settings.keywords is not None:
+            transcription_config["keywords"] = list(self._settings.keywords)
+        return transcription_config
+
     def _start_turn(self) -> None:
+        # A listener failure can surface a buffered transcript before session.update completes.
+        # Once configured, every normal turn reuses the exact detached request snapshot.
+        transcription_config = self._transcription_config or self._get_transcription_config()
         self._tracing_span = transcription_span(
             model=self._model,
             model_config={
                 "temperature": self._settings.temperature,
-                "language": self._settings.language,
-                "prompt": self._settings.prompt,
+                "language": transcription_config.get("language"),
+                "languages": transcription_config.get("languages"),
+                "keywords": (
+                    transcription_config.get("keywords")
+                    if self._trace_include_sensitive_data
+                    else None
+                ),
+                "prompt": transcription_config.get("prompt"),
                 "turn_detection": self._turn_detection,
             },
         )
@@ -201,32 +226,25 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _configure_session(self) -> None:
         assert self._websocket is not None, "Websocket not initialized"
-        transcription_config: dict[str, Any] = {"model": self._model}
-        if self._settings.language is not None:
-            if self._model in {"gpt-transcribe", "gpt-live-transcribe"}:
-                transcription_config["languages"] = [self._settings.language]
-            else:
-                transcription_config["language"] = self._settings.language
-        if self._settings.prompt is not None:
-            transcription_config["prompt"] = self._settings.prompt
-
-        await self._websocket.send(
-            json.dumps(
-                {
-                    "type": "session.update",
-                    "session": {
-                        "type": "transcription",
-                        "audio": {
-                            "input": {
-                                "format": {"type": "audio/pcm", "rate": 24000},
-                                "transcription": transcription_config,
-                                "turn_detection": self._turn_detection,
-                            }
-                        },
+        transcription_config = self._get_transcription_config()
+        session_update = json.dumps(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "transcription": transcription_config,
+                            "turn_detection": self._turn_detection,
+                        }
                     },
-                }
-            )
+                },
+            }
         )
+        self._transcription_config = transcription_config
+
+        await self._websocket.send(session_update)
 
     async def _setup_connection(self, ws: websockets.ClientConnection) -> None:
         self._websocket = ws
