@@ -89,6 +89,8 @@ Check out a variety of sample implementations that use the SDK in the examples s
 
 - **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):** Explore how to use non-OpenAI models with the SDK, including custom providers and third-party adapters.
 
+    -   A named [OrcaRouter](https://www.orcarouter.ai) example that routes a Chat Completions model through the OrcaRouter gateway (`examples/model_providers/custom_example_orcarouter.py`)
+
 - **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):** Examples showing how to build real-time experiences using the SDK, including:
 
     -   Web application patterns with structured text and image messages
