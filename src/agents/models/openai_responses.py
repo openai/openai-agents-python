@@ -1052,7 +1052,7 @@ class OpenAIResponsesModel(Model):
         # independently of it.
         needs_cleaning = any(
             isinstance(item, dict)
-            and (item.get("provider_data") or item.get("id") == FAKE_RESPONSES_ID)
+            and ("provider_data" in item or item.get("id") == FAKE_RESPONSES_ID)
             for item in list_input
         )
         if not needs_cleaning:

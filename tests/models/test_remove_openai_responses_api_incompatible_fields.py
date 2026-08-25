@@ -111,8 +111,10 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         assert "id" not in result[1]
         assert result[1]["content"] == "hello"
 
-    def test_preserves_real_ids(self, model: OpenAIResponsesModel):
-        """Real IDs (not FAKE_RESPONSES_ID) should be preserved."""
+    def test_removes_empty_provider_data_and_preserves_real_ids(
+        self, model: OpenAIResponsesModel
+    ) -> None:
+        """Empty provider metadata is stripped without removing a real item ID."""
         list_input = [
             {
                 "type": "message",
@@ -125,6 +127,7 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
         result = model._remove_openai_responses_api_incompatible_fields(list_input)
 
         assert result[0]["id"] == "msg_real123"
+        assert "provider_data" not in result[0]
 
     def test_handles_empty_list(self, model: OpenAIResponsesModel):
         """Empty list should be returned unchanged."""
@@ -203,3 +206,36 @@ class TestRemoveOpenAIResponsesAPIIncompatibleFields:
 
         assert message.id == FAKE_RESPONSES_ID
         assert "id" not in create_kwargs["input"][1]
+
+    def test_request_payload_drops_empty_provider_data_without_mutating_input(
+        self, model: OpenAIResponsesModel
+    ) -> None:
+        """Request construction strips SDK metadata from a copy of caller-owned input."""
+        message: dict[str, Any] = {
+            "type": "message",
+            "id": "msg_real123",
+            "role": "assistant",
+            "status": "completed",
+            "content": [],
+            "provider_data": {},
+        }
+
+        create_kwargs = model._build_response_create_kwargs(
+            system_instructions=None,
+            input=[cast(TResponseInputItem, message)],
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+        )
+
+        assert create_kwargs["input"] == [
+            {
+                "type": "message",
+                "id": "msg_real123",
+                "role": "assistant",
+                "status": "completed",
+                "content": [],
+            }
+        ]
+        assert message["provider_data"] == {}
