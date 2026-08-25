@@ -177,7 +177,11 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     if self._trace_include_sensitive_data
                     else None
                 ),
-                "prompt": transcription_config.get("prompt"),
+                "prompt": (
+                    transcription_config.get("prompt")
+                    if self._trace_include_sensitive_data
+                    else None
+                ),
                 "turn_detection": self._turn_detection,
             },
         )
@@ -553,7 +557,11 @@ class OpenAISTTModel(STTModel):
             model_config={
                 "temperature": self._non_null_or_not_given(settings.temperature),
                 "language": self._non_null_or_not_given(settings.language),
-                "prompt": self._non_null_or_not_given(settings.prompt),
+                "prompt": (
+                    self._non_null_or_not_given(settings.prompt)
+                    if trace_include_sensitive_data
+                    else None
+                ),
             },
         ) as span:
             try:

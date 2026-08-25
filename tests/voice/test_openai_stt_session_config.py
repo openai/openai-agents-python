@@ -189,13 +189,14 @@ async def test_streaming_stt_trace_records_transcription_options_with_sensitive_
 
 
 @pytest.mark.asyncio
-async def test_streaming_stt_trace_redacts_keywords_without_sensitive_data() -> None:
+async def test_streaming_stt_trace_redacts_text_options_without_sensitive_data() -> None:
     sensitive_keywords = ["CUSTOMER_SECRET_NAME"]
+    sensitive_prompt = "customer account vocabulary"
     session = OpenAISTTTranscriptionSession(
         input=StreamedAudioInput(),
         client=AsyncMock(api_key="FAKE_KEY"),
         model="gpt-live-transcribe",
-        settings=STTModelSettings(keywords=sensitive_keywords),
+        settings=STTModelSettings(prompt=sensitive_prompt, keywords=sensitive_keywords),
         trace_include_sensitive_data=False,
         trace_include_sensitive_audio_data=False,
     )
@@ -213,6 +214,7 @@ async def test_streaming_stt_trace_redacts_keywords_without_sensitive_data() -> 
 
     model_config = create_span.call_args.kwargs["model_config"]
     assert model_config["keywords"] is None
+    assert model_config["prompt"] is None
     assert all(value is not sensitive_keywords for value in model_config.values())
     span.start.assert_called_once_with()
     span.finish.assert_called_once_with()

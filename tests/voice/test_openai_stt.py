@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -395,6 +396,33 @@ async def test_transcribe_error_respects_sensitive_data_setting(
             )
 
     assert fetch_span_errors("transcription") == [{"message": expected_error, "data": {}}]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_redacts_prompt_without_changing_request() -> None:
+    client = AsyncMock()
+    client.audio.transcriptions.create.return_value = SimpleNamespace(text="transcript")
+    model = OpenAISTTModel(model="whisper-1", openai_client=client)
+    span = MagicMock()
+    span_context = MagicMock()
+    span_context.__enter__.return_value = span
+
+    with patch(
+        "agents.voice.models.openai_stt.transcription_span",
+        return_value=span_context,
+    ) as create_span:
+        result = await model.transcribe(
+            AudioInput(buffer=np.zeros(2, dtype=np.int16)),
+            STTModelSettings(prompt="customer account vocabulary"),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+    assert result == "transcript"
+    assert create_span.call_args.kwargs["model_config"]["prompt"] is None
+    assert client.audio.transcriptions.create.await_args.kwargs["prompt"] == (
+        "customer account vocabulary"
+    )
 
 
 @pytest.mark.asyncio
