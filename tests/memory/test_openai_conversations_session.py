@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -290,6 +291,63 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.create.assert_not_called()
         mock_openai_client.conversations.items.create.assert_not_called()
         assert session.session_id == "test_id"
+
+    @pytest.mark.asyncio
+    async def test_add_items_chunks_payloads_over_create_limit(self, mock_openai_client):
+        """The Conversations API accepts at most 20 items per create call."""
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+
+        await session.add_items(items)
+
+        calls = mock_openai_client.conversations.items.create.call_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs == {"conversation_id": "test_id", "items": items[:20]}
+        assert calls[1].kwargs == {"conversation_id": "test_id", "items": items[20:]}
+
+    @pytest.mark.asyncio
+    async def test_add_items_does_not_chunk_payloads_at_create_limit(self, mock_openai_client):
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(20)
+        ]
+
+        await session.add_items(items)
+
+        mock_openai_client.conversations.items.create.assert_called_once_with(
+            conversation_id="test_id", items=items
+        )
+
+    @pytest.mark.asyncio
+    async def test_add_items_rolls_back_created_chunks_when_a_later_create_fails(
+        self, mock_openai_client
+    ):
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+        created_ids = [f"item_{index}" for index in range(20)]
+        mock_openai_client.conversations.items.create.side_effect = [
+            SimpleNamespace(data=[SimpleNamespace(id=item_id) for item_id in created_ids]),
+            RuntimeError("create failed"),
+        ]
+
+        with pytest.raises(RuntimeError, match="create failed"):
+            await session.add_items(items)
+
+        deleted_ids = [
+            call.kwargs["item_id"]
+            for call in mock_openai_client.conversations.items.delete.call_args_list
+        ]
+        assert deleted_ids == list(reversed(created_ids))
 
     @pytest.mark.asyncio
     async def test_pop_item_with_items(self, mock_openai_client):

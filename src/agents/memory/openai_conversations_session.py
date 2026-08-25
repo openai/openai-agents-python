@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -10,6 +11,22 @@ from agents.models._openai_shared import get_default_openai_client
 from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
+
+# Conversations items.create accepts at most 20 items per request.
+# See https://developers.openai.com/api/reference/resources/conversations/subresources/items/.
+_MAX_ITEMS_PER_CONVERSATION_CREATE = 20
+
+
+def _created_conversation_item_ids(result: object) -> list[str]:
+    data = getattr(result, "data", None)
+    if data is None:
+        return []
+    ids: list[str] = []
+    for item in data:
+        item_id = getattr(item, "id", None)
+        if isinstance(item_id, str) and item_id:
+            ids.append(item_id)
+    return ids
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -116,10 +133,21 @@ class OpenAIConversationsSession(SessionABC):
             return
 
         session_id = await self._get_session_id()
-        await self._openai_client.conversations.items.create(
-            conversation_id=session_id,
-            items=items,
-        )
+        created_ids: list[str] = []
+        try:
+            for offset in range(0, len(items), _MAX_ITEMS_PER_CONVERSATION_CREATE):
+                created = await self._openai_client.conversations.items.create(
+                    conversation_id=session_id,
+                    items=items[offset : offset + _MAX_ITEMS_PER_CONVERSATION_CREATE],
+                )
+                created_ids.extend(_created_conversation_item_ids(created))
+        except Exception:
+            for item_id in reversed(created_ids):
+                with contextlib.suppress(Exception):
+                    await self._openai_client.conversations.items.delete(
+                        conversation_id=session_id, item_id=item_id
+                    )
+            raise
 
     async def pop_item(self) -> TResponseInputItem | None:
         session_id = await self._get_session_id()
