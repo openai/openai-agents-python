@@ -264,6 +264,29 @@ async def test_get_all_function_tools_duplicate_error_is_deterministic():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_server_in_tool_names", [False, True])
+async def test_get_all_function_tools_rejects_duplicates_from_one_server(
+    include_server_in_tool_names: bool,
+):
+    server = FakeMCPServer(server_name="duplicate_server")
+    server.add_tool("lookup", {})
+    server.add_tool("lookup", {})
+
+    with pytest.raises(UserError, match="Duplicate tool names found on MCP server") as exc_info:
+        await MCPUtil.get_all_function_tools(
+            [server],
+            False,
+            RunContextWrapper(context=None),
+            Agent(name="test_agent"),
+            include_server_in_tool_names=include_server_in_tool_names,
+        )
+
+    assert str(exc_info.value) == (
+        "Duplicate tool names found on MCP server `duplicate_server`: lookup"
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_all_function_tools_duplicate_error_without_hint_when_prefixed():
     """When include_server_in_tool_names is already enabled, duplicates should
     not suggest enabling the same option again.

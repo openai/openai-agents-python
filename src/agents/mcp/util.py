@@ -281,6 +281,7 @@ class MCPUtil:
             server_tool_batches = []
             for server_index, server in enumerate(servers):
                 listed_tools = await cls._list_tools_with_span(server, run_context, agent)
+                cls._validate_unique_tool_names(server, listed_tools)
                 server_tool_batches.append((server_index, server, listed_tools))
 
             prefixed_tool_name_overrides = cls._build_prefixed_tool_name_overrides(
@@ -375,6 +376,17 @@ class MCPUtil:
         ]
 
     @classmethod
+    def _validate_unique_tool_names(cls, server: MCPServer, tools: list[MCPTool]) -> None:
+        duplicate_tool_names = sorted(
+            name for name, count in Counter(tool.name for tool in tools).items() if count > 1
+        )
+        if duplicate_tool_names:
+            raise UserError(
+                "Duplicate tool names found on MCP server "
+                f"`{get_mcp_server_log_name(server.name)}`: {', '.join(duplicate_tool_names)}"
+            )
+
+    @classmethod
     async def get_function_tools(
         cls,
         server: MCPServer,
@@ -390,6 +402,7 @@ class MCPUtil:
         """Get all function tools from a single MCP server."""
 
         tools = await cls._list_tools_with_span(server, run_context, agent)
+        cls._validate_unique_tool_names(server, tools)
 
         tool_name_overrides: list[str] | None = None
         if tool_name_override is not None:
