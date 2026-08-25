@@ -53,6 +53,16 @@ def test_find_context_eof_fallbacks() -> None:
     assert match.fuzz >= 10000
 
 
+def test_find_context_eof_ignores_trailing_empty_split_element() -> None:
+    match = _find_context(["a", "b", ""], [], start=0, eof=True)
+    assert match.new_index == 2
+    assert match.fuzz == 0
+
+    last_foo = _find_context(["x", "foo", "y", "foo", ""], ["foo"], start=0, eof=True)
+    assert last_foo.new_index == 3
+    assert last_foo.fuzz == 0
+
+
 def test_find_context_core_stripped_matches() -> None:
     match = _find_context_core([" line "], ["line"], start=0)
     assert match.new_index == 0

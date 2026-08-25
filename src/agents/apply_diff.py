@@ -333,13 +333,24 @@ class ContextMatch:
 
 def _find_context(lines: list[str], context: list[str], start: int, eof: bool) -> ContextMatch:
     if eof:
-        end_start = max(0, len(lines) - len(context))
-        end_match = _find_context_core(lines, context, end_start)
+        # `str.split("\n")` keeps a trailing empty element for text that ends in a
+        # newline. Treat that as the file terminator, not as a line, so EOF hunks
+        # append after the last real line instead of after a phantom blank.
+        search_lines = _eof_search_lines(lines)
+        end_start = max(0, len(search_lines) - len(context))
+        end_match = _find_context_core(search_lines, context, end_start)
         if end_match.new_index != -1:
             return end_match
-        fallback = _find_context_core(lines, context, start)
+        fallback_start = min(start, len(search_lines))
+        fallback = _find_context_core(search_lines, context, fallback_start)
         return ContextMatch(new_index=fallback.new_index, fuzz=fallback.fuzz + 10000)
     return _find_context_core(lines, context, start)
+
+
+def _eof_search_lines(lines: list[str]) -> list[str]:
+    if lines and lines[-1] == "":
+        return lines[:-1]
+    return lines
 
 
 def _find_context_core(lines: list[str], context: list[str], start: int) -> ContextMatch:

@@ -264,3 +264,21 @@ def test_apply_diff_with_crlf_input_and_crlf_diff_preserves_crlf() -> None:
 def test_apply_diff_create_mode_preserves_crlf_newlines() -> None:
     diff = "\r\n".join(["+hello", "+world", "+"])
     assert apply_diff("", diff, mode="create") == "hello\r\nworld\r\n"
+
+
+def test_apply_diff_eof_hunk_appends_without_a_blank_line() -> None:
+    # Files that end in a newline must not grow a phantom blank line at EOF.
+    assert apply_diff("a\nb\n", "@@\n+c\n*** End of File") == "a\nb\nc\n"
+    assert apply_diff("a\nb", "@@\n+c\n*** End of File") == "a\nb\nc"
+
+
+def test_apply_diff_eof_hunk_matches_the_last_context_occurrence() -> None:
+    original = "x\nfoo\ny\nfoo\n"
+    diff = " foo\n+added\n*** End of File"
+    assert apply_diff(original, diff) == "x\nfoo\ny\nfoo\nadded\n"
+
+
+def test_apply_diff_eof_hunk_preserves_crlf() -> None:
+    original = "a\r\nb\r\n"
+    diff = "@@\n+c\n*** End of File"
+    assert apply_diff(original, diff) == "a\r\nb\r\nc\r\n"
