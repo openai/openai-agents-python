@@ -25,6 +25,56 @@ from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
 
+class _InMemoryConversationItems:
+    """Store conversation items so tests can observe committed history."""
+
+    def __init__(self) -> None:
+        self.items: list[dict[str, Any]] = []
+        self._next_id = 0
+        self.create_calls = 0
+        self.second_create_started = asyncio.Event()
+        self.release_second_create = asyncio.Event()
+
+    async def create(self, *, conversation_id: str, items: list[Any]) -> SimpleNamespace:
+        self.create_calls += 1
+        if self.create_calls == 2:
+            self.second_create_started.set()
+            await self.release_second_create.wait()
+        created: list[SimpleNamespace] = []
+        for item in items:
+            self._next_id += 1
+            stored = dict(item)
+            stored["id"] = f"item_{self._next_id}"
+            self.items.append(stored)
+            created.append(SimpleNamespace(id=stored["id"]))
+        return SimpleNamespace(data=created)
+
+    async def delete(self, *, conversation_id: str, item_id: str) -> None:
+        self.items = [item for item in self.items if item["id"] != item_id]
+
+    def list(self, **kwargs: Any) -> Any:
+        stored_items = list(self.items)
+        if kwargs.get("order") == "desc":
+            stored_items = list(reversed(stored_items))
+
+        async def _iter() -> Any:
+            for item in stored_items:
+                payload = dict(item)
+                yield SimpleNamespace(
+                    model_dump=lambda exclude_unset=True, payload=payload: payload
+                )
+
+        return _iter()
+
+
+def _bind_in_memory_conversation(
+    mock_openai_client: Any, store: _InMemoryConversationItems
+) -> None:
+    mock_openai_client.conversations.items.create.side_effect = store.create
+    mock_openai_client.conversations.items.delete.side_effect = store.delete
+    mock_openai_client.conversations.items.list = MagicMock(side_effect=store.list)
+
+
 @pytest.fixture
 def mock_openai_client():
     """Create a mock OpenAI client for testing."""
@@ -350,6 +400,119 @@ class TestOpenAIConversationsSessionBasicOperations:
         assert deleted_ids == list(reversed(created_ids))
 
     @pytest.mark.asyncio
+    async def test_add_items_rolls_back_created_chunks_when_cancelled_between_creates(
+        self, mock_openai_client
+    ):
+        store = _InMemoryConversationItems()
+        seed = {"id": "seed", "role": "user", "content": "seed"}
+        store.items = [dict(seed)]
+        _bind_in_memory_conversation(mock_openai_client, store)
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+
+        add_task = asyncio.create_task(session.add_items(items))
+        await store.second_create_started.wait()
+        add_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await add_task
+
+        assert await session.get_items() == [seed]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_add_items_does_not_expose_partial_batch_to_overlapping_get_items(
+        self, mock_openai_client
+    ):
+        store = _InMemoryConversationItems()
+        seed = {"id": "seed", "role": "user", "content": "seed"}
+        store.items = [dict(seed)]
+        _bind_in_memory_conversation(mock_openai_client, store)
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+
+        add_task = asyncio.create_task(session.add_items(items))
+        await store.second_create_started.wait()
+        get_task = asyncio.create_task(session.get_items())
+        await asyncio.sleep(0)
+        add_task.cancel()
+
+        add_result, get_result = await asyncio.gather(add_task, get_task, return_exceptions=True)
+
+        assert isinstance(add_result, asyncio.CancelledError)
+        assert get_result == [seed]
+        assert await session.get_items() == [seed]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_add_items_does_not_expose_partial_batch_to_overlapping_add_items(
+        self, mock_openai_client
+    ):
+        store = _InMemoryConversationItems()
+        seed = {"id": "seed", "role": "user", "content": "seed"}
+        store.items = [dict(seed)]
+        _bind_in_memory_conversation(mock_openai_client, store)
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+        surviving_item: TResponseInputItem = {"role": "user", "content": "survivor"}
+
+        add_task = asyncio.create_task(session.add_items(items))
+        await store.second_create_started.wait()
+        surviving_task = asyncio.create_task(session.add_items([surviving_item]))
+        await asyncio.sleep(0)
+        add_task.cancel()
+
+        add_result, surviving_result = await asyncio.gather(
+            add_task, surviving_task, return_exceptions=True
+        )
+
+        assert isinstance(add_result, asyncio.CancelledError)
+        assert surviving_result is None
+        history = await session.get_items()
+        assert history[0] == seed
+        assert history[-1]["content"] == "survivor"
+        assert [item.get("content") for item in history if item.get("content") != "seed"] == [
+            "survivor"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_add_items_does_not_expose_partial_batch_to_overlapping_pop_item(
+        self, mock_openai_client
+    ):
+        store = _InMemoryConversationItems()
+        seed = {"id": "seed", "role": "user", "content": "seed"}
+        store.items = [dict(seed)]
+        _bind_in_memory_conversation(mock_openai_client, store)
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {index}"} for index in range(21)
+        ]
+
+        add_task = asyncio.create_task(session.add_items(items))
+        await store.second_create_started.wait()
+        pop_task = asyncio.create_task(session.pop_item())
+        await asyncio.sleep(0)
+        add_task.cancel()
+
+        add_result, popped = await asyncio.gather(add_task, pop_task, return_exceptions=True)
+
+        assert isinstance(add_result, asyncio.CancelledError)
+        assert popped == seed
+        assert await session.get_items() == []
+
+    @pytest.mark.asyncio
     async def test_pop_item_with_items(self, mock_openai_client):
         """Test popping item when items exist using method patching."""
         session = OpenAIConversationsSession(
@@ -359,7 +522,9 @@ class TestOpenAIConversationsSessionBasicOperations:
         # Mock get_items to return one item
         latest_item = {"id": "item_123", "role": "assistant", "content": "Latest message"}
 
-        with patch.object(session, "get_items", return_value=[latest_item]):
+        with patch.object(
+            session, "_get_items_unlocked", new_callable=AsyncMock, return_value=[latest_item]
+        ):
             popped_item = await session.pop_item()
 
             assert popped_item == latest_item
@@ -375,7 +540,7 @@ class TestOpenAIConversationsSessionBasicOperations:
         )
 
         # Mock get_items to return empty list
-        with patch.object(session, "get_items", return_value=[]):
+        with patch.object(session, "_get_items_unlocked", new_callable=AsyncMock, return_value=[]):
             popped_item = await session.pop_item()
 
             assert popped_item is None
@@ -667,7 +832,9 @@ class TestOpenAIConversationsSessionErrorHandling:
         # Mock item without ID
         invalid_item = {"role": "assistant", "content": "No ID"}
 
-        with patch.object(session, "get_items", return_value=[invalid_item]):
+        with patch.object(
+            session, "_get_items_unlocked", new_callable=AsyncMock, return_value=[invalid_item]
+        ):
             # This should raise a KeyError because 'id' field is missing
             with pytest.raises(KeyError, match="'id'"):
                 await session.pop_item()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -29,6 +30,21 @@ def _created_conversation_item_ids(result: object) -> list[str]:
     return ids
 
 
+async def _await_despite_cancellation(awaitable: Awaitable[None]) -> None:
+    """Finish rollback even if the caller keeps cancelling the current task."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        _ = task.exception() if not task.cancelled() else None
+        raise
+
+
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
     _maybe_openai_client = openai_client
     if openai_client is None:
@@ -53,6 +69,7 @@ class OpenAIConversationsSession(SessionABC):
     ):
         self._session_id: str | None = conversation_id
         self._session_id_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
         self.session_settings = (
             coerce_session_settings(session_settings)
             if session_settings is not None
@@ -100,6 +117,10 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async with self._session_lock:
+            return await self._get_items_unlocked(limit)
+
+    async def _get_items_unlocked(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -132,40 +153,48 @@ class OpenAIConversationsSession(SessionABC):
         if not items:
             return
 
-        session_id = await self._get_session_id()
-        created_ids: list[str] = []
-        try:
-            for offset in range(0, len(items), _MAX_ITEMS_PER_CONVERSATION_CREATE):
-                created = await self._openai_client.conversations.items.create(
-                    conversation_id=session_id,
-                    items=items[offset : offset + _MAX_ITEMS_PER_CONVERSATION_CREATE],
-                )
-                created_ids.extend(_created_conversation_item_ids(created))
-        except Exception:
-            for item_id in reversed(created_ids):
-                with contextlib.suppress(Exception):
-                    await self._openai_client.conversations.items.delete(
-                        conversation_id=session_id, item_id=item_id
+        async with self._session_lock:
+            session_id = await self._get_session_id()
+            created_ids: list[str] = []
+            try:
+                for offset in range(0, len(items), _MAX_ITEMS_PER_CONVERSATION_CREATE):
+                    created = await self._openai_client.conversations.items.create(
+                        conversation_id=session_id,
+                        items=items[offset : offset + _MAX_ITEMS_PER_CONVERSATION_CREATE],
                     )
-            raise
+                    created_ids.extend(_created_conversation_item_ids(created))
+            except (Exception, asyncio.CancelledError):
+                await _await_despite_cancellation(
+                    self._delete_created_items(session_id, created_ids)
+                )
+                raise
+
+    async def _delete_created_items(self, session_id: str, created_ids: list[str]) -> None:
+        for item_id in reversed(created_ids):
+            with contextlib.suppress(Exception):
+                await self._openai_client.conversations.items.delete(
+                    conversation_id=session_id, item_id=item_id
+                )
 
     async def pop_item(self) -> TResponseInputItem | None:
-        session_id = await self._get_session_id()
-        items = await self.get_items(limit=1)
-        if not items:
-            return None
-        item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
-        await self._openai_client.conversations.items.delete(
-            conversation_id=session_id, item_id=item_id
-        )
-        return items[0]
+        async with self._session_lock:
+            session_id = await self._get_session_id()
+            items = await self._get_items_unlocked(limit=1)
+            if not items:
+                return None
+            item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
+            await self._openai_client.conversations.items.delete(
+                conversation_id=session_id, item_id=item_id
+            )
+            return items[0]
 
     async def clear_session(self) -> None:
-        async with self._session_id_lock:
-            if self._session_id is None:
-                return
+        async with self._session_lock:
+            async with self._session_id_lock:
+                if self._session_id is None:
+                    return
 
-            await self._openai_client.conversations.delete(
-                conversation_id=self._session_id,
-            )
-            self._session_id = None
+                await self._openai_client.conversations.delete(
+                    conversation_id=self._session_id,
+                )
+                self._session_id = None
