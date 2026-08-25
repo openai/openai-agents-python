@@ -85,6 +85,8 @@ handoff_obj = handoff(
 
 `input_type` describes the arguments for the handoff tool call itself. The SDK exposes that schema to the model as the handoff tool's `parameters`, validates the returned JSON locally, and passes the parsed value to `on_handoff`.
 
+`is_enabled` is evaluated while the SDK prepares the available handoffs, before the model returns handoff arguments, so it cannot authorize values inside an argument-bearing handoff. When authorization depends on the parsed fields, perform the check at the start of `on_handoff`, before any application side effects. If authorization fails, raise instead of returning; the SDK continues the transfer after `on_handoff` returns successfully. Tool input guardrails apply to function tools, not handoffs.
+
 It does not replace the next agent's main input, and it does not choose a different destination. The [`handoff()`][agents.handoffs.handoff] helper still transfers to the specific agent you wrapped, and the receiving agent still sees the conversation history unless you change it with an [`input_filter`][agents.handoffs.Handoff.input_filter] or nested handoff history settings.
 
 `input_type` is also separate from [`RunContextWrapper.context`][agents.run_context.RunContextWrapper.context]. Use `input_type` for metadata the model decides at handoff time, not for application state or dependencies you already have locally.

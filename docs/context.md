@@ -29,6 +29,16 @@ You can use the context for things like:
 
 Within a single run, derived wrappers share the same underlying app context, approval state, and usage tracking. Nested [`Agent.as_tool()`][agents.agent.Agent.as_tool] runs may attach a different `tool_input`, but they do not get an isolated copy of your app state by default.
 
+### Use local context for capability visibility
+
+When function tools, MCP tools, and handoffs depend on the same request policy, keep the policy inputs or helper on your application context. Each SDK surface exposes the current run context through its own callback:
+
+-   [`FunctionTool.is_enabled`][agents.tool.FunctionTool.is_enabled] receives a `RunContextWrapper`.
+-   [`Handoff.is_enabled`][agents.handoffs.Handoff.is_enabled] receives a `RunContextWrapper`.
+-   An MCP [`tool_filter`](mcp.md#dynamic-tool-filtering) receives a [`ToolFilterContext`][agents.mcp.ToolFilterContext], whose `run_context` property contains the current `RunContextWrapper`.
+
+Adapt the shared application policy to these callbacks instead of maintaining separate capability lists. The callbacks control which capabilities the SDK exposes for the current run; they cannot authorize a model-generated argument or resource selection. For function tools, enforce those decisions inside the tool implementation or with [tool input guardrails](guardrails.md#tool-guardrails) and [approvals](human_in_the_loop.md) when appropriate. MCP servers must authorize their own protected operations. For a handoff with `input_type`, check the parsed input at the start of `on_handoff`, before application side effects, and raise instead of returning when authorization fails. Tool input guardrails do not run for handoffs. See [handoff inputs](handoffs.md#handoff-inputs) for the callback lifecycle.
+
 ### What `RunContextWrapper` exposes
 
 [`RunContextWrapper`][agents.run_context.RunContextWrapper] is a wrapper around your app-defined context object. In practice you will most often use:
