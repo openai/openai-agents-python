@@ -439,8 +439,7 @@ def test_run_context_in_non_first_position_raises_value_error():
 
 
 def test_var_positional_tuple_annotation():
-    # When a function has a var-positional parameter annotated with a tuple type,
-    # function_schema() should convert it into a field with type List[<tuple-element>].
+    # A variadic tuple annotation applies to each positional argument.
     def func(*args: tuple[int, ...]) -> int:
         total = 0
         for arg in args:
@@ -450,8 +449,17 @@ def test_var_positional_tuple_annotation():
     fs = function_schema(func, use_docstring_info=False)
 
     properties = fs.params_json_schema.get("properties", {})
-    assert properties.get("args").get("type") == "array"
-    assert properties.get("args").get("items").get("type") == "integer"
+    args_schema = properties.get("args", {})
+    assert args_schema.get("type") == "array"
+    assert args_schema.get("items", {}).get("type") == "array"
+    assert args_schema.get("items", {}).get("items", {}).get("type") == "integer"
+
+    parsed = fs.params_pydantic_model.model_validate({"args": [[1, 2], [3]]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == 6
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
 
 
 def test_var_keyword_dict_annotation():

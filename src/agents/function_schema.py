@@ -399,10 +399,10 @@ def function_schema(
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
             if get_origin(ann) is tuple:
-                # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
+                # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[args_of_tuple[0]]  # type: ignore
+                    ann = list[ann]  # type: ignore
                 else:
                     ann = list[Any]
             else:
