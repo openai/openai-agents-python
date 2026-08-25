@@ -408,6 +408,24 @@ def test_function_tool_rejects_non_object_or_non_strict_raw_output_schema(
         )
 
 
+def test_function_tool_accepts_single_element_object_type_array_output_schema() -> None:
+    """JSON Schema type arrays such as ``["object"]`` are equivalent to ``"object"``."""
+
+    tool = function_tool(
+        lambda: {"a": "x"},
+        allowed_callers=["programmatic"],
+        output_json_schema={
+            "type": ["object"],
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "additionalProperties": False,
+        },
+    )
+    assert tool.output_json_schema is not None
+    assert tool.output_json_schema["type"] == "object"
+    assert tool.output_json_schema["additionalProperties"] is False
+
+
 @pytest.mark.asyncio
 async def test_function_tool_validates_inferred_output_type() -> None:
     @function_tool(allowed_callers=["programmatic"])

@@ -2176,7 +2176,10 @@ def _json_schema_is_object(schema: dict[str, Any]) -> bool:
     current: Any = schema
     seen_refs: set[str] = set()
     while isinstance(current, dict):
-        if current.get("type") == "object":
+        # JSON Schema allows a one-element type array; treat ["object"] like "object" so
+        # OpenAPI/MCP-style output schemas match the params and strict-schema paths.
+        typ = current.get("type")
+        if typ == "object" or typ == ["object"]:
             return True
         ref = current.get("$ref")
         if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen_refs:
