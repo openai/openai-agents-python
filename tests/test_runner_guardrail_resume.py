@@ -8,6 +8,7 @@ import agents.run as run_module
 from agents import (
     Agent,
     Runner,
+    ToolExecutionConfig,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
     function_tool,
@@ -88,8 +89,14 @@ async def _run_with_session(
     hooks: RunHooks[Any],
     *,
     streamed: bool,
+    pre_approval: bool,
 ) -> Any:
-    run_config = RunConfig(tracing_disabled=True)
+    run_config = RunConfig(
+        tracing_disabled=True,
+        tool_execution=(
+            ToolExecutionConfig(pre_approval_tool_input_guardrails=True) if pre_approval else None
+        ),
+    )
     if not streamed:
         return await Runner.run(
             agent,
@@ -110,7 +117,7 @@ async def _run_with_session(
     return result
 
 
-def _assert_one_guardrail_pair(value: Any) -> None:
+def _assert_guardrail_results(value: Any, *, input_count: int) -> None:
     input_results = (
         value._tool_input_guardrail_results
         if isinstance(value, RunState)
@@ -121,7 +128,9 @@ def _assert_one_guardrail_pair(value: Any) -> None:
         if isinstance(value, RunState)
         else value.tool_output_guardrail_results
     )
-    assert [result.output.output_info for result in input_results] == ["input-checked"]
+    assert [result.output.output_info for result in input_results] == [
+        "input-checked"
+    ] * input_count
     assert [result.output.output_info for result in output_results] == ["output-checked"]
 
 
@@ -135,16 +144,22 @@ def _tool_item_types(items: list[TResponseInputItem], call_id: str) -> list[str]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failing_streamed", "recovering_streamed", "round_trip", "failure"),
+    (
+        "failing_streamed",
+        "recovering_streamed",
+        "round_trip",
+        "failure",
+        "pre_approval",
+    ),
     [
-        (False, False, False, "before"),
-        (False, True, True, "after"),
-        (True, False, False, "after"),
-        (True, True, True, "before"),
+        (False, False, False, "before", False),
+        (False, True, True, "after", True),
+        (True, False, False, "after", False),
+        (True, True, True, "before", False),
     ],
     ids=[
         "run-to-run-live-before-commit",
-        "run-to-streamed-json-commit-then-raise",
+        "run-to-streamed-json-pre-approval-commit-then-raise",
         "streamed-to-run-live-commit-then-raise",
         "streamed-to-streamed-json-before-commit",
     ],
@@ -154,6 +169,7 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
     recovering_streamed: bool,
     round_trip: bool,
     failure: Literal["before", "after"],
+    pre_approval: bool,
 ) -> None:
     counters = {
         "effect": 0,
@@ -200,6 +216,12 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
     agent = Agent(name="payment", model=model, tools=[charge, notify])
     session = _ResumeWriteFailureSession()
     hooks = _CountingToolHooks()
+    input_guardrail_count = 2 if pre_approval else 1
+    expected_counters = {
+        "effect": 1,
+        "input_guardrail": input_guardrail_count,
+        "output_guardrail": 1,
+    }
 
     paused = await _run_with_session(
         agent,
@@ -207,6 +229,7 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
         session,
         hooks,
         streamed=failing_streamed,
+        pre_approval=pre_approval,
     )
     state = paused.to_state()
     charge_approval = next(
@@ -222,14 +245,11 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
             session,
             hooks,
             streamed=failing_streamed,
+            pre_approval=pre_approval,
         )
     assert error.value is session.error
-    _assert_one_guardrail_pair(state)
-    assert counters == {
-        "effect": 1,
-        "input_guardrail": 1,
-        "output_guardrail": 1,
-    }
+    _assert_guardrail_results(state, input_count=input_guardrail_count)
+    assert counters == expected_counters
     assert hooks.tool_starts == 1
     assert hooks.tool_ends == 1
     assert len(model.calls) == 1
@@ -240,7 +260,7 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
 
     if round_trip:
         state = await RunState.from_json(agent, state.to_json())
-        _assert_one_guardrail_pair(state)
+        _assert_guardrail_results(state, input_count=input_guardrail_count)
 
     pending = await _run_with_session(
         agent,
@@ -248,21 +268,18 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
         session,
         hooks,
         streamed=recovering_streamed,
+        pre_approval=pre_approval,
     )
-    _assert_one_guardrail_pair(pending)
+    _assert_guardrail_results(pending, input_count=input_guardrail_count)
     pending_state = pending.to_state()
-    _assert_one_guardrail_pair(pending_state)
+    _assert_guardrail_results(pending_state, input_count=input_guardrail_count)
     remaining = pending_state.get_interruptions()
     assert [item.raw_item.call_id for item in remaining] == ["notify-1"]
     assert _tool_item_types(await session.get_items(), "charge-1") == [
         "function_call",
         "function_call_output",
     ]
-    assert counters == {
-        "effect": 1,
-        "input_guardrail": 1,
-        "output_guardrail": 1,
-    }
+    assert counters == expected_counters
     assert hooks.tool_starts == 1
     assert hooks.tool_ends == 1
     assert len(model.calls) == 1
@@ -274,10 +291,11 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
         session,
         hooks,
         streamed=recovering_streamed,
+        pre_approval=pre_approval,
     )
     assert result.final_output == "done"
-    _assert_one_guardrail_pair(result)
-    _assert_one_guardrail_pair(result.to_state())
+    _assert_guardrail_results(result, input_count=input_guardrail_count)
+    _assert_guardrail_results(result.to_state(), input_count=input_guardrail_count)
     session_items = await session.get_items()
     result_items = result.to_input_list()
     final_model_items = model.calls[-1].input
@@ -290,11 +308,7 @@ async def test_resumed_session_failure_publishes_durable_tool_guardrails(
             "function_call",
             "function_call_output",
         ]
-    assert counters == {
-        "effect": 1,
-        "input_guardrail": 1,
-        "output_guardrail": 1,
-    }
+    assert counters == expected_counters
     assert hooks.tool_starts == 1
     assert hooks.tool_ends == 1
     assert len(model.calls) == 2
