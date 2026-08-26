@@ -273,6 +273,23 @@ def _ensure_strict_json_schema(
             inside_nested_resource=inside_nested_resource,
         )
 
+    # tuples: { 'type': 'array', 'prefixItems': [{...}, ...] }
+    # pydantic emits prefixItems for fixed-length tuple type hints. Each element
+    # is an independent subschema that must be strictified just like array items.
+    prefix_items = json_schema.get("prefixItems")
+    if is_list(prefix_items):
+        json_schema["prefixItems"] = [
+            _ensure_strict_json_schema(
+                entry,
+                path=(*path, "prefixItems", str(i)),
+                root=root,
+                budget=budget,
+                depth=next_depth,
+                inside_nested_resource=inside_nested_resource,
+            )
+            for i, entry in enumerate(prefix_items)
+        ]
+
     # unions
     any_of = json_schema.get("anyOf")
     if is_list(any_of):

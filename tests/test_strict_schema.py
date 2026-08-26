@@ -990,3 +990,47 @@ def test_ref_with_anchor_is_still_expanded():
         "$anchor": "value",
         "type": "string",
     }
+
+
+def test_prefix_items_entries_are_strictified():
+    # pydantic emits prefixItems for fixed-length tuple type hints. Each element
+    # is an independent subschema that must be strictified just like array items.
+    schema = {
+        "type": "object",
+        "properties": {
+            "point": {
+                "type": "array",
+                "prefixItems": [
+                    {"type": "object", "properties": {"x": {"type": "integer"}}},
+                    {"type": "string"},
+                ],
+            }
+        },
+    }
+
+    result = ensure_strict_json_schema(copy.deepcopy(schema))
+
+    object_entry = result["properties"]["point"]["prefixItems"][0]
+    assert object_entry["additionalProperties"] is False
+    assert object_entry["required"] == ["x"]
+
+
+def test_open_object_inside_prefix_items_is_rejected_like_top_level():
+    # A dict[str, int] at the top level is rejected because additionalProperties
+    # is a schema rather than false. The same schema hidden inside a tuple
+    # element must be rejected identically.
+    schema = {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "array",
+                "prefixItems": [
+                    {"type": "object", "additionalProperties": {"type": "integer"}},
+                    {"type": "string"},
+                ],
+            }
+        },
+    }
+
+    with pytest.raises(UserError, match="additionalProperties should not be set"):
+        ensure_strict_json_schema(schema)
