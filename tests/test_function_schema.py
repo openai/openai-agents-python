@@ -8,7 +8,7 @@ from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
 
 from agents import RunContextWrapper, function_tool
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.function_schema import function_schema, generate_func_documentation
 
 
@@ -1183,3 +1183,94 @@ def test_default_equality_is_not_used_for_sentinel_comparison(
     parsed = fs.params_pydantic_model(x=1)
     args, kwargs = fs.to_call_args(parsed)
     assert isinstance((args + list(kwargs.values()))[-1], default_type)
+
+
+def _kwargs_keyword_only(*, opt: int = 1, **kw: Any) -> tuple[int, dict[str, Any]]:
+    return opt, kw
+
+
+def _kwargs_positional_or_keyword(x: int, *rest: int, **kw: Any) -> tuple[int, tuple[int, ...]]:
+    return x, rest
+
+
+def _kwargs_after_var_positional(*rest: int, y: int = 0, **kw: Any) -> tuple[int, int]:
+    return y, len(rest)
+
+
+def _kwargs_with_context(ctx: RunContextWrapper[str], n: int, **kw: Any) -> int:
+    return n
+
+
+@pytest.mark.parametrize(
+    ("func", "payload", "conflict"),
+    [
+        pytest.param(
+            _kwargs_keyword_only,
+            {"opt": 5, "kw": {"opt": 9}},
+            "'opt'",
+            id="keyword-only",
+        ),
+        pytest.param(
+            _kwargs_positional_or_keyword,
+            {"x": 1, "rest": [2, 3], "kw": {"x": 99}},
+            "'x'",
+            id="positional-or-keyword",
+        ),
+        pytest.param(
+            _kwargs_after_var_positional,
+            {"rest": [1], "y": 2, "kw": {"y": 3}},
+            "'y'",
+            id="keyword-only-after-var-positional",
+        ),
+        pytest.param(
+            _kwargs_with_context,
+            {"n": 1, "kw": {"ctx": 9}},
+            "'ctx'",
+            id="context-parameter",
+        ),
+    ],
+)
+def test_to_call_args_rejects_kwargs_keys_that_collide_with_named_params(
+    func: Callable[..., Any], payload: dict[str, Any], conflict: str
+) -> None:
+    """A **kwargs key naming a keyword-bindable parameter is not a callable combination.
+
+    Splatting it would either replace the validated value for that parameter or make the
+    call fail with "got multiple values for argument", so it is reported to the model.
+    """
+    fs = function_schema(func, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**payload)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        fs.to_call_args(parsed)
+
+    assert conflict in str(exc_info.value)
+    assert fs.name in str(exc_info.value)
+
+
+def _kwargs_positional_only(a: int, /, **kw: Any) -> tuple[int, dict[str, Any]]:
+    return a, kw
+
+
+def _kwargs_var_positional_name(*rest: int, **kw: Any) -> tuple[tuple[int, ...], dict[str, Any]]:
+    return rest, kw
+
+
+def test_to_call_args_allows_kwargs_key_matching_positional_only_param() -> None:
+    """``f(1, a=2)`` is legal for ``def f(a, /, **kw)``: the key belongs to ``**kw``."""
+    fs = function_schema(_kwargs_positional_only, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**{"a": 1, "kw": {"a": 2}})
+
+    args, kwargs_dict = fs.to_call_args(parsed)
+
+    assert _kwargs_positional_only(*args, **kwargs_dict) == (1, {"a": 2})
+
+
+def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
+    """``*args`` binds no name, so a key of the same name belongs to ``**kw``."""
+    fs = function_schema(_kwargs_var_positional_name, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**{"rest": [1], "kw": {"rest": 5}})
+
+    args, kwargs_dict = fs.to_call_args(parsed)
+
+    assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
