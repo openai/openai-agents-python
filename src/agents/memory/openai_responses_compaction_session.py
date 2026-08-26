@@ -142,6 +142,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
+        # Bumped by clear_session and pop_item under the lock. The prefix check in
+        # run_compaction cannot see a destructive rewrite when both the snapshot and
+        # the post flight history are empty, so the counter records it explicitly.
+        self._destructive_generation = 0
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -201,13 +205,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
+        # resolved_mode was derived from the response id as it is right now. A
+        # concurrent call can overwrite self._response_id while this one waits on
+        # the lock below, so everything after this line uses the paired local.
+        response_id = self._response_id
+
         async with self._mutation_lock:
             compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
             force = args.get("force", False) if args else False
             should_compact = force or self.should_trigger_compaction(
                 {
-                    "response_id": self._response_id,
+                    "response_id": response_id,
                     "compaction_mode": resolved_mode,
                     "compaction_candidate_items": compaction_candidate_items,
                     "session_items": session_items,
@@ -217,7 +226,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if not should_compact:
                 logger.debug(
                     "skip: decision hook declined compaction for %s (mode=%s)",
-                    self._response_id,
+                    response_id,
                     resolved_mode,
                 )
                 return
@@ -225,18 +234,19 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # Capture the full stored history while the lock still excludes writers.
             # It anchors the post-flight check that detects concurrent mutations.
             snapshot_items = await self._get_all_underlying_session_items()
+            snapshot_generation = self._destructive_generation
 
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
-            self._response_id,
+            response_id,
             self.model,
             resolved_mode,
         )
 
         compact_kwargs: dict[str, Any] = {"model": self.model}
         if resolved_mode == "previous_response_id":
-            compact_kwargs["previous_response_id"] = self._response_id
+            compact_kwargs["previous_response_id"] = response_id
         else:
             compact_kwargs["input"] = session_items
 
@@ -253,17 +263,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             previous_items = await self._get_all_underlying_session_items()
             baseline_count = len(snapshot_items)
-            if previous_items[:baseline_count] != snapshot_items:
+            if (
+                self._destructive_generation != snapshot_generation
+                or previous_items[:baseline_count] != snapshot_items
+            ):
                 # A concurrent clear_session or pop_item rewrote history while the
                 # compaction request was in flight, so the snapshot no longer
                 # describes the stored items. Replacing them would resurrect
-                # deleted history; keep the current items and drop the caches.
+                # deleted history; keep the current items and drop the caches. The
+                # generation counter catches the case the prefix check cannot: a
+                # clear_session while the snapshot itself was empty.
                 self._compaction_candidate_items = None
                 self._session_items = None
                 logger.warning(
                     "Skipped compaction replacement for %s (mode=%s): session history "
                     "diverged from the compaction snapshot while the request was in flight.",
-                    self._response_id,
+                    response_id,
                     resolved_mode,
                 )
                 return
@@ -280,7 +295,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s, concurrent_tail=%s)",
-            self._response_id,
+            response_id,
             resolved_mode,
             len(output_items),
             len(self._compaction_candidate_items or []),
@@ -458,6 +473,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._destructive_generation += 1
             return popped
 
     async def clear_session(self) -> None:
@@ -466,6 +482,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._compaction_candidate_items = []
             self._session_items = []
             self._deferred_response_id = None
+            self._destructive_generation += 1
 
     async def _ensure_compaction_candidates(
         self,

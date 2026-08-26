@@ -1993,6 +1993,86 @@ class TestCompactionConcurrentMutations:
         assert cached_tail.get("call_id") == "call_tail"
         assert TOOL_CALL_SESSION_TITLE_KEY not in cached_tail
 
+    @pytest.mark.asyncio
+    async def test_clear_session_with_empty_snapshot_is_not_repopulated(self) -> None:
+        """A clear during flight must hold even when the snapshot itself was empty.
+
+        With previous_response_id compaction the local session can be empty when
+        the request starts, so the post flight prefix check compares two empty
+        lists and cannot see the clear. The destructive generation counter can.
+        """
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+        underlying = SimpleListSession(history=[])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        session = OpenAIResponsesCompactionSession(
+            session_id="clear-empty-baseline",
+            underlying_session=underlying,
+            client=self.create_gated_compact_client(
+                [compacted_item], compact_entered, release_compact
+            ),
+            compaction_mode="previous_response_id",
+        )
+
+        compaction_task = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_baseline"})
+        )
+        try:
+            await compact_entered.wait()
+            await session.clear_session()
+        finally:
+            release_compact.set()
+        await compaction_task
+
+        assert await underlying.get_items() == []
+        assert await session.get_items() == []
+
+    @pytest.mark.asyncio
+    async def test_compact_uses_response_id_captured_before_lock_wait(self) -> None:
+        """The compact call must use the response id its mode was resolved from.
+
+        While one run_compaction waits on the mutation lock, a second call can
+        overwrite the shared response id at entry. The waiter must not pick up
+        the newer id after resuming.
+        """
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+        underlying = SimpleListSession(history=[])
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [compacted_item]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="captured-response-id",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._mutation_lock.acquire()
+        try:
+            first = asyncio.create_task(
+                session.run_compaction({"force": True, "response_id": "resp_first"})
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            second = asyncio.create_task(
+                session.run_compaction({"force": True, "response_id": "resp_second"})
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            # The second call already overwrote the shared id while the first waits.
+            assert session._response_id == "resp_second"
+        finally:
+            session._mutation_lock.release()
+        await first
+        await second
+
+        sent_ids = [
+            call.kwargs["previous_response_id"]
+            for call in mock_client.responses.compact.call_args_list
+        ]
+        assert sent_ids == ["resp_first", "resp_second"]
+
 
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:
