@@ -88,6 +88,38 @@ def test_object_without_additional_properties():
     assert result["properties"]["a"] == {"type": "string"}
 
 
+def test_strict_schema_removes_non_null_defaults():
+    schema = {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "default": 10},
+            "label": {"type": "string", "default": "untitled"},
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["required"] == ["limit", "label"]
+    assert result["properties"] == {
+        "limit": {"type": "integer"},
+        "label": {"type": "string"},
+    }
+
+
+def test_strict_schema_removes_defaults_from_ref_siblings():
+    schema = {
+        "$defs": {"value": {"type": "integer"}},
+        "type": "object",
+        "properties": {
+            "limit": {"$ref": "#/$defs/value", "default": 10},
+        },
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["properties"]["limit"] == {"$ref": "#/$defs/value"}
+
+
 def test_open_object_rejection_is_opt_in():
     schema = {"type": "object", "properties": {}}
 
