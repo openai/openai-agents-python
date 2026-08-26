@@ -44,7 +44,10 @@ from ._retry_runtime import should_disable_provider_managed_retries
 from ._trace import model_config_for_trace
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
-from .chatcmpl_stream_handler import ChatCmplStreamHandler
+from .chatcmpl_stream_handler import (
+    _UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE,
+    ChatCmplStreamHandler,
+)
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
@@ -75,6 +78,7 @@ class OpenAIChatCompletionsModel(Model):
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
         self._has_warned_unsupported_reasoning_settings = False
+        self._has_warned_unsupported_choice = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -128,6 +132,22 @@ class OpenAIChatCompletionsModel(Model):
                 message,
             )
             self._has_warned_unsupported_reasoning_settings = True
+
+    def _handle_unsupported_choices(self, choices: list[Choice]) -> None:
+        unsupported_choice_indexes = [choice.index for choice in choices if choice.index != 0]
+        if len(choices) <= 1 and not unsupported_choice_indexes:
+            return
+
+        if self._strict_feature_validation:
+            raise UserError(_UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE)
+
+        if not self._has_warned_unsupported_choice:
+            logger.warning(
+                "%s Using the first returned choice; enable strict feature validation to "
+                "raise an error instead.",
+                _UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE,
+            )
+            self._has_warned_unsupported_choice = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -266,6 +286,8 @@ class OpenAIChatCompletionsModel(Model):
                     f"ChatCompletion response has no choices (possible provider error payload)"
                     f"{error_details}"
                 )
+
+            self._handle_unsupported_choices(response.choices)
 
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None

@@ -74,6 +74,23 @@ def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
     )
 
 
+def _chat_completion_with_choice_indexes(*indexes: int) -> ChatCompletion:
+    return ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=index,
+                finish_reason="stop",
+                message=ChatCompletionMessage(role="assistant", content=f"choice-{index}"),
+            )
+            for index in indexes
+        ],
+    )
+
+
 async def _run_chat_completions_model_with_custom_base_url(
     model_settings: ModelSettings | dict[str, Any] | None = None,
     tools: list[Tool] | None = None,
@@ -196,6 +213,78 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
     assert resp.raw_usage is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice_indexes", [(0, 1), (1,)])
+async def test_get_response_rejects_unsupported_choices_in_strict_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    choice_indexes: tuple[int, ...],
+) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _chat_completion_with_choice_indexes(*choice_indexes)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(
+        use_responses=False,
+        strict_feature_validation=True,
+    ).get_model("gpt-4")
+
+    with pytest.raises(UserError, match="multiple choices or nonzero choice indexes"):
+        await model.get_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_warns_once_and_uses_first_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _chat_completion_with_choice_indexes(0, 1)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    responses = [
+        await model.get_response(
+            system_instructions=None,
+            input="",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+        for _ in range(2)
+    ]
+
+    for response in responses:
+        assert isinstance(response.output[0], ResponseOutputMessage)
+        assert isinstance(response.output[0].content[0], ResponseOutputText)
+        assert response.output[0].content[0].text == "choice-0"
+    warnings = [
+        record
+        for record in caplog.records
+        if "multiple choices or nonzero choice indexes" in record.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 @pytest.mark.allow_call_model_methods
