@@ -117,7 +117,10 @@ def test_strict_schema_removes_defaults_from_ref_siblings():
 
     result = ensure_strict_json_schema(schema)
 
-    assert result["properties"]["limit"] == {"$ref": "#/$defs/value"}
+    assert result["properties"]["limit"] == {"type": "integer"}
+
+    strict_result = ensure_strict_json_schema(copy.deepcopy(schema), _reject_open_objects=True)
+    assert strict_result["properties"]["limit"] == {"type": "integer"}
 
 
 def test_open_object_rejection_is_opt_in():

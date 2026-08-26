@@ -359,10 +359,6 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # Strict structured-output schemas require every property to be present, so
-    # defaults are both redundant and rejected by providers such as Azure OpenAI.
-    json_schema.pop("default", None)
-
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
     #
@@ -394,6 +390,13 @@ def _ensure_strict_json_schema(
             depth=next_depth,
             inside_nested_resource=inside_nested_resource,
         )
+
+    # Strict structured-output schemas require every property to be present, so
+    # defaults are both redundant and rejected by providers such as Azure OpenAI.
+    # Keep them until after `$ref` expansion: a default is a permitted `$ref`
+    # sibling, and removing it first would leave an unvalidated reference when
+    # open objects are rejected.
+    json_schema.pop("default", None)
 
     if budget.reject_open_objects and "$ref" in json_schema:
         raise UserError(_UNVALIDATED_REF_ERROR)
