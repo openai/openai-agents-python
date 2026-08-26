@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import select
 import sys
 import threading
@@ -20,27 +21,42 @@ _STDIN_POLL_INTERVAL_SECONDS = 0.1
 """How long a waiting reader blocks before re-checking whether it was asked to stop."""
 
 
-def _stdin_poll_fd() -> int | None:
-    """Return the stdin descriptor if a reader waiting on it can be interrupted.
+def _interruptible_stdin_fd() -> int | None:
+    """Return the stdin descriptor only if a reader waiting on it can always be stopped.
 
-    A reader is only safe to start on a worker thread when it can be told to stop, and that
-    requires waiting on a descriptor rather than blocking in ``input()``. Everything else --
-    a console on Windows, a captured or synthetic stdin with no descriptor -- reads on the
-    event loop instead, because a worker blocked in ``input()`` cannot be stopped at all:
-    the default executor is joined during loop shutdown, so it would hang the process until
-    the user pressed Enter.
+    A reader is safe to start on a worker thread only when every blocking step it takes can
+    be interrupted. Waiting on the descriptor is interruptible; the ``input()`` that follows
+    is not, so readiness has to already guarantee a complete line.
+
+    Only a terminal in canonical mode gives that guarantee: it reports readiness once the
+    user presses Enter. On a pipe or a regular file, ``select`` fires on the first byte, so
+    a writer that sends a partial line and pauses would leave ``input()`` blocked on the
+    missing newline with no way to stop it. Those cases, a console on Windows, and a
+    captured or synthetic stdin with no descriptor all read on the event loop instead --
+    the behavior this module had before -- rather than start a worker that cannot be
+    stopped and would hang loop shutdown until stdin delivered another line.
     """
     if sys.platform == "win32":
         # select() accepts only sockets here, and the console reports readiness per keystroke
         # rather than per line, so neither gives an interruptible wait.
         return None
+
+    import termios
+
     try:
         fd = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
         return None
+    if not os.isatty(fd):
+        return None
     try:
-        select.select([fd], [], [], 0)
-    except (OSError, ValueError):
+        mode = termios.tcgetattr(fd)
+    except (termios.error, OSError, ValueError):
+        return None
+    local_flags = mode[3]
+    if not local_flags & termios.ICANON:
+        # A terminal taken out of canonical mode reports readiness per keystroke, so the
+        # same partial-line problem applies.
         return None
     return fd
 
@@ -49,9 +65,9 @@ def _read_line_when_ready(fd: int, stop: threading.Event) -> str | None:
     """Wait for a line on ``fd`` and read it, returning None if asked to stop first.
 
     The wait is split into ``_STDIN_POLL_INTERVAL_SECONDS`` slices so setting ``stop`` ends
-    this reader within one slice. A terminal in canonical mode only reports readiness once
-    the user presses Enter, so the ``input()`` call below consumes an already-complete line
-    instead of blocking.
+    this reader within one slice. ``fd`` comes from :func:`_interruptible_stdin_fd`, so it
+    is a canonical-mode terminal and readiness means a complete line is waiting: the
+    ``input()`` below consumes it instead of blocking.
     """
     while not stop.is_set():
         try:
@@ -71,7 +87,7 @@ async def _read_user_input(prompt: str) -> str:
     Raises:
         EOFError: If stdin reached end of input.
     """
-    fd = _stdin_poll_fd()
+    fd = _interruptible_stdin_fd()
     if fd is None:
         return input(prompt)
 

@@ -108,15 +108,30 @@ async def test_run_demo_loop_skips_empty_input(monkeypatch, capsys):
     assert model.calls[-1].input == [get_text_input_item("Hi")]
 
 
-requires_pollable_stdin = pytest.mark.skipif(
+requires_terminal_stdin = pytest.mark.skipif(
     sys.platform == "win32",
     reason="stdin cannot be waited on here, so the demo loop reads on the event loop",
 )
 
 
 @contextlib.contextmanager
-def _pollable_stdin(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
-    """Point sys.stdin at a real pipe so the loop takes its interruptible reader path."""
+def _terminal_stdin(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """Point sys.stdin at a real terminal so the loop takes its interruptible reader path."""
+    import pty  # POSIX only, and every caller is skipped on Windows.
+
+    primary_fd, secondary_fd = pty.openpty()
+    reader = os.fdopen(secondary_fd, "r")
+    monkeypatch.setattr(sys, "stdin", reader)
+    try:
+        yield primary_fd
+    finally:
+        reader.close()
+        os.close(primary_fd)
+
+
+@contextlib.contextmanager
+def _pipe_stdin(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """Point sys.stdin at a pipe, which must not qualify for the reader thread."""
     read_fd, write_fd = os.pipe()
     reader = os.fdopen(read_fd, "r")
     monkeypatch.setattr(sys, "stdin", reader)
@@ -127,12 +142,36 @@ def _pollable_stdin(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
         reader.close()
 
 
-def test_stdin_without_a_pollable_descriptor_reads_on_the_event_loop():
+def test_stdin_without_a_descriptor_reads_on_the_event_loop():
     """pytest's captured stdin has no descriptor, so no reader thread may be started."""
-    assert repl_module._stdin_poll_fd() is None
+    assert repl_module._interruptible_stdin_fd() is None
 
 
-@requires_pollable_stdin
+@requires_terminal_stdin
+def test_pipe_stdin_reads_on_the_event_loop(monkeypatch):
+    """A pipe signals readiness on the first byte, not on a complete line.
+
+    Starting a reader thread on one would let a writer that pauses mid-line leave
+    ``input()`` blocked on the missing newline, where nothing can stop it.
+    """
+    with _pipe_stdin(monkeypatch) as write_fd:
+        os.write(write_fd, b"partial")
+        assert repl_module._interruptible_stdin_fd() is None
+
+
+@requires_terminal_stdin
+def test_terminal_stdin_out_of_canonical_mode_reads_on_the_event_loop(monkeypatch):
+    """A raw-mode terminal reports readiness per keystroke, so it gets no reader thread."""
+    import termios
+    import tty
+
+    with _terminal_stdin(monkeypatch):
+        assert repl_module._interruptible_stdin_fd() is not None
+        tty.setraw(sys.stdin.fileno(), termios.TCSANOW)
+        assert repl_module._interruptible_stdin_fd() is None
+
+
+@requires_terminal_stdin
 @pytest.mark.asyncio
 async def test_run_demo_loop_does_not_block_the_event_loop(monkeypatch):
     """The prompt must not hold the loop while it waits for a keystroke."""
@@ -153,14 +192,14 @@ async def test_run_demo_loop_does_not_block_the_event_loop(monkeypatch):
     async def release_prompt() -> None:
         released.set()
 
-    with _pollable_stdin(monkeypatch) as write_fd:
+    with _terminal_stdin(monkeypatch) as write_fd:
         os.write(write_fd, b"anything\n")
         await asyncio.gather(run_demo_loop(agent, stream=False), release_prompt())
 
     assert not model.calls
 
 
-@requires_pollable_stdin
+@requires_terminal_stdin
 @pytest.mark.asyncio
 async def test_cancelling_the_demo_loop_stops_the_stdin_reader(monkeypatch):
     """Ctrl+C must not leave a worker sitting on stdin after the loop is done.
@@ -187,7 +226,7 @@ async def test_cancelling_the_demo_loop_stops_the_stdin_reader(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("stdin had no input"))
 
     # No bytes are written, so the reader stays in its poll loop until it is asked to stop.
-    with _pollable_stdin(monkeypatch):
+    with _terminal_stdin(monkeypatch):
         task = asyncio.create_task(run_demo_loop(agent, stream=False))
         assert await asyncio.to_thread(entered.wait, 5)
 
@@ -200,7 +239,7 @@ async def test_cancelling_the_demo_loop_stops_the_stdin_reader(monkeypatch):
     assert not model.calls
 
 
-@requires_pollable_stdin
+@requires_terminal_stdin
 @pytest.mark.asyncio
 async def test_cancelling_the_demo_loop_settles_within_one_poll_interval(monkeypatch):
     """The wait for the reader is bounded, so cancellation stays responsive."""
@@ -217,7 +256,7 @@ async def test_cancelling_the_demo_loop_settles_within_one_poll_interval(monkeyp
     monkeypatch.setattr(repl_module, "_read_line_when_ready", tracked_reader)
     monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("stdin had no input"))
 
-    with _pollable_stdin(monkeypatch):
+    with _terminal_stdin(monkeypatch):
         task = asyncio.create_task(run_demo_loop(agent, stream=False))
         assert await asyncio.to_thread(reading.wait, 5)
 
