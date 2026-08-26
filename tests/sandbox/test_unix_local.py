@@ -545,3 +545,133 @@ async def test_persist_workspace_reports_a_missing_root(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspaceArchiveReadError):
         await session.persist_workspace()
+
+
+@pytest.mark.asyncio
+async def test_persist_workspace_cancellation_waits_for_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must not be reported while the worker still holds the workspace.
+
+    ``asyncio.to_thread`` cannot interrupt the thread, and the snapshot lifecycle closes
+    the archive stream as soon as the await returns, so returning early would leave a live
+    worker reading a closed stream.
+    """
+    session = _RecordingUnixLocalSession(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    settled = threading.Event()
+
+    def blocking_archive(root: Path, skip: set[Path]) -> io.BytesIO:
+        started.set()
+        release.wait(timeout=5)
+        settled.set()
+        return io.BytesIO(b"archive")
+
+    monkeypatch.setattr(unix_local_module, "_archive_workspace", blocking_archive)
+
+    task = asyncio.create_task(session.persist_workspace())
+    assert await asyncio.to_thread(started.wait, 5)
+
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done()
+    assert not settled.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert settled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_cancellation_waits_for_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same ownership for extraction, which mutates the workspace as it runs."""
+    session = _RecordingUnixLocalSession(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    settled = threading.Event()
+
+    def blocking_extract(root: Path, data: io.IOBase) -> None:
+        started.set()
+        release.wait(timeout=5)
+        settled.set()
+
+    monkeypatch.setattr(unix_local_module, "_extract_workspace_archive", blocking_extract)
+
+    task = asyncio.create_task(session.hydrate_workspace(io.BytesIO(b"")))
+    assert await asyncio.to_thread(started.wait, 5)
+
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done()
+    assert not settled.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert settled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_still_waits_for_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that cancels more than once does not get to skip the wait."""
+    session = _RecordingUnixLocalSession(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    settled = threading.Event()
+
+    def blocking_archive(root: Path, skip: set[Path]) -> io.BytesIO:
+        started.set()
+        release.wait(timeout=5)
+        settled.set()
+        return io.BytesIO(b"archive")
+
+    monkeypatch.setattr(unix_local_module, "_archive_workspace", blocking_archive)
+
+    task = asyncio.create_task(session.persist_workspace())
+    assert await asyncio.to_thread(started.wait, 5)
+
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0.02)
+    assert not task.done()
+    assert not settled.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert settled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_wins_over_a_failing_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that fails after the caller cancelled still reports as cancelled."""
+    session = _RecordingUnixLocalSession(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_archive(root: Path, skip: set[Path]) -> io.BytesIO:
+        started.set()
+        release.wait(timeout=5)
+        raise OSError("workspace went away")
+
+    monkeypatch.setattr(unix_local_module, "_archive_workspace", failing_archive)
+
+    task = asyncio.create_task(session.persist_workspace())
+    assert await asyncio.to_thread(started.wait, 5)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task

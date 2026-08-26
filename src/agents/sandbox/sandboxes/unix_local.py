@@ -21,12 +21,12 @@ import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 from ...logger import log_tool_action_warning
 from .._mount_security import redact_mount_error_data
@@ -73,6 +73,8 @@ _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
 _PTY_CHILD_SIGNAL_DEFAULTS = (signal.SIGINT, signal.SIGQUIT)
+
+_WorkspaceIOResultT = TypeVar("_WorkspaceIOResultT")
 _PTY_FD_CLOSE_GRACE_SECONDS = 0.1
 _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
     {
@@ -116,17 +118,42 @@ def _restore_pty_child_signal_defaults() -> None:
         signal.signal(signum, signal.SIG_DFL)
 
 
-# The helpers below do the blocking filesystem work for this backend. Each one is called
-# through ``asyncio.to_thread`` so the archive, extraction, and path syscalls stay off the
-# event loop; keeping them at module level keeps that boundary obvious and keeps session
-# state access on the loop side of it.
+async def _run_workspace_io(
+    func: Callable[..., _WorkspaceIOResultT],
+    *args: Any,
+) -> _WorkspaceIOResultT:
+    """Run blocking workspace I/O on a worker thread and own that worker's lifetime.
+
+    ``asyncio.to_thread`` cannot interrupt the thread it starts, so returning as soon as the
+    caller is cancelled would report the operation as stopped while the worker is still
+    walking or writing the workspace. Callers act on that immediately: the snapshot
+    lifecycle closes the archive stream in a ``finally`` as soon as the await returns, and a
+    resume clears the workspace root. Either would land on a live worker.
+
+    So the cancellation is recorded, the worker is allowed to settle, and only then does the
+    cancellation propagate. Repeated cancellation is absorbed the same way. This mirrors
+    ``memory.sqlite_session._await_mutation``, which owns cancellation for session writes.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+
+    if cancellation is not None:
+        # Consume any worker failure so it is not reported as never retrieved. The caller
+        # asked to stop, so the cancellation is what it hears about.
+        task.exception()
+        raise cancellation from None
+    return task.result()
 
 
-def _resolve_existing_workspace(workspace: Path) -> Path:
-    """Confirm the workspace root exists and resolve it."""
-    if not workspace.exists():
-        raise WorkspaceRootNotFoundError(path=workspace)
-    return workspace.resolve()
+# The two helpers below carry the unbounded workspace I/O. They run on a worker thread via
+# ``_run_workspace_io`` so archiving and extraction do not hold the event loop; keeping them
+# at module level makes that boundary obvious and keeps session state on the loop side of it.
 
 
 def _archive_workspace(root: Path, skip: set[Path]) -> io.BytesIO:
@@ -255,7 +282,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
         try:
-            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+            workspace.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 
@@ -324,7 +351,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _exec_internal(
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
-        env, cwd, workspace_root = await self._resolved_exec_context()
+        env, cwd = await self._resolved_exec_context()
+        workspace_root = Path(cwd).resolve()
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
             command_parts=command_parts,
@@ -376,7 +404,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         _ = timeout
-        env, cwd, workspace_root = await self._resolved_exec_context()
+        env, cwd = await self._resolved_exec_context()
+        workspace_root = Path(cwd).resolve()
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         command_parts = self._workspace_relative_command_parts(sanitized_command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -522,7 +551,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         for entry in entries:
             await self._terminate_pty_entry(entry)
 
-    async def _resolved_exec_context(self) -> tuple[dict[str, str], str, Path]:
+    async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
         if self._host_environment_allowlist is None:
             env = dict(os.environ)
         else:
@@ -534,12 +563,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
-        # One thread hop covers both filesystem calls: the existence check, and the resolve
-        # that each of the three exec paths used to repeat for itself.
-        workspace_root = await asyncio.to_thread(_resolve_existing_workspace, workspace)
+        if not workspace.exists():
+            raise WorkspaceRootNotFoundError(path=workspace)
 
         env["HOME"] = str(workspace)
-        return env, str(workspace), workspace_root
+        return env, str(workspace)
 
     async def _pump_process_stream(
         self,
@@ -1076,7 +1104,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         user: str | User,
     ) -> None:
-        env, cwd, workspace_root = await self._resolved_exec_context()
+        env, cwd = await self._resolved_exec_context()
+        workspace_root = Path(cwd).resolve()
         command_parts = self._prepare_exec_command(
             "sh",
             "-c",
@@ -1136,11 +1165,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         # thread. Session state is read here, on the loop, and only plain values cross over.
         root = Path(self.state.manifest.root)
         skip = self._persist_workspace_skip_relpaths()
-        return await asyncio.to_thread(_archive_workspace, root, skip)
+        return await _run_workspace_io(_archive_workspace, root, skip)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
-        await asyncio.to_thread(_extract_workspace_archive, root, data)
+        await _run_workspace_io(_extract_workspace_archive, root, data)
 
 
 class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | None]):
