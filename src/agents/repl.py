@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import select
+import sys
+import threading
+from contextlib import suppress
 from typing import Any
 
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
@@ -11,6 +15,84 @@ from .result import RunResultBase
 from .run import DEFAULT_MAX_TURNS, Runner
 from .run_context import TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
+
+_STDIN_POLL_INTERVAL_SECONDS = 0.1
+"""How long a waiting reader blocks before re-checking whether it was asked to stop."""
+
+
+def _stdin_poll_fd() -> int | None:
+    """Return the stdin descriptor if a reader waiting on it can be interrupted.
+
+    A reader is only safe to start on a worker thread when it can be told to stop, and that
+    requires waiting on a descriptor rather than blocking in ``input()``. Everything else --
+    a console on Windows, a captured or synthetic stdin with no descriptor -- reads on the
+    event loop instead, because a worker blocked in ``input()`` cannot be stopped at all:
+    the default executor is joined during loop shutdown, so it would hang the process until
+    the user pressed Enter.
+    """
+    if sys.platform == "win32":
+        # select() accepts only sockets here, and the console reports readiness per keystroke
+        # rather than per line, so neither gives an interruptible wait.
+        return None
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        select.select([fd], [], [], 0)
+    except (OSError, ValueError):
+        return None
+    return fd
+
+
+def _read_line_when_ready(fd: int, stop: threading.Event) -> str | None:
+    """Wait for a line on ``fd`` and read it, returning None if asked to stop first.
+
+    The wait is split into ``_STDIN_POLL_INTERVAL_SECONDS`` slices so setting ``stop`` ends
+    this reader within one slice. A terminal in canonical mode only reports readiness once
+    the user presses Enter, so the ``input()`` call below consumes an already-complete line
+    instead of blocking.
+    """
+    while not stop.is_set():
+        try:
+            ready, _, _ = select.select([fd], [], [], _STDIN_POLL_INTERVAL_SECONDS)
+        except (OSError, ValueError):
+            # stdin stopped being selectable underneath us; treat it as end of input rather
+            # than blocking in a read this reader could no longer be stopped from.
+            return None
+        if ready:
+            return input()
+    return None
+
+
+async def _read_user_input(prompt: str) -> str:
+    """Read one line from stdin without holding the event loop or leaking a reader.
+
+    Raises:
+        EOFError: If stdin reached end of input.
+    """
+    fd = _stdin_poll_fd()
+    if fd is None:
+        return input(prompt)
+
+    print(prompt, end="", flush=True)
+    stop = threading.Event()
+    reader = asyncio.ensure_future(asyncio.to_thread(_read_line_when_ready, fd, stop))
+    try:
+        line = await asyncio.shield(reader)
+    except asyncio.CancelledError:
+        # Ctrl+C cancels this task but cannot interrupt the worker, and the default executor
+        # is joined while the loop shuts down. Stop the reader and wait for it so no worker
+        # is still sitting on stdin once this coroutine is done; the poll interval bounds
+        # that wait.
+        stop.set()
+        with suppress(BaseException):
+            await asyncio.shield(reader)
+        raise
+
+    if line is None:
+        raise EOFError
+    return line
 
 
 async def run_demo_loop(
@@ -38,11 +120,7 @@ async def run_demo_loop(
     input_items: list[TResponseInputItem] = []
     while True:
         try:
-            # `input()` is blocking, so it has to run off the event loop. Calling it
-            # directly would freeze every other task on the loop -- MCP servers that need
-            # to service their streams, background work started by the caller -- for as
-            # long as the prompt waits for a keystroke.
-            user_input = await asyncio.to_thread(input, " > ")
+            user_input = await _read_user_input(" > ")
         except (EOFError, KeyboardInterrupt):
             print()
             break
