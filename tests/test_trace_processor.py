@@ -707,6 +707,66 @@ def test_worker_that_outlives_shutdown_keeps_the_exporter_cancelled(mock_client)
     exporter.close()
 
 
+@patch("httpx2.Client")
+def test_shared_exporter_stays_cancelled_until_every_shutdown_releases(mock_client):
+    """Two processors can share one exporter, so one release must not speak for both.
+
+    A provider shuts its processors down in turn: the first times out with its worker still
+    inside a request, the second exits cleanly. If that second release cleared the shared
+    cancellation, the first worker would find it gone when its request finally returns a 5xx
+    and retry, after its own shutdown had already returned.
+    """
+    post_called = threading.Event()
+    release_post = threading.Event()
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+
+    def post(**kwargs: Any) -> Any:
+        post_called.set()
+        release_post.wait(timeout=5.0)
+        return mock_response
+
+    mock_client.return_value.post.side_effect = post
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        max_retries=100,
+        base_delay=10.0,
+        max_delay=10.0,
+    )
+    blocked = BatchTraceProcessor(
+        exporter=exporter,
+        max_queue_size=1,
+        max_batch_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+    other = BatchTraceProcessor(exporter=exporter)
+
+    blocked.on_span_end(get_span(blocked))
+    assert post_called.wait(timeout=2.0)
+
+    blocked.shutdown(timeout=0.05)
+    blocked_worker = blocked._worker_thread
+    assert blocked_worker is not None and blocked_worker.is_alive()
+
+    # The second processor never started a worker, so its shutdown finishes and releases
+    # right away -- while the first processor's request is still outstanding.
+    other.shutdown(timeout=1.0)
+    assert exporter._shutdown_event.is_set()
+
+    release_post.set()
+
+    blocked_worker.join(timeout=2.0)
+    assert not blocked_worker.is_alive()
+    assert mock_client.return_value.post.call_count == 1
+
+    # Both requests released now, so the exporter is usable again.
+    assert not exporter._shutdown_event.is_set()
+
+    exporter.close()
+
+
 @pytest.mark.serial
 @pytest.mark.review_optional
 def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:

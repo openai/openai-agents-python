@@ -85,6 +85,8 @@ class BackendSpanExporter(TracingExporter):
         self.base_delay = base_delay
         self.max_delay = max_delay
         self._shutdown_event = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_requests = 0
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
@@ -535,11 +537,24 @@ class BackendSpanExporter(TracingExporter):
         self._client.close()
 
     def _request_shutdown(self) -> None:
-        self._shutdown_event.set()
+        with self._shutdown_lock:
+            self._shutdown_requests += 1
+            self._shutdown_event.set()
 
     def _reset_shutdown(self) -> None:
-        """Undo a previous shutdown request so this exporter can retry exports again."""
-        self._shutdown_event.clear()
+        """Drop one shutdown request, restoring retries once the last one is released.
+
+        Processors share an exporter -- `default_exporter()` hands the same instance to
+        every one of them -- so more than one can have a shutdown in flight. Retries come
+        back only when every request has been released; clearing on the first release would
+        resurrect the retry backoff of a worker still exporting under a shutdown of its own.
+        """
+        with self._shutdown_lock:
+            if self._shutdown_requests == 0:
+                return
+            self._shutdown_requests -= 1
+            if self._shutdown_requests == 0:
+                self._shutdown_event.clear()
 
 
 class BatchTraceProcessor(TracingProcessor):
@@ -629,11 +644,12 @@ class BatchTraceProcessor(TracingProcessor):
         """
         Called when the application stops. We signal our thread to stop, then join it.
         """
-        if timeout is not None:
+        if timeout is not None and not self._requested_exporter_shutdown:
             request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
             if callable(request_exporter_shutdown):
                 # Flagged before the request so the worker, which may exit as soon as the
-                # event below is set, always sees that the request is ours to release.
+                # event below is set, always sees that the request is ours to release. Only
+                # ever requested once, so that our single release balances it.
                 self._requested_exporter_shutdown = True
                 request_exporter_shutdown()
 
@@ -659,12 +675,14 @@ class BatchTraceProcessor(TracingProcessor):
     def _release_exporter_shutdown(self) -> None:
         """Give a shutdown request we made back to the exporter, now that our worker is done.
 
-        The request is one-way and `default_exporter()` hands the same exporter to every
-        processor, so leaving it set makes the next processor give up on the first transient
-        failure instead of retrying -- blaming a shutdown that is long over. It is released
-        only by the processor that made it, and only once that processor's worker has
-        stopped: while the worker is still exporting it owns the cancellation and must keep
-        abandoning its retries, including when `shutdown` timed out and returned without it.
+        `default_exporter()` hands the same exporter to every processor, so leaving the
+        request outstanding makes the next processor give up on the first transient failure
+        instead of retrying -- blaming a shutdown that is long over. It is released only by
+        the processor that made it, and only once that processor's worker has stopped: while
+        the worker is still exporting it needs the cancellation to keep abandoning its
+        retries, including when `shutdown` timed out and returned without it. Other
+        processors' requests are counted separately by the exporter, so releasing ours never
+        takes the cancellation away from theirs.
         """
         if not self._requested_exporter_shutdown:
             return
