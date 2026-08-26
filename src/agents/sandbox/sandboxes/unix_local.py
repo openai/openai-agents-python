@@ -116,6 +116,65 @@ def _restore_pty_child_signal_defaults() -> None:
         signal.signal(signum, signal.SIG_DFL)
 
 
+# The helpers below do the blocking filesystem work for this backend. Each one is called
+# through ``asyncio.to_thread`` so the archive, extraction, and path syscalls stay off the
+# event loop; keeping them at module level keeps that boundary obvious and keeps session
+# state access on the loop side of it.
+
+
+def _resolve_existing_workspace(workspace: Path) -> Path:
+    """Confirm the workspace root exists and resolve it."""
+    if not workspace.exists():
+        raise WorkspaceRootNotFoundError(path=workspace)
+    return workspace.resolve()
+
+
+def _archive_workspace(root: Path, skip: set[Path]) -> io.BytesIO:
+    """Tar the whole workspace tree into an in-memory archive."""
+    if not root.exists():
+        raise WorkspaceArchiveReadError(path=root, context={"reason": "workspace_root_not_found"})
+
+    buf = io.BytesIO()
+    try:
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            tar.add(
+                root,
+                arcname=".",
+                filter=lambda ti: (
+                    None
+                    if should_skip_tar_member(
+                        ti.name,
+                        skip_rel_paths=skip,
+                        root_name=None,
+                    )
+                    else ti
+                ),
+            )
+    except (tarfile.TarError, OSError) as e:
+        raise WorkspaceArchiveReadError(path=root, cause=e) from e
+
+    buf.seek(0)
+    return buf
+
+
+def _extract_workspace_archive(root: Path, data: io.IOBase) -> None:
+    """Extract an archive over the workspace tree."""
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=data, mode="r:*") as tar:
+            safe_extract_tarfile(
+                tar,
+                root=root,
+                allow_external_symlink_targets=False,
+            )
+    except UnsafeTarMemberError as e:
+        raise WorkspaceArchiveWriteError(
+            path=root, context={"reason": e.reason, "member": e.member}, cause=e
+        ) from e
+    except (tarfile.TarError, OSError) as e:
+        raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+
+
 class UnixLocalSandboxSessionState(SandboxSessionState):
     type: Literal["unix_local"] = "unix_local"
     workspace_root_owned: bool = False
@@ -196,7 +255,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
         try:
-            workspace.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 
@@ -265,8 +324,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _exec_internal(
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
-        env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        env, cwd, workspace_root = await self._resolved_exec_context()
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
             command_parts=command_parts,
@@ -318,8 +376,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         _ = timeout
-        env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        env, cwd, workspace_root = await self._resolved_exec_context()
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         command_parts = self._workspace_relative_command_parts(sanitized_command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -465,7 +522,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         for entry in entries:
             await self._terminate_pty_entry(entry)
 
-    async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
+    async def _resolved_exec_context(self) -> tuple[dict[str, str], str, Path]:
         if self._host_environment_allowlist is None:
             env = dict(os.environ)
         else:
@@ -477,11 +534,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
-        if not workspace.exists():
-            raise WorkspaceRootNotFoundError(path=workspace)
+        # One thread hop covers both filesystem calls: the existence check, and the resolve
+        # that each of the three exec paths used to repeat for itself.
+        workspace_root = await asyncio.to_thread(_resolve_existing_workspace, workspace)
 
         env["HOME"] = str(workspace)
-        return env, str(workspace)
+        return env, str(workspace), workspace_root
 
     async def _pump_process_stream(
         self,
@@ -1018,8 +1076,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         user: str | User,
     ) -> None:
-        env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        env, cwd, workspace_root = await self._resolved_exec_context()
         command_parts = self._prepare_exec_command(
             "sh",
             "-c",
@@ -1075,51 +1132,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         return self._running
 
     async def persist_workspace(self) -> io.IOBase:
+        # Archiving the whole workspace tree is unbounded work, so it runs on a worker
+        # thread. Session state is read here, on the loop, and only plain values cross over.
         root = Path(self.state.manifest.root)
-        if not root.exists():
-            raise WorkspaceArchiveReadError(
-                path=root, context={"reason": "workspace_root_not_found"}
-            )
-
         skip = self._persist_workspace_skip_relpaths()
-        buf = io.BytesIO()
-        try:
-            with tarfile.open(fileobj=buf, mode="w") as tar:
-                tar.add(
-                    root,
-                    arcname=".",
-                    filter=lambda ti: (
-                        None
-                        if should_skip_tar_member(
-                            ti.name,
-                            skip_rel_paths=skip,
-                            root_name=None,
-                        )
-                        else ti
-                    ),
-                )
-        except (tarfile.TarError, OSError) as e:
-            raise WorkspaceArchiveReadError(path=root, cause=e) from e
-
-        buf.seek(0)
-        return buf
+        return await asyncio.to_thread(_archive_workspace, root, skip)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(fileobj=data, mode="r:*") as tar:
-                safe_extract_tarfile(
-                    tar,
-                    root=root,
-                    allow_external_symlink_targets=False,
-                )
-        except UnsafeTarMemberError as e:
-            raise WorkspaceArchiveWriteError(
-                path=root, context={"reason": e.reason, "member": e.member}, cause=e
-            ) from e
-        except (tarfile.TarError, OSError) as e:
-            raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+        await asyncio.to_thread(_extract_workspace_archive, root, data)
 
 
 class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | None]):

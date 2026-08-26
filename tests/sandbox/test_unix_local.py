@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import signal
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -9,7 +11,7 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import PtySessionNotFoundError, WorkspaceArchiveReadError
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -464,3 +466,82 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+@pytest.mark.asyncio
+async def test_persist_workspace_archives_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archiving the workspace must not hold the loop for the length of the tar.
+
+    The stub returns only after a coroutine scheduled alongside it has run, so archiving on
+    the event loop deadlocks here instead of completing.
+    """
+    session = _RecordingUnixLocalSession(tmp_path)
+    released = threading.Event()
+    archived: list[tuple[Path, set[Path]]] = []
+
+    def blocking_archive(root: Path, skip: set[Path]) -> io.BytesIO:
+        if not released.wait(timeout=5):
+            raise AssertionError("the event loop was blocked while archiving the workspace")
+        archived.append((root, skip))
+        return io.BytesIO(b"archive")
+
+    monkeypatch.setattr(unix_local_module, "_archive_workspace", blocking_archive)
+
+    async def release() -> None:
+        released.set()
+
+    archive, _ = await asyncio.gather(session.persist_workspace(), release())
+
+    assert archived == [(Path(tmp_path), session._persist_workspace_skip_relpaths())]
+    assert archive.read() == b"archive"
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_extracts_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extraction is unbounded too, so it runs on a worker thread for the same reason."""
+    session = _RecordingUnixLocalSession(tmp_path)
+    released = threading.Event()
+    extracted: list[Path] = []
+
+    def blocking_extract(root: Path, data: io.IOBase) -> None:
+        if not released.wait(timeout=5):
+            raise AssertionError("the event loop was blocked while extracting the archive")
+        extracted.append(root)
+
+    monkeypatch.setattr(unix_local_module, "_extract_workspace_archive", blocking_extract)
+
+    async def release() -> None:
+        released.set()
+
+    await asyncio.gather(session.hydrate_workspace(io.BytesIO(b"")), release())
+
+    assert extracted == [Path(tmp_path)]
+
+
+@pytest.mark.asyncio
+async def test_persist_then_hydrate_round_trips_workspace_contents(tmp_path: Path) -> None:
+    """Moving the tar work into helpers must not change what the archive carries."""
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "file.txt").write_text("payload", encoding="utf-8")
+
+    archive = await _RecordingUnixLocalSession(source).persist_workspace()
+
+    target = tmp_path / "target"
+    await _RecordingUnixLocalSession(target).hydrate_workspace(archive)
+
+    assert (target / "nested" / "file.txt").read_text(encoding="utf-8") == "payload"
+
+
+@pytest.mark.asyncio
+async def test_persist_workspace_reports_a_missing_root(tmp_path: Path) -> None:
+    session = _RecordingUnixLocalSession(tmp_path / "absent")
+
+    with pytest.raises(WorkspaceArchiveReadError):
+        await session.persist_workspace()
