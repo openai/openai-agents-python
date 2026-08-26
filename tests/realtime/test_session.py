@@ -6200,12 +6200,14 @@ class TestUpdateAgentFunctionality:
             assert session._current_dispatch_snapshot.agent is first_agent
 
     @pytest.mark.asyncio
-    async def test_failed_update_agent_does_not_rollback_newer_update(self, mock_model):
+    async def test_overlapping_failed_updates_restore_last_committed_agent(self, mock_model):
         first_agent = RealtimeAgent(name="first", instructions="first")
-        failing_agent = RealtimeAgent(name="failing", instructions="failing")
-        newest_agent = RealtimeAgent(name="newest", instructions="newest")
+        first_failing_agent = RealtimeAgent(name="first-failing", instructions="first-failing")
+        second_failing_agent = RealtimeAgent(name="second-failing", instructions="second-failing")
         first_send_started = asyncio.Event()
+        second_send_started = asyncio.Event()
         release_first_send = asyncio.Event()
+        release_second_send = asyncio.Event()
         send_count = 0
 
         async def send_event(_event):
@@ -6214,22 +6216,115 @@ class TestUpdateAgentFunctionality:
             if send_count == 1:
                 first_send_started.set()
                 await release_first_send.wait()
+                raise RuntimeError("first send failed")
+            second_send_started.set()
+            await release_second_send.wait()
+            raise RuntimeError("second send failed")
+
+        mock_model.send_event = send_event
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        async with session:
+            first_update = asyncio.create_task(session.update_agent(first_failing_agent))
+            await first_send_started.wait()
+            second_update = asyncio.create_task(session.update_agent(second_failing_agent))
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+            assert not second_send_started.is_set()
+
+            release_first_send.set()
+            with pytest.raises(RuntimeError, match="first send failed"):
+                await first_update
+
+            await second_send_started.wait()
+            release_second_send.set()
+            with pytest.raises(RuntimeError, match="second send failed"):
+                await second_update
+
+            assert session._current_agent is first_agent
+            assert session._current_dispatch_snapshot is not None
+            assert session._current_dispatch_snapshot.agent is first_agent
+
+    @pytest.mark.asyncio
+    async def test_failed_update_agent_does_not_rollback_handoff_owned_state(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first")
+        updated_agent = RealtimeAgent(name="updated", instructions="updated")
+        handed_off_agent = RealtimeAgent(name="handed-off", instructions="handed-off")
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def send_event(_event):
+            send_started.set()
+            await release_send.wait()
+            raise RuntimeError("send failed")
+
+        mock_model.send_event = send_event
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        async with session:
+            update = asyncio.create_task(session.update_agent(updated_agent))
+            await send_started.wait()
+
+            handoff_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=None,
+                agent=handed_off_agent,
+            )
+            handoff_snapshot = session._dispatch_snapshot_from_settings(
+                handed_off_agent, handoff_settings
+            )
+            session._current_agent = handed_off_agent
+            session._current_dispatch_snapshot = handoff_snapshot
+
+            release_send.set()
+            with pytest.raises(RuntimeError, match="send failed"):
+                await update
+
+            assert session._current_agent is handed_off_agent
+            assert session._current_dispatch_snapshot is handoff_snapshot
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("send_fails", [False, True])
+    async def test_repeatedly_cancelled_update_agent_waits_for_send_to_settle(
+        self, mock_model, send_fails
+    ):
+        first_agent = RealtimeAgent(name="first", instructions="first")
+        second_agent = RealtimeAgent(name="second", instructions="second")
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+        send_cancelled = asyncio.Event()
+
+        async def send_event(_event):
+            send_started.set()
+            try:
+                await release_send.wait()
+            except asyncio.CancelledError:
+                send_cancelled.set()
+                raise
+            if send_fails:
                 raise RuntimeError("send failed")
 
         mock_model.send_event = send_event
         session = RealtimeSession(mock_model, first_agent, None)
 
-        failing_update = asyncio.create_task(session.update_agent(failing_agent))
-        await first_send_started.wait()
-        await session.update_agent(newest_agent)
-        release_first_send.set()
+        async with session:
+            update = asyncio.create_task(session.update_agent(second_agent))
+            await send_started.wait()
+            update.cancel()
+            await asyncio.sleep(0)
+            update.cancel()
+            await asyncio.sleep(0)
 
-        with pytest.raises(RuntimeError, match="send failed"):
-            await failing_update
+            assert not update.done()
+            assert not send_cancelled.is_set()
 
-        assert session._current_agent is newest_agent
-        assert session._current_dispatch_snapshot is not None
-        assert session._current_dispatch_snapshot.agent is newest_agent
+            release_send.set()
+            with pytest.raises(asyncio.CancelledError):
+                await update
+
+            assert session._current_agent is (first_agent if send_fails else second_agent)
+            assert session._current_dispatch_snapshot is not None
+            assert session._current_dispatch_snapshot.agent is session._current_agent
 
 
 class TestTranscriptPreservation:

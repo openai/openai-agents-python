@@ -239,6 +239,7 @@ class RealtimeSession(RealtimeModelListener):
         self._active_tool_invocations: dict[str, tuple[str, str, str]] = {}
         self._pending_tool_outputs: dict[str, _PendingToolOutput] = {}
         self._current_dispatch_snapshot: _RealtimeDispatchSnapshot | None = None
+        self._update_agent_lock = asyncio.Lock()
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
@@ -378,26 +379,49 @@ class RealtimeSession(RealtimeModelListener):
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""
-        updated_settings = await self._get_updated_model_settings_from_agent(
-            starting_settings=None,
-            agent=agent,
-        )
-        updated_snapshot = self._dispatch_snapshot_from_settings(agent, updated_settings)
-
-        previous_agent = self._current_agent
-        previous_snapshot = self._current_dispatch_snapshot
-        self._current_agent = agent
-        self._current_dispatch_snapshot = updated_snapshot
-
-        try:
-            await self._model.send_event(
-                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+        async with self._update_agent_lock:
+            updated_settings = await self._get_updated_model_settings_from_agent(
+                starting_settings=None,
+                agent=agent,
             )
-        except Exception:
-            if self._current_agent is agent and self._current_dispatch_snapshot is updated_snapshot:
-                self._current_agent = previous_agent
-                self._current_dispatch_snapshot = previous_snapshot
-            raise
+            updated_snapshot = self._dispatch_snapshot_from_settings(agent, updated_settings)
+
+            previous_agent = self._current_agent
+            previous_snapshot = self._current_dispatch_snapshot
+            self._current_agent = agent
+            self._current_dispatch_snapshot = updated_snapshot
+
+            send_task = asyncio.create_task(
+                self._model.send_event(
+                    RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+                )
+            )
+            try:
+                await asyncio.shield(send_task)
+            except asyncio.CancelledError:
+                while not send_task.done():
+                    try:
+                        await asyncio.shield(send_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                if send_task.cancelled() or send_task.exception() is not None:
+                    if (
+                        self._current_agent is agent
+                        and self._current_dispatch_snapshot is updated_snapshot
+                    ):
+                        self._current_agent = previous_agent
+                        self._current_dispatch_snapshot = previous_snapshot
+                raise
+            except BaseException:
+                if (
+                    self._current_agent is agent
+                    and self._current_dispatch_snapshot is updated_snapshot
+                ):
+                    self._current_agent = previous_agent
+                    self._current_dispatch_snapshot = previous_snapshot
+                raise
 
     def _reconcile_output_response(self, response_id: str) -> None:
         if self._active_output_response_generation is None:
