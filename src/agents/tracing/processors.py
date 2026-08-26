@@ -537,6 +537,10 @@ class BackendSpanExporter(TracingExporter):
     def _request_shutdown(self) -> None:
         self._shutdown_event.set()
 
+    def _reset_shutdown(self) -> None:
+        """Undo a previous shutdown request so this exporter can retry exports again."""
+        self._shutdown_event.clear()
+
 
 class BatchTraceProcessor(TracingProcessor):
     """Some implementation notes:
@@ -563,6 +567,15 @@ class BatchTraceProcessor(TracingProcessor):
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
         self._exporter = exporter
+        # A processor that shut down earlier may have asked this exporter to abandon retry
+        # backoff. That request is one-way, and `default_exporter()` hands the same instance
+        # to every processor, so clear it as this one attaches: otherwise the first transient
+        # failure exported here gives up without retrying, blaming a shutdown that is over.
+        # Duck-typed like the `_request_shutdown` call in `shutdown()`, since the exporter
+        # interface does not require either.
+        reset_exporter_shutdown = getattr(exporter, "_reset_shutdown", None)
+        if callable(reset_exporter_shutdown):
+            reset_exporter_shutdown()
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
