@@ -1049,3 +1049,73 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+
+async def _approved_handoff_session_state(streamed: bool):
+    """Pause on an approval-gated call that shares its response with a handoff."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("charge", '{"amount":7}', call_id="charge-1"),
+                get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1"),
+            ],
+            [get_text_message("done")],
+            [get_text_message("fresh")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    agent = Agent(name="triage", model=model, tools=[charge], handoffs=[delegate])
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7 then hand off", session, streamed)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects
+
+
+def _call_pair(items: list[TResponseInputItem], call_id: str) -> list[str]:
+    return [
+        str(item.get("type"))
+        for item in items
+        if isinstance(item, dict) and item.get("call_id") == call_id
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_resumed_handoff_session_append_is_recovered_before_next_model(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    agent, model, session, state, effects = await _approved_handoff_session_state(failing_streamed)
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed)
+    assert error.value is session.error
+    assert effects == [7]
+    assert len(model.calls) == 1
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+    assert state._current_agent is not None and state._current_agent.name == "delegate"
+
+    result = await _run_session_resume(agent, state, session, retry_streamed)
+    assert result.final_output == "done"
+    assert result.last_agent.name == "delegate"
+    assert effects == [7]
+    assert len(model.calls) == 2
+    expected_pair = ["function_call", "function_call_output"]
+    stored = await session.get_items()
+    assert _call_pair(stored, "charge-1") == expected_pair
+    assert _call_pair(stored, "handoff-1") == expected_pair
+    assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
+    assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
+    assert "pending_session_write" not in result.to_state().to_json()

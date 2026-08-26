@@ -61,7 +61,13 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
-from .run_steps import NextStepInterruption, NextStepRunAgain, ProcessedResponse, SingleStepResult
+from .run_steps import (
+    NextStepHandoff,
+    NextStepInterruption,
+    NextStepRunAgain,
+    ProcessedResponse,
+    SingleStepResult,
+)
 
 __all__ = [
     "admit_pending_input",
@@ -541,7 +547,13 @@ def update_run_state_after_resume(
     run_state._generated_items = generated_items
     if session_items is not None:
         run_state._session_items = list(session_items)
-    run_state._current_step = turn_result.next_step  # type: ignore[assignment]
+    next_step = turn_result.next_step
+    if isinstance(next_step, NextStepHandoff):
+        # The target agent is already committed, so the rest of the turn is an ordinary
+        # "run again". Normalizing here, before the fallible Session append, lets the existing
+        # pending-write checkpoint carry the handoff batch without a new persisted step type.
+        next_step = NextStepRunAgain()
+    run_state._current_step = next_step  # type: ignore[assignment]
 
 
 async def save_result_to_session(
