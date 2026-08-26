@@ -567,15 +567,6 @@ class BatchTraceProcessor(TracingProcessor):
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
         self._exporter = exporter
-        # A processor that shut down earlier may have asked this exporter to abandon retry
-        # backoff. That request is one-way, and `default_exporter()` hands the same instance
-        # to every processor, so clear it as this one attaches: otherwise the first transient
-        # failure exported here gives up without retrying, blaming a shutdown that is over.
-        # Duck-typed like the `_request_shutdown` call in `shutdown()`, since the exporter
-        # interface does not require either.
-        reset_exporter_shutdown = getattr(exporter, "_reset_shutdown", None)
-        if callable(reset_exporter_shutdown):
-            reset_exporter_shutdown()
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
@@ -593,6 +584,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._thread_start_lock = threading.Lock()
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
+        self._requested_exporter_shutdown = False
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -637,11 +629,15 @@ class BatchTraceProcessor(TracingProcessor):
         """
         Called when the application stops. We signal our thread to stop, then join it.
         """
-        self._shutdown_event.set()
         if timeout is not None:
             request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
             if callable(request_exporter_shutdown):
+                # Flagged before the request so the worker, which may exit as soon as the
+                # event below is set, always sees that the request is ours to release.
+                self._requested_exporter_shutdown = True
                 request_exporter_shutdown()
+
+        self._shutdown_event.set()
 
         deadline = None if timeout is None else time.monotonic() + timeout
         self._shutdown_deadline = deadline
@@ -653,9 +649,29 @@ class BatchTraceProcessor(TracingProcessor):
                 logger.warning(
                     "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
                 )
+            # A worker that stopped released the request itself, at the end of `_run`. One
+            # that outlived this timeout still owns it and releases it when it does stop.
         else:
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
+            self._release_exporter_shutdown()
+
+    def _release_exporter_shutdown(self) -> None:
+        """Give a shutdown request we made back to the exporter, now that our worker is done.
+
+        The request is one-way and `default_exporter()` hands the same exporter to every
+        processor, so leaving it set makes the next processor give up on the first transient
+        failure instead of retrying -- blaming a shutdown that is long over. It is released
+        only by the processor that made it, and only once that processor's worker has
+        stopped: while the worker is still exporting it owns the cancellation and must keep
+        abandoning its retries, including when `shutdown` timed out and returned without it.
+        """
+        if not self._requested_exporter_shutdown:
+            return
+        self._requested_exporter_shutdown = False
+        reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+        if callable(reset_exporter_shutdown):
+            reset_exporter_shutdown()
 
     def force_flush(self):
         """
@@ -679,6 +695,9 @@ class BatchTraceProcessor(TracingProcessor):
 
         # Final drain after shutdown
         self._export_batches(deadline=self._shutdown_deadline)
+
+        # This worker is done exporting, so it no longer needs the exporter cancelled.
+        self._release_exporter_shutdown()
 
     def _export_batches(self, deadline: float | None = None):
         """Drains the queue and exports in batches of up to `max_batch_size` until the queue

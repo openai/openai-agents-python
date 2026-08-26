@@ -614,7 +614,7 @@ def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries
 
 @patch("httpx2.Client")
 def test_new_processor_restores_exporter_retries_after_a_previous_shutdown(mock_client):
-    """A shutdown request must not disable retries for the exporter's next processor.
+    """A finished shutdown must not disable retries for the exporter's next processor.
 
     ``_request_shutdown`` is one-way and ``default_exporter()`` hands the same instance to
     every processor, so a stale request turned the first transient failure of the next
@@ -633,16 +633,77 @@ def test_new_processor_restores_exporter_retries_after_a_previous_shutdown(mock_
 
     first = BatchTraceProcessor(exporter=exporter)
     first.shutdown(timeout=1.0)
-    assert exporter._shutdown_event.is_set()
-
-    second = BatchTraceProcessor(exporter=exporter)
     assert not exporter._shutdown_event.is_set()
 
+    second = BatchTraceProcessor(exporter=exporter)
     second._queue.put_nowait(get_span(second))
     second.force_flush()
 
     assert mock_client.return_value.post.call_count == 3
 
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_worker_that_outlives_shutdown_keeps_the_exporter_cancelled(mock_client):
+    """A worker abandoned by a timed-out shutdown owns the cancellation until it exits.
+
+    Releasing the request when the next processor attaches would hand it back while that
+    worker is still exporting, so it would sleep through its backoff and keep retrying after
+    the shutdown that was supposed to stop it had already returned.
+    """
+    post_called = threading.Event()
+    release_post = threading.Event()
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+
+    def post(**kwargs: Any) -> Any:
+        post_called.set()
+        release_post.wait(timeout=5.0)
+        return mock_response
+
+    mock_client.return_value.post.side_effect = post
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        max_retries=100,
+        base_delay=10.0,
+        max_delay=10.0,
+    )
+    processor = BatchTraceProcessor(
+        exporter=exporter,
+        max_queue_size=1,
+        max_batch_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+
+    processor.on_span_end(get_span(processor))
+    assert post_called.wait(timeout=2.0)
+
+    # The worker is stuck inside the request, so the join times out and shutdown returns
+    # with the worker still running and the exporter still cancelled.
+    processor.shutdown(timeout=0.05)
+    worker = processor._worker_thread
+    assert worker is not None and worker.is_alive()
+    assert exporter._shutdown_event.is_set()
+
+    # A replacement processor attaching must not take the cancellation away from it.
+    replacement = BatchTraceProcessor(exporter=exporter)
+    assert exporter._shutdown_event.is_set()
+
+    release_post.set()
+
+    # Still cancelled, so the abandoned worker abandons its backoff instead of sleeping
+    # through base_delay and retrying.
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert mock_client.return_value.post.call_count == 1
+
+    # And once it is gone it hands the exporter back, so the replacement can retry again.
+    assert not exporter._shutdown_event.is_set()
+
+    replacement.shutdown()
     exporter.close()
 
 
