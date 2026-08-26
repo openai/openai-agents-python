@@ -321,6 +321,89 @@ def test_batch_trace_processor_shutdown_timeout_defers_exporter_close_to_the_wor
     assert events == ["export done", "close"]
 
 
+def test_batch_trace_processor_shared_exporter_survives_a_sibling_shutdown() -> None:
+    """One processor's shutdown must not dispose an exporter a sibling still exports through.
+
+    ``add_trace_processor(BatchTraceProcessor(default_exporter()))`` puts two processors on
+    one exporter, and the provider shuts them down in turn.
+    """
+    exported: list[Trace | Span[Any]] = []
+
+    class SharedExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            assert not self.closed, "exported through a closed exporter"
+            exported.extend(items)
+
+        def close(self) -> None:
+            self.closed = True
+
+    exporter = SharedExporter()
+    first = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+    second = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+
+    first.shutdown()
+    assert not exporter.closed, "the sibling still owns a share of the exporter"
+
+    # The survivor keeps working, which is the whole point of not closing yet.
+    second._queue.put_nowait(get_span(second))
+    second.force_flush()
+    assert len(exported) == 1
+
+    second.shutdown()
+    assert exporter.closed, "the last processor out closes the exporter"
+
+
+def test_batch_trace_processor_repeated_shutdown_releases_one_share() -> None:
+    """A second shutdown must not release a share the processor no longer holds."""
+
+    class SharedExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    exporter = SharedExporter()
+    first = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+    second = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+
+    first.shutdown()
+    first.shutdown()
+    assert not exporter.closed, "the sibling's share must survive a repeated shutdown"
+
+    second.shutdown()
+    assert exporter.closed
+
+
+def test_batch_trace_processor_closes_an_untrackable_exporter() -> None:
+    """An exporter that cannot be tracked falls back to the single-owner behaviour."""
+
+    class UnhashableExporter(TracingExporter):
+        __hash__ = None  # type: ignore[assignment]
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    exporter = UnhashableExporter()
+    processor = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+
+    processor.shutdown()
+
+    assert exporter.closed
+
+
 def test_batch_trace_processor_shutdown_timeout_bounds_a_slow_exporter_close(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -7,7 +7,8 @@ import queue
 import random
 import threading
 import time
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, MutableMapping
 from functools import cached_property
 from typing import Any, cast
 
@@ -538,6 +539,13 @@ class BackendSpanExporter(TracingExporter):
         self._shutdown_event.set()
 
 
+# A processor closes the exporter it was handed, but several processors may share one, so
+# count the live users per exporter and let the last one out do the closing. Keyed weakly:
+# an exporter whose processors are all garbage collected takes its entry with it.
+_exporter_users: MutableMapping[TracingExporter, int] = weakref.WeakKeyDictionary()
+_exporter_users_lock = threading.Lock()
+
+
 class BatchTraceProcessor(TracingProcessor):
     """Some implementation notes:
     1. Using Queue, which is thread-safe.
@@ -582,6 +590,29 @@ class BatchTraceProcessor(TracingProcessor):
         self._shutdown_deadline: float | None = None
         # Guarded by _export_lock so closing cannot overlap an export, in either order.
         self._exporter_closed = False
+        self._counted_as_exporter_user = self._count_as_exporter_user()
+
+    def _count_as_exporter_user(self) -> bool:
+        """Claim a share of the exporter. False when it cannot be tracked at all."""
+        try:
+            with _exporter_users_lock:
+                _exporter_users[self._exporter] = _exporter_users.get(self._exporter, 0) + 1
+        except TypeError:
+            # Unhashable or not weak-referenceable: fall back to sole ownership.
+            return False
+        return True
+
+    def _release_exporter_share(self) -> bool:
+        """Drop this processor's claim, returning True if it held the last one."""
+        if not self._counted_as_exporter_user:
+            return True
+        with _exporter_users_lock:
+            remaining = _exporter_users.get(self._exporter, 1) - 1
+            if remaining > 0:
+                _exporter_users[self._exporter] = remaining
+                return False
+            _exporter_users.pop(self._exporter, None)
+        return True
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -688,13 +719,18 @@ class BatchTraceProcessor(TracingProcessor):
         lock extends that to ``force_flush``: a flush already waiting on the lock either
         exports first or finds the exporter closed and drops its batch, and none can start
         afterwards. The close itself runs outside the lock so a slow one cannot wedge every
-        later flush behind it. Duck-typed like ``_request_shutdown`` because the interface
-        does not require ``close``.
+        later flush behind it. An exporter shared with another processor is released rather
+        than closed, since that processor still has work to export through it. Duck-typed
+        like ``_request_shutdown`` because the interface does not require ``close``.
         """
         with self._export_lock:
             if self._exporter_closed:
                 return
             self._exporter_closed = True
+
+        if not self._release_exporter_share():
+            logger.debug("skip: exporter still in use by another processor")
+            return
 
         close_exporter = getattr(self._exporter, "close", None)
         if not callable(close_exporter):
