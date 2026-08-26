@@ -1,3 +1,6 @@
+import asyncio
+import threading
+
 import pytest
 
 from agents import Agent, run_demo_loop
@@ -98,3 +101,27 @@ async def test_run_demo_loop_skips_empty_input(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "hello" in output
     assert model.calls[-1].input == [get_text_input_item("Hi")]
+
+
+@pytest.mark.asyncio
+async def test_run_demo_loop_does_not_block_the_event_loop(monkeypatch):
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model)
+
+    released = threading.Event()
+
+    def blocking_input(_=" > ") -> str:
+        # Returns only after a coroutine scheduled alongside the loop has run, so reading
+        # the prompt on the event loop instead of a worker thread deadlocks here.
+        if not released.wait(timeout=5):
+            raise AssertionError("the event loop was blocked while waiting for input")
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", blocking_input)
+
+    async def release_prompt() -> None:
+        released.set()
+
+    await asyncio.gather(run_demo_loop(agent, stream=False), release_prompt())
+
+    assert not model.calls

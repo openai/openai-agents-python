@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
@@ -37,7 +38,11 @@ async def run_demo_loop(
     input_items: list[TResponseInputItem] = []
     while True:
         try:
-            user_input = input(" > ")
+            # `input()` is blocking, so it has to run off the event loop. Calling it
+            # directly would freeze every other task on the loop -- MCP servers that need
+            # to service their streams, background work started by the caller -- for as
+            # long as the prompt waits for a keystroke.
+            user_input = await asyncio.to_thread(input, " > ")
         except (EOFError, KeyboardInterrupt):
             print()
             break
