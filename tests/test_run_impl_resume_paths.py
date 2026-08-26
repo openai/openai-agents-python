@@ -9,7 +9,13 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool
+from agents import (
+    Agent,
+    GuardrailFunctionOutput,
+    Runner,
+    function_tool,
+    output_guardrail,
+)
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool
@@ -88,12 +94,16 @@ class _LostAckSQLiteSession(SQLiteSession):
 
 
 async def _run_session_resume(
-    agent: Agent[Any], value: str | RunState[Any], session: Session | None, streamed: bool
+    agent: Agent[Any],
+    value: str | RunState[Any],
+    session: Session | None,
+    streamed: bool,
+    hooks: RunHooks[Any] | None = None,
 ):
     config = RunConfig(tracing_disabled=True)
     if not streamed:
-        return await Runner.run(agent, value, session=session, run_config=config)
-    result = Runner.run_streamed(agent, value, session=session, run_config=config)
+        return await Runner.run(agent, value, session=session, run_config=config, hooks=hooks)
+    result = Runner.run_streamed(agent, value, session=session, run_config=config, hooks=hooks)
     async for _ in result.stream_events():
         pass
     return result
@@ -1049,3 +1059,231 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+
+class _CountingRunHooks(RunHooks[Any]):
+    """Count the agent lifecycle hooks an application could attach side effects to."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.ends: list[str] = []
+
+    async def on_agent_start(self, context: Any, agent: Agent[Any]) -> None:
+        self.starts += 1
+
+    async def on_agent_end(self, context: Any, agent: Agent[Any], output: Any) -> None:
+        self.ends.append(str(output))
+
+
+async def _terminal_output_session_state(
+    streamed: bool,
+    session: Session | None = None,
+    hooks: RunHooks[Any] | None = None,
+):
+    """Pause on an approval whose tool output becomes the terminal agent output."""
+    effects: list[int] = []
+    guardrail_outputs: list[str] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    @output_guardrail
+    async def record_output(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        guardrail_outputs.append(str(output))
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[record_output],
+    )
+    session = session if session is not None else _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects, guardrail_outputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_resumed_terminal_output_is_settled_before_next_model(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    (
+        agent,
+        model,
+        session,
+        state,
+        effects,
+        guardrail_outputs,
+    ) = await _terminal_output_session_state(failing_streamed)
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed)
+    assert error.value is session.error
+    assert effects == [7]
+    assert len(model.calls) == 1
+    assert guardrail_outputs == ["receipt-7"]
+    assert state.to_json()["current_step"] == {
+        "type": "next_step_final_output",
+        "data": {"output": "receipt-7"},
+    }
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    result = await _run_session_resume(agent, state, session, retry_streamed)
+    assert result.final_output == "receipt-7"
+    # The accepted output is settled instead of replaced by a second model turn.
+    assert len(model.calls) == 1
+    assert effects == [7]
+    assert guardrail_outputs == ["receipt-7"]
+    assert [
+        str(guardrail_result.output.output_info)
+        for guardrail_result in result.output_guardrail_results
+    ] == ["receipt-7"]
+    expected_pair = ["function_call", "function_call_output"]
+    assert _charge_pair(await session.get_items()) == expected_pair
+    assert _charge_pair(result.to_input_list()) == expected_pair
+    settled = result.to_state().to_json()
+    assert "pending_session_write" not in settled
+    assert settled["current_step"] is None
+    await _run_session_resume(agent, "What was the receipt?", session, retry_streamed)
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_settled_terminal_output_does_not_replay_agent_lifecycle_hooks(
+    streamed: bool,
+) -> None:
+    hooks = _CountingRunHooks()
+    agent, model, session, state, effects, _ = await _terminal_output_session_state(
+        streamed, hooks=hooks
+    )
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed, hooks=hooks)
+    assert hooks.ends == ["receipt-7"]
+    starts_before_retry = hooks.starts
+
+    restored = await RunState.from_json(agent, state.to_json())
+    result = await _run_session_resume(agent, restored, session, not streamed, hooks=hooks)
+    assert result.final_output == "receipt-7"
+    # A settled terminal output must not repeat hooks an application can attach effects to.
+    assert hooks.starts == starts_before_retry
+    assert hooks.ends == ["receipt-7"]
+    assert effects == [7]
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_streamed", [False, True])
+@pytest.mark.parametrize("mismatch", ["missing", "different-id", "changed-tail"])
+async def test_settled_terminal_output_rejects_ambiguous_recovery(
+    retry_streamed: bool, mismatch: str
+) -> None:
+    agent, model, session, state, effects, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    state = await RunState.from_json(agent, state.to_json())
+    supplied_session: Session | None = session
+    if mismatch == "missing":
+        supplied_session = None
+    elif mismatch == "different-id":
+        supplied_session = SimpleListSession("other", await session.get_items())
+    else:
+        await session.add_items([{"role": "user", "content": "another writer"}])
+    before = await session.get_items()
+    with pytest.raises(UserError, match="pending Session write"):
+        await _run_session_resume(agent, state, supplied_session, retry_streamed)
+    assert len(model.calls) == 1
+    assert effects == [7]
+    assert await session.get_items() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_structured_terminal_output_stays_non_resumable(streamed: bool) -> None:
+    """A non-string terminal output cannot round-trip unchanged, so it stays non-resumable."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    async def stop_with_structured_output(
+        context: RunContextWrapper[Any], results: list[Any]
+    ) -> ToolsToFinalOutputResult:
+        return ToolsToFinalOutputResult(
+            is_final_output=True, final_output={"receipt": results[0].output}
+        )
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=stop_with_structured_output,
+        output_type=AgentOutputSchema(dict[str, str], strict_json_schema=False),
+    )
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+    payload = state.to_json()
+    assert payload["current_step"] is None
+    assert "pending_session_write" not in payload
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["old-schema", "non-string-output"])
+async def test_terminal_output_step_rejects_invalid_serialized_payload(invalid: str) -> None:
+    agent, _, session, state, _, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    if invalid == "old-schema":
+        payload["$schemaVersion"] = "1.16"
+    else:
+        payload["current_step"]["data"]["output"] = {"not": "a string"}
+    with pytest.raises(UserError, match="terminal output step is invalid"):
+        await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_settled_terminal_output_rejects_added_input() -> None:
+    agent, _, session, state, _, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    with pytest.raises(UserError, match="Cannot add input to a terminal RunState"):
+        state.add_input("and now what?")

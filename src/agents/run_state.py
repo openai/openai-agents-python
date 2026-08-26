@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
     from .run_internal.run_steps import (
+        NextStepFinalOutput,
         NextStepInterruption,
         NextStepRunAgain,
         ProcessedResponse,
@@ -225,7 +226,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes."
+        "resume flows, including pending resumed Session writes and accepted terminal outputs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -843,8 +844,12 @@ class RunState(Generic[TContext, TAgent]):
     _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
     """Results from tool output guardrails applied during the run."""
 
-    _current_step: NextStepInterruption | NextStepRunAgain | None = None
-    """Current resumable step, or ``None`` when the state is terminal."""
+    _current_step: NextStepInterruption | NextStepRunAgain | NextStepFinalOutput | None = None
+    """Current resumable step, or ``None`` when the state is terminal.
+
+    ``NextStepFinalOutput`` is a settled terminal output whose Session append has not been
+    acknowledged yet, so it resumes by finalizing that output rather than by running the model.
+    """
 
     _last_processed_response: ProcessedResponse | None = None
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -1978,6 +1983,7 @@ class RunState(Generic[TContext, TAgent]):
         """Serialize the current resumable step."""
         # Import at runtime to avoid circular import
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+        from .run_internal.session_persistence import recoverable_terminal_step
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
@@ -1987,6 +1993,13 @@ class RunState(Generic[TContext, TAgent]):
 
         if isinstance(self._current_step, NextStepRunAgain):
             return {"type": "next_step_run_again"}
+
+        terminal_step = recoverable_terminal_step(self)
+        if terminal_step is not None:
+            return {
+                "type": "next_step_final_output",
+                "data": {"output": terminal_step.output},
+            }
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -4304,6 +4317,15 @@ async def _build_run_state_from_json(
         from .run_internal.run_steps import NextStepRunAgain
 
         state._current_step = NextStepRunAgain()
+    elif current_step_data and current_step_data.get("type") == "next_step_final_output":
+        from .run_internal.run_steps import NextStepFinalOutput
+
+        terminal_output = current_step_data.get("data", {}).get("output")
+        # An older label never wrote this step, so accepting one would grant a snapshot a
+        # resume shortcut the schema it claims does not have.
+        if (schema_major, schema_minor) < (1, 17) or not isinstance(terminal_output, str):
+            raise validation_error_factory("Run state terminal output step is invalid", UserError)
+        state._current_step = NextStepFinalOutput(output=terminal_output)
     elif current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
@@ -4358,11 +4380,18 @@ async def _build_run_state_from_json(
     )
     pending_write = state_json.get("pending_session_write")
     if pending_write is not None:
-        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+        from .run_internal.run_steps import (
+            NextStepFinalOutput,
+            NextStepInterruption,
+            NextStepRunAgain,
+        )
 
         if (
             (schema_major, schema_minor) < (1, 17)
-            or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
+            or not isinstance(
+                state._current_step,
+                NextStepRunAgain | NextStepInterruption | NextStepFinalOutput,
+            )
             or not isinstance(pending_write, dict)
             or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
             or not isinstance(pending_write.get("session_id"), str)
@@ -5645,6 +5674,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
+        "Run state terminal output step is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "

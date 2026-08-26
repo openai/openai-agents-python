@@ -177,6 +177,7 @@ from .session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    recoverable_terminal_step,
     resume_pending_session_write,
     resumed_turn_items,
     rewind_session_items,
@@ -617,6 +618,12 @@ async def _finalize_streamed_final_output(
         raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
+    if recoverable_terminal_step(streamed_result._state) is not None:
+        # These passed for this exact output. Publish them before the append can raise so a
+        # settled retry reports the original evidence instead of evaluating a new final output.
+        streamed_result._state._output_guardrail_results = list(
+            streamed_result.output_guardrail_results
+        )
     final_turn_items = _final_turn_items_for_persistence(
         items,
         processed_response,
@@ -1266,6 +1273,17 @@ async def start_streaming(
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
+                resumed_terminal_step = recoverable_terminal_step(run_state)
+                if resumed_terminal_step is not None:
+                    # The accepted output, its items, and its guardrail results already seeded
+                    # this streamed result from the state, so settling the pending Session write
+                    # is all that was left of the failed attempt.
+                    streamed_result.final_output = resumed_terminal_step.output
+                    run_state._current_step = None
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
+
                 if isinstance(run_state._current_step, NextStepInterruption):
                     if not run_state._model_responses:
                         raise UserError("No model response found in previous state")

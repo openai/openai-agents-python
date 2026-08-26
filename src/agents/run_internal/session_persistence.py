@@ -61,7 +61,13 @@ from .items import (
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
-from .run_steps import NextStepInterruption, NextStepRunAgain, ProcessedResponse, SingleStepResult
+from .run_steps import (
+    NextStepFinalOutput,
+    NextStepInterruption,
+    NextStepRunAgain,
+    ProcessedResponse,
+    SingleStepResult,
+)
 
 __all__ = [
     "admit_pending_input",
@@ -75,6 +81,7 @@ __all__ = [
     "save_result_to_session",
     "save_resumed_turn_items",
     "resume_pending_session_write",
+    "recoverable_terminal_step",
     "update_run_state_after_resume",
     "rewind_session_items",
     "wait_for_session_cleanup",
@@ -714,6 +721,21 @@ async def save_result_to_session(
     return saved_run_items_count
 
 
+def recoverable_terminal_step(run_state: RunState[Any, Any] | None) -> NextStepFinalOutput | None:
+    """Return the accepted terminal step a resumed run may settle without another model call.
+
+    The terminal batch is appended after the output guardrails, so the accepted output only
+    survives an append failure when the step itself is durable. Only a plain string output
+    round-trips through the RunState codec unchanged: richer values fall back to
+    ``json.dumps(..., default=str)`` and would change type on the way back, so they keep the
+    existing non-resumable behavior instead.
+    """
+    step = run_state._current_step if run_state is not None else None
+    if not isinstance(step, NextStepFinalOutput) or type(step.output) is not str:
+        return None
+    return step
+
+
 async def save_resumed_turn_items(
     *,
     session: Session | None,
@@ -740,7 +762,10 @@ async def save_resumed_turn_items(
         resumed_write_state=(
             run_state
             if run_state is not None
-            and isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+            and (
+                isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+                or recoverable_terminal_step(run_state) is not None
+            )
             else None
         ),
     )

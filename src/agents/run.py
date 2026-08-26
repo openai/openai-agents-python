@@ -65,6 +65,7 @@ from .run_internal.agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     build_interruption_result,
+    build_recovered_final_output_result,
     build_resumed_stream_debug_extra,
     ensure_context_wrapper,
     finalize_conversation_tracking,
@@ -139,6 +140,7 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    recoverable_terminal_step,
     resume_pending_session_write,
     resumed_turn_items,
     save_result_to_session,
@@ -1063,6 +1065,29 @@ class AgentRunner:
                         )
                         session_input_items_for_persistence = []
                     if run_state is not None and run_state._current_step is not None:
+                        resumed_terminal_step = recoverable_terminal_step(run_state)
+                        if resumed_terminal_step is not None:
+                            logger.debug("Settling an accepted terminal output")
+                            result = build_recovered_final_output_result(
+                                run_state=run_state,
+                                final_output=resumed_terminal_step.output,
+                                result_input=original_input,
+                                session_items=session_items,
+                                model_responses=model_responses,
+                                current_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                tool_use_tracker=tool_use_tracker,
+                                max_turns=max_turns,
+                                current_turn=current_turn,
+                                generated_items=generated_items,
+                            )
+                            run_state._current_step = None
+                            return _finalize_result(result)
+
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
                             if not run_state._model_responses:
@@ -1362,6 +1387,13 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                if recoverable_terminal_step(run_state) is not None:
+                                    # These passed for this exact output. Publish them before the
+                                    # append can raise so a settled retry reports the original
+                                    # evidence instead of evaluating a new final output.
+                                    run_state._output_guardrail_results = list(
+                                        output_guardrail_results
+                                    )
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,

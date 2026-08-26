@@ -10,7 +10,7 @@ from openai.types.responses.response_usage import OutputTokensDetails
 from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
-from ..guardrail import InputGuardrailResult
+from ..guardrail import InputGuardrailResult, OutputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
@@ -41,7 +41,11 @@ from .run_steps import (
     NextStepRunAgain,
     ProcessedResponse,
 )
-from .session_persistence import save_result_to_session, save_resumed_turn_items
+from .session_persistence import (
+    recoverable_terminal_step,
+    save_result_to_session,
+    save_resumed_turn_items,
+)
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
 
@@ -51,6 +55,7 @@ __all__ = [
     "attach_usage_to_span",
     "build_generated_items_details",
     "build_interruption_result",
+    "build_recovered_final_output_result",
     "build_resumed_stream_debug_extra",
     "describe_run_state_step",
     "ensure_context_wrapper",
@@ -491,6 +496,55 @@ def build_interruption_result(
     return result
 
 
+def build_recovered_final_output_result(
+    *,
+    run_state: RunState,
+    final_output: Any,
+    result_input: str | list[TResponseInputItem],
+    session_items: list[RunItem],
+    model_responses: list[ModelResponse],
+    current_agent: Agent[Any],
+    input_guardrail_results: list[InputGuardrailResult],
+    output_guardrail_results: list[OutputGuardrailResult],
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+    context_wrapper: RunContextWrapper[TContext],
+    tool_use_tracker: AgentToolUseTracker,
+    max_turns: int | None,
+    current_turn: int,
+    generated_items: list[RunItem],
+) -> RunResult:
+    """Create a RunResult for a terminal output accepted before a Session append failed."""
+    identity_root_agent = (
+        run_state._starting_agent if run_state._starting_agent is not None else current_agent
+    )
+    result = RunResult(
+        input=result_input,
+        new_items=session_items,
+        raw_responses=model_responses,
+        final_output=final_output,
+        _last_agent=current_agent,
+        input_guardrail_results=input_guardrail_results,
+        output_guardrail_results=output_guardrail_results,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+        context_wrapper=context_wrapper,
+        interruptions=[],
+        _tool_use_tracker_snapshot=serialize_tool_use_tracker(
+            tool_use_tracker,
+            starting_agent=identity_root_agent,
+        ),
+        max_turns=max_turns,
+    )
+    result._current_turn = current_turn
+    result._model_input_items = list(generated_items)
+    result._replay_from_model_input_items = list(generated_items) != list(session_items)
+    result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
+    result._trace_state = run_state._trace_state
+    result._original_input = copy_input_items(result_input)
+    return result
+
+
 def append_model_response_if_new(
     model_responses: list[ModelResponse],
     response: ModelResponse,
@@ -571,6 +625,10 @@ async def save_final_turn_items_after_guardrails(
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
+    # An accepted terminal output is appended after the output guardrails, so this is the last
+    # fallible step of the run. Let the resumed state own the batch when it can settle the same
+    # output later instead of re-entering the model.
+    terminal_write_state = run_state if recoverable_terminal_step(run_state) is not None else None
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
@@ -580,6 +638,7 @@ async def save_final_turn_items_after_guardrails(
             reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             store=store,
             wrapper=wrapper,
+            run_state=terminal_write_state,
         )
         return run_state._current_turn_persisted_item_count
     return await save_result_to_session(
@@ -591,6 +650,7 @@ async def save_final_turn_items_after_guardrails(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        resumed_write_state=terminal_write_state,
     )
 
 
