@@ -154,6 +154,10 @@ integration-tests-prospective-platform:
 integration-tests-security:
 	$(INTEGRATION_TEST_RUNNER) --profile security
 
+.PHONY: integration-tests-containers
+integration-tests-containers:
+	$(INTEGRATION_TEST_RUNNER) --profile containers
+
 .PHONY: integration-tests-mcp-v1
 integration-tests-mcp-v1:
 	$(INTEGRATION_TEST_RUNNER) --profile mcp-v1
