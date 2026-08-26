@@ -142,9 +142,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
-        # Bumped by clear_session and pop_item under the lock. The prefix check in
-        # run_compaction cannot see a destructive rewrite when both the snapshot and
-        # the post flight history are empty, so the counter records it explicitly.
+        # Bumped under the lock by every rewrite of stored history: clear_session,
+        # pop_item, and a successful compaction replacement. The prefix check in
+        # run_compaction cannot see a rewrite when the snapshot it compares against
+        # was empty, so the counter records those explicitly.
         self._destructive_generation = 0
 
     @property
@@ -292,6 +293,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             cached_items = output_items + _normalize_compaction_session_items(concurrent_tail)
             self._compaction_candidate_items = select_compaction_candidate_items(cached_items)
             self._session_items = cached_items
+            # The replacement itself rewrote stored history, so a second in flight
+            # compaction that snapshotted before it must not treat this output as
+            # a concurrent tail. With a non empty snapshot the prefix check would
+            # catch that; when both snapshots were empty only the counter can.
+            self._destructive_generation += 1
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s, concurrent_tail=%s)",

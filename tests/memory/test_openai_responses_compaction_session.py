@@ -2073,6 +2073,61 @@ class TestCompactionConcurrentMutations:
         ]
         assert sent_ids == ["resp_first", "resp_second"]
 
+    @pytest.mark.asyncio
+    async def test_overlapping_compactions_with_empty_snapshots_keep_one_output(self) -> None:
+        """The second of two overlapping compactions must not absorb the first.
+
+        Both calls snapshot an empty session, so the prefix check alone cannot
+        tell the first replacement from a concurrent append. Without the
+        generation bump on replacement, the second call persists both outputs
+        concatenated.
+        """
+        first_output = cast(TResponseInputItem, {"type": "compaction", "summary": "first"})
+        second_output = cast(TResponseInputItem, {"type": "compaction", "summary": "second"})
+        underlying = SimpleListSession(history=[])
+
+        entered: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+        release: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+        outputs = [[first_output], [second_output]]
+        call_index = 0
+
+        async def gated_compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_index
+            index = call_index
+            call_index += 1
+            entered[index].set()
+            await release[index].wait()
+            response = MagicMock()
+            response.output = outputs[index]
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=gated_compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="overlapping-empty",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        first = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_overlap"})
+        )
+        await entered[0].wait()
+        second = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_overlap"})
+        )
+        await entered[1].wait()
+
+        release[0].set()
+        await first
+        release[1].set()
+        await second
+
+        # The first replacement landed; the second detected the rewrite and skipped.
+        assert await underlying.get_items() == [first_output]
+        assert await session.get_items() == [first_output]
+
 
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:
