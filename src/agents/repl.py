@@ -115,7 +115,11 @@ def _catching_sigint(stop: threading.Event) -> Iterator[Callable[[], bool]]:
     try:
         yield lambda: interrupted
     finally:
-        signal.signal(signal.SIGINT, previous if previous is not None else signal.SIG_DFL)
+        # Only ours is ours to undo: the prompt is awaited, so an embedding application can
+        # install its own handler in the meantime, and putting ``previous`` back would strip
+        # the newer one and send later interrupts to a handler that has been superseded.
+        if signal.getsignal(signal.SIGINT) is handle:
+            signal.signal(signal.SIGINT, previous if previous is not None else signal.SIG_DFL)
 
 
 async def _read_user_input(prompt: str) -> str:

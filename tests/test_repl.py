@@ -283,6 +283,47 @@ async def test_first_ctrl_c_exits_the_demo_loop_cleanly(monkeypatch):
 
 @requires_terminal_stdin
 @pytest.mark.asyncio
+async def test_prompt_keeps_a_sigint_handler_installed_while_it_waits(monkeypatch):
+    """A handler installed while the prompt waits outlives the prompt.
+
+    The prompt is awaited, so an embedding application can start its own shutdown handling
+    in the middle of one. Putting the previous handler back would strip that newer one and
+    send later interrupts to a handler that has been superseded.
+    """
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model)
+
+    reading = threading.Event()
+    read_line_when_ready = repl_module._read_line_when_ready
+
+    def tracked_reader(fd: int, stop: threading.Event) -> str | None:
+        reading.set()
+        return read_line_when_ready(fd, stop)
+
+    monkeypatch.setattr(repl_module, "_read_line_when_ready", tracked_reader)
+    monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("stdin had no input"))
+
+    def application_handler(signum: int, frame: object) -> None:
+        pytest.fail("the application handler should not have run")
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        with _terminal_stdin(monkeypatch):
+            task = asyncio.create_task(run_demo_loop(agent, stream=False))
+            assert await asyncio.to_thread(reading.wait, 5)
+
+            signal.signal(signal.SIGINT, application_handler)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+
+        assert signal.getsignal(signal.SIGINT) is application_handler
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+
+@requires_terminal_stdin
+@pytest.mark.asyncio
 async def test_cancelling_the_demo_loop_settles_within_one_poll_interval(monkeypatch):
     """The wait for the reader is bounded, so cancellation stays responsive."""
     model = ScriptedModel()
