@@ -568,6 +568,9 @@ class BatchTraceProcessor(TracingProcessor):
         self._max_batch_size = max_batch_size
         self._schedule_delay = schedule_delay
         self._shutdown_event = threading.Event()
+        # Set when the worker has something to do before its next scheduled export: the queue
+        # reached the trigger size, or we are shutting down.
+        self._wake_event = threading.Event()
 
         # The queue size threshold at which we export immediately.
         self._export_trigger_size = max(1, int(max_queue_size * export_trigger_ratio))
@@ -602,6 +605,8 @@ class BatchTraceProcessor(TracingProcessor):
             self._queue.put_nowait(trace)
         except queue.Full:
             logger.warning("Queue is full, dropping trace.")
+            return
+        self._wake_worker_if_queue_is_full_enough()
 
     def on_trace_end(self, trace: Trace) -> None:
         # We send traces via on_trace_start, so we don't need to do anything here.
@@ -619,12 +624,20 @@ class BatchTraceProcessor(TracingProcessor):
             self._queue.put_nowait(span)
         except queue.Full:
             logger.warning("Queue is full, dropping span.")
+            return
+        self._wake_worker_if_queue_is_full_enough()
+
+    def _wake_worker_if_queue_is_full_enough(self) -> None:
+        """Wake the worker early when the queue reaches the export trigger size."""
+        if self._queue.qsize() >= self._export_trigger_size:
+            self._wake_event.set()
 
     def shutdown(self, timeout: float | None = None):
         """
         Called when the application stops. We signal our thread to stop, then join it.
         """
         self._shutdown_event.set()
+        self._wake_event.set()
         if timeout is not None:
             request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
             if callable(request_exporter_shutdown):
@@ -660,9 +673,14 @@ class BatchTraceProcessor(TracingProcessor):
                 self._export_batches()
                 # Reset the next scheduled flush time
                 self._next_export_time = time.monotonic() + self._schedule_delay
-            else:
-                # Sleep a short interval so we don't busy-wait.
-                time.sleep(0.2)
+                continue
+
+            # Block until the next scheduled flush rather than polling. Producers set the
+            # event once the queue reaches the trigger size and shutdown() sets it to break
+            # out immediately, so an idle process wakes once per schedule_delay instead of
+            # five times a second.
+            self._wake_event.wait(max(0.0, self._next_export_time - time.monotonic()))
+            self._wake_event.clear()
 
         # Final drain after shutdown
         self._export_batches(deadline=self._shutdown_deadline)

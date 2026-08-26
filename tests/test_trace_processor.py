@@ -282,6 +282,52 @@ def test_batch_trace_processor_survives_exporter_exception():
     assert exporter.call_count >= 3
 
 
+def test_batch_trace_processor_queue_trigger_wakes_the_idle_worker() -> None:
+    """The worker parks until its next scheduled export, so producers have to wake it."""
+    exported = threading.Event()
+
+    class SignalingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            exported.set()
+
+    processor = BatchTraceProcessor(
+        exporter=SignalingExporter(),
+        max_queue_size=4,
+        schedule_delay=60.0,
+        export_trigger_ratio=0.5,
+    )
+
+    processor.on_span_end(get_span(processor))
+    # One span is below the two-item trigger, so the worker has no reason to wake yet.
+    assert not exported.wait(timeout=0.2)
+
+    processor.on_span_end(get_span(processor))
+    assert exported.wait(timeout=2.0), "reaching the trigger size must wake the worker"
+
+    processor.shutdown(timeout=2.0)
+
+
+def test_batch_trace_processor_shutdown_wakes_the_idle_worker() -> None:
+    """shutdown() must not wait out the schedule delay before the final drain."""
+    exported: list[Trace | Span[Any]] = []
+
+    class RecordingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            exported.extend(items)
+
+    processor = BatchTraceProcessor(exporter=RecordingExporter(), schedule_delay=60.0)
+    processor.on_span_end(get_span(processor))
+
+    start = time.monotonic()
+    processor.shutdown(timeout=2.0)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0
+    assert processor._worker_thread is not None
+    assert not processor._worker_thread.is_alive()
+    assert len(exported) == 1
+
+
 @pytest.mark.parametrize(
     ("adjusted_wall_time", "adjusted_monotonic_time", "expected_scheduled_exports"),
     [
@@ -300,7 +346,6 @@ def test_batch_trace_processor_schedule_uses_monotonic_clock(
         def __init__(self) -> None:
             self.wall_time = 1000.0
             self.monotonic_time = 100.0
-            self.sleep_calls = 0
 
         def time(self) -> float:
             return self.wall_time
@@ -309,12 +354,25 @@ def test_batch_trace_processor_schedule_uses_monotonic_clock(
             return self.monotonic_time
 
         def sleep(self, _seconds: float) -> None:
-            self.sleep_calls += 1
-            if self.sleep_calls == 1:
-                self.wall_time = adjusted_wall_time
-                self.monotonic_time = adjusted_monotonic_time
+            raise AssertionError("the worker must wait on its event, not poll with sleep")
+
+    class ControlledWakeEvent:
+        """Stands in for the worker's wake event and drives the loop from its waits."""
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self, _timeout: float | None = None) -> bool:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                controlled_time.wall_time = adjusted_wall_time
+                controlled_time.monotonic_time = adjusted_monotonic_time
             else:
                 processor._shutdown_event.set()
+            return False
+
+        def clear(self) -> None:
+            pass
 
     controlled_time = ControlledTime()
     monkeypatch.setattr("agents.tracing.processors.time", controlled_time)
@@ -324,6 +382,7 @@ def test_batch_trace_processor_schedule_uses_monotonic_clock(
         schedule_delay=1.0,
         export_trigger_ratio=1.0,
     )
+    monkeypatch.setattr(processor, "_wake_event", ControlledWakeEvent())
     processor._queue.put_nowait(get_span(processor))
     scheduled_export = object()
     export_deadlines: list[float | None | object] = []
