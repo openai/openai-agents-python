@@ -278,6 +278,69 @@ def test_batch_trace_processor_shutdown_closes_the_backend_exporter_client() -> 
     assert exporter._client.is_closed
 
 
+def test_batch_trace_processor_shutdown_timeout_defers_exporter_close_to_the_worker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A batch that outlives the shutdown timeout keeps the exporter until it is done.
+
+    ``shutdown(timeout=...)`` returns while the worker is still inside ``export()``, so
+    closing from there would dispose the client the in-flight batch is still using.
+    """
+    export_started = threading.Event()
+    release_export = threading.Event()
+    events: list[str] = []
+
+    class SlowClosingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            export_started.set()
+            release_export.wait(timeout=5.0)
+            events.append("export done")
+
+        def close(self) -> None:
+            events.append("close")
+
+    processor = BatchTraceProcessor(
+        exporter=SlowClosingExporter(),
+        max_queue_size=1,
+        schedule_delay=60.0,
+        export_trigger_ratio=1.0,
+    )
+    processor.on_span_end(get_span(processor))
+    assert export_started.wait(timeout=2.0)
+
+    with caplog.at_level(logging.WARNING):
+        processor.shutdown(timeout=0.05)
+
+    assert "shutdown timeout reached" in caplog.text
+    assert events == [], "the exporter must not be closed while an export is running"
+
+    release_export.set()
+    assert processor._worker_thread is not None
+    processor._worker_thread.join(timeout=5.0)
+    assert not processor._worker_thread.is_alive()
+    assert events == ["export done", "close"]
+
+
+def test_batch_trace_processor_closes_the_exporter_only_once() -> None:
+    """The worker and shutdown both reach the close, but the exporter sees one call."""
+    closes: list[int] = []
+
+    class CountingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            closes.append(1)
+
+    processor = BatchTraceProcessor(exporter=CountingExporter(), schedule_delay=60.0)
+    processor.on_span_end(get_span(processor))
+
+    processor.shutdown(timeout=5.0)
+    processor.shutdown(timeout=5.0)
+
+    assert closes == [1]
+
+
 def test_batch_trace_processor_shutdown_survives_exporter_close_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

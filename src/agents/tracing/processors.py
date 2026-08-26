@@ -580,6 +580,8 @@ class BatchTraceProcessor(TracingProcessor):
         self._thread_start_lock = threading.Lock()
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
+        self._close_lock = threading.Lock()
+        self._exporter_closed = False
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -634,9 +636,11 @@ class BatchTraceProcessor(TracingProcessor):
         self._shutdown_deadline = deadline
 
         # Only join if we ever started the background thread; otherwise flush synchronously.
+        worker_still_running = False
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=timeout)
-            if self._worker_thread.is_alive():
+            worker_still_running = self._worker_thread.is_alive()
+            if worker_still_running:
                 logger.warning(
                     "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
                 )
@@ -644,18 +648,32 @@ class BatchTraceProcessor(TracingProcessor):
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
 
-        # Release whatever the exporter holds open -- the default one keeps a pooled HTTP
-        # client alive for the life of the process. Done last so the flush above still has
-        # it, and duck-typed like ``_request_shutdown`` because the interface does not
-        # require it.
+        if not worker_still_running:
+            self._close_exporter()
+
+    def _close_exporter(self) -> None:
+        """Release whatever the exporter holds open, once, when nothing is exporting.
+
+        The default exporter keeps a pooled HTTP client alive for the life of the process.
+        Whoever performs the final drain closes it afterwards -- the worker thread when
+        there is one, ``shutdown`` otherwise -- so a batch that outlives a shutdown timeout
+        never has its client pulled out from under it. Duck-typed like ``_request_shutdown``
+        because the interface does not require ``close``.
+        """
+        with self._close_lock:
+            if self._exporter_closed:
+                return
+            self._exporter_closed = True
+
         close_exporter = getattr(self._exporter, "close", None)
-        if callable(close_exporter):
-            try:
-                close_exporter()
-            except Exception as exc:
-                log_model_and_tool_action_error(
-                    logger, "[non-fatal] Tracing: exporter close failed", exc
-                )
+        if not callable(close_exporter):
+            return
+        try:
+            close_exporter()
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                logger, "[non-fatal] Tracing: exporter close failed", exc
+            )
 
     def force_flush(self):
         """
@@ -679,6 +697,10 @@ class BatchTraceProcessor(TracingProcessor):
 
         # Final drain after shutdown
         self._export_batches(deadline=self._shutdown_deadline)
+
+        # Nothing else is exporting now, so this is the safe point to release the
+        # exporter's resources even if shutdown() already gave up waiting for us.
+        self._close_exporter()
 
     def _export_batches(self, deadline: float | None = None):
         """Drains the queue and exports in batches of up to `max_batch_size` until the queue
