@@ -1,3 +1,6 @@
+import asyncio
+import threading
+
 import pytest
 
 from agents import Agent, run_demo_loop
@@ -98,3 +101,32 @@ async def test_run_demo_loop_skips_empty_input(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "hello" in output
     assert model.calls[-1].input == [get_text_input_item("Hi")]
+
+
+@pytest.mark.asyncio
+async def test_run_demo_loop_does_not_block_event_loop(monkeypatch, capsys):
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model)
+    input_started = threading.Event()
+    release_input = threading.Event()
+    heartbeat_ran = asyncio.Event()
+
+    def blocking_input(_=" > ") -> str:
+        input_started.set()
+        release_input.wait()
+        return "quit"
+
+    async def heartbeat() -> None:
+        heartbeat_ran.set()
+        await asyncio.to_thread(release_input.wait)
+
+    monkeypatch.setattr("builtins.input", blocking_input)
+    loop_task = asyncio.create_task(run_demo_loop(agent, stream=False))
+    heartbeat_task = asyncio.create_task(heartbeat())
+    await asyncio.to_thread(input_started.wait)
+    await asyncio.wait_for(heartbeat_ran.wait(), timeout=1)
+    release_input.set()
+    await loop_task
+    await heartbeat_task
+
+    assert not model.calls
