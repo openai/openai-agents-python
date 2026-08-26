@@ -73,6 +73,9 @@ class AdvancedSQLiteSession(SQLiteSession):
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
         self._create_structure_tables_on_init = create_tables
+        # Set before super().__init__: adoption of pre-upgrade messages runs
+        # during base-class connection initialization and logs through this.
+        self._logger = logger if logger is not None else logging.getLogger(__name__)
         try:
             super().__init__(
                 session_id=session_id,
@@ -91,7 +94,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         # branch pointer is established or a write begins. A mismatch means
         # another instance cleared the session, so the local pointer resets to main.
         self._generation = 0
-        self._logger = logger if logger is not None else logging.getLogger(__name__)
 
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
         """Initialize base tables only after validating advanced-table ownership."""
@@ -99,10 +101,115 @@ class AdvancedSQLiteSession(SQLiteSession):
             conn.execute("BEGIN IMMEDIATE")
             self._create_schema_for_connection(conn)
             self._init_structure_tables(conn)
+            self._adopt_untracked_messages(conn)
         else:
             self._claim_structure_tables(conn)
             self._create_schema_for_connection(conn)
+            # The read-only pre-check keeps the common already-initialized path
+            # lock-free, so opening a session never contends with a writer in
+            # another process. Only a genuine upgrade proceeds to the write lock:
+            # BEGIN IMMEDIATE serializes adoption across processes, and the
+            # re-check inside _adopt_untracked_messages makes the loser a no-op.
+            if self._message_structure_table_exists(conn) and self._needs_adoption(conn):
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                self._adopt_untracked_messages(conn)
         conn.commit()
+
+    def _needs_adoption(self, conn: sqlite3.Connection) -> bool:
+        """True when this session has message rows but no structure rows at all."""
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (self.session_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return False
+            cursor.execute(
+                f"SELECT EXISTS(SELECT 1 FROM {self.messages_table} WHERE session_id = ?)",
+                (self.session_id,),
+            )
+            return bool(cursor.fetchone()[0])
+
+    @staticmethod
+    def _message_structure_table_exists(conn: sqlite3.Connection) -> bool:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_structure'"
+            )
+            return cursor.fetchone() is not None
+
+    def _adopt_untracked_messages(self, conn: sqlite3.Connection) -> int:
+        """Backfill ``message_structure`` for messages that predate the upgrade.
+
+        A database written by the plain ``SQLiteSession`` has message rows but no
+        ``message_structure`` rows. Without adoption that history is invisible to
+        the branch-aware queries and, worse, is deleted as orphaned by the first
+        ``pop_item`` or ``delete_branch``, because the orphan cleanup treats every
+        untracked row as debris from a failed write.
+
+        Adoption only runs when the session has no structure rows at all, which is
+        the unambiguous signature of an upgraded database: once any structure row
+        exists, an untracked message really is an orphan and stays sweepable.
+        """
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM message_structure WHERE session_id = ?",
+                (self.session_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return 0
+            cursor.execute(
+                f"SELECT id, message_data FROM {self.messages_table} "
+                f"WHERE session_id = ? ORDER BY id",
+                (self.session_id,),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            return 0
+
+        # Mirror _insert_structure_metadata's turn assignment: each user message
+        # opens a new turn and non-user items belong to the current turn. The
+        # session was single-branch before the upgrade, so everything is 'main'.
+        structure_data = []
+        user_turn = 0
+        for sequence_number, (message_id, message_data) in enumerate(rows, start=1):
+            item: TResponseInputItem | None
+            try:
+                item = json.loads(message_data)
+            except (json.JSONDecodeError, TypeError):
+                # Keep undecodable rows tracked so they are not swept as orphans;
+                # pop_item already skips corrupted payloads gracefully.
+                item = None
+            if item is not None and self._is_user_message(item):
+                user_turn += 1
+            structure_data.append(
+                (
+                    self.session_id,
+                    message_id,
+                    "main",
+                    self._classify_message_type(item) if item is not None else "other",
+                    sequence_number,
+                    user_turn,
+                    user_turn,
+                    self._extract_tool_name(item) if item is not None else None,
+                )
+            )
+
+        with closing(conn.cursor()) as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO message_structure
+                (session_id, message_id, branch_id, message_type, sequence_number,
+                 user_turn_number, branch_turn_number, tool_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                structure_data,
+            )
+        self._logger.info(
+            "Adopted %s pre-upgrade messages into the 'main' branch", len(structure_data)
+        )
+        return len(structure_data)
 
     def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
         """Set the current-branch pointer unless a clear has committed meanwhile.

@@ -4308,3 +4308,101 @@ async def test_concurrent_structure_table_claims_leave_one_coherent_owner(tmp_pa
             if process.is_alive():
                 process.terminate()
             process.join(timeout=5)
+
+
+async def test_upgrade_from_sqlite_session_preserves_history(tmp_path: Path):
+    """Regression: history written by the plain SQLiteSession must survive an
+    upgrade to AdvancedSQLiteSession. Untracked rows used to be invisible to
+    get_items and permanently deleted as orphans by the first pop_item."""
+    from agents.memory.sqlite_session import SQLiteSession
+
+    db_path = tmp_path / "upgrade.db"
+    plain = SQLiteSession("upgrade_test", db_path)
+    legacy_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    await plain.add_items(legacy_items)
+    plain.close()
+
+    session = AdvancedSQLiteSession(session_id="upgrade_test", db_path=db_path, create_tables=True)
+    try:
+        # Legacy history is visible after the upgrade.
+        assert await session.get_items() == legacy_items
+
+        # pop_item removes the newest legacy item, not the whole history.
+        await session.add_items([{"role": "user", "content": "new"}])
+        assert (await session.pop_item()) == {"role": "user", "content": "new"}
+        assert (await session.pop_item()) == {"role": "assistant", "content": "a2"}
+
+        with session._locked_connection() as conn:
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM {session.messages_table} WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()[0]
+        assert remaining == 3
+    finally:
+        session.close()
+
+    # Round-trip: the plain session still sees the remaining history.
+    plain_again = SQLiteSession("upgrade_test", db_path)
+    assert await plain_again.get_items() == legacy_items[:3]
+    plain_again.close()
+
+
+async def test_upgrade_assigns_turns_to_adopted_history(tmp_path: Path):
+    """Adopted pre-upgrade messages get sequential main-branch turn numbers."""
+    from agents.memory.sqlite_session import SQLiteSession
+
+    db_path = tmp_path / "upgrade_turns.db"
+    plain = SQLiteSession("upgrade_turns", db_path)
+    await plain.add_items(
+        [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+    )
+    plain.close()
+
+    session = AdvancedSQLiteSession(session_id="upgrade_turns", db_path=db_path, create_tables=True)
+    try:
+        turns = await session.get_conversation_turns()
+        assert [t["turn"] for t in turns] == [1, 2]
+        assert turns[0]["content"] == "first question"
+        assert turns[1]["content"] == "second question"
+
+        # New writes continue the numbering rather than restarting it.
+        await session.add_items([{"role": "user", "content": "third question"}])
+        turns = await session.get_conversation_turns()
+        assert [t["turn"] for t in turns] == [1, 2, 3]
+    finally:
+        session.close()
+
+
+async def test_adoption_only_runs_on_structureless_sessions(tmp_path: Path):
+    """Once any structure rows exist, untracked rows are genuine orphans and
+    remain sweepable; adoption must not resurrect them."""
+    db_path = tmp_path / "no_adoption.db"
+    session = AdvancedSQLiteSession(session_id="no_adoption", db_path=db_path, create_tables=True)
+    try:
+        await session.add_items([{"role": "user", "content": "tracked"}])
+        # Simulate debris from a failed write: a message row without structure.
+        orphan: list[TResponseInputItem] = [{"role": "user", "content": "orphan"}]
+        with session._locked_connection() as conn:
+            session._insert_items(conn, orphan)
+            conn.commit()
+    finally:
+        session.close()
+
+    reopened = AdvancedSQLiteSession(session_id="no_adoption", db_path=db_path, create_tables=True)
+    try:
+        # The orphan was not adopted and the sweep still removes it.
+        assert await reopened.get_items() == [{"role": "user", "content": "tracked"}]
+        deleted = await reopened._cleanup_orphaned_messages()
+        assert deleted == 1
+    finally:
+        reopened.close()
