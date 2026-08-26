@@ -4,7 +4,7 @@ Integration tests for DaprSession with real Dapr sidecar and Redis using testcon
 These tests use Docker containers for both Redis and Dapr, with proper networking.
 Tests are automatically skipped if dependencies (dapr, testcontainers, docker) are not available.
 
-Run with: pytest tests/extensions/memory/test_dapr_redis_integration.py -v
+Run with: make integration-tests-containers
 """
 
 from __future__ import annotations
@@ -18,11 +18,11 @@ import tempfile
 import time
 import urllib.request
 
-import docker  # type: ignore[import-untyped]
 import pytest
-from docker.errors import DockerException  # type: ignore[import-untyped]
+from openai.types.responses import ResponseOutputItem, ResponseOutputMessage, ResponseOutputText
 
 # Skip tests if dependencies are not available
+pytest.importorskip("docker")
 pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
 if sys.platform == "win32":
@@ -30,11 +30,8 @@ if sys.platform == "win32":
         "Dapr Docker integration tests are not supported on Windows",
         allow_module_level=True,
     )
-if shutil.which("docker") is None:
-    pytest.skip(
-        "Docker executable is not available; skipping Dapr integration tests",
-        allow_module_level=True,
-    )
+import docker  # type: ignore[import-untyped]
+from docker.errors import DockerException  # type: ignore[import-untyped]
 from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
 from testcontainers.core.network import Network  # type: ignore[import-untyped]
 from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore[import-untyped]
@@ -46,15 +43,44 @@ from agents.extensions.memory import (
     DaprSession,
 )
 from agents.testing import ScriptedModel
-from tests.test_responses import get_text_message
 
-# Docker-backed integration tests should stay on the exclusive serial test path.
-pytestmark = [pytest.mark.asyncio, pytest.mark.review_optional, pytest.mark.serial]
+DAPR_IMAGE = (
+    "daprio/daprd:1.16.2@sha256:3ae30141b9775b5bc03d073185abf1101fbad1e1941c1c3075527bc4865454e3"
+)
+
+# The first test owns module-scoped image pulls and up to 150 seconds of readiness waits.
+pytestmark = [pytest.mark.asyncio, pytest.mark.containers, pytest.mark.timeout(300)]
+
+
+def get_text_message(content: str) -> ResponseOutputItem:
+    return ResponseOutputMessage(
+        id="1",
+        type="message",
+        role="assistant",
+        content=[
+            ResponseOutputText(
+                text=content,
+                type="output_text",
+                annotations=[],
+                logprobs=[],
+            )
+        ],
+        status="completed",
+    )
+
+
+def disable_dapr_sdk_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the fixture's dynamic-port health checks across supported Dapr SDK versions."""
+    from dapr.clients.health import DaprHealth
+
+    for method_name in ("wait_until_ready", "wait_for_sidecar"):
+        if hasattr(DaprHealth, method_name):
+            monkeypatch.setattr(DaprHealth, method_name, lambda: None)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def require_docker_daemon():
-    """Skip the selected Dapr tests when the Docker daemon is unavailable."""
+    """Skip the selected Dapr tests when the Docker SDK cannot reach its daemon."""
     client = None
     try:
         client = docker.from_env()
@@ -135,9 +161,9 @@ def redis_container(docker_network):
         .with_network_aliases("redis")
         .with_exposed_ports(6379)
     )
-    container.start()
-    wait_for_logs(container, "Ready to accept connections", timeout=30)
     try:
+        container.start()
+        wait_for_logs(container, "Ready to accept connections", timeout=30)
         yield container
     finally:
         container.stop()
@@ -146,16 +172,18 @@ def redis_container(docker_network):
 @pytest.fixture(scope="module")
 def dapr_container(redis_container, docker_network):
     """Start Dapr sidecar container with Redis state store configuration."""
-    # Create temporary components directory
     temp_dir = tempfile.mkdtemp()
-    os.chmod(temp_dir, 0o755)
-    components_path = os.path.join(temp_dir, "components")
-    os.makedirs(components_path, exist_ok=True)
-    os.chmod(components_path, 0o755)
+    container: DockerContainer | None = None
+    try:
+        # Create temporary components directory
+        os.chmod(temp_dir, 0o755)
+        components_path = os.path.join(temp_dir, "components")
+        os.makedirs(components_path, exist_ok=True)
+        os.chmod(components_path, 0o755)
 
-    # Write Redis state store component configuration
-    # KEY: Use 'redis:6379' (network alias), NOT localhost!
-    state_store_config = """
+        # Write Redis state store component configuration
+        # KEY: Use 'redis:6379' (network alias), NOT localhost!
+        state_store_config = """
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -171,65 +199,60 @@ spec:
   - name: actorStateStore
     value: "false"
 """
-    state_store_path = os.path.join(components_path, "statestore.yaml")
-    with open(state_store_path, "w") as f:
-        f.write(state_store_config)
-    os.chmod(state_store_path, 0o644)
+        state_store_path = os.path.join(components_path, "statestore.yaml")
+        with open(state_store_path, "w") as f:
+            f.write(state_store_config)
+        os.chmod(state_store_path, 0o644)
 
-    # Create Dapr container
-    container = DockerContainer("daprio/daprd:latest")
-    container = container.with_network(docker_network)  # Join the same network
-    container = container.with_volume_mapping(components_path, "/components", mode="ro")
-    container = container.with_command(
-        [
-            "./daprd",
-            "-app-id",
-            "test-app",
-            "-dapr-http-port",
-            "3500",  # HTTP API port for health checks
-            "-dapr-grpc-port",
-            "50001",
-            "-resources-path",
-            "/components",
-            "-log-level",
-            "info",
-        ]
-    )
-    container = container.with_exposed_ports(3500, 50001)  # Expose both ports
+        # Create Dapr container
+        container = DockerContainer(DAPR_IMAGE)
+        container = container.with_network(docker_network)  # Join the same network
+        container = container.with_volume_mapping(components_path, "/components", mode="ro")
+        container = container.with_command(
+            [
+                "./daprd",
+                "-app-id",
+                "test-app",
+                "-dapr-http-port",
+                "3500",  # HTTP API port for health checks
+                "-dapr-grpc-port",
+                "50001",
+                "-resources-path",
+                "/components",
+                "-log-level",
+                "info",
+            ]
+        )
+        container = container.with_exposed_ports(3500, 50001)  # Expose both ports
 
-    container.start()
+        container.start()
 
-    # Get the exposed HTTP port and host
-    http_host = container.get_container_host_ip()
-    http_port = container.get_exposed_port(3500)
+        # Get the exposed HTTP port and host
+        http_host = container.get_container_host_ip()
+        http_port = container.get_exposed_port(3500)
 
-    # Wait for Dapr to become healthy
-    if not wait_for_dapr_health(http_host, http_port, timeout=60):
-        container.stop()
-        pytest.fail("Dapr container failed to become healthy")
+        # Wait for Dapr to become healthy
+        if not wait_for_dapr_health(http_host, http_port, timeout=60):
+            pytest.fail("Dapr container failed to become healthy")
 
-    if not wait_for_dapr_component(http_host, http_port, "statestore", timeout=60):
-        logs = container.get_wrapped_container().logs().decode("utf-8", errors="replace")
-        container.stop()
-        pytest.fail(f"Dapr state store component failed to load.\nContainer logs:\n{logs}")
+        if not wait_for_dapr_component(http_host, http_port, "statestore", timeout=60):
+            logs = container.get_wrapped_container().logs().decode("utf-8", errors="replace")
+            pytest.fail(f"Dapr state store component failed to load.\nContainer logs:\n{logs}")
 
-    # Set environment variables for Dapr SDK health checks
-    # The Dapr SDK checks these when creating a client
-    os.environ["DAPR_HTTP_PORT"] = str(http_port)
-    os.environ["DAPR_RUNTIME_HOST"] = http_host
+        # Set environment variables for Dapr SDK health checks
+        # The Dapr SDK checks these when creating a client
+        os.environ["DAPR_HTTP_PORT"] = str(http_port)
+        os.environ["DAPR_RUNTIME_HOST"] = http_host
 
-    yield container
-
-    # Cleanup environment variables
-    os.environ.pop("DAPR_HTTP_PORT", None)
-    os.environ.pop("DAPR_RUNTIME_HOST", None)
-
-    container.stop()
-
-    # Cleanup
-    import shutil
-
-    shutil.rmtree(temp_dir, ignore_errors=True)
+        yield container
+    finally:
+        os.environ.pop("DAPR_HTTP_PORT", None)
+        os.environ.pop("DAPR_RUNTIME_HOST", None)
+        try:
+            if container is not None:
+                container.stop()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -245,10 +268,7 @@ async def test_dapr_redis_integration(dapr_container, monkeypatch):
     dapr_port = dapr_container.get_exposed_port(50001)
     dapr_address = f"{dapr_host}:{dapr_port}"
 
-    # Monkeypatch the Dapr health check since we already verified it in the fixture
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     # Create session using from_address
     session = DaprSession.from_address(
@@ -303,9 +323,7 @@ async def test_dapr_redis_integration(dapr_container, monkeypatch):
 
 async def test_dapr_runner_integration(agent: Agent, dapr_container, monkeypatch):
     """Test DaprSession with agent Runner using real Dapr sidecar."""
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
@@ -346,9 +364,7 @@ async def test_dapr_runner_integration(agent: Agent, dapr_container, monkeypatch
 
 async def test_dapr_session_isolation(dapr_container, monkeypatch):
     """Test that different session IDs are isolated with real Dapr."""
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
@@ -392,9 +408,7 @@ async def test_dapr_session_isolation(dapr_container, monkeypatch):
 
 async def test_dapr_ttl_functionality(dapr_container, monkeypatch):
     """Test TTL functionality with real Dapr and Redis (if supported by state store)."""
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
@@ -431,9 +445,7 @@ async def test_dapr_ttl_functionality(dapr_container, monkeypatch):
 
 async def test_dapr_consistency_levels(dapr_container, monkeypatch):
     """Test different consistency levels with real Dapr."""
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
@@ -479,9 +491,7 @@ async def test_dapr_consistency_levels(dapr_container, monkeypatch):
 
 async def test_dapr_unicode_and_special_chars(dapr_container, monkeypatch):
     """Test unicode and special characters with real Dapr and Redis."""
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
@@ -525,9 +535,7 @@ async def test_dapr_concurrent_writes_resolution(dapr_container, monkeypatch):
     Concurrent writes from multiple session instances should resolve via
     optimistic concurrency.
     """
-    from dapr.clients.health import DaprHealth
-
-    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+    disable_dapr_sdk_health_check(monkeypatch)
 
     dapr_host = dapr_container.get_container_host_ip()
     dapr_port = dapr_container.get_exposed_port(50001)
