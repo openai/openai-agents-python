@@ -580,7 +580,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._thread_start_lock = threading.Lock()
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
-        self._close_lock = threading.Lock()
+        # Guarded by _export_lock so closing cannot overlap an export, in either order.
         self._exporter_closed = False
 
     def _ensure_thread_started(self) -> None:
@@ -657,23 +657,26 @@ class BatchTraceProcessor(TracingProcessor):
         The default exporter keeps a pooled HTTP client alive for the life of the process.
         Whoever performs the final drain closes it afterwards -- the worker thread when
         there is one, ``shutdown`` otherwise -- so a batch that outlives a shutdown timeout
-        never has its client pulled out from under it. Duck-typed like ``_request_shutdown``
-        because the interface does not require ``close``.
+        never has its client pulled out from under it. Taking the export lock extends that
+        to ``force_flush``: a flush already waiting on it either exports first or finds the
+        exporter closed and drops its batch, but never exports through a closed client.
+        Duck-typed like ``_request_shutdown`` because the interface does not require
+        ``close``.
         """
-        with self._close_lock:
+        with self._export_lock:
             if self._exporter_closed:
                 return
             self._exporter_closed = True
 
-        close_exporter = getattr(self._exporter, "close", None)
-        if not callable(close_exporter):
-            return
-        try:
-            close_exporter()
-        except Exception as exc:
-            log_model_and_tool_action_error(
-                logger, "[non-fatal] Tracing: exporter close failed", exc
-            )
+            close_exporter = getattr(self._exporter, "close", None)
+            if not callable(close_exporter):
+                return
+            try:
+                close_exporter()
+            except Exception as exc:
+                log_model_and_tool_action_error(
+                    logger, "[non-fatal] Tracing: exporter close failed", exc
+                )
 
     def force_flush(self):
         """
@@ -707,6 +710,13 @@ class BatchTraceProcessor(TracingProcessor):
         is completely empty.
         """
         with self._export_lock:
+            if self._exporter_closed:
+                if not self._queue.empty():
+                    logger.warning(
+                        "[non-fatal] Tracing: exporter is closed; dropping queued traces."
+                    )
+                return
+
             while True:
                 if deadline is not None and time.monotonic() >= deadline:
                     logger.warning(

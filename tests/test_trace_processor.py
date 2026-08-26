@@ -321,6 +321,89 @@ def test_batch_trace_processor_shutdown_timeout_defers_exporter_close_to_the_wor
     assert events == ["export done", "close"]
 
 
+def test_batch_trace_processor_force_flush_drops_its_batch_once_the_exporter_is_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A flush that arrives after the close must drop its batch, not export through it."""
+    exported: list[Trace | Span[Any]] = []
+
+    class ClosableExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.closed = False
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            assert not self.closed, "exported through a closed exporter"
+            exported.extend(items)
+
+        def close(self) -> None:
+            self.closed = True
+
+    exporter = ClosableExporter()
+    processor = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+    processor.shutdown()
+    assert exporter.closed
+
+    processor._queue.put_nowait(get_span(processor))
+    with caplog.at_level(logging.WARNING):
+        processor.force_flush()
+
+    assert exported == []
+    assert "exporter is closed" in caplog.text
+
+
+def test_batch_trace_processor_close_never_overlaps_a_concurrent_force_flush() -> None:
+    """A flush queued behind a slow export must not straddle the exporter's close.
+
+    ``shutdown(timeout=...)`` returns while the worker is still exporting, and its expired
+    deadline leaves the next batch queued. The flush waiting on the export lock and the
+    worker's close then race; whichever wins, no export may run against a closed client.
+    """
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    class SlowClosableExporter(TracingExporter):
+        def __init__(self) -> None:
+            self.closed = False
+            self.exports_after_close = 0
+
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            if self.closed:
+                self.exports_after_close += 1
+            if not export_started.is_set():
+                export_started.set()
+                release_export.wait(timeout=5.0)
+
+        def close(self) -> None:
+            self.closed = True
+
+    exporter = SlowClosableExporter()
+    processor = BatchTraceProcessor(
+        exporter=exporter,
+        max_queue_size=4,
+        schedule_delay=60.0,
+        export_trigger_ratio=0.25,
+    )
+    processor.on_span_end(get_span(processor))
+    assert export_started.wait(timeout=2.0)
+
+    # A second batch is queued behind the export that is still in flight.
+    processor._queue.put_nowait(get_span(processor))
+    flush = threading.Thread(target=processor.force_flush)
+    flush.start()
+
+    processor.shutdown(timeout=0.05)
+    release_export.set()
+
+    assert processor._worker_thread is not None
+    processor._worker_thread.join(timeout=5.0)
+    flush.join(timeout=5.0)
+
+    assert not flush.is_alive()
+    assert not processor._worker_thread.is_alive()
+    assert exporter.closed
+    assert exporter.exports_after_close == 0
+
+
 def test_batch_trace_processor_closes_the_exporter_only_once() -> None:
     """The worker and shutdown both reach the close, but the exporter sees one call."""
     closes: list[int] = []
