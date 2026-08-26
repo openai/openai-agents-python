@@ -1139,10 +1139,7 @@ class TestEdgeCases:
         trimmer = ToolOutputTrimmer(max_output_chars=max_output_chars, preview_chars=preview_chars)
         item = {"type": "function_call_output", "call_id": "c1", "output": large}
         trimmed, saved = trimmer._trim_function_call_output(item, ("my_tool",))
-        if trimmed is None:
-            # Only skipped when not even the header fits; the original is left alone.
-            assert saved == 0
-            return
+        assert trimmed is not None, "the budget must be enforced, not abandoned"
         assert len(trimmed["output"]) <= max_output_chars
         assert saved == len(large) - len(trimmed["output"])
 
@@ -1167,6 +1164,23 @@ class TestEdgeCases:
         assert trimmed is not None
         assert trimmed["output"] == header
         assert saved == len(large) - len(header)
+
+    def test_long_tool_name_falls_back_to_a_compact_marker(self) -> None:
+        """A name too long for the header must cost the header, not the whole trim."""
+        large = "x" * 6000
+        long_name = "very_long_namespace." + "a" * 80
+        item = {"type": "function_call_output", "call_id": "c1", "output": large}
+
+        trimmed, saved = ToolOutputTrimmer(
+            max_output_chars=60, preview_chars=200
+        )._trim_function_call_output(item, (long_name,))
+
+        assert trimmed is not None, "a long tool name must not leave 6000 chars in place"
+        output = trimmed["output"]
+        assert len(output) <= 60
+        assert output.startswith("[Trimmed:")
+        assert long_name not in output
+        assert saved == len(large) - len(output)
 
     def test_summary_reports_the_actual_preview_length(self) -> None:
         """The header must not claim preview_chars when the preview is shorter."""

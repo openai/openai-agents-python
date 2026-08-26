@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -258,8 +258,6 @@ class ToolOutputTrimmer:
         tool_name = tool_names[0] if tool_names else ""
         display_name = tool_name or "unknown_tool"
         summary = self._fit_preview_summary(output_str, display_name, output_len)
-        if summary is None:
-            return None, 0
 
         trimmed_item = dict(item)
         trimmed_item["output"] = summary
@@ -270,23 +268,42 @@ class ToolOutputTrimmer:
         text: str,
         display_name: str,
         output_len: int,
-    ) -> str | None:
+    ) -> str:
         """Build a free-text preview summary that fits within ``max_output_chars``.
 
         ``preview_chars`` is an upper bound on the preview, not a guaranteed size: the
         preview shrinks to whatever the header leaves inside the budget, mirroring how
         ``_trim_structured_function_call_output`` sizes structured previews. A budget
-        that leaves no room at all still gets the bare header, which is a bounded
-        summary; ``None`` means not even that fits, so no replacement would be an
-        improvement over the original.
+        too tight even for a preview-less header - a long qualified tool name, say -
+        drops to a more compact marker rather than giving up, since leaving the
+        original in place overshoots the budget by far more than a terse header does.
         """
+        headers: tuple[Callable[[int], str], ...] = (
+            lambda preview_len: (
+                f"[Trimmed: {display_name} output — {output_len} chars → "
+                f"{preview_len} char preview]"
+            ),
+            lambda preview_len: f"[Trimmed: {output_len} chars → {preview_len} char preview]",
+            lambda _preview_len: "[Trimmed]",
+        )
+        for build_header in headers:
+            summary = self._fit_summary_with_header(text, build_header)
+            if summary is not None:
+                return summary
+        # Not even "[Trimmed]" fits, so say as much of it as the budget allows - the same
+        # last resort ``_trim_structured_function_call_output`` falls back to.
+        return "[Trimmed]"[: self.max_output_chars]
+
+    def _fit_summary_with_header(
+        self,
+        text: str,
+        build_header: Callable[[int], str],
+    ) -> str | None:
+        """Fit the largest preview this header shape allows, or ``None`` if it has no room."""
         preview_len = min(len(text), self.preview_chars)
         while True:
             # The header reports the real preview length, so its width tracks that length.
-            header = (
-                f"[Trimmed: {display_name} output — {output_len} chars → "
-                f"{preview_len} char preview]"
-            )
+            header = build_header(preview_len)
             # The ellipsis marks a preview that was cut short. A bare header states the
             # same thing on its own, so it does not carry one, and it does not need the
             # newline that separates a preview from the header either.
@@ -453,8 +470,6 @@ class ToolOutputTrimmer:
             return None, 0
 
         summary = self._fit_preview_summary(serialized_results, "tool_search", output_len)
-        if summary is None:
-            return None, 0
 
         trimmed_item = dict(item)
         trimmed_item["results"] = [{"text": summary}]
