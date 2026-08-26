@@ -379,6 +379,119 @@ def test_items_to_messages_with_output_message_and_function_call():
     assert tool_call["function"]["arguments"] == "{}"
 
 
+def _turn_items_function_call_first() -> list[TResponseInputItem]:
+    """One completed tool turn in the order the streaming handler emits it.
+
+    A provider that streams tool-call deltas before the same turn's text yields
+    response outputs ordered [function_call, message]; the runner then appends
+    the function_call_output.
+    """
+    func_item: ResponseFunctionToolCallParam = {
+        "id": "99",
+        "call_id": "abc",
+        "name": "math",
+        "arguments": "{}",
+        "type": "function_call",
+    }
+    resp_msg = ResponseOutputMessage(
+        id="42",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(text="Let me calculate.", type="output_text", annotations=[])],
+    )
+    return [
+        cast(TResponseInputItem, func_item),
+        cast(TResponseInputItem, resp_msg.model_dump()),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "abc", "output": "4"},
+        ),
+    ]
+
+
+def test_items_to_messages_merges_function_call_before_output_message():
+    """A streamed turn ordered [function_call, message] must convert to one
+    assistant message; an assistant message with tool_calls followed by another
+    assistant message is rejected by the Chat Completions API."""
+    messages = Converter.items_to_messages(_turn_items_function_call_first())
+
+    assert len(messages) == 2
+    assistant = messages[0]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "Let me calculate."
+    tool_calls = assistant.get("tool_calls")
+    assert isinstance(tool_calls, list)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "math"
+    assert messages[1]["role"] == "tool"
+    assert messages[1]["tool_call_id"] == "abc"
+
+
+def test_items_to_messages_streamed_and_nonstreamed_turn_order_converge():
+    """[function_call, message] and [message, function_call] describe the same
+    turn and must produce identical Chat Completions messages."""
+    streamed = _turn_items_function_call_first()
+    non_streamed = [streamed[1], streamed[0], streamed[2]]
+
+    assert Converter.items_to_messages(streamed) == Converter.items_to_messages(non_streamed)
+
+
+def test_items_to_messages_does_not_merge_a_later_turn_into_a_tool_turn():
+    """A plain assistant turn after a completed tool turn stays a separate
+    message; only the same turn's text merges into the tool_calls message."""
+    items = _turn_items_function_call_first()
+    later_turn = cast(
+        TResponseInputItem,
+        ResponseOutputMessage(
+            id="43",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[ResponseOutputText(text="Done.", type="output_text", annotations=[])],
+        ).model_dump(),
+    )
+    messages = Converter.items_to_messages([*items, later_turn])
+
+    assert len(messages) == 3
+    assert messages[0]["role"] == "assistant"
+    assert messages[0].get("tool_calls")
+    assert messages[1]["role"] == "tool"
+    assert messages[2]["role"] == "assistant"
+    assert messages[2]["content"] == "Done."
+    assert not messages[2].get("tool_calls")
+
+
+def test_items_to_messages_merges_refusal_into_pending_tool_call_message():
+    """A refusal-bearing message after its turn's function call merges into the
+    same assistant message instead of opening an invalid second one."""
+    func_item: ResponseFunctionToolCallParam = {
+        "id": "99",
+        "call_id": "abc",
+        "name": "math",
+        "arguments": "{}",
+        "type": "function_call",
+    }
+    resp_msg = ResponseOutputMessage(
+        id="42",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputRefusal(refusal="won't do that", type="refusal")],
+    )
+    messages = Converter.items_to_messages(
+        [
+            cast(TResponseInputItem, func_item),
+            cast(TResponseInputItem, resp_msg.model_dump()),
+        ]
+    )
+
+    assert len(messages) == 1
+    assistant = messages[0]
+    assert assistant["refusal"] == "won't do that"
+    assert assistant.get("tool_calls")
+
+
 def test_items_to_messages_accepts_statusless_output_message():
     """Output messages remain recognizable after replay normalization removes null status."""
     statusless_message = cast(

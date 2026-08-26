@@ -738,18 +738,15 @@ class Converter:
 
             # 3) response output message => assistant
             elif resp_msg := cls.maybe_response_output_message(item):
-                # A reasoning item can be followed by an assistant message and then tool calls
-                # in the same turn, so preserve pending reasoning state across this flush.
-                flush_assistant_message(clear_pending_reasoning=False)
-                new_asst = ChatCompletionAssistantMessageParam(role="assistant")
                 contents = resp_msg["content"]
 
                 text_segments = []
+                refusal: str | None = None
                 for c in contents:
                     if c["type"] == "output_text":
                         text_segments.append(c["text"])
                     elif c["type"] == "refusal":
-                        new_asst["refusal"] = c["refusal"]
+                        refusal = c["refusal"]
                     elif c["type"] == "output_audio":
                         # Can't handle this, b/c chat completions expects an ID which we dont have
                         raise UserError(
@@ -758,14 +755,57 @@ class Converter:
                     else:
                         raise UserError(f"Unknown content type in ResponseOutputMessage: {c}")
 
-                if text_segments:
-                    combined = "\n".join(text_segments)
-                    new_asst["content"] = combined
+                # A streamed turn can order its function calls before its text message,
+                # and the pending assistant message then already carries the tool calls
+                # of this same turn: a function_call_output always flushes, so tool calls
+                # from a previous turn cannot still be pending here. Merge the message
+                # into that pending assistant message. Flushing instead would emit an
+                # assistant message with tool_calls directly followed by another
+                # assistant message, a sequence the Chat Completions API rejects.
+                pending_content = (
+                    current_assistant_msg.get("content")
+                    if current_assistant_msg is not None
+                    else None
+                )
+                if (
+                    current_assistant_msg is not None
+                    and current_assistant_msg.get("tool_calls")
+                    and "refusal" not in current_assistant_msg
+                    # None is the untouched state; a list means thinking blocks were
+                    # already reconstructed into content parts and text can be appended.
+                    and (pending_content is None or isinstance(pending_content, list))
+                ):
+                    merged_asst = current_assistant_msg
+                    if text_segments:
+                        combined = "\n".join(text_segments)
+                        if isinstance(pending_content, list):
+                            merged_asst["content"] = [
+                                *pending_content,
+                                ChatCompletionContentPartTextParam(text=combined, type="text"),
+                            ]
+                        else:
+                            merged_asst["content"] = combined
+                    if refusal is not None:
+                        merged_asst["refusal"] = refusal
+                    apply_pending_thinking_blocks(merged_asst)
+                    apply_pending_reasoning_content(merged_asst)
+                else:
+                    # A reasoning item can be followed by an assistant message and then
+                    # tool calls in the same turn, so preserve pending reasoning state
+                    # across this flush.
+                    flush_assistant_message(clear_pending_reasoning=False)
+                    new_asst = ChatCompletionAssistantMessageParam(role="assistant")
+                    if refusal is not None:
+                        new_asst["refusal"] = refusal
 
-                apply_pending_thinking_blocks(new_asst)
-                new_asst["tool_calls"] = []
-                apply_pending_reasoning_content(new_asst)
-                current_assistant_msg = new_asst
+                    if text_segments:
+                        combined = "\n".join(text_segments)
+                        new_asst["content"] = combined
+
+                    apply_pending_thinking_blocks(new_asst)
+                    new_asst["tool_calls"] = []
+                    apply_pending_reasoning_content(new_asst)
+                    current_assistant_msg = new_asst
 
             # 4) function/file-search calls => attach to assistant
             elif file_search := cls.maybe_file_search_call(item):
