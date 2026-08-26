@@ -26,17 +26,21 @@ def get_sentence_based_splitter(
         Returns:
             A tuple of the text to process and the remaining text buffer.
         """
-        sentences = re.split(r"(?<=[.!?])\s+", text_buffer.strip())
-        if len(sentences) >= 1:
-            combined_sentences = " ".join(sentences[:-1])
+        # Capture the separators instead of discarding them, and split the raw buffer
+        # rather than a stripped copy: the whitespace the model emitted is what a TTS
+        # engine renders as a pause, so collapsing "\n\n" to a single space runs
+        # paragraphs together in the audio.
+        parts = re.split(r"((?<=[.!?])\s+)", text_buffer)
+        # parts alternates sentence, separator, ..., sentence, so the last entry is the
+        # incomplete sentence and at least three entries mean a sentence has completed.
+        if len(parts) >= 3:
+            combined_sentences = "".join(parts[:-2])
             if len(combined_sentences) >= min_sentence_length:
-                # Carry any trailing whitespace over to the remainder. It separates the text
+                # Any trailing whitespace stays on the remainder. It separates the text
                 # held back from the next streamed delta, and stripping it concatenates the
                 # next word onto the last one, so "He " followed by "arrived" is spoken as
                 # "Hearrived".
-                trailing_whitespace = text_buffer[len(text_buffer.rstrip()) :]
-                remaining_text_buffer = sentences[-1] + trailing_whitespace
-                return combined_sentences, remaining_text_buffer
+                return combined_sentences, parts[-1]
         return "", text_buffer
 
     return sentence_based_text_splitter

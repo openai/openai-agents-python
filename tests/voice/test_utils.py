@@ -69,3 +69,50 @@ def test_split_without_trailing_whitespace_is_unchanged() -> None:
         "This sentence is long enough to flush.",
         "He",
     )
+
+
+@pytest.mark.parametrize(
+    "text,spoken,remaining",
+    [
+        (
+            "Line one is long enough.\nLine two here.\nrest",
+            "Line one is long enough.\nLine two here.",
+            "rest",
+        ),
+        (
+            "First point.\n\nSecond point is long. tail",
+            "First point.\n\nSecond point is long.",
+            "tail",
+        ),
+        (
+            "   Leading spaces here are kept? Yes indeed. tail",
+            "   Leading spaces here are kept? Yes indeed.",
+            "tail",
+        ),
+        (
+            "Hello world this is one.  Double space kept?  tail",
+            "Hello world this is one.  Double space kept?",
+            "tail",
+        ),
+    ],
+    ids=["newline", "paragraph_break", "leading_whitespace", "double_space"],
+)
+def test_split_preserves_the_whitespace_the_model_emitted(
+    text: str, spoken: str, remaining: str
+) -> None:
+    """Separators are what a TTS engine renders as a pause, so they must survive.
+
+    Splitting a stripped buffer on a non-capturing pattern normalized every
+    inter-sentence whitespace run to a single space and dropped leading whitespace.
+    """
+    split = get_sentence_based_splitter(20)
+
+    assert split(text) == (spoken, remaining)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 15])
+def test_streamed_paragraph_breaks_survive_any_delta_boundary(chunk_size: int) -> None:
+    """Short sentences accumulate into one chunk, so their breaks must be kept."""
+    text = "First point.\n\nSecond point.\n\nThird point is the last one here."
+
+    assert any("\n\n" in chunk for chunk in _stream(text, chunk_size))
