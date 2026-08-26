@@ -42,9 +42,9 @@ from .run_steps import (
     ProcessedResponse,
 )
 from .session_persistence import (
-    checkpointable_terminal_step,
     save_result_to_session,
     save_resumed_turn_items,
+    terminal_checkpoint_owner,
 )
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
@@ -619,6 +619,7 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    settle_terminal_output: bool = False,
 ) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
     if not session_persistence_enabled or not items:
@@ -626,10 +627,10 @@ async def save_final_turn_items_after_guardrails(
     if input_guardrails_triggered(input_guardrail_results):
         return 0
     # An accepted terminal output is appended after the output guardrails, so this is the last
-    # fallible step of the run. Let the resumed state own the batch when it can settle the same
-    # output later instead of re-entering the model.
-    terminal_write_state = (
-        run_state if checkpointable_terminal_step(run_state) is not None else None
+    # fallible step of the run. Only the caller that saw every guardrail succeed opts in to
+    # letting the resumed state own the batch and settle the same output later.
+    terminal_write_state = terminal_checkpoint_owner(
+        run_state, session, settle_terminal_output=settle_terminal_output
     )
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(

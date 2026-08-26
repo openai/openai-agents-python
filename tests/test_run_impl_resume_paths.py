@@ -1290,13 +1290,13 @@ async def test_settled_terminal_output_rejects_added_input() -> None:
         state.add_input("and now what?")
 
 
-class _CompactionSession(SimpleListSession):
-    """A compaction-aware session whose post-append maintenance can fail on demand."""
+class _CompactionSession(_FailingResumeSession):
+    """A compaction-aware session whose append and post-append maintenance can each fail."""
 
     def __init__(self) -> None:
-        super().__init__("terminal-compaction")
+        super().__init__()
         self.fail_compaction = False
-        self.error = RuntimeError("compaction failed")
+        self.compaction_error = RuntimeError("compaction failed")
         self.deferred: list[str] = []
 
     async def run_compaction(self, args: Any) -> None:
@@ -1305,7 +1305,7 @@ class _CompactionSession(SimpleListSession):
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self.fail_compaction:
             self.fail_compaction = False
-            raise self.error
+            raise self.compaction_error
         self.deferred.append(response_id)
 
     def _get_deferred_compaction_response_id(self) -> str | None:
@@ -1365,4 +1365,84 @@ async def test_terminal_output_is_not_settled_after_failed_post_append_persisten
     result = await _run_session_resume(agent, restored, session, not streamed)
     # The failed maintenance must not be reported as a completed run for the accepted output.
     assert result.final_output != "receipt-7"
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_terminal_output_is_not_settled_when_an_output_guardrail_raises(
+    streamed: bool,
+) -> None:
+    """A guardrail error must surface on the next resume, not be settled away."""
+    effects: list[int] = []
+    guardrail_calls: list[str] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    @output_guardrail
+    async def explode_once(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        guardrail_calls.append(str(output))
+        if len(guardrail_calls) == 1:
+            raise RuntimeError("output guardrail exploded")
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[explode_once],
+    )
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, streamed)
+
+    # The guardrail never completed, so nothing about this turn is settleable.
+    payload = state.to_json()
+    assert payload["current_step"] is None
+    assert "pending_session_write" not in payload
+    assert guardrail_calls == ["receipt-7"]
+
+    restored = await RunState.from_json(agent, payload)
+    result = await _run_session_resume(agent, restored, session, not streamed)
+    assert result.final_output == "retry-final"
+    assert len(model.calls) == 2
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_compaction_aware_session_does_not_arm_a_terminal_checkpoint(
+    streamed: bool,
+) -> None:
+    """The checkpoint replays the append alone, so it cannot own a batch that also owes
+    post-append compaction work."""
+    session = _CompactionSession()
+    agent, model, _, state, effects, _ = await _terminal_output_session_state(
+        streamed, session=session
+    )
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    payload = state.to_json()
+    assert payload["current_step"] is None
+    assert "pending_session_write" not in payload
     assert effects == [7]

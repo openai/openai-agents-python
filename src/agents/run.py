@@ -136,7 +136,6 @@ from .run_internal.run_steps import (
 from .run_internal.session_persistence import (
     _session_get_items,
     admit_pending_input,
-    checkpointable_terminal_step,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -144,9 +143,11 @@ from .run_internal.session_persistence import (
     recoverable_terminal_step,
     resume_pending_session_write,
     resumed_turn_items,
+    resumed_write_owner,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    terminal_checkpoint_owner,
     update_run_state_after_resume,
 )
 from .run_internal.tool_use_tracker import (
@@ -1191,7 +1192,7 @@ class AgentRunner:
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
-                                        run_state=run_state,
+                                        run_state=resumed_write_owner(run_state, session),
                                         session=session,
                                         items=turn_session_items,
                                         persisted_count=(
@@ -1393,10 +1394,15 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
-                                if checkpointable_terminal_step(run_state) is not None:
-                                    # These passed for this exact output. Publish them before the
-                                    # append can raise so a settled retry reports the original
-                                    # evidence instead of evaluating a new final output.
+                                if (
+                                    terminal_checkpoint_owner(
+                                        run_state, session, settle_terminal_output=True
+                                    )
+                                    is not None
+                                ):
+                                    # Every output guardrail passed for this exact output. Publish
+                                    # them before the append can raise so a settled retry reports
+                                    # the original evidence instead of evaluating a new one.
                                     run_state._output_guardrail_results = list(
                                         output_guardrail_results
                                     )
@@ -1409,6 +1415,8 @@ class AgentRunner:
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
+                                    # Reached only after every output guardrail succeeded.
+                                    settle_terminal_output=True,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
