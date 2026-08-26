@@ -397,16 +397,16 @@ def function_schema(
 
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
-            # e.g. *args: extend positional args
             if get_origin(ann) is tuple:
-                # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
-                if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[ann]  # type: ignore
-                else:
+                if not args_of_tuple or args_of_tuple == ((),):
+                    # Preserve the permissive behavior for bare and empty tuple annotations.
                     ann = list[Any]
+                else:
+                    # Preserve a parameterized tuple as the type of each positional argument.
+                    ann = list[ann]  # type: ignore
             else:
-                # If user wrote *args: int, treat as List[int]
+                # If user wrote *args: T, treat it as list[T].
                 ann = list[ann]  # type: ignore
 
             # Default factory to empty list

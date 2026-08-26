@@ -1,3 +1,4 @@
+import typing
 from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -460,6 +461,54 @@ def test_var_positional_tuple_annotation():
 
     with pytest.raises(ValidationError):
         fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
+
+
+def test_var_positional_fixed_tuple_annotation():
+    def func(*args: tuple[int, str]) -> tuple[tuple[int, str], ...]:
+        return args
+
+    fs = function_schema(func, use_docstring_info=False)
+
+    args_schema = fs.params_json_schema["properties"]["args"]
+    assert args_schema["type"] == "array"
+    assert args_schema["items"]["type"] == "array"
+    assert args_schema["items"]["prefixItems"] == [
+        {"type": "integer"},
+        {"type": "string"},
+    ]
+    assert args_schema["items"]["minItems"] == 2
+    assert args_schema["items"]["maxItems"] == 2
+
+    parsed = fs.params_pydantic_model.model_validate({"args": [[1, "one"], [2, "two"]]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == ((1, "one"), (2, "two"))
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"args": [[1, "one", "extra"]]})
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"args": [[1]]})
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"args": [["wrong", 1]]})
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [tuple[()], typing.Tuple[()]],  # noqa: UP006
+    ids=["builtin", "typing"],
+)
+def test_var_positional_empty_tuple_annotation_remains_permissive(annotation):
+    def func(*args):
+        return args
+
+    func.__annotations__["args"] = annotation
+    fs = function_schema(func, use_docstring_info=False)
+
+    assert fs.params_json_schema["properties"]["args"]["items"] == {}
+    parsed = fs.params_pydantic_model.model_validate({"args": [1, "two"]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == (1, "two")
 
 
 def test_var_keyword_dict_annotation():
