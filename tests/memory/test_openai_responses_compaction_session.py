@@ -111,6 +111,7 @@ class TestOpenAIResponsesCompactionSession:
     def create_mock_session(self) -> MagicMock:
         mock = MagicMock(spec=Session)
         mock.session_id = "test-session"
+        mock.session_settings = None
         mock.get_items = AsyncMock(return_value=[])
         mock.add_items = AsyncMock()
         mock.pop_item = AsyncMock(return_value=None)
@@ -424,7 +425,7 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.get_items.return_value = items
 
         mock_compact_response = MagicMock()
-        mock_compact_response.output = []
+        mock_compact_response.output = items
 
         mock_client = MagicMock()
         mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
@@ -490,6 +491,100 @@ class TestOpenAIResponsesCompactionSession:
         assert second_kwargs.get("input") == mock_compact_response.output
 
     @pytest.mark.asyncio
+    async def test_run_compaction_auto_uses_full_input_when_session_limit_hides_history(
+        self, tmp_path
+    ) -> None:
+        history = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"msg{i}"},
+            )
+            for i in range(DEFAULT_COMPACTION_THRESHOLD + 1)
+        ]
+        underlying = SQLiteSession(
+            "limited-auto-compact",
+            str(tmp_path / "limited_auto_compact.db"),
+            session_settings=SessionSettings(limit=DEFAULT_COMPACTION_THRESHOLD - 1),
+        )
+        await underlying.add_items(history)
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {"type": "message", "role": "assistant", "content": "compacted"}
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+
+        await session.run_compaction({"response_id": "resp-limited"})
+
+        mock_client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=history)
+        assert await underlying.get_items(limit=len(history)) == mock_compact_response.output
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_rejects_previous_response_id_when_session_limit_hides_history(
+        self, tmp_path
+    ) -> None:
+        history = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"msg{i}"},
+            )
+            for i in range(DEFAULT_COMPACTION_THRESHOLD + 1)
+        ]
+        underlying = SQLiteSession(
+            "limited-response-compact",
+            str(tmp_path / "limited_response_compact.db"),
+            session_settings=SessionSettings(limit=DEFAULT_COMPACTION_THRESHOLD - 1),
+        )
+        await underlying.add_items(history)
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        with pytest.raises(ValueError, match="use compaction_mode='input'"):
+            await session.run_compaction({"response_id": "resp-limited"})
+
+        mock_client.responses.compact.assert_not_awaited()
+        assert await underlying.get_items(limit=len(history)) == history
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_previous_response_id_allows_empty_negative_limit(
+        self, tmp_path
+    ) -> None:
+        underlying = SQLiteSession(
+            "empty-negative-limit-compact",
+            str(tmp_path / "empty_negative_limit_compact.db"),
+            session_settings=SessionSettings(limit=-1),
+        )
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = []
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session.run_compaction({"response_id": "resp-empty", "force": True})
+
+        mock_client.responses.compact.assert_awaited_once_with(
+            model="gpt-4.1", previous_response_id="resp-empty"
+        )
+
+    @pytest.mark.asyncio
     async def test_run_compaction_skips_when_below_threshold(self) -> None:
         mock_session = self.create_mock_session()
         # Return fewer than threshold items
@@ -509,6 +604,23 @@ class TestOpenAIResponsesCompactionSession:
 
         # Should not have called the compact API
         mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defer_compaction_reuses_cached_full_history_for_mode_resolution(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "hi"})
+        ]
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+        )
+
+        await session._defer_compaction("resp-123")
+        await session._defer_compaction("resp-456")
+
+        assert mock_session.get_items.await_count == 1
+        assert mock_session.get_items.await_args_list[0].kwargs == {"limit": 2_147_483_647}
 
     @pytest.mark.asyncio
     async def test_run_compaction_executes_when_threshold_met(self) -> None:
@@ -1753,6 +1865,7 @@ class TestCompactionStripsOrphanedIds:
     def create_mock_session(self) -> MagicMock:
         mock = MagicMock(spec=Session)
         mock.session_id = "test-session"
+        mock.session_settings = None
         mock.get_items = AsyncMock(return_value=[])
         mock.add_items = AsyncMock()
         mock.pop_item = AsyncMock(return_value=None)

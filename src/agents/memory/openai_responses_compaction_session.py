@@ -156,8 +156,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         response_id: str | None,
         store: bool | None,
         requested_mode: OpenAIResponsesCompactionMode | None,
+        session_items: list[TResponseInputItem],
     ) -> _ResolvedCompactionMode:
         mode = requested_mode or self.compaction_mode
+        if mode != "input":
+            settings = self.underlying_session.session_settings
+            limit = settings.limit if settings is not None else None
+            if limit is not None and len(session_items) > max(limit, 0):
+                if mode == "previous_response_id":
+                    raise ValueError(
+                        "OpenAIResponsesCompactionSession cannot use previous_response_id "
+                        "compaction when the underlying session retrieval limit hides local "
+                        "history; use compaction_mode='input' instead."
+                    )
+                return "input"
         if (
             mode == "auto"
             and store is None
@@ -189,10 +201,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._last_unstored_response_id = None
         else:
             store = None
+
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=self._response_id,
             store=store,
             requested_mode=requested_mode,
+            session_items=session_items,
         )
 
         if resolved_mode == "previous_response_id" and not self._response_id:
@@ -200,8 +215,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "OpenAIResponsesCompactionSession.run_compaction requires a response_id "
                 "when using previous_response_id compaction."
             )
-
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
@@ -391,6 +404,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             response_id=response_id,
             store=store,
             requested_mode=None,
+            session_items=session_items,
         )
         should_compact = self.should_trigger_compaction(
             {
