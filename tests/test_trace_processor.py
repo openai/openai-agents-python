@@ -321,6 +321,58 @@ def test_batch_trace_processor_shutdown_timeout_defers_exporter_close_to_the_wor
     assert events == ["export done", "close"]
 
 
+def test_batch_trace_processor_shutdown_timeout_bounds_a_slow_exporter_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A close that waits on a backend must not outlive the caller's timeout."""
+    release_close = threading.Event()
+    close_returned = threading.Event()
+
+    class SlowClosingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            release_close.wait(timeout=5.0)
+            close_returned.set()
+
+    processor = BatchTraceProcessor(exporter=SlowClosingExporter())
+
+    start = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        processor.shutdown(timeout=0.05)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, "shutdown must honour its timeout even if close() hangs"
+    assert "while closing the exporter" in caplog.text
+
+    # The close is not abandoned, only unwaited: it still finishes on its own thread.
+    release_close.set()
+    assert close_returned.wait(timeout=5.0)
+
+
+def test_batch_trace_processor_expired_deadline_skips_the_exporter_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no time left there is nothing to spend on cleanup, so say so and move on."""
+    closes: list[int] = []
+
+    class ClosingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            closes.append(1)
+
+    processor = BatchTraceProcessor(exporter=ClosingExporter())
+
+    with caplog.at_level(logging.WARNING):
+        processor.shutdown(timeout=0.0)
+
+    assert closes == []
+    assert "leaving the exporter open" in caplog.text
+
+
 def test_batch_trace_processor_force_flush_drops_its_batch_once_the_exporter_is_closed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

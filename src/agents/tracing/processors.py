@@ -649,7 +649,34 @@ class BatchTraceProcessor(TracingProcessor):
             self._export_batches(deadline=deadline)
 
         if not worker_still_running:
+            self._close_exporter_within(deadline)
+
+    def _close_exporter_within(self, deadline: float | None) -> None:
+        """Close the exporter without letting a slow ``close`` outlive the caller's timeout.
+
+        An exporter whose cleanup waits on a backend would otherwise block ``shutdown`` --
+        and the atexit handler that calls it -- for as long as it likes. Bound it the way
+        the worker join is bounded: give it whatever is left of the deadline, then warn and
+        move on.
+        """
+        if deadline is None:
             self._close_exporter()
+            return
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "[non-fatal] Tracing: shutdown timeout reached; leaving the exporter open."
+            )
+            return
+
+        closer = threading.Thread(target=self._close_exporter, daemon=True)
+        closer.start()
+        closer.join(timeout=remaining)
+        if closer.is_alive():
+            logger.warning(
+                "[non-fatal] Tracing: shutdown timeout reached while closing the exporter."
+            )
 
     def _close_exporter(self) -> None:
         """Release whatever the exporter holds open, once, when nothing is exporting.
@@ -657,26 +684,27 @@ class BatchTraceProcessor(TracingProcessor):
         The default exporter keeps a pooled HTTP client alive for the life of the process.
         Whoever performs the final drain closes it afterwards -- the worker thread when
         there is one, ``shutdown`` otherwise -- so a batch that outlives a shutdown timeout
-        never has its client pulled out from under it. Taking the export lock extends that
-        to ``force_flush``: a flush already waiting on it either exports first or finds the
-        exporter closed and drops its batch, but never exports through a closed client.
-        Duck-typed like ``_request_shutdown`` because the interface does not require
-        ``close``.
+        never has its client pulled out from under it. Claiming the flag under the export
+        lock extends that to ``force_flush``: a flush already waiting on the lock either
+        exports first or finds the exporter closed and drops its batch, and none can start
+        afterwards. The close itself runs outside the lock so a slow one cannot wedge every
+        later flush behind it. Duck-typed like ``_request_shutdown`` because the interface
+        does not require ``close``.
         """
         with self._export_lock:
             if self._exporter_closed:
                 return
             self._exporter_closed = True
 
-            close_exporter = getattr(self._exporter, "close", None)
-            if not callable(close_exporter):
-                return
-            try:
-                close_exporter()
-            except Exception as exc:
-                log_model_and_tool_action_error(
-                    logger, "[non-fatal] Tracing: exporter close failed", exc
-                )
+        close_exporter = getattr(self._exporter, "close", None)
+        if not callable(close_exporter):
+            return
+        try:
+            close_exporter()
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                logger, "[non-fatal] Tracing: exporter close failed", exc
+            )
 
     def force_flush(self):
         """
