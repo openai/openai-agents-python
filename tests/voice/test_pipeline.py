@@ -15,7 +15,7 @@ import pytest
 
 import agents._debug as _debug
 from agents import trace
-from tests.testing_processor import fetch_events, fetch_span_errors
+from tests.testing_processor import fetch_events, fetch_ordered_spans, fetch_span_errors
 
 try:
     from agents.voice import (
@@ -585,6 +585,46 @@ async def test_streamed_audio_error_respects_sensitive_data_setting(
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trace_include_sensitive_data", [True, False])
+async def test_speech_span_redacts_tts_instructions(
+    trace_include_sensitive_data: bool,
+) -> None:
+    """TTS instructions are author-written prompt text, so they follow the same gate as input."""
+    instructions = "sensitive-style-instructions"
+    received: list[str] = []
+
+    class RecordingTTS(ZeroPcmTTSModel):
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            received.append(settings.instructions)
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    result = StreamedAudioResult(
+        RecordingTTS(),
+        TTSModelSettings(instructions=instructions),
+        VoicePipelineConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+
+    with trace("tts-instructions"):
+        await result._stream_audio("spoken text", local_queue)
+
+    speech_spans = [span for span in fetch_ordered_spans() if span.span_data.type == "speech"]
+    assert len(speech_spans) == 1
+    model_config = cast(dict[str, Any], speech_spans[0].span_data.model_config)
+
+    if trace_include_sensitive_data:
+        assert model_config["instructions"] == instructions
+        assert speech_spans[0].span_data.input == "spoken text"
+    else:
+        assert model_config["instructions"] is None
+        assert speech_spans[0].span_data.input == ""
+
+    # Non-sensitive settings stay visible either way, and the model still gets the real value.
+    assert model_config["speed"] == TTSModelSettings().speed
+    assert received == [instructions]
 
 
 @pytest.mark.asyncio

@@ -124,7 +124,11 @@ class StreamedAudioResult:
             input=text if self._voice_pipeline_config.trace_include_sensitive_data else "",
             model_config={
                 "voice": self.tts_settings.voice,
-                "instructions": self.instructions,
+                "instructions": (
+                    self.instructions
+                    if self._voice_pipeline_config.trace_include_sensitive_data
+                    else None
+                ),
                 "speed": self.tts_settings.speed,
             },
             output_format="pcm",
