@@ -136,6 +136,7 @@ from .run_internal.run_steps import (
 from .run_internal.session_persistence import (
     _session_get_items,
     admit_pending_input,
+    checkpointable_terminal_step,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -594,6 +595,7 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
+        resumed_terminal_step: NextStepFinalOutput | None = None
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -637,6 +639,9 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
+            # Capture before reconciling: settling the pending write clears the checkpoint
+            # that proves the append was the only work still owed for this run.
+            resumed_terminal_step = recoverable_terminal_step(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -980,6 +985,30 @@ class AgentRunner:
                             str | list[TResponseInputItem], original_input
                         )
                         run_state = cast(RunState[TContext] | None, run_state)
+                    if run_state is not None and resumed_terminal_step is not None:
+                        # Nothing but the Session append was still owed, and it settled above.
+                        # Finish here so no sandbox, guardrail, model, tool, or hook work runs
+                        # for an output that was already accepted.
+                        logger.debug("Settling an accepted terminal output")
+                        result = build_recovered_final_output_result(
+                            run_state=run_state,
+                            final_output=resumed_terminal_step.output,
+                            result_input=original_input,
+                            session_items=session_items,
+                            model_responses=model_responses,
+                            current_agent=current_agent,
+                            input_guardrail_results=input_guardrail_results,
+                            output_guardrail_results=output_guardrail_results,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            context_wrapper=context_wrapper,
+                            tool_use_tracker=tool_use_tracker,
+                            max_turns=max_turns,
+                            current_turn=current_turn,
+                            generated_items=generated_items,
+                        )
+                        run_state._current_step = None
+                        return _finalize_result(result)
                     resuming_turn = is_resumed_state
                     all_input_guardrails = (
                         starting_agent.input_guardrails + (run_config.input_guardrails or [])
@@ -1065,29 +1094,6 @@ class AgentRunner:
                         )
                         session_input_items_for_persistence = []
                     if run_state is not None and run_state._current_step is not None:
-                        resumed_terminal_step = recoverable_terminal_step(run_state)
-                        if resumed_terminal_step is not None:
-                            logger.debug("Settling an accepted terminal output")
-                            result = build_recovered_final_output_result(
-                                run_state=run_state,
-                                final_output=resumed_terminal_step.output,
-                                result_input=original_input,
-                                session_items=session_items,
-                                model_responses=model_responses,
-                                current_agent=current_agent,
-                                input_guardrail_results=input_guardrail_results,
-                                output_guardrail_results=output_guardrail_results,
-                                tool_input_guardrail_results=tool_input_guardrail_results,
-                                tool_output_guardrail_results=tool_output_guardrail_results,
-                                context_wrapper=context_wrapper,
-                                tool_use_tracker=tool_use_tracker,
-                                max_turns=max_turns,
-                                current_turn=current_turn,
-                                generated_items=generated_items,
-                            )
-                            run_state._current_step = None
-                            return _finalize_result(result)
-
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
                             if not run_state._model_responses:
@@ -1387,7 +1393,7 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
-                                if recoverable_terminal_step(run_state) is not None:
+                                if checkpointable_terminal_step(run_state) is not None:
                                     # These passed for this exact output. Publish them before the
                                     # append can raise so a settled retry reports the original
                                     # evidence instead of evaluating a new final output.

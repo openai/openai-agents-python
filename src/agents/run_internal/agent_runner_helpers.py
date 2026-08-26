@@ -42,7 +42,7 @@ from .run_steps import (
     ProcessedResponse,
 )
 from .session_persistence import (
-    recoverable_terminal_step,
+    checkpointable_terminal_step,
     save_result_to_session,
     save_resumed_turn_items,
 )
@@ -628,7 +628,9 @@ async def save_final_turn_items_after_guardrails(
     # An accepted terminal output is appended after the output guardrails, so this is the last
     # fallible step of the run. Let the resumed state own the batch when it can settle the same
     # output later instead of re-entering the model.
-    terminal_write_state = run_state if recoverable_terminal_step(run_state) is not None else None
+    terminal_write_state = (
+        run_state if checkpointable_terminal_step(run_state) is not None else None
+    )
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,

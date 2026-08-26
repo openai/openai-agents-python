@@ -173,6 +173,7 @@ from .run_steps import (
 from .session_persistence import (
     _session_get_items,
     admit_pending_input,
+    checkpointable_terminal_step,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -618,7 +619,7 @@ async def _finalize_streamed_final_output(
         raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
-    if recoverable_terminal_step(streamed_result._state) is not None:
+    if checkpointable_terminal_step(streamed_result._state) is not None:
         # These passed for this exact output. Publish them before the append can raise so a
         # settled retry reports the original evidence instead of evaluating a new final output.
         streamed_result._state._output_guardrail_results = list(
@@ -929,7 +930,11 @@ async def start_streaming(
             run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
+        resumed_terminal_step: NextStepFinalOutput | None = None
         if is_resumed_state and run_state is not None:
+            # Capture before reconciling: settling the pending write clears the checkpoint
+            # that proves the append was the only work still owed for this run.
+            resumed_terminal_step = recoverable_terminal_step(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             streamed_result._current_turn_persisted_item_count = (
                 run_state._current_turn_persisted_item_count
@@ -1197,6 +1202,15 @@ async def start_streaming(
 
     try:
         while True:
+            if run_state is not None and resumed_terminal_step is not None:
+                # Nothing but the Session append was still owed, and it settled above. The
+                # accepted output, its items, and its guardrail results already seeded this
+                # streamed result, so finish before any sandbox, guardrail, or hook work.
+                streamed_result.final_output = resumed_terminal_step.output
+                run_state._current_step = None
+                streamed_result.is_complete = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                break
             validate_output_guardrails_with_server_managed_conversation(
                 current_agent,
                 run_config,
@@ -1273,17 +1287,6 @@ async def start_streaming(
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
-                resumed_terminal_step = recoverable_terminal_step(run_state)
-                if resumed_terminal_step is not None:
-                    # The accepted output, its items, and its guardrail results already seeded
-                    # this streamed result from the state, so settling the pending Session write
-                    # is all that was left of the failed attempt.
-                    streamed_result.final_output = resumed_terminal_step.output
-                    run_state._current_step = None
-                    streamed_result.is_complete = True
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    break
-
                 if isinstance(run_state._current_step, NextStepInterruption):
                     if not run_state._model_responses:
                         raise UserError("No model response found in previous state")

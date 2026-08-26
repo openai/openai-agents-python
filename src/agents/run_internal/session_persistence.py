@@ -81,6 +81,7 @@ __all__ = [
     "save_result_to_session",
     "save_resumed_turn_items",
     "resume_pending_session_write",
+    "checkpointable_terminal_step",
     "recoverable_terminal_step",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -721,19 +722,32 @@ async def save_result_to_session(
     return saved_run_items_count
 
 
-def recoverable_terminal_step(run_state: RunState[Any, Any] | None) -> NextStepFinalOutput | None:
-    """Return the accepted terminal step a resumed run may settle without another model call.
+def checkpointable_terminal_step(
+    run_state: RunState[Any, Any] | None,
+) -> NextStepFinalOutput | None:
+    """Return the accepted terminal step whose deferred append a resumed state may own.
 
-    The terminal batch is appended after the output guardrails, so the accepted output only
-    survives an append failure when the step itself is durable. Only a plain string output
-    round-trips through the RunState codec unchanged: richer values fall back to
-    ``json.dumps(..., default=str)`` and would change type on the way back, so they keep the
-    existing non-resumable behavior instead.
+    Only a plain string output round-trips through the RunState codec unchanged: richer values
+    fall back to ``json.dumps(..., default=str)`` and would change type on the way back, so they
+    keep the existing non-resumable behavior instead.
     """
     step = run_state._current_step if run_state is not None else None
     if not isinstance(step, NextStepFinalOutput) or type(step.output) is not str:
         return None
     return step
+
+
+def recoverable_terminal_step(run_state: RunState[Any, Any] | None) -> NextStepFinalOutput | None:
+    """Return the accepted terminal step a resumed run may settle without another model call.
+
+    A checkpointable step is only settleable while its append is still outstanding. The pending
+    write is that record: once it settles, later persistence work for the same batch, such as
+    compaction, can still fail, and those failures must not be reported as a completed run.
+    Reconciling the pending write clears it, so callers capture this before settling it.
+    """
+    if run_state is None or run_state._pending_session_write is None:
+        return None
+    return checkpointable_terminal_step(run_state)
 
 
 async def save_resumed_turn_items(
@@ -764,7 +778,7 @@ async def save_resumed_turn_items(
             if run_state is not None
             and (
                 isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
-                or recoverable_terminal_step(run_state) is not None
+                or checkpointable_terminal_step(run_state) is not None
             )
             else None
         ),

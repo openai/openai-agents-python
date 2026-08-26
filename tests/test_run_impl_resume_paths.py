@@ -43,6 +43,7 @@ from agents.run_internal.run_loop import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.usage import Usage
 from tests.test_responses import get_function_tool_call, get_text_message
@@ -1287,3 +1288,81 @@ async def test_settled_terminal_output_rejects_added_input() -> None:
         await _run_session_resume(agent, state, session, False)
     with pytest.raises(UserError, match="Cannot add input to a terminal RunState"):
         state.add_input("and now what?")
+
+
+class _CompactionSession(SimpleListSession):
+    """A compaction-aware session whose post-append maintenance can fail on demand."""
+
+    def __init__(self) -> None:
+        super().__init__("terminal-compaction")
+        self.fail_compaction = False
+        self.error = RuntimeError("compaction failed")
+        self.deferred: list[str] = []
+
+    async def run_compaction(self, args: Any) -> None:
+        return None
+
+    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+        if self.fail_compaction:
+            self.fail_compaction = False
+            raise self.error
+        self.deferred.append(response_id)
+
+    def _get_deferred_compaction_response_id(self) -> str | None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_settled_terminal_output_skips_sandbox_preparation(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settling an accepted output must not create, start, or depend on sandbox resources."""
+    agent, model, session, state, effects, _ = await _terminal_output_session_state(streamed)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    prepared = False
+
+    async def _fail_prepare_agent(*args: Any, **kwargs: Any):
+        nonlocal prepared
+        prepared = True
+        raise AssertionError("sandbox preparation must not run for a settled terminal output")
+
+    monkeypatch.setattr(SandboxRuntime, "prepare_agent", _fail_prepare_agent)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    result = await _run_session_resume(agent, restored, session, not streamed)
+    assert result.final_output == "receipt-7"
+    assert prepared is False
+    assert effects == [7]
+    assert len(model.calls) == 1
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_terminal_output_is_not_settled_after_failed_post_append_persistence(
+    streamed: bool,
+) -> None:
+    """A cleared append checkpoint means later Session work failed, so nothing may be settled."""
+    session = _CompactionSession()
+    agent, model, _, state, effects, _ = await _terminal_output_session_state(
+        streamed, session=session
+    )
+    session.fail_compaction = True
+    with pytest.raises(RuntimeError, match="compaction failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    # The batch committed, so its checkpoint is gone and the terminal step is no longer durable.
+    payload = state.to_json()
+    assert "pending_session_write" not in payload
+    assert payload["current_step"] is None
+    assert session.deferred == []
+
+    restored = await RunState.from_json(agent, payload)
+    result = await _run_session_resume(agent, restored, session, not streamed)
+    # The failed maintenance must not be reported as a completed run for the accepted output.
+    assert result.final_output != "receipt-7"
+    assert effects == [7]
