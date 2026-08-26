@@ -1146,6 +1146,28 @@ class TestEdgeCases:
         assert len(trimmed["output"]) <= max_output_chars
         assert saved == len(large) - len(trimmed["output"])
 
+    def test_budget_that_fits_only_the_header_still_trims(self) -> None:
+        """A budget with no room for a preview must still yield a bounded summary."""
+        large = "x" * 6000
+        item = {"type": "function_call_output", "call_id": "c1", "output": large}
+
+        # preview_chars=0 produces the bare header, the shortest summary there is.
+        bare, _ = ToolOutputTrimmer(
+            max_output_chars=500, preview_chars=0
+        )._trim_function_call_output(item, ("my_tool",))
+        assert bare is not None
+        header = bare["output"]
+
+        # That header is all that fits in this budget. Treating the trailing "..." as
+        # mandatory used to overflow it and skip the trim, leaving all 6000 chars.
+        trimmed, saved = ToolOutputTrimmer(
+            max_output_chars=len(header), preview_chars=5000
+        )._trim_function_call_output(item, ("my_tool",))
+
+        assert trimmed is not None
+        assert trimmed["output"] == header
+        assert saved == len(large) - len(header)
+
     def test_summary_reports_the_actual_preview_length(self) -> None:
         """The header must not claim preview_chars when the preview is shorter."""
         trimmer = ToolOutputTrimmer(max_output_chars=100, preview_chars=5000)

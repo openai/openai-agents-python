@@ -275,24 +275,30 @@ class ToolOutputTrimmer:
 
         ``preview_chars`` is an upper bound on the preview, not a guaranteed size: the
         preview shrinks to whatever the header leaves inside the budget, mirroring how
-        ``_trim_structured_function_call_output`` sizes structured previews. Returns
-        ``None`` when not even the header fits, since no replacement is an improvement
-        then.
+        ``_trim_structured_function_call_output`` sizes structured previews. A budget
+        that leaves no room at all still gets the bare header, which is a bounded
+        summary; ``None`` means not even that fits, so no replacement would be an
+        improvement over the original.
         """
         preview_len = min(len(text), self.preview_chars)
         while True:
             # The header reports the real preview length, so its width tracks that length.
             header = (
                 f"[Trimmed: {display_name} output — {output_len} chars → "
-                f"{preview_len} char preview]\n"
+                f"{preview_len} char preview]"
             )
-            ellipsis = "..." if preview_len < len(text) else ""
-            room = self.max_output_chars - len(header) - len(ellipsis)
+            # The ellipsis marks a preview that was cut short. A bare header states the
+            # same thing on its own, so it does not carry one, and it does not need the
+            # newline that separates a preview from the header either.
+            ellipsis = "..." if 0 < preview_len < len(text) else ""
+            separator = "\n" if preview_len else ""
+            room = self.max_output_chars - len(header) - len(separator) - len(ellipsis)
             if preview_len <= room:
-                return f"{header}{text[:preview_len]}{ellipsis}"
-            if room < 0:
+                return f"{header}{separator}{text[:preview_len]}{ellipsis}"
+            if preview_len == 0:
                 return None
-            preview_len = room
+            # Shrinking also shortens the header, so re-fit rather than giving up here.
+            preview_len = max(0, room)
 
     def _trim_structured_function_call_output(
         self,
