@@ -110,6 +110,7 @@ def _assert_complete_filesystem_inspection(output: str) -> None:
     assert "--- filesystem complete ---\n--- processes ---" in output
 
 
+@pytest.mark.containers
 @pytest.mark.parametrize("fail_after_inspection", [False, True], ids=["success", "model-failure"])
 async def test_runner_owned_local_sandbox_cannot_inspect_trusted_client_credential(
     caplog: pytest.LogCaptureFixture,
