@@ -101,8 +101,8 @@ class ToolOutputTrimmer:
             Python or JSON representation overhead, and their replacements fit within this
             budget. Defaults to 500.
         preview_chars: Maximum number of characters of a string output, or the text parts of
-            a structured output, to preserve as a preview when trimming. Structured previews
-            may be shorter when needed to fit ``max_output_chars``. Defaults to 200.
+            a structured output, to preserve as a preview when trimming. Previews may be
+            shorter when needed to fit ``max_output_chars``. Defaults to 200.
         trimmable_tools: Optional tool name or set of tool names whose outputs can be trimmed.
             For namespaced tools, both bare names and qualified ``namespace.name`` entries are
             supported. If ``None``, all tool outputs are eligible for trimming. Defaults
@@ -257,17 +257,42 @@ class ToolOutputTrimmer:
 
         tool_name = tool_names[0] if tool_names else ""
         display_name = tool_name or "unknown_tool"
-        preview = output_str[: self.preview_chars]
-        summary = (
-            f"[Trimmed: {display_name} output — {output_len} chars → "
-            f"{self.preview_chars} char preview]\n{preview}..."
-        )
-        if len(summary) >= output_len:
+        summary = self._fit_preview_summary(output_str, display_name, output_len)
+        if summary is None:
             return None, 0
 
         trimmed_item = dict(item)
         trimmed_item["output"] = summary
         return trimmed_item, output_len - len(summary)
+
+    def _fit_preview_summary(
+        self,
+        text: str,
+        display_name: str,
+        output_len: int,
+    ) -> str | None:
+        """Build a free-text preview summary that fits within ``max_output_chars``.
+
+        ``preview_chars`` is an upper bound on the preview, not a guaranteed size: the
+        preview shrinks to whatever the header leaves inside the budget, mirroring how
+        ``_trim_structured_function_call_output`` sizes structured previews. Returns
+        ``None`` when not even the header fits, since no replacement is an improvement
+        then.
+        """
+        preview_len = min(len(text), self.preview_chars)
+        while True:
+            # The header reports the real preview length, so its width tracks that length.
+            header = (
+                f"[Trimmed: {display_name} output — {output_len} chars → "
+                f"{preview_len} char preview]\n"
+            )
+            ellipsis = "..." if preview_len < len(text) else ""
+            room = self.max_output_chars - len(header) - len(ellipsis)
+            if preview_len <= room:
+                return f"{header}{text[:preview_len]}{ellipsis}"
+            if room < 0:
+                return None
+            preview_len = room
 
     def _trim_structured_function_call_output(
         self,
@@ -421,12 +446,8 @@ class ToolOutputTrimmer:
         if output_len <= self.max_output_chars:
             return None, 0
 
-        preview = serialized_results[: self.preview_chars]
-        summary = (
-            f"[Trimmed: tool_search output — {output_len} chars → "
-            f"{self.preview_chars} char preview]\n{preview}..."
-        )
-        if len(summary) >= output_len:
+        summary = self._fit_preview_summary(serialized_results, "tool_search", output_len)
+        if summary is None:
             return None, 0
 
         trimmed_item = dict(item)

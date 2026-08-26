@@ -1106,12 +1106,11 @@ class TestSlidingWindow:
 
 
 class TestEdgeCases:
-    def test_skips_trim_when_summary_would_exceed_original(self) -> None:
-        """When preview_chars is large relative to the output, the summary can be
-        longer than the original. In that case the output should be left untouched."""
-        # Output is 501 chars (just above default max_output_chars=500).
-        # With preview_chars=490, the summary header + 490-char preview + "..." will
-        # easily exceed 501 chars, so trimming should be skipped.
+    def test_summary_never_exceeds_max_output_chars(self) -> None:
+        """A preview larger than the remaining budget is clamped, never overflowed."""
+        # Output is 501 chars (just above default max_output_chars=500). With
+        # preview_chars=490 the header plus a 490-char preview would not fit, so the
+        # preview shrinks to whatever the header leaves inside the 500-char budget.
         borderline = "x" * 501
         items = [
             _user("q1"),
@@ -1125,8 +1124,49 @@ class TestEdgeCases:
         ]
         trimmer = ToolOutputTrimmer(max_output_chars=500, preview_chars=490)
         result = trimmer(_make_data(items))
-        # Output left untouched because summary would be longer
-        assert _output(result, 2) == borderline
+        trimmed = _output(result, 2)
+        assert len(trimmed) <= 500
+        assert trimmed.startswith("[Trimmed: search output")
+        assert trimmed.endswith("...")
+
+    @pytest.mark.parametrize("preview_chars", [0, 1, 200, 5000])
+    @pytest.mark.parametrize("max_output_chars", [1, 10, 60, 100, 500])
+    def test_trimmed_output_fits_budget_for_any_config(
+        self, max_output_chars: int, preview_chars: int
+    ) -> None:
+        """max_output_chars is a budget: no config may produce a larger replacement."""
+        large = "x" * 6000
+        trimmer = ToolOutputTrimmer(max_output_chars=max_output_chars, preview_chars=preview_chars)
+        item = {"type": "function_call_output", "call_id": "c1", "output": large}
+        trimmed, saved = trimmer._trim_function_call_output(item, ("my_tool",))
+        if trimmed is None:
+            # Only skipped when not even the header fits; the original is left alone.
+            assert saved == 0
+            return
+        assert len(trimmed["output"]) <= max_output_chars
+        assert saved == len(large) - len(trimmed["output"])
+
+    def test_summary_reports_the_actual_preview_length(self) -> None:
+        """The header must not claim preview_chars when the preview is shorter."""
+        trimmer = ToolOutputTrimmer(max_output_chars=100, preview_chars=5000)
+        item = {"type": "function_call_output", "call_id": "c1", "output": "x" * 6000}
+        trimmed, _ = trimmer._trim_function_call_output(item, ("my_tool",))
+        assert trimmed is not None
+        output = trimmed["output"]
+        header, preview = output.split("\n", 1)
+        assert f"{len(preview) - len('...')} char preview" in header
+
+    def test_legacy_tool_search_results_fit_budget(self) -> None:
+        """The legacy tool_search results path shares the same budget."""
+        trimmer = ToolOutputTrimmer(max_output_chars=120, preview_chars=5000)
+        item = {
+            "type": "tool_search_output",
+            "call_id": "ts1",
+            "results": [{"text": "x" * 6000}],
+        }
+        trimmed, _ = trimmer._trim_legacy_tool_search_results(item)
+        assert trimmed is not None
+        assert len(trimmed["results"][0]["text"]) <= 120
 
     def test_unknown_tool_name_fallback(self) -> None:
         """When a function_call_output has no matching function_call, the summary
