@@ -201,25 +201,30 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        async with self._mutation_lock:
+            compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
-        force = args.get("force", False) if args else False
-        should_compact = force or self.should_trigger_compaction(
-            {
-                "response_id": self._response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
-        )
-
-        if not should_compact:
-            logger.debug(
-                "skip: decision hook declined compaction for %s (mode=%s)",
-                self._response_id,
-                resolved_mode,
+            force = args.get("force", False) if args else False
+            should_compact = force or self.should_trigger_compaction(
+                {
+                    "response_id": self._response_id,
+                    "compaction_mode": resolved_mode,
+                    "compaction_candidate_items": compaction_candidate_items,
+                    "session_items": session_items,
+                }
             )
-            return
+
+            if not should_compact:
+                logger.debug(
+                    "skip: decision hook declined compaction for %s (mode=%s)",
+                    self._response_id,
+                    resolved_mode,
+                )
+                return
+
+            # Capture the full stored history while the lock still excludes writers.
+            # It anchors the post-flight check that detects concurrent mutations.
+            snapshot_items = await self._get_all_underlying_session_items()
 
         self._deferred_response_id = None
         logger.debug(
@@ -247,19 +252,39 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         async with self._mutation_lock:
             previous_items = await self._get_all_underlying_session_items()
+            baseline_count = len(snapshot_items)
+            if previous_items[:baseline_count] != snapshot_items:
+                # A concurrent clear_session or pop_item rewrote history while the
+                # compaction request was in flight, so the snapshot no longer
+                # describes the stored items. Replacing them would resurrect
+                # deleted history; keep the current items and drop the caches.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                logger.warning(
+                    "Skipped compaction replacement for %s (mode=%s): session history "
+                    "diverged from the compaction snapshot while the request was in flight.",
+                    self._response_id,
+                    resolved_mode,
+                )
+                return
+            # Items appended concurrently while the request was in flight sit past
+            # the snapshot; carry them over so the replacement cannot drop them.
+            concurrent_tail = previous_items[baseline_count:]
             await self._replace_underlying_session_items(
-                output_items=output_items,
+                output_items=output_items + concurrent_tail,
                 previous_items=previous_items,
             )
-            self._compaction_candidate_items = select_compaction_candidate_items(output_items)
-            self._session_items = output_items
+            cached_items = output_items + _normalize_compaction_session_items(concurrent_tail)
+            self._compaction_candidate_items = select_compaction_candidate_items(cached_items)
+            self._session_items = cached_items
 
         logger.debug(
-            "compact: done for %s (mode=%s, output=%s, candidates=%s)",
+            "compact: done for %s (mode=%s, output=%s, candidates=%s, concurrent_tail=%s)",
             self._response_id,
             resolved_mode,
             len(output_items),
             len(self._compaction_candidate_items or []),
+            len(concurrent_tail),
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:

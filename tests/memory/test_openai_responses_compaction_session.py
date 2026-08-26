@@ -1780,6 +1780,220 @@ class TestCompactionStripsOrphanedIds:
         assert assistant_items[0]["id"] == "msg_aaa"
 
 
+class TestCompactionConcurrentMutations:
+    """Wrapper mutations racing the in-flight responses.compact call."""
+
+    def create_gated_compact_client(
+        self,
+        output_items: list[TResponseInputItem],
+        compact_entered: asyncio.Event,
+        release_compact: asyncio.Event,
+    ) -> MagicMock:
+        """Build a client whose compact call blocks until the test releases it."""
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = output_items
+
+        async def gated_compact(**kwargs: Any) -> MagicMock:
+            compact_entered.set()
+            await release_compact.wait()
+            return mock_compact_response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=gated_compact)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_concurrent_add_items_during_forced_compaction_survives(self) -> None:
+        """Items added while responses.compact is in flight must survive replacement."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"msg{i}"})
+            for i in range(3)
+        ]
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+        concurrent_user_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "written mid-flight"},
+        )
+        concurrent_assistant_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "reply mid-flight"},
+        )
+
+        underlying = SimpleListSession(history=history)
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        session = OpenAIResponsesCompactionSession(
+            session_id="concurrent-add",
+            underlying_session=underlying,
+            client=self.create_gated_compact_client(
+                [compacted_item], compact_entered, release_compact
+            ),
+            compaction_mode="input",
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        try:
+            await compact_entered.wait()
+            await session.add_items([concurrent_user_item, concurrent_assistant_item])
+            assert await underlying.get_items() == [
+                *history,
+                concurrent_user_item,
+                concurrent_assistant_item,
+            ]
+        finally:
+            release_compact.set()
+        await compaction_task
+
+        expected = [compacted_item, concurrent_user_item, concurrent_assistant_item]
+        assert await session.get_items() == expected
+        assert session._session_items == expected
+        assert session._compaction_candidate_items == [concurrent_assistant_item]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_add_items_during_threshold_compaction_survives(self) -> None:
+        """The default threshold trigger path must also preserve mid-flight writes."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"msg{i}"})
+            for i in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+        concurrent_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "written mid-flight"},
+        )
+
+        underlying = SimpleListSession(history=history)
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        mock_client = self.create_gated_compact_client(
+            [compacted_item], compact_entered, release_compact
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="concurrent-threshold",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction())
+        try:
+            await compact_entered.wait()
+            await session.add_items([concurrent_item])
+        finally:
+            release_compact.set()
+        await compaction_task
+
+        mock_client.responses.compact.assert_called_once()
+        assert await session.get_items() == [compacted_item, concurrent_item]
+        assert session._session_items == [compacted_item, concurrent_item]
+
+    @pytest.mark.asyncio
+    async def test_clear_session_during_compaction_is_not_resurrected(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A clear_session issued mid-flight must win over the stale snapshot."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"msg{i}"})
+            for i in range(3)
+        ]
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+
+        underlying = SimpleListSession(history=history)
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        session = OpenAIResponsesCompactionSession(
+            session_id="concurrent-clear",
+            underlying_session=underlying,
+            client=self.create_gated_compact_client(
+                [compacted_item], compact_entered, release_compact
+            ),
+            compaction_mode="input",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+            try:
+                await compact_entered.wait()
+                await session.clear_session()
+                assert await underlying.get_items() == []
+            finally:
+                release_compact.set()
+            await compaction_task
+
+        assert await session.get_items() == []
+        candidates, session_items = await session._ensure_compaction_candidates()
+        assert candidates == []
+        assert session_items == []
+        assert "Skipped compaction replacement" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_replacement_preserves_metadata_tail_across_storage_round_trip(
+        self, tmp_path
+    ) -> None:
+        """The snapshot prefix check must match items that round-tripped through storage."""
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "reply"}),
+            cast(
+                TResponseInputItem,
+                {
+                    "type": "function_call",
+                    "call_id": "call_history",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    TOOL_CALL_SESSION_DESCRIPTION_KEY: "Lookup private records.",
+                },
+            ),
+        ]
+        concurrent_item = cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "call_tail",
+                "name": "lookup",
+                "arguments": "{}",
+                TOOL_CALL_SESSION_TITLE_KEY: "Lookup",
+            },
+        )
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+
+        underlying = SQLiteSession("round-trip", str(tmp_path / "compaction_round_trip.db"))
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        session = OpenAIResponsesCompactionSession(
+            session_id="round-trip",
+            underlying_session=underlying,
+            client=self.create_gated_compact_client(
+                [compacted_item], compact_entered, release_compact
+            ),
+            compaction_mode="input",
+        )
+
+        # Warm the caches, then add through the wrapper so the cached items hold the
+        # normalized shapes while the underlying store keeps the raw metadata keys.
+        await session._ensure_compaction_candidates()
+        await session.add_items(history)
+        stored_history = [cast(dict, item) for item in await underlying.get_items()]
+        assert any(TOOL_CALL_SESSION_DESCRIPTION_KEY in item for item in stored_history)
+        assert all(
+            TOOL_CALL_SESSION_DESCRIPTION_KEY not in cast(dict, item)
+            for item in session._session_items or []
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        try:
+            await compact_entered.wait()
+            await session.add_items([concurrent_item])
+        finally:
+            release_compact.set()
+        await compaction_task
+
+        assert await underlying.get_items() == [compacted_item, concurrent_item]
+        assert session._session_items is not None
+        cached_tail = cast(dict, session._session_items[1])
+        assert cached_tail.get("call_id") == "call_tail"
+        assert TOOL_CALL_SESSION_TITLE_KEY not in cached_tail
+
+
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:
         mock_underlying = MagicMock(spec=Session)
