@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import subprocess
@@ -762,6 +763,61 @@ def test_shared_exporter_stays_cancelled_until_every_shutdown_releases(mock_clie
     assert mock_client.return_value.post.call_count == 1
 
     # Both requests released now, so the exporter is usable again.
+    assert not exporter._shutdown_event.is_set()
+
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_concurrent_shutdowns_leave_the_exporter_request_balanced(mock_client):
+    """`shutdown` is safe to call from several threads, so it must request only once.
+
+    The exporter counts outstanding requests and the worker releases one as it exits, so two
+    callers racing through the request path would leave a request outstanding forever -- and
+    every later processor giving up on its first transient failure instead of retrying.
+    """
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    class RendezvousExporter(BackendSpanExporter):
+        """Blocks inside the window between the request check and the request itself.
+
+        `shutdown` reaches the exporter by looking `_request_shutdown` up on it, which
+        happens after a processor has decided to make the request and before it has recorded
+        that it did. Holding two callers here is what an unsynchronized decision would let
+        happen; serialized, only one of them ever arrives and the rendezvous times out.
+        """
+
+        def __init__(self, arrived: threading.Barrier, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._arrived = arrived
+
+        @property
+        def _request_shutdown(self):
+            with contextlib.suppress(threading.BrokenBarrierError):
+                self._arrived.wait(timeout=0.5)
+            return super()._request_shutdown
+
+    exporter = RendezvousExporter(threading.Barrier(2), api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter, schedule_delay=60.0)
+
+    # Start the worker, so the single release on its way out has to balance every request.
+    processor.on_span_end(get_span(processor))
+    assert processor._worker_thread is not None
+    assert processor._worker_thread.is_alive()
+
+    threads = [
+        threading.Thread(target=processor.shutdown, kwargs={"timeout": 2.0}) for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
+    assert not processor._worker_thread.is_alive()
+    assert exporter._shutdown_requests == 0
     assert not exporter._shutdown_event.is_set()
 
     exporter.close()

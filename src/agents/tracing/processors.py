@@ -600,6 +600,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
         self._requested_exporter_shutdown = False
+        self._exporter_shutdown_lock = threading.Lock()
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -644,14 +645,8 @@ class BatchTraceProcessor(TracingProcessor):
         """
         Called when the application stops. We signal our thread to stop, then join it.
         """
-        if timeout is not None and not self._requested_exporter_shutdown:
-            request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
-            if callable(request_exporter_shutdown):
-                # Flagged before the request so the worker, which may exit as soon as the
-                # event below is set, always sees that the request is ours to release. Only
-                # ever requested once, so that our single release balances it.
-                self._requested_exporter_shutdown = True
-                request_exporter_shutdown()
+        if timeout is not None:
+            self._request_exporter_shutdown()
 
         self._shutdown_event.set()
 
@@ -662,15 +657,37 @@ class BatchTraceProcessor(TracingProcessor):
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=timeout)
             if self._worker_thread.is_alive():
+                # The worker outlived this shutdown, so it keeps the request until it stops.
                 logger.warning(
                     "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
                 )
-            # A worker that stopped released the request itself, at the end of `_run`. One
-            # that outlived this timeout still owns it and releases it when it does stop.
+            else:
+                # The worker released the request as it exited, unless it had already
+                # exited when we made it -- in which case this is the only release.
+                self._release_exporter_shutdown()
         else:
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
             self._release_exporter_shutdown()
+
+    def _request_exporter_shutdown(self) -> None:
+        """Ask the exporter to abandon its retry backoff, at most once for this processor.
+
+        Under the lock so that concurrent `shutdown` calls make a single request between
+        them: the exporter counts requests, and this processor has exactly one release to
+        balance it with.
+        """
+        with self._exporter_shutdown_lock:
+            if self._requested_exporter_shutdown:
+                return
+            request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
+            if not callable(request_exporter_shutdown):
+                return
+            # Flagged before the request so a worker exiting concurrently either waits here
+            # and then releases what we asked for, or finds nothing to release yet and
+            # leaves it to the caller below, which releases once the worker has stopped.
+            self._requested_exporter_shutdown = True
+            request_exporter_shutdown()
 
     def _release_exporter_shutdown(self) -> None:
         """Give a shutdown request we made back to the exporter, now that our worker is done.
@@ -684,12 +701,13 @@ class BatchTraceProcessor(TracingProcessor):
         processors' requests are counted separately by the exporter, so releasing ours never
         takes the cancellation away from theirs.
         """
-        if not self._requested_exporter_shutdown:
-            return
-        self._requested_exporter_shutdown = False
-        reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
-        if callable(reset_exporter_shutdown):
-            reset_exporter_shutdown()
+        with self._exporter_shutdown_lock:
+            if not self._requested_exporter_shutdown:
+                return
+            self._requested_exporter_shutdown = False
+            reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+            if callable(reset_exporter_shutdown):
+                reset_exporter_shutdown()
 
     def force_flush(self):
         """
