@@ -40,6 +40,7 @@ def test_every_integration_profile_has_exactly_one_credential_class() -> None:
         "packaging",
         "prospective-contract",
         "prospective-platform",
+        "containers",
         "security",
         "mcp-v1",
         "extras",
@@ -87,7 +88,15 @@ def test_live_profiles_refuse_untrusted_credentials_before_side_effects(
 
 @pytest.mark.parametrize(
     "profile",
-    ["packaging", "prospective-contract", "prospective-platform", "security", "mcp-v1", "extras"],
+    [
+        "packaging",
+        "prospective-contract",
+        "prospective-platform",
+        "containers",
+        "security",
+        "mcp-v1",
+        "extras",
+    ],
 )
 def test_local_only_profiles_remove_key_before_uv_child_process(
     profile: str, monkeypatch: pytest.MonkeyPatch
@@ -385,6 +394,50 @@ def test_successful_integration_run_requires_valid_junit_evidence(
 
 
 @pytest.mark.parametrize(
+    ("profile", "ignores_container_directory"),
+    [
+        ("mcp-v1", True),
+        ("prospective-contract", True),
+        ("containers", False),
+    ],
+)
+def test_only_containers_profile_collects_container_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile: str,
+    ignores_container_directory: bool,
+) -> None:
+    run_suite = _run_suite()
+    commands: list[list[str]] = []
+
+    def fake_run_pytest(command: list[str], *, env: dict[str, str]) -> tuple[int, str]:
+        _ = env
+        commands.append(command)
+        result_path = Path(command[-1].removeprefix("--junitxml="))
+        result_path.write_text(
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+            '<testcase name="selected" /></testsuite>',
+            encoding="utf-8",
+        )
+        return 0, "1 passed"
+
+    monkeypatch.setitem(run_suite.__globals__, "RESULTS", tmp_path)
+    monkeypatch.setitem(run_suite.__globals__, "run_pytest", fake_run_pytest)
+
+    run_suite(
+        tmp_path / "python",
+        tmp_path / "candidate.whl",
+        tmp_path / "candidate.tar.gz",
+        selection="containers" if profile == "containers" else "packaging",
+        environment_kind=profile,
+        profile=profile,
+    )
+
+    ignore_argument = f"--ignore={run_suite.__globals__['TESTS'] / 'containers'}"
+    assert (ignore_argument in commands[0]) is ignores_container_directory
+
+
+@pytest.mark.parametrize(
     ("profile", "strict"),
     [("release", True), ("security", True), ("packaging", False)],
 )
@@ -596,6 +649,58 @@ def test_packaging_profile_checks_dependency_present_contract_for_wheel_and_sdis
     assert all(suite["require_no_skips"] is True for suite in dependency_suites)
 
 
+def test_containers_profile_runs_one_strict_wheel_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    main = cast(Callable[[], None], namespace["main"])
+    wheel = tmp_path / "candidate.whl"
+    sdist = tmp_path / "candidate.tar.gz"
+    created: list[tuple[str, Path, str | None, tuple[str, ...]]] = []
+    suites: list[dict[str, Any]] = []
+
+    def fake_create_environment(
+        name: str,
+        distribution: Path,
+        *,
+        extras: bool = False,
+        optional_extra: str | None = None,
+        additional_requirements: tuple[str, ...] = (),
+    ) -> Path:
+        assert extras is False
+        created.append((name, distribution, optional_extra, additional_requirements))
+        return tmp_path / name / "python"
+
+    monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_STRICT", "0")
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "containers"])
+    monkeypatch.setitem(main.__globals__, "build_distributions", lambda: (wheel, sdist))
+    monkeypatch.setitem(main.__globals__, "create_environment", fake_create_environment)
+    monkeypatch.setitem(
+        main.__globals__, "run_suite", lambda *args, **kwargs: suites.append(kwargs)
+    )
+    monkeypatch.setattr(main.__globals__["shutil"], "rmtree", lambda *args, **kwargs: None)
+
+    main()
+
+    assert os.environ["OPENAI_AGENTS_INTEGRATION_STRICT"] == "1"
+    assert created == [
+        (
+            "containers",
+            wheel,
+            "dapr,docker",
+            (namespace["TESTCONTAINERS_REQUIREMENT"],),
+        )
+    ]
+    assert suites == [
+        {
+            "selection": "containers",
+            "environment_kind": "containers",
+            "profile": "containers",
+        }
+    ]
+
+
 def test_release_profile_enforces_strict_security_for_wheel_and_sdist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -666,7 +771,7 @@ def test_release_profile_enforces_strict_security_for_wheel_and_sdist(
         for suite in dependency_suites
     )
     assert all(suite["require_no_skips"] is True for suite in dependency_suites)
-    assert namespace["STRICT_PROFILES"] == frozenset({"release", "security"})
+    assert namespace["STRICT_PROFILES"] == frozenset({"containers", "release", "security"})
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])

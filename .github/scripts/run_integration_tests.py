@@ -17,6 +17,7 @@ RESULTS = WORKSPACE / "results"
 TESTS = ROOT / "integration_tests"
 CONTRACT_POLICY = ROOT / "tests" / "fixtures" / "released_api_contract_policy.json"
 PROSPECTIVE_CONTRACT_ENV = "OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT"
+TESTCONTAINERS_REQUIREMENT = "testcontainers==4.12.0"
 EXTRAS = "any-llm,litellm,realtime,voice"
 OPTIONAL_EXTRAS = (
     "any-llm",
@@ -29,13 +30,14 @@ OPTIONAL_EXTRAS = (
     "viz",
     "s3",
 )
-STRICT_PROFILES = frozenset({"release", "security"})
+STRICT_PROFILES = frozenset({"containers", "release", "security"})
 LOCAL_ONLY_CREDENTIAL_CLASS = "local-only"
 LIVE_CREDENTIAL_CLASS = "live"
 PROFILE_CREDENTIAL_CLASSES = {
     "packaging": LOCAL_ONLY_CREDENTIAL_CLASS,
     "prospective-contract": LOCAL_ONLY_CREDENTIAL_CLASS,
     "prospective-platform": LOCAL_ONLY_CREDENTIAL_CLASS,
+    "containers": LOCAL_ONLY_CREDENTIAL_CLASS,
     "security": LOCAL_ONLY_CREDENTIAL_CLASS,
     "mcp-v1": LOCAL_ONLY_CREDENTIAL_CLASS,
     "extras": LOCAL_ONLY_CREDENTIAL_CLASS,
@@ -276,11 +278,10 @@ def run_suite(
         "-c",
         str(TESTS / "pytest.ini"),
         str(TESTS),
-        "-v",
-        "--tb=short",
-        "-m",
-        selection,
     ]
+    if profile != "containers":
+        command.append(f"--ignore={TESTS / 'containers'}")
+    command.extend(["-v", "--tb=short", "-m", selection])
     result_path = RESULTS / profile / f"{environment_kind}.xml"
     result_path.parent.mkdir(parents=True, exist_ok=True)
     command.append(f"--junitxml={result_path}")
@@ -456,6 +457,22 @@ def main() -> None:
                 additional_env={"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": mcp_version},
                 profile=args.profile,
             )
+
+    if args.profile == "containers":
+        python = create_environment(
+            "containers",
+            wheel,
+            optional_extra="dapr,docker",
+            additional_requirements=(TESTCONTAINERS_REQUIREMENT,),
+        )
+        run_suite(
+            python,
+            wheel,
+            sdist,
+            selection="containers",
+            environment_kind="containers",
+            profile=args.profile,
+        )
 
     if args.profile in {
         "packaging",
