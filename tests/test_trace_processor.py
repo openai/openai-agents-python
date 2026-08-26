@@ -244,6 +244,60 @@ def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
     assert seen_deadlines[0] is not None
 
 
+def test_batch_trace_processor_shutdown_closes_the_exporter() -> None:
+    """An exporter that owns resources gets to release them, after the final flush."""
+    events: list[str] = []
+
+    class ClosingExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            events.append("export")
+
+        def close(self) -> None:
+            events.append("close")
+
+    processor = BatchTraceProcessor(exporter=ClosingExporter())
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown()
+
+    assert events == ["export", "close"]
+
+
+def test_batch_trace_processor_shutdown_closes_the_backend_exporter_client() -> None:
+    """The default exporter keeps a pooled HTTP client open for the life of the process.
+
+    Nothing in the shutdown chain used to close it, so the connection to the tracing
+    endpoint was left for interpreter teardown to reap -- a ResourceWarning under
+    ``-W error::ResourceWarning``, and one leaked pool per replaced processor.
+    """
+    exporter = BackendSpanExporter(api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter)
+
+    processor.shutdown()
+
+    assert exporter._client.is_closed
+
+
+def test_batch_trace_processor_shutdown_survives_exporter_close_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup is best-effort: a failing close must not break application shutdown."""
+
+    class BrokenCloseExporter(TracingExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            pass
+
+        def close(self) -> None:
+            raise RuntimeError("close boom")
+
+    processor = BatchTraceProcessor(exporter=BrokenCloseExporter())
+
+    with caplog.at_level(logging.ERROR):
+        processor.shutdown()
+
+    assert "exporter close failed" in caplog.text
+
+
 def test_batch_trace_processor_survives_exporter_exception():
     """A failing exporter must not kill the background worker thread.
 

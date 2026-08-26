@@ -644,6 +644,19 @@ class BatchTraceProcessor(TracingProcessor):
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
 
+        # Release whatever the exporter holds open -- the default one keeps a pooled HTTP
+        # client alive for the life of the process. Done last so the flush above still has
+        # it, and duck-typed like ``_request_shutdown`` because the interface does not
+        # require it.
+        close_exporter = getattr(self._exporter, "close", None)
+        if callable(close_exporter):
+            try:
+                close_exporter()
+            except Exception as exc:
+                log_model_and_tool_action_error(
+                    logger, "[non-fatal] Tracing: exporter close failed", exc
+                )
+
     def force_flush(self):
         """
         Forces an immediate flush of all queued spans.
