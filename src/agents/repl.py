@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import select
+import signal
 import sys
 import threading
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from types import FrameType
 from typing import Any
 
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
@@ -81,11 +84,46 @@ def _read_line_when_ready(fd: int, stop: threading.Event) -> str | None:
     return None
 
 
+@contextmanager
+def _catching_sigint(stop: threading.Event) -> Iterator[Callable[[], bool]]:
+    """Take SIGINT for the duration of the block, waking the reader waiting on ``stop``.
+
+    Ctrl+C only raises KeyboardInterrupt in the thread blocked on ``input()``. With the read
+    on a worker, nothing raises it there, and the interrupt reaches ``asyncio.Runner``
+    instead, which cancels the REPL task: the loop never takes the clean exit its
+    ``KeyboardInterrupt`` handler provides, and ``asyncio.run()`` re-raises the interrupt at
+    the call site as an uncaught traceback. Handling SIGINT here keeps the task alive so the
+    caller can stop the reader and raise KeyboardInterrupt itself, in the loop.
+
+    Yields a predicate reporting whether an interrupt arrived.
+    """
+    interrupted = False
+
+    def handle(signum: int, frame: FrameType | None) -> None:
+        nonlocal interrupted
+        interrupted = True
+        # All this needs to do is end the reader; the exception is raised by the caller.
+        stop.set()
+
+    try:
+        previous = signal.signal(signal.SIGINT, handle)
+    except ValueError:
+        # Handlers may only be installed from the main thread; elsewhere SIGINT is not ours
+        # to take, so leave it alone and report no interrupt.
+        yield lambda: False
+        return
+    try:
+        yield lambda: interrupted
+    finally:
+        signal.signal(signal.SIGINT, previous if previous is not None else signal.SIG_DFL)
+
+
 async def _read_user_input(prompt: str) -> str:
     """Read one line from stdin without holding the event loop or leaking a reader.
 
     Raises:
         EOFError: If stdin reached end of input.
+        KeyboardInterrupt: If a Ctrl+C arrived while waiting for the line.
     """
     fd = _interruptible_stdin_fd()
     if fd is None:
@@ -93,19 +131,22 @@ async def _read_user_input(prompt: str) -> str:
 
     print(prompt, end="", flush=True)
     stop = threading.Event()
-    reader = asyncio.ensure_future(asyncio.to_thread(_read_line_when_ready, fd, stop))
-    try:
-        line = await asyncio.shield(reader)
-    except asyncio.CancelledError:
-        # Ctrl+C cancels this task but cannot interrupt the worker, and the default executor
-        # is joined while the loop shuts down. Stop the reader and wait for it so no worker
-        # is still sitting on stdin once this coroutine is done; the poll interval bounds
-        # that wait.
-        stop.set()
-        with suppress(BaseException):
-            await asyncio.shield(reader)
-        raise
+    with _catching_sigint(stop) as interrupted:
+        reader = asyncio.ensure_future(asyncio.to_thread(_read_line_when_ready, fd, stop))
+        try:
+            line = await asyncio.shield(reader)
+        except asyncio.CancelledError:
+            # Cancelled from outside the REPL. The worker cannot be interrupted, and the
+            # default executor is joined while the loop shuts down. Stop the reader and wait
+            # for it so no worker is still sitting on stdin once this coroutine is done; the
+            # poll interval bounds that wait.
+            stop.set()
+            with suppress(BaseException):
+                await asyncio.shield(reader)
+            raise
 
+    if interrupted():
+        raise KeyboardInterrupt
     if line is None:
         raise EOFError
     return line

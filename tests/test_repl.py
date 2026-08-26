@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import signal
 import sys
 import threading
 from collections.abc import Iterator
@@ -237,6 +238,47 @@ async def test_cancelling_the_demo_loop_stops_the_stdin_reader(monkeypatch):
     # The reader returned before the coroutine finished, so nothing is left on stdin.
     assert exited.is_set()
     assert not model.calls
+
+
+@requires_terminal_stdin
+@pytest.mark.asyncio
+async def test_first_ctrl_c_exits_the_demo_loop_cleanly(monkeypatch):
+    """The first Ctrl+C at the prompt ends the loop the same way EOF does.
+
+    The reader runs on a worker thread, so nothing raises KeyboardInterrupt where the loop
+    waits. Left to the default handling the interrupt reaches ``asyncio.Runner`` instead,
+    which cancels the REPL task: the clean exit below is skipped and ``asyncio.run()``
+    re-raises the interrupt at the call site as an uncaught traceback.
+    """
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model)
+
+    reading = threading.Event()
+    read_line_when_ready = repl_module._read_line_when_ready
+
+    def tracked_reader(fd: int, stop: threading.Event) -> str | None:
+        reading.set()
+        return read_line_when_ready(fd, stop)
+
+    monkeypatch.setattr(repl_module, "_read_line_when_ready", tracked_reader)
+    monkeypatch.setattr("builtins.input", lambda *args: pytest.fail("stdin had no input"))
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    # No bytes are written, so the reader is still waiting when the interrupt arrives.
+    with _terminal_stdin(monkeypatch):
+        task = asyncio.create_task(run_demo_loop(agent, stream=False))
+        assert await asyncio.to_thread(reading.wait, 5)
+
+        # Raised on the main thread, exactly where a Ctrl+C would be delivered.
+        signal.raise_signal(signal.SIGINT)
+
+        # Returns instead of raising: neither the interrupt nor a cancellation escapes.
+        await asyncio.wait_for(task, timeout=5)
+
+    assert not model.calls
+    # SIGINT is left as it was found, so it still interrupts whatever runs next.
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
 
 
 @requires_terminal_stdin
