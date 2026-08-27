@@ -2477,6 +2477,77 @@ class TestCompactionConcurrentMutations:
         mock_client.responses.compact.assert_not_awaited()
         assert "Skipped compaction for resp_recorded" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_persisted_batch_survives_read_failure_after_append(self) -> None:
+        """A failing history read must not fail a batch the backend already holds.
+
+        Ordering under test: a response's batch is persisted through the
+        boundary hook while the underlying store fails every read issued
+        after an append. The count that seeds the boundary is read before
+        the append, so the hook records the boundary without touching the
+        failing read and the caller never sees an error for a turn that is
+        already stored; a read after the append would raise here, the run
+        would treat the persisted turn as failed, and a retry would append
+        it again. The compaction keyed on the response then proves the
+        recorded boundary equals the count a read after the append would
+        have produced: the turn persisted after the batch is preserved as
+        the tail.
+        """
+        turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        later_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn later"}
+        )
+        summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+
+        class ReadFailsAfterAppendSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self.add_calls = 0
+                self.failing = True
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_calls += 1
+                await super().add_items(items)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if self.failing and self.add_calls:
+                    raise RuntimeError("history read failed after the batch was appended")
+                return await super().get_items(limit)
+
+        underlying = ReadFailsAfterAppendSession()
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="read-failure-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([turn], response_id="resp_a")
+
+        # The append landed exactly once and the boundary bookkeeping finished
+        # even though every read after the append would have failed.
+        assert underlying.add_calls == 1
+        assert session._response_boundaries["resp_a"] == 1
+        assert session._response_boundaries_ever_recorded is True
+
+        underlying.failing = False
+        assert await underlying.get_items() == [turn]
+
+        await session.add_items([later_turn])
+        await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        # The recorded boundary matches the count a read after the append
+        # would have produced, so the turn persisted after the batch is the
+        # tail the replacement preserves.
+        assert await underlying.get_items() == [summary, later_turn]
+        assert await session.get_items() == [summary, later_turn]
+
 
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:

@@ -556,10 +556,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         between the batch and the count recorded for it, so run_compaction can
         later preserve everything past the boundary regardless of what other
         runs appended before its own snapshot.
+
+        The count that seeds the boundary is read before the append. The lock
+        excludes every other writer for the whole region, so that count plus
+        the batch length equals the count a read after the append would return,
+        and once the append succeeds the recording below is pure assignment
+        that cannot fail. A history read that failed after a successful append
+        would surface an error for a batch the backend already holds, and
+        retrying the turn would persist it again. When the read itself fails,
+        the append has not started, so no boundary is recorded, the ever
+        recorded flag stays untouched, and a retry begins clean.
         """
         async with self._mutation_lock:
+            boundary = len(await self._get_all_underlying_session_items()) + len(items)
             await self._add_items_locked(items)
-            boundary = len(await self._get_all_underlying_session_items())
             self._response_boundaries.pop(response_id, None)
             self._response_boundaries[response_id] = boundary
             self._response_boundaries_ever_recorded = True
