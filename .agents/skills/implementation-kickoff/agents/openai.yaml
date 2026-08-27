@@ -1,0 +1,6 @@
+interface:
+  display_name: "Implementation Kickoff"
+  short_description: "Run implementation in a fresh PR-ready worktree"
+  default_prompt: "Use $implementation-kickoff to start this implementation in a fresh worktree and leave one verified local commit."
+policy:
+  allow_implicit_invocation: false

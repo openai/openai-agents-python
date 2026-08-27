@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import dataclasses
+import inspect
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Generic
+
+from agents.prompts import Prompt
+
+from .. import _debug
+from ..agent import AgentBase
+from ..guardrail import OutputGuardrail
+from ..handoffs import Handoff
+from ..lifecycle import AgentHooksBase, RunHooksBase
+from ..logger import logger
+from ..run_context import RunContextWrapper, TContext
+from ..util._types import MaybeAwaitable
+
+RealtimeAgentHooks = AgentHooksBase[TContext, "RealtimeAgent[TContext]"]
+"""Agent hooks for `RealtimeAgent`s."""
+
+RealtimeRunHooks = RunHooksBase[TContext, "RealtimeAgent[TContext]"]
+"""Run hooks for `RealtimeAgent`s."""
+
+
+@dataclass
+class RealtimeAgent(AgentBase, Generic[TContext]):
+    """A specialized agent instance that is meant to be used within a `RealtimeSession` to build
+    voice agents. Due to the nature of this agent, some configuration options are not supported
+    that are supported by regular `Agent` instances. For example:
+    - `model` choice is not supported, as all RealtimeAgents will be handled by the same model
+      within a `RealtimeSession`.
+    - `modelSettings` is not supported, as all RealtimeAgents will be handled by the same model
+      within a `RealtimeSession`.
+    - `outputType` is not supported, as RealtimeAgents do not support structured outputs.
+    - `toolUseBehavior` is not supported, as all RealtimeAgents will be handled by the same model
+      within a `RealtimeSession`.
+    - `voice` can be configured on an `Agent` level; however, it cannot be changed after the first
+      agent within a `RealtimeSession` has spoken.
+
+    See `AgentBase` for base parameters that are shared with `Agent`s.
+    """
+
+    instructions: (
+        str
+        | Callable[
+            [RunContextWrapper[TContext], RealtimeAgent[TContext]],
+            MaybeAwaitable[str],
+        ]
+        | None
+    ) = None
+    """The instructions for the agent. Will be used as the "system prompt" when this agent is
+    invoked. Describes what the agent should do, and how it responds.
+
+    Can either be a string, or a function that dynamically generates instructions for the agent. If
+    you provide a function, it will be called with the context and the agent instance. It must
+    return a string.
+    """
+
+    prompt: Prompt | None = None
+    """A prompt object. Prompts allow you to dynamically configure the instructions, tools
+    and other config for an agent outside of your code. Only usable with OpenAI models.
+    """
+
+    handoffs: list[RealtimeAgent[Any] | Handoff[TContext, RealtimeAgent[Any]]] = field(
+        default_factory=list
+    )
+    """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
+    and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
+    modularity.
+    """
+
+    output_guardrails: list[OutputGuardrail[TContext]] = field(default_factory=list)
+    """A list of checks that run on the final output of the agent, after generating a response.
+    Runs only if the agent produces a final output.
+    """
+
+    hooks: RealtimeAgentHooks | None = None
+    """A class that receives callbacks on various lifecycle events for this agent.
+    """
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError(f"RealtimeAgent name must be a string, got {type(self.name).__name__}")
+        if not isinstance(self.tools, list):
+            raise TypeError(f"RealtimeAgent tools must be a list, got {type(self.tools).__name__}")
+        if not isinstance(self.handoffs, list):
+            raise TypeError(
+                f"RealtimeAgent handoffs must be a list, got {type(self.handoffs).__name__}"
+            )
+        if (
+            self.instructions is not None
+            and not isinstance(self.instructions, str)
+            and not callable(self.instructions)
+        ):
+            raise TypeError(
+                f"RealtimeAgent instructions must be a string, callable, or None, "
+                f"got {type(self.instructions).__name__}"
+            )
+
+    def clone(self, **kwargs: Any) -> RealtimeAgent[TContext]:
+        """Make a copy of the agent, with the given arguments changed.
+
+        Notes:
+            - Uses `dataclasses.replace`, which performs a **shallow copy** and never copies a
+              list attribute such as `tools`, `handoffs`, `mcp_servers`, or `output_guardrails`.
+              Each of those attributes is whatever the merged arguments hold.
+            - An attribute you do not pass arrives as the original agent's own list, so both
+              agents hold that one list and its entries. Appending through either agent, for
+              example `cloned.tools.append(extra_tool)`, therefore also changes the other.
+            - An attribute you do pass is used exactly as given, so it shares a list or an entry
+              with the original agent only where you reused one. `agent.clone(tools=agent.tools)`
+              still shares that list, while `agent.clone(tools=[other_tool])` shares nothing.
+            - To give the clone a list that no other agent holds, pass a new one, for example
+              `agent.clone(tools=[*agent.tools, extra_tool])`. The entries copied into it remain
+              the same objects the original agent holds.
+
+        Example:
+            ```python
+            new_agent = agent.clone(instructions="New instructions")
+            ```
+        """
+        return dataclasses.replace(self, **kwargs)
+
+    async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
+        """Get the system prompt for the agent."""
+        if isinstance(self.instructions, str):
+            return self.instructions
+        elif callable(self.instructions):
+            # Call once, then await if needed. Callable instances with async
+            # ``__call__`` are not coroutine functions, so checking
+            # ``iscoroutinefunction(self.instructions)`` would skip the await.
+            result = self.instructions(run_context, self)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        elif self.instructions is not None:
+            if _debug.DONT_LOG_MODEL_DATA:
+                logger.error("Instructions must be a string or a function")
+            else:
+                logger.error(
+                    "Instructions must be a string or a function, got %s", self.instructions
+                )
+
+        return None

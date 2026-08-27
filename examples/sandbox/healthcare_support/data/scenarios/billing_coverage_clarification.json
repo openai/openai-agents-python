@@ -1,0 +1,30 @@
+{
+  "scenario_id": "billing_coverage_clarification",
+  "description": "Patient received an unexpected imaging bill and wants coverage clarification.",
+  "transcript": "Hey, this is Luis Romero. I got a bill after an ultrasound on 2026-02-08 and I thought it was covered.\nMy insurance is Cigna and my member ID is CG-291001.\nCan someone explain what happened and what I should do now?",
+  "patient_metadata": {
+    "patient_id": "PAT-1004"
+  },
+  "followup_qa": {
+    "date of service": "2026-02-08",
+    "payer": "Cigna"
+  },
+  "expected": {
+    "intent": "billing_coverage_clarification",
+    "required_entities": {
+      "payer": "Cigna",
+      "member_id": "CG-291001"
+    },
+    "required_tool_calls": [
+      "insurance_eligibility_lookup"
+    ],
+    "required_resolution_elements": [
+      "billing coverage review",
+      "recommended next step"
+    ],
+    "expected_payer": "Cigna"
+  },
+  "gold": {
+    "expected_next_step": "Route to billing review with EOB and service date context."
+  }
+}

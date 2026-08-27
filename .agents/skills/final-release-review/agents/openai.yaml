@@ -1,0 +1,4 @@
+interface:
+  display_name: "Final Release Review"
+  short_description: "Plan and audit releases with docs coverage"
+  default_prompt: "Use $final-release-review to determine review mode, release intent, and the minimum compatible release type, audit the target, review open docs PR coverage, and draft Key Changes when the release is minor."

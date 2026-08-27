@@ -1,0 +1,3 @@
+# `Traces`
+
+::: agents.tracing.traces

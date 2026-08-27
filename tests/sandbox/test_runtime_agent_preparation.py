@@ -1,0 +1,321 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+from agents import UserError
+from agents.models.default_models import get_default_model
+from agents.run_context import RunContextWrapper
+from agents.sandbox import (
+    MemoryReadConfig,
+    SandboxWorkspaceScope,
+    runtime_agent_preparation as sandbox_prep,
+)
+from agents.sandbox.capabilities import Capability, Compaction, Memory
+from agents.sandbox.entries import BaseEntry, File
+from agents.sandbox.manifest import Manifest
+from agents.sandbox.sandbox_agent import SandboxAgent
+from agents.sandbox.types import User
+from agents.testing import scripted_sandbox_session
+
+
+def test_sandbox_agent_normalizes_first_party_dictionary_configuration() -> None:
+    agent = SandboxAgent(
+        name="sandbox",
+        model_settings={"reasoning": {"context": "all_turns"}},
+        default_manifest={"root": "/workspace"},
+        run_as={"name": "agent"},
+    )
+
+    assert agent.model_settings.reasoning is not None
+    assert agent.model_settings.reasoning.context == "all_turns"
+    assert isinstance(agent.default_manifest, Manifest)
+    assert isinstance(agent.run_as, User)
+    assert agent.run_as.name == "agent"
+
+
+def test_sandbox_agent_rejects_untrusted_manifest_path_grants() -> None:
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"sandbox\.default_manifest\.extra_path_grants must be configured "
+            r"on a trusted Manifest"
+        ),
+    ):
+        SandboxAgent(name="sandbox", default_manifest={"extra_path_grants": [{"path": "/tmp"}]})
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        Manifest(root="/workspace").model_dump(),
+        Manifest(root="/workspace").model_dump(mode="json"),
+    ],
+)
+def test_sandbox_agent_accepts_serialized_manifest_without_path_grants(
+    manifest: dict[str, Any],
+) -> None:
+    agent = SandboxAgent(name="sandbox", default_manifest=manifest)
+
+    assert isinstance(agent.default_manifest, Manifest)
+    assert agent.default_manifest.extra_path_grants == ()
+
+
+class _Capability:
+    def __init__(self, fragment: str | None, *, type: str = "test") -> None:
+        self.type = type
+        self.fragment = fragment
+        self.manifests: list[Manifest] = []
+        self.sampling_params_calls: list[dict[str, object]] = []
+
+    def tools(self) -> list[object]:
+        return []
+
+    def sampling_params(self, sampling_params: dict[str, object]) -> dict[str, object]:
+        self.sampling_params_calls.append(dict(sampling_params))
+        return {}
+
+    def required_capability_types(self) -> set[str]:
+        return set()
+
+    async def instructions(self, manifest: Manifest) -> str | None:
+        self.manifests.append(manifest)
+        return self.fragment
+
+
+def _session_with_manifest(manifest: Manifest | None):
+    return scripted_sandbox_session(manifest=manifest)
+
+
+def test_prepare_sandbox_agent_passes_session_manifest_to_capability_instructions():
+    manifest = Manifest(root="/workspace")
+    capability = _Capability("capability fragment")
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            base_instructions="base instructions",
+            instructions="additional instructions",
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=cast(list[Capability], [capability]),
+    )
+    instructions = cast(
+        Callable[[RunContextWrapper[object], SandboxAgent[object]], Awaitable[str | None]],
+        prepared.instructions,
+    )
+
+    result: str | None = asyncio.run(
+        cast(
+            Coroutine[Any, Any, str | None],
+            instructions(
+                cast(RunContextWrapper[object], None),
+                cast(SandboxAgent[object], prepared),
+            ),
+        )
+    )
+
+    assert result == (
+        "base instructions\n\n"
+        "# Agent instructions\n\n"
+        "additional instructions\n\n"
+        "# Sandbox capability instructions\n\n"
+        "capability fragment\n\n"
+        f"{sandbox_prep._filesystem_instructions(manifest)}"
+    )
+    assert capability.manifests == [manifest]
+
+
+def test_prepare_sandbox_agent_wraps_capabilities_without_agent_instructions():
+    manifest = Manifest(root="/workspace")
+    capability = _Capability("capability fragment")
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            base_instructions="base instructions",
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=cast(list[Capability], [capability]),
+    )
+    instructions = cast(
+        Callable[[RunContextWrapper[object], SandboxAgent[object]], Awaitable[str | None]],
+        prepared.instructions,
+    )
+
+    result: str | None = asyncio.run(
+        cast(
+            Coroutine[Any, Any, str | None],
+            instructions(
+                cast(RunContextWrapper[object], None),
+                cast(SandboxAgent[object], prepared),
+            ),
+        )
+    )
+
+    assert result == (
+        "base instructions\n\n"
+        "# Sandbox capability instructions\n\n"
+        "capability fragment\n\n"
+        f"{sandbox_prep._filesystem_instructions(manifest)}"
+    )
+    assert capability.manifests == [manifest]
+
+
+def test_prepare_sandbox_agent_passes_default_model_to_capability_sampling_params() -> None:
+    manifest = Manifest(root="/workspace")
+    capability = _Capability(None)
+
+    sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="base instructions",
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=cast(list[Capability], [capability]),
+    )
+
+    assert capability.sampling_params_calls == [{"model": get_default_model()}]
+
+
+def test_prepare_sandbox_agent_prepares_default_compaction_policy() -> None:
+    manifest = Manifest(root="/workspace")
+
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="base instructions",
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=[Compaction()],
+    )
+
+    extra_args = prepared.model_settings.extra_args
+    assert extra_args is not None
+    assert "context_management" in extra_args
+    assert "model" not in extra_args
+
+
+def test_prepare_sandbox_agent_uses_default_sandbox_instructions_when_base_missing():
+    manifest = Manifest(root="/workspace")
+    capability = _Capability("capability fragment")
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="additional instructions",
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=cast(list[Capability], [capability]),
+    )
+    instructions = cast(
+        Callable[[RunContextWrapper[object], SandboxAgent[object]], Awaitable[str | None]],
+        prepared.instructions,
+    )
+
+    result: str | None = asyncio.run(
+        cast(
+            Coroutine[Any, Any, str | None],
+            instructions(
+                cast(RunContextWrapper[object], None),
+                cast(SandboxAgent[object], prepared),
+            ),
+        )
+    )
+
+    default_instructions = sandbox_prep.get_default_sandbox_instructions()
+    assert default_instructions is not None
+    assert result == (
+        f"{default_instructions}\n\n"
+        "# Agent instructions\n\n"
+        "additional instructions\n\n"
+        "# Sandbox capability instructions\n\n"
+        "capability fragment\n\n"
+        f"{sandbox_prep._filesystem_instructions(manifest)}"
+    )
+    assert capability.manifests == [manifest]
+
+
+def test_filesystem_instructions_tell_model_to_ls_when_manifest_tree_is_truncated() -> None:
+    entries: dict[str | Path, BaseEntry] = {
+        f"file_{index:03}.txt": File(content=b"", description="x" * 40) for index in range(200)
+    }
+    manifest = Manifest(root="/workspace", entries=entries)
+
+    result = sandbox_prep._filesystem_instructions(manifest)
+
+    assert "... (truncated " in result
+    assert (
+        "The filesystem layout above was truncated. "
+        "Use `ls` to explore specific directories before relying on omitted paths."
+    ) in result
+
+
+def test_filesystem_instructions_describe_run_working_directory() -> None:
+    manifest = Manifest(root="/workspace", entries={"tasks/a": File(content=b"")})
+
+    result = sandbox_prep._filesystem_instructions(
+        manifest,
+        SandboxWorkspaceScope.from_cwd("tasks/a"),
+    )
+
+    assert "For this run, the working directory is `/workspace/tasks/a`." in result
+    assert (
+        "Relative paths passed to the built-in `exec_command`, `view_image`, and `apply_patch` "
+        "tools resolve from this directory."
+    ) in result
+    assert "Other sandbox tools follow their own path contract." in result
+    assert "The session workspace root remains `/workspace`." in result
+    assert (
+        "The working directory changes path resolution; it does not isolate this run from the "
+        "rest of the session workspace."
+    ) in result
+    assert (
+        "Files outside the working directory may be visible to or shared with other runs." in result
+    )
+
+
+def test_prepare_sandbox_agent_validates_required_capabilities() -> None:
+    manifest = Manifest(root="/workspace")
+
+    with pytest.raises(UserError, match="Memory requires missing capabilities: filesystem, shell"):
+        sandbox_prep.prepare_sandbox_agent(
+            agent=SandboxAgent(
+                name="sandbox",
+                instructions="base instructions",
+                capabilities=[Memory()],
+            ),
+            session=_session_with_manifest(manifest),
+            capabilities=[Memory()],
+        )
+
+    with pytest.raises(UserError, match="Memory requires missing capabilities: shell"):
+        sandbox_prep.prepare_sandbox_agent(
+            agent=SandboxAgent(
+                name="sandbox",
+                instructions="base instructions",
+                capabilities=[Memory(read=MemoryReadConfig(live_update=False), generate=None)],
+            ),
+            session=_session_with_manifest(manifest),
+            capabilities=[Memory(read=MemoryReadConfig(live_update=False), generate=None)],
+        )
+
+    prepared = sandbox_prep.prepare_sandbox_agent(
+        agent=SandboxAgent(
+            name="sandbox",
+            instructions="base instructions",
+            capabilities=[Memory()],
+        ),
+        session=_session_with_manifest(manifest),
+        capabilities=cast(
+            list[Capability],
+            [
+                Memory(),
+                _Capability(None, type="filesystem"),
+                _Capability(None, type="shell"),
+            ],
+        ),
+    )
+
+    assert prepared.name == "sandbox"

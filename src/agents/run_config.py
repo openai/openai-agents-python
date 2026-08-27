@@ -1,0 +1,629 @@
+from __future__ import annotations
+
+import inspect
+import os
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import PurePath
+from typing import TYPE_CHECKING, Any, Generic, Literal
+
+from pydantic import TypeAdapter
+from typing_extensions import NotRequired, TypedDict
+
+from ._config_coercion import (
+    _declared_dataclass_type,
+    coerce_dataclass_config,
+    coerce_pydantic_config,
+)
+from .guardrail import InputGuardrail, OutputGuardrail
+from .handoffs import HandoffHistoryMapper, HandoffInputFilter
+from .items import TResponseInputItem
+from .lifecycle import RunHooks
+from .memory import Session, SessionInputCallback, SessionSettings
+from .memory.session_settings import (
+    _coerce_session_settings,
+    _declared_session_settings_type,
+)
+from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
+from .models.interface import Model, ModelProvider
+from .models.multi_provider import MultiProvider
+from .run_context import TContext
+from .run_error_handlers import RunErrorHandlers
+from .tracing import TracingConfig
+from .util._types import MaybeAwaitable
+
+if TYPE_CHECKING:
+    from .agent import Agent
+    from .run_context import RunContextWrapper
+    from .sandbox.manifest import Manifest
+    from .sandbox.session.base_sandbox_session import BaseSandboxSession
+    from .sandbox.session.sandbox_client import BaseSandboxClient
+    from .sandbox.session.sandbox_session_state import SandboxSessionState
+    from .sandbox.snapshot import SnapshotBase, SnapshotSpec
+
+
+DEFAULT_MAX_TURNS = 10
+DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4
+DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
+DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
+
+
+def _default_trace_include_sensitive_data() -> bool:
+    """Return the default for trace_include_sensitive_data based on environment."""
+    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+@dataclass
+class ModelInputData:
+    """Container for the data that will be sent to the model."""
+
+    input: list[TResponseInputItem]
+    instructions: str | None
+
+
+@dataclass
+class CallModelData(Generic[TContext]):
+    """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
+
+    model_data: ModelInputData
+    agent: Agent[TContext]
+    context: TContext | None
+
+
+CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+ReasoningItemIdPolicy = Literal["preserve", "omit"]
+ToolNotFoundBehavior = Literal["raise_error", "return_error_to_model"]
+ToolNameCollisionPolicy = Literal["warn", "error"]
+
+
+@dataclass
+class ToolErrorFormatterArgs(Generic[TContext]):
+    """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
+
+    kind: Literal["approval_rejected", "tool_not_found"]
+    """The category of tool error being formatted."""
+
+    tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
+    """The tool runtime that produced the error."""
+
+    tool_name: str
+    """The name of the tool that produced the error."""
+
+    call_id: str
+    """The unique tool call identifier."""
+
+    default_message: str
+    """The SDK default message for this error kind."""
+
+    run_context: RunContextWrapper[TContext]
+    """The active run context for the current execution."""
+
+
+ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
+
+
+@dataclass
+class OutputGuardrailBlockedMessageArgs(Generic[TContext]):
+    """Data passed to output guardrail blocked-message formatters."""
+
+    default_message: str
+    """The SDK default data-free placeholder."""
+
+    guardrail_name: str
+    """The name of the output guardrail that triggered the tripwire."""
+
+    agent: Agent[Any]
+    """The agent whose final output was rejected."""
+
+    run_context: RunContextWrapper[TContext]
+    """The active run context wrapper."""
+
+
+# Keep this formatter synchronous. It runs after a terminal tool output is rejected but before
+# every replay and persistence owner is rebuilt with the data-free replacement. Awaiting
+# application code at that boundary can leave the rejected output reachable through cancellation
+# traceback locals or partially sanitized state. Async support therefore requires a redesign of
+# the redaction boundary, not merely awaiting the formatter result here.
+OutputGuardrailBlockedMessageFormatter = Callable[
+    [OutputGuardrailBlockedMessageArgs[Any]], str | None
+]
+
+
+@dataclass
+class ToolExecutionConfig:
+    """Grouped SDK-side execution settings for local tool calls."""
+
+    max_function_tool_concurrency: int | None = None
+    """Maximum number of local function tool calls to execute concurrently.
+
+    Set to `None` to preserve the default behavior, which starts all function tool calls
+    emitted in a turn. This does not change provider-side `parallel_tool_calls` behavior.
+    """
+
+    pre_approval_tool_input_guardrails: bool = False
+    """Run function tool input guardrails before emitting a pending approval interruption.
+
+    The same guardrails still run again immediately before tool execution after approval.
+    """
+
+    def __post_init__(self) -> None:
+        if self.max_function_tool_concurrency is not None and (
+            self.max_function_tool_concurrency < 1
+        ):
+            raise ValueError("tool_execution.max_function_tool_concurrency must be at least 1")
+        if not isinstance(self.pre_approval_tool_input_guardrails, bool):
+            raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
+
+
+@dataclass
+class SandboxConcurrencyLimits:
+    """Concurrency limits for sandbox materialization work."""
+
+    manifest_entries: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
+    """Maximum number of manifest entries to materialize concurrently per sandbox session.
+
+    Set to `None` to disable this manifest entry limit.
+    """
+
+    local_dir_files: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
+    """Maximum number of files to copy concurrently for each local_dir manifest entry.
+
+    Set to `None` to disable this per-local-dir file copy limit.
+    """
+
+    def validate(self) -> None:
+        if self.manifest_entries is not None and self.manifest_entries < 1:
+            raise ValueError("concurrency_limits.manifest_entries must be at least 1")
+        if self.local_dir_files is not None and self.local_dir_files < 1:
+            raise ValueError("concurrency_limits.local_dir_files must be at least 1")
+
+
+@dataclass
+class SandboxArchiveLimits:
+    """Resource limits for sandbox archive extraction."""
+
+    max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES
+    """Maximum archive input bytes accepted by `BaseSandboxSession.extract()`.
+
+    Set to `None` to disable this input-size limit.
+    """
+
+    max_extracted_bytes: int | None = DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES
+    """Maximum declared bytes that an archive may extract.
+
+    Set to `None` to disable this extracted-size limit.
+    """
+
+    max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS
+    """Maximum number of extractable archive members.
+
+    Set to `None` to disable this member-count limit.
+    """
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.max_input_bytes is not None and self.max_input_bytes < 1:
+            raise ValueError("archive_limits.max_input_bytes must be at least 1")
+        if self.max_extracted_bytes is not None and self.max_extracted_bytes < 1:
+            raise ValueError("archive_limits.max_extracted_bytes must be at least 1")
+        if self.max_members is not None and self.max_members < 1:
+            raise ValueError("archive_limits.max_members must be at least 1")
+
+
+@dataclass
+class SandboxRunConfig:
+    """Grouped sandbox runtime configuration for `Runner`."""
+
+    client: BaseSandboxClient[Any] | None = None
+    """Sandbox client used to create or resume sandbox sessions."""
+
+    options: Any | None = None
+    """Sandbox-client-specific options used when creating a fresh session."""
+
+    session: BaseSandboxSession | None = None
+    """Live sandbox session override for the current process."""
+
+    session_state: SandboxSessionState | None = None
+    """Explicit sandbox session state to resume from when not using `RunState` payloads."""
+
+    manifest: Manifest | None = None
+    """Optional sandbox manifest override for fresh session creation."""
+
+    snapshot: SnapshotSpec | SnapshotBase | None = None
+    """Optional sandbox snapshot used for fresh session creation."""
+
+    concurrency_limits: SandboxConcurrencyLimits = field(default_factory=SandboxConcurrencyLimits)
+    """Concurrency limits for sandbox materialization work."""
+
+    archive_limits: SandboxArchiveLimits | None = None
+    """Resource limits for sandbox archive extraction.
+
+    Set to `None` to preserve the default behavior with no SDK archive resource limits.
+    Use `SandboxArchiveLimits()` to enable SDK defaults.
+    """
+
+    cwd: str | PurePath | None = None
+    """Optional model-facing working directory relative to the sandbox workspace root.
+
+    Relative paths used by the built-in `exec_command`, `view_image`, and `apply_patch` tools
+    resolve from this directory. Custom path-bearing capabilities must apply their bound
+    `SandboxWorkspaceScope` explicitly. The directory must exist and be accessible to the
+    configured sandbox user when the runner validates `cwd`; for a fresh session, the runner
+    materializes the manifest before that validation.
+    This setting changes relative-path resolution only. It does not confine the run to `cwd`,
+    prevent access to other paths allowed by the shared session's workspace policy, change
+    `Manifest.root`, or change direct `BaseSandboxSession` path behavior.
+    """
+
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            client: BaseSandboxClient[Any] | None = None,
+            options: Any | None = None,
+            session: BaseSandboxSession | None = None,
+            session_state: SandboxSessionState | None = None,
+            manifest: Manifest | dict[str, Any] | None = None,
+            snapshot: SnapshotSpec | SnapshotBase | dict[str, Any] | None = None,
+            concurrency_limits: SandboxConcurrencyLimits | dict[str, Any] = ...,
+            archive_limits: SandboxArchiveLimits | dict[str, Any] | None = None,
+            cwd: str | PurePath | None = None,
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        if self.cwd is not None:
+            from .sandbox.workspace_paths import normalize_sandbox_cwd
+
+            self.cwd = normalize_sandbox_cwd(self.cwd).as_posix()
+        if isinstance(self.manifest, dict):
+            from .sandbox.manifest import _coerce_manifest
+
+            self.manifest = _coerce_manifest(self.manifest, parameter_name="sandbox.manifest")
+        if isinstance(self.snapshot, dict):
+            from .sandbox.snapshot import SnapshotBase, SnapshotSpecUnion
+
+            if "id" in self.snapshot:
+                self.snapshot = SnapshotBase.parse(self.snapshot)
+            else:
+                self.snapshot = TypeAdapter(SnapshotSpecUnion).validate_python(self.snapshot)
+        if isinstance(self.options, dict) and self.client is not None:
+            from .sandbox.session.sandbox_client import BaseSandboxClientOptions
+
+            options_type = BaseSandboxClientOptions._options_class_for_type(self.client.backend_id)
+            if options_type is not None:
+                options = self.options
+                explicit_type = options.get("type")
+                if explicit_type is not None and explicit_type != self.client.backend_id:
+                    raise ValueError(
+                        f"sandbox.options type `{explicit_type}` does not match selected "
+                        f"sandbox client backend `{self.client.backend_id}`"
+                    )
+                if "type" not in options:
+                    options = {
+                        **options,
+                        "type": options_type.model_fields["type"].default,
+                    }
+                self.options = coerce_pydantic_config(
+                    options,
+                    options_type,
+                    parameter_name="sandbox.options",
+                )
+            elif self.client.backend_id == "blaxel":
+                from .extensions.sandbox.blaxel.sandbox import (
+                    BlaxelSandboxClient,
+                    BlaxelSandboxClientOptions,
+                )
+
+                if isinstance(self.client, BlaxelSandboxClient):
+                    self.options = coerce_dataclass_config(
+                        self.options,
+                        BlaxelSandboxClientOptions,
+                        parameter_name="sandbox.options",
+                    )
+        self.concurrency_limits = coerce_dataclass_config(
+            self.concurrency_limits,
+            _declared_dataclass_type(
+                type(self),
+                "concurrency_limits",
+                SandboxConcurrencyLimits,
+            ),
+            parameter_name="sandbox.concurrency_limits",
+        )
+        if self.archive_limits is not None:
+            self.archive_limits = coerce_dataclass_config(
+                self.archive_limits,
+                _declared_dataclass_type(
+                    type(self),
+                    "archive_limits",
+                    SandboxArchiveLimits,
+                ),
+                parameter_name="sandbox.archive_limits",
+            )
+
+
+@dataclass
+class RunConfig:
+    """Configures settings for the entire agent run."""
+
+    model: str | Model | None = None
+    """The model to use for the entire agent run. If set, will override the model set on every
+    agent. The model_provider passed in below must be able to resolve this model name.
+    """
+
+    model_provider: ModelProvider = field(default_factory=MultiProvider)
+    """The model provider to use when looking up string model names. Defaults to OpenAI."""
+
+    model_settings: ModelSettings | None = None
+    """Configure global model settings. Any non-null values will override the agent-specific model
+    settings. Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
+    """
+
+    handoff_input_filter: HandoffInputFilter | None = None
+    """A global input filter to apply to all handoffs. If `Handoff.input_filter` is set, then that
+    will take precedence. The input filter allows you to edit the inputs that are sent to the new
+    agent. See the documentation in `Handoff.input_filter` for more details. Server-managed
+    conversations (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`)
+    do not support handoff input filters.
+    """
+
+    nest_handoff_history: bool = False
+    """Opt-in beta: compact prior run history into ordered assistant summary segments while
+    preserving lossless message items in their original positions. This is disabled by default
+    while we stabilize nested handoffs; set to True to enable the compacted transcript behavior.
+    Server-managed conversations
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
+    disable this behavior with a warning.
+    """
+
+    handoff_history_mapper: HandoffHistoryMapper | None = None
+    """Optional function that receives the normalized transcript (history + handoff items) and
+    returns the input history that should be passed to the next agent. When left as `None`, the
+    runner uses ordered summary segments around lossless message items. When supplied, the
+    function's return value is used as the exact input history. This function only runs when
+    `nest_handoff_history` is True.
+    """
+
+    input_guardrails: list[InputGuardrail[Any]] | None = None
+    """A list of input guardrails to run on the initial run input."""
+
+    output_guardrails: list[OutputGuardrail[Any]] | None = None
+    """A list of output guardrails to run on the final output of the run."""
+
+    tracing_disabled: bool = False
+    """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
+    """
+
+    tracing: TracingConfig | None = None
+    """Tracing configuration for this run."""
+
+    trace_include_sensitive_data: bool = field(
+        default_factory=_default_trace_include_sensitive_data
+    )
+    """Whether we include potentially sensitive data (for example: inputs/outputs of tool calls or
+    LLM generations) in traces. If False, we'll still create spans for these events, but the
+    sensitive data will not be included.
+    """
+
+    workflow_name: str = "Agent workflow"
+    """The name of the run, used for tracing. Should be a logical name for the run, like
+    "Code generation workflow" or "Customer support agent".
+    """
+
+    trace_id: str | None = None
+    """A custom trace ID to use for tracing. If not provided, we will generate a new trace ID."""
+
+    group_id: str | None = None
+    """
+    A grouping identifier to use for tracing, to link multiple traces from the same conversation
+    or process. For example, you might use a chat thread ID.
+    """
+
+    trace_metadata: dict[str, Any] | None = None
+    """
+    An optional dictionary of additional metadata to include with the trace.
+    """
+
+    session_input_callback: SessionInputCallback | None = None
+    """Defines how to handle session history when new input is provided.
+    - `None` (default): The new input is appended to the session history.
+    - `SessionInputCallback`: A custom function that receives the history and new input, and
+      returns the desired combined list of items.
+    """
+
+    call_model_input_filter: CallModelInputFilter | None = None
+    """
+    Optional callback that is invoked immediately before calling the model. It receives the current
+    agent, context and the model input (instructions and input items), and must return a possibly
+    modified `ModelInputData` to use for the model call.
+
+    This allows you to edit the input sent to the model e.g. to stay within a token limit.
+    For example, you can use this to add a system prompt to the input.
+    """
+
+    tool_error_formatter: ToolErrorFormatter | None = None
+    """Optional callback that formats tool error messages returned to the model.
+
+    Returning ``None`` falls back to the SDK default message.
+    """
+
+    session_settings: SessionSettings | None = None
+    """Configure session settings. Any non-null values will override the session's default
+    settings. Used to control session behavior like the number of items to retrieve.
+    """
+
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+    """Controls how reasoning items are converted to next-turn model input.
+
+    - ``None`` / ``"preserve"`` keeps reasoning item IDs as-is.
+    - ``"omit"`` strips reasoning item IDs from model input built by the runner.
+    """
+
+    sandbox: SandboxRunConfig | None = None
+    """Optional sandbox runtime configuration for `SandboxAgent` execution."""
+
+    tool_execution: ToolExecutionConfig | None = None
+    """Optional SDK-side execution settings for local tool calls."""
+
+    tool_not_found_behavior: ToolNotFoundBehavior = "raise_error"
+    """Controls unresolved function tool calls emitted by the model.
+
+    - ``"raise_error"`` preserves the default behavior and raises ``ModelBehaviorError``.
+    - ``"return_error_to_model"`` returns a model-visible ``function_call_output`` error and lets
+      the run continue.
+    """
+
+    tool_name_collision_policy: ToolNameCollisionPolicy = "warn"
+    """Controls collisions between function tool and handoff names.
+
+    - ``"warn"`` logs an actionable warning and exposes only the current dispatch winner.
+    - ``"error"`` raises ``UserError`` before the model is called.
+
+    Existing strict validation for namespaced and deferred-loading tools is unchanged.
+    """
+
+    output_guardrail_blocked_message: str | OutputGuardrailBlockedMessageFormatter | None = None
+    """Customize the data-free placeholder retained for terminal tool output rejected by an
+    output guardrail.
+
+    Pass a non-empty string or a synchronous formatter that receives safe run metadata. Returning
+    ``None`` or an invalid value, or raising from the formatter, uses the SDK default. The rejected
+    output and guardrail ``output_info`` are never passed to the formatter.
+    """
+
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            model: str | Model | None = None,
+            model_provider: ModelProvider = ...,
+            model_settings: ModelSettings | dict[str, Any] | None = None,
+            handoff_input_filter: HandoffInputFilter | None = None,
+            nest_handoff_history: bool = False,
+            handoff_history_mapper: HandoffHistoryMapper | None = None,
+            input_guardrails: list[InputGuardrail[Any]] | None = None,
+            output_guardrails: list[OutputGuardrail[Any]] | None = None,
+            tracing_disabled: bool = False,
+            tracing: TracingConfig | None = None,
+            trace_include_sensitive_data: bool = ...,
+            workflow_name: str = "Agent workflow",
+            trace_id: str | None = None,
+            group_id: str | None = None,
+            trace_metadata: dict[str, Any] | None = None,
+            session_input_callback: SessionInputCallback | None = None,
+            call_model_input_filter: CallModelInputFilter | None = None,
+            tool_error_formatter: ToolErrorFormatter | None = None,
+            session_settings: SessionSettings | dict[str, Any] | None = None,
+            reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+            sandbox: SandboxRunConfig | dict[str, Any] | None = None,
+            tool_execution: ToolExecutionConfig | dict[str, Any] | None = None,
+            tool_not_found_behavior: ToolNotFoundBehavior = "raise_error",
+            tool_name_collision_policy: ToolNameCollisionPolicy = "warn",
+            output_guardrail_blocked_message: (
+                str | OutputGuardrailBlockedMessageFormatter | None
+            ) = None,
+        ) -> None: ...
+
+    def __post_init__(self) -> None:
+        if self.tool_name_collision_policy not in ("warn", "error"):
+            raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
+        blocked_message = self.output_guardrail_blocked_message
+        if type(blocked_message) is str:
+            if not blocked_message:
+                raise ValueError("output_guardrail_blocked_message must be non-empty")
+        elif isinstance(blocked_message, str):
+            raise TypeError(
+                "output_guardrail_blocked_message must be a built-in string, callable, or None"
+            )
+        elif blocked_message is not None and not callable(blocked_message):
+            raise TypeError("output_guardrail_blocked_message must be a string, callable, or None")
+        elif inspect.iscoroutinefunction(blocked_message):
+            raise TypeError("output_guardrail_blocked_message formatter must be synchronous")
+        if self.model_settings is not None:
+            self.model_settings = _coerce_model_settings(
+                self.model_settings,
+                parameter_name="RunConfig model_settings",
+                model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
+            )
+        if self.session_settings is not None:
+            self.session_settings = _coerce_session_settings(
+                self.session_settings,
+                settings_type=_declared_session_settings_type(type(self), "session_settings"),
+            )
+        if self.sandbox is not None:
+            self.sandbox = coerce_dataclass_config(
+                self.sandbox,
+                _declared_dataclass_type(type(self), "sandbox", SandboxRunConfig),
+                parameter_name="run_config.sandbox",
+            )
+        if self.tool_execution is not None:
+            self.tool_execution = coerce_dataclass_config(
+                self.tool_execution,
+                _declared_dataclass_type(
+                    type(self),
+                    "tool_execution",
+                    ToolExecutionConfig,
+                ),
+                parameter_name="run_config.tool_execution",
+            )
+
+
+class RunOptions(TypedDict, Generic[TContext]):
+    """Arguments for ``AgentRunner`` methods."""
+
+    context: NotRequired[TContext | None]
+    """The context for the run."""
+
+    max_turns: NotRequired[int | None]
+    """The maximum number of turns to run for. Set to ``None`` to disable the limit."""
+
+    hooks: NotRequired[RunHooks[TContext] | None]
+    """Lifecycle hooks for the run."""
+
+    run_config: NotRequired[RunConfig | dict[str, Any] | None]
+    """Run configuration."""
+
+    previous_response_id: NotRequired[str | None]
+    """The ID of the previous response, if any."""
+
+    auto_previous_response_id: NotRequired[bool]
+    """Enable automatic response chaining for the first turn."""
+
+    conversation_id: NotRequired[str | None]
+    """The ID of the stored conversation, if any."""
+
+    session: NotRequired[Session | None]
+    """The session for the run."""
+
+    error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
+    """Error handlers keyed by error kind."""
+
+
+def _coerce_run_config(value: RunConfig | dict[str, Any]) -> RunConfig:
+    """Normalize run configuration dictionaries at public runner boundaries."""
+    return coerce_dataclass_config(value, RunConfig, parameter_name="run_config")
+
+
+__all__ = [
+    "DEFAULT_MAX_TURNS",
+    "ToolNameCollisionPolicy",
+    "CallModelData",
+    "CallModelInputFilter",
+    "ModelInputData",
+    "OutputGuardrailBlockedMessageArgs",
+    "OutputGuardrailBlockedMessageFormatter",
+    "ReasoningItemIdPolicy",
+    "RunConfig",
+    "RunOptions",
+    "SandboxArchiveLimits",
+    "SandboxConcurrencyLimits",
+    "SandboxRunConfig",
+    "ToolExecutionConfig",
+    "ToolErrorFormatter",
+    "ToolErrorFormatterArgs",
+    "_default_trace_include_sensitive_data",
+]

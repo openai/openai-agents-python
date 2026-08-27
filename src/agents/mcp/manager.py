@@ -1,0 +1,575 @@
+from __future__ import annotations
+
+import asyncio
+import math
+from collections.abc import Awaitable, Callable, Iterable
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from typing import Any
+
+from ..logger import log_tool_action_debug, log_tool_action_error, logger
+from ._logging import get_mcp_server_log_message
+from .server import MCPServer
+
+
+def _validate_lifecycle_timeout(timeout_seconds: float | None, *, field_name: str) -> float | None:
+    """Validate an MCP manager lifecycle timeout without changing its semantics."""
+    if timeout_seconds is None:
+        return None
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+        raise TypeError(f"{field_name} must be a positive number of seconds or None.")
+    try:
+        is_finite = math.isfinite(timeout_seconds)
+    except OverflowError:
+        is_finite = False
+    if not is_finite or timeout_seconds <= 0:
+        raise ValueError(f"{field_name} must be a positive finite number of seconds or None.")
+    return timeout_seconds
+
+
+@dataclass
+class _ServerCommand:
+    action: str
+    timeout_seconds: float | None
+    future: asyncio.Future[None]
+
+
+class _ServerWorker:
+    def __init__(self, server: MCPServer) -> None:
+        self._server = server
+        self._queue: asyncio.Queue[_ServerCommand] = asyncio.Queue()
+        self._task = asyncio.create_task(self._run())
+        self._cleanup_future: asyncio.Future[None] | None = None
+
+    @property
+    def is_done(self) -> bool:
+        return self._task.done()
+
+    @property
+    def is_stopping(self) -> bool:
+        return self._cleanup_future is not None
+
+    @property
+    def cleanup_error(self) -> BaseException | None:
+        if (
+            self._cleanup_future is None
+            or not self._cleanup_future.done()
+            or self._cleanup_future.cancelled()
+        ):
+            return None
+        return self._cleanup_future.exception()
+
+    def add_done_callback(self, callback: Callable[[asyncio.Task[None]], None]) -> None:
+        self._task.add_done_callback(callback)
+
+    async def connect(self, timeout_seconds: float | None) -> None:
+        await self._submit("connect", timeout_seconds)
+
+    async def cleanup(self, timeout_seconds: float | None) -> None:
+        if self._cleanup_future is None:
+            loop = asyncio.get_running_loop()
+            self._cleanup_future = loop.create_future()
+            self._queue.put_nowait(
+                _ServerCommand(
+                    action="cleanup",
+                    timeout_seconds=timeout_seconds,
+                    future=self._cleanup_future,
+                )
+            )
+        cleanup_waiter = asyncio.shield(self._cleanup_future)
+        if timeout_seconds is None:
+            await cleanup_waiter
+        else:
+            await asyncio.wait_for(cleanup_waiter, timeout=timeout_seconds)
+
+    async def _submit(self, action: str, timeout_seconds: float | None) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        self._queue.put_nowait(
+            _ServerCommand(action=action, timeout_seconds=timeout_seconds, future=future)
+        )
+        await future
+
+    async def _run(self) -> None:
+        while True:
+            command = await self._queue.get()
+            should_exit = command.action == "cleanup"
+            try:
+                if command.action == "connect":
+                    await _run_with_timeout_in_task(self._server.connect, command.timeout_seconds)
+                elif command.action == "cleanup":
+                    await _run_with_timeout_in_task(self._server.cleanup, command.timeout_seconds)
+                else:
+                    raise ValueError(f"Unknown command: {command.action}")
+                if not command.future.cancelled():
+                    command.future.set_result(None)
+            except BaseException as exc:
+                if not command.future.cancelled():
+                    command.future.set_exception(exc)
+            if should_exit:
+                return
+
+
+async def _run_with_timeout_in_task(
+    func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
+) -> None:
+    # Use an in-task timeout to preserve task affinity for MCP cleanup.
+    # asyncio.wait_for creates a new Task on Python < 3.11, which breaks
+    # libraries that require connect/cleanup in the same task (e.g. AnyIO cancel scopes).
+    timeout_seconds = _validate_lifecycle_timeout(timeout_seconds, field_name="timeout_seconds")
+    if timeout_seconds is None:
+        await func()
+        return
+    timeout_context = getattr(asyncio, "timeout", None)
+    if timeout_context is not None:
+        async with timeout_context(timeout_seconds):
+            await func()
+        return
+    task = asyncio.current_task()
+    if task is None:
+        await asyncio.wait_for(func(), timeout=timeout_seconds)
+        return
+    timed_out = False
+    loop = asyncio.get_running_loop()
+
+    def _cancel() -> None:
+        nonlocal timed_out
+        timed_out = True
+        task.cancel()
+
+    handle = loop.call_later(timeout_seconds, _cancel)
+    try:
+        await func()
+    except asyncio.CancelledError as exc:
+        if timed_out:
+            raise asyncio.TimeoutError() from exc
+        raise
+    finally:
+        handle.cancel()
+
+
+class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
+    """Manage MCP server lifecycles and expose only connected servers.
+
+    Use this helper to keep MCP connect/cleanup on the same task and avoid
+    run failures when a server is unavailable. The manager will attempt to
+    connect each server and then expose the connected subset via
+    `active_servers`.
+
+    Basic usage:
+        async with MCPServerManager([server_a, server_b]) as manager:
+            agent = Agent(
+                name="Assistant",
+                instructions="...",
+                mcp_servers=manager.active_servers,
+            )
+
+    FastAPI lifespan example:
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            async with MCPServerManager([server_a, server_b]) as manager:
+                app.state.mcp_manager = manager
+                yield
+
+        app = FastAPI(lifespan=lifespan)
+
+    Important behaviors:
+    - `active_servers` only includes servers that connected successfully.
+      `failed_servers` holds the failures and `errors` maps servers to errors.
+    - `drop_failed_servers=True` removes failed servers from `active_servers`
+      (recommended). If False, `active_servers` will still include all servers.
+    - `strict=True` raises on the first connection failure. If False, failures
+      are recorded and the run can proceed with the remaining servers.
+    - `reconnect(failed_only=True)` retries failed servers and refreshes
+      `active_servers`.
+    - `connect_in_parallel=True` uses a dedicated worker task per server to
+      allow concurrent connects while preserving task affinity for cleanup.
+    - Lifecycle timeouts are validated during construction and assignment. They
+      accept positive finite seconds or `None` to disable the timeout. Zero is
+      rejected because it would create an immediate deadline.
+    """
+
+    def __init__(
+        self,
+        servers: Iterable[MCPServer],
+        *,
+        connect_timeout_seconds: float | None = 10.0,
+        cleanup_timeout_seconds: float | None = 10.0,
+        drop_failed_servers: bool = True,
+        strict: bool = False,
+        suppress_cancelled_error: bool = True,
+        connect_in_parallel: bool = False,
+    ) -> None:
+        self._all_servers = self._unique_servers(servers)
+        self._active_servers = list(self._all_servers)
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.cleanup_timeout_seconds = cleanup_timeout_seconds
+        self.drop_failed_servers = drop_failed_servers
+        self.strict = strict
+        self.suppress_cancelled_error = suppress_cancelled_error
+        self.connect_in_parallel = connect_in_parallel
+        self._workers: dict[MCPServer, _ServerWorker] = {}
+        self._lifecycle_lock = asyncio.Lock()
+
+        self._failed_servers: list[MCPServer] = []
+        self._failed_server_set: set[MCPServer] = set()
+        self._connected_servers: set[MCPServer] = set()
+        self._errors: dict[MCPServer, BaseException] = {}
+
+    @property
+    def active_servers(self) -> list[MCPServer]:
+        """Return the active MCP servers after connection attempts."""
+        return list(self._active_servers)
+
+    @property
+    def all_servers(self) -> list[MCPServer]:
+        """Return all MCP servers managed by this instance."""
+        return list(self._all_servers)
+
+    @property
+    def failed_servers(self) -> list[MCPServer]:
+        """Return a snapshot of MCP servers with recorded failures."""
+        return list(self._failed_servers)
+
+    @property
+    def errors(self) -> dict[MCPServer, BaseException]:
+        """Return a snapshot of recorded MCP server errors."""
+        return dict(self._errors)
+
+    @property
+    def connect_timeout_seconds(self) -> float | None:
+        """Return the lifecycle connect timeout."""
+        return self._connect_timeout_seconds
+
+    @connect_timeout_seconds.setter
+    def connect_timeout_seconds(self, timeout_seconds: float | None) -> None:
+        self._connect_timeout_seconds = _validate_lifecycle_timeout(
+            timeout_seconds, field_name="connect_timeout_seconds"
+        )
+
+    @property
+    def cleanup_timeout_seconds(self) -> float | None:
+        """Return the lifecycle cleanup timeout."""
+        return self._cleanup_timeout_seconds
+
+    @cleanup_timeout_seconds.setter
+    def cleanup_timeout_seconds(self, timeout_seconds: float | None) -> None:
+        self._cleanup_timeout_seconds = _validate_lifecycle_timeout(
+            timeout_seconds, field_name="cleanup_timeout_seconds"
+        )
+
+    async def __aenter__(self) -> MCPServerManager:
+        await self.connect_all()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
+        await self.cleanup_all()
+        return None
+
+    async def connect_all(self) -> list[MCPServer]:
+        """Connect all servers in order and return the active list."""
+        if not await self._acquire_lifecycle_lock():
+            return self.active_servers
+        try:
+            return await self._connect_all()
+        finally:
+            self._lifecycle_lock.release()
+
+    async def _connect_all(self) -> list[MCPServer]:
+        previous_connected_servers = set(self._connected_servers)
+        previous_active_servers = list(self._active_servers)
+        self._failed_servers = []
+        self._failed_server_set = set()
+        self._errors = {}
+
+        servers_to_connect = self._servers_to_connect(self._all_servers)
+        connected_servers: list[MCPServer] = []
+        try:
+            if self.connect_in_parallel:
+                await self._connect_all_parallel(servers_to_connect)
+            else:
+                for server in servers_to_connect:
+                    await self._attempt_connect(server)
+                    if server not in self._failed_server_set:
+                        connected_servers.append(server)
+        except BaseException:
+            if self.connect_in_parallel:
+                await self._cleanup_servers(servers_to_connect)
+            else:
+                servers_to_cleanup = self._unique_servers(
+                    [*connected_servers, *self._failed_servers]
+                )
+                await self._cleanup_servers(servers_to_cleanup)
+            if self.drop_failed_servers:
+                self._active_servers = [
+                    server for server in self._all_servers if server in previous_connected_servers
+                ]
+            else:
+                self._active_servers = previous_active_servers
+            raise
+
+        self._refresh_active_servers()
+
+        return self.active_servers
+
+    async def reconnect(self, *, failed_only: bool = True) -> list[MCPServer]:
+        """Reconnect servers and return the active list.
+
+        Args:
+            failed_only: If True, only retry servers that previously failed.
+                If False, cleanup and retry all servers.
+        """
+        if not await self._acquire_lifecycle_lock():
+            return self.active_servers
+        try:
+            return await self._reconnect(failed_only=failed_only)
+        finally:
+            self._lifecycle_lock.release()
+
+    async def _reconnect(self, *, failed_only: bool) -> list[MCPServer]:
+        if failed_only:
+            failed_servers = self._unique_servers(self._failed_servers)
+            servers_to_retry = await self._cleanup_servers(failed_servers)
+        else:
+            await self._cleanup_all()
+            servers_to_retry = list(self._all_servers)
+            self._failed_servers = []
+            self._failed_server_set = set()
+            self._errors = {}
+
+        servers_to_retry = self._servers_to_connect(servers_to_retry)
+        try:
+            if self.connect_in_parallel:
+                await self._connect_all_parallel(servers_to_retry)
+            else:
+                for server in servers_to_retry:
+                    await self._attempt_connect(server)
+        finally:
+            self._refresh_active_servers()
+        return self.active_servers
+
+    async def cleanup_all(self) -> None:
+        """Cleanup all servers in reverse order."""
+        if not await self._acquire_lifecycle_lock():
+            return
+        try:
+            await self._cleanup_all()
+        finally:
+            self._lifecycle_lock.release()
+
+    async def _acquire_lifecycle_lock(self) -> bool:
+        try:
+            await self._lifecycle_lock.acquire()
+        except asyncio.CancelledError:
+            if not self.suppress_cancelled_error:
+                raise
+            return False
+        return True
+
+    async def _cleanup_all(self) -> None:
+        try:
+            for server in reversed(self._all_servers):
+                try:
+                    await self._cleanup_server(server)
+                except asyncio.CancelledError as exc:
+                    if not self.suppress_cancelled_error:
+                        raise
+                    log_tool_action_debug(
+                        logger,
+                        get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
+                        exc,
+                    )
+                    self._errors[server] = exc
+                except Exception as exc:
+                    log_tool_action_error(
+                        logger,
+                        get_mcp_server_log_message("Failed to cleanup MCP server", server),
+                        exc,
+                    )
+                    self._errors[server] = exc
+        finally:
+            self._refresh_active_servers()
+
+    async def _run_with_timeout(
+        self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
+    ) -> None:
+        await _run_with_timeout_in_task(func, timeout_seconds)
+
+    async def _attempt_connect(
+        self, server: MCPServer, *, raise_on_error: bool | None = None
+    ) -> None:
+        if raise_on_error is None:
+            raise_on_error = self.strict
+        try:
+            await self._run_connect(server)
+            self._connected_servers.add(server)
+            if server in self._failed_server_set:
+                self._remove_failed_server(server)
+                self._errors.pop(server, None)
+        except asyncio.CancelledError as exc:
+            # Always record so connect_all()'s failure cleanup includes this server.
+            # Re-raising without recording left partially-opened servers uncleaned
+            # (especially under `async with`, where __aexit__ never runs).
+            self._record_failure(server, exc, phase="connect")
+            if not self.suppress_cancelled_error:
+                raise
+        except Exception as exc:
+            self._record_failure(server, exc, phase="connect")
+            if raise_on_error:
+                raise
+        except BaseException as exc:
+            self._record_failure(server, exc, phase="connect")
+            raise
+
+    def _refresh_active_servers(self) -> None:
+        if self.drop_failed_servers:
+            self._active_servers = [
+                server for server in self._all_servers if server in self._connected_servers
+            ]
+        else:
+            self._active_servers = list(self._all_servers)
+
+    def _record_failure(self, server: MCPServer, exc: BaseException, phase: str) -> None:
+        log_tool_action_error(
+            logger,
+            get_mcp_server_log_message(f"Failed to {phase} MCP server", server),
+            exc,
+        )
+        if server not in self._failed_server_set:
+            self._failed_servers.append(server)
+            self._failed_server_set.add(server)
+        self._errors[server] = exc
+
+    async def _run_connect(self, server: MCPServer) -> None:
+        if self.connect_in_parallel:
+            worker = await self._get_worker(server)
+            await worker.connect(self.connect_timeout_seconds)
+        else:
+            await self._run_with_timeout(server.connect, self.connect_timeout_seconds)
+
+    async def _cleanup_server(self, server: MCPServer) -> None:
+        if (
+            self.connect_in_parallel
+            and server not in self._workers
+            and server not in self._connected_servers
+        ):
+            return
+        if self.connect_in_parallel and server in self._workers:
+            worker = self._workers[server]
+            try:
+                await worker.cleanup(self.cleanup_timeout_seconds)
+            finally:
+                if worker.is_done:
+                    self._handle_worker_done(server, worker)
+                elif self._workers.get(server) is worker:
+                    self._connected_servers.discard(server)
+            return
+        try:
+            await self._run_with_timeout(server.cleanup, self.cleanup_timeout_seconds)
+        finally:
+            self._connected_servers.discard(server)
+
+    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> list[MCPServer]:
+        servers_list = list(servers)
+        cleaned_servers: set[MCPServer] = set()
+        for server in reversed(servers_list):
+            try:
+                await self._cleanup_server(server)
+            except asyncio.CancelledError as exc:
+                if not self.suppress_cancelled_error:
+                    raise
+                log_tool_action_debug(
+                    logger,
+                    get_mcp_server_log_message("Cleanup cancelled for MCP server", server),
+                    exc,
+                )
+                self._errors[server] = exc
+            except Exception as exc:
+                log_tool_action_error(
+                    logger,
+                    get_mcp_server_log_message("Failed to cleanup MCP server", server),
+                    exc,
+                )
+                self._errors[server] = exc
+            else:
+                cleaned_servers.add(server)
+        return [server for server in servers_list if server in cleaned_servers]
+
+    async def _connect_all_parallel(self, servers: list[MCPServer]) -> None:
+        tasks = [
+            asyncio.create_task(self._attempt_connect(server, raise_on_error=False))
+            for server in servers
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if not self.suppress_cancelled_error:
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
+        if self.strict and self._failed_servers:
+            first_failure = None
+            if self.suppress_cancelled_error:
+                for server in self._failed_servers:
+                    error = self._errors.get(server)
+                    if error is None or isinstance(error, asyncio.CancelledError):
+                        continue
+                    first_failure = server
+                    break
+            else:
+                first_failure = self._failed_servers[0]
+            if first_failure is not None:
+                error = self._errors.get(first_failure)
+                if error is not None:
+                    raise error
+                raise RuntimeError(f"Failed to connect MCP server '{first_failure.name}'")
+
+    async def _get_worker(self, server: MCPServer) -> _ServerWorker:
+        worker = self._workers.get(server)
+        if worker is not None and worker.is_stopping:
+            await worker.cleanup(self.cleanup_timeout_seconds)
+            self._discard_worker(server, worker)
+            worker = self._workers.get(server)
+        if worker is not None and worker.is_done:
+            self._discard_worker(server, worker)
+            worker = self._workers.get(server)
+        if worker is None:
+            worker = _ServerWorker(server=server)
+            self._workers[server] = worker
+            worker.add_done_callback(lambda _task: self._handle_worker_done(server, worker))
+        return worker
+
+    def _handle_worker_done(self, server: MCPServer, worker: _ServerWorker) -> None:
+        if worker.cleanup_error is None:
+            self._discard_worker(server, worker)
+        elif self._workers.get(server) is worker:
+            self._connected_servers.discard(server)
+
+    def _discard_worker(self, server: MCPServer, worker: _ServerWorker) -> None:
+        if self._workers.get(server) is worker:
+            self._workers.pop(server, None)
+            self._connected_servers.discard(server)
+
+    def _remove_failed_server(self, server: MCPServer) -> None:
+        if server in self._failed_server_set:
+            self._failed_server_set.remove(server)
+        self._failed_servers = [
+            failed_server for failed_server in self._failed_servers if failed_server != server
+        ]
+
+    def _servers_to_connect(self, servers: Iterable[MCPServer]) -> list[MCPServer]:
+        unique = self._unique_servers(servers)
+        if not self._connected_servers:
+            return unique
+        return [server for server in unique if server not in self._connected_servers]
+
+    @staticmethod
+    def _unique_servers(servers: Iterable[MCPServer]) -> list[MCPServer]:
+        seen: set[MCPServer] = set()
+        unique: list[MCPServer] = []
+        for server in servers:
+            if server not in seen:
+                seen.add(server)
+                unique.append(server)
+        return unique

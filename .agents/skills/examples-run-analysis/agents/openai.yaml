@@ -1,0 +1,4 @@
+interface:
+  display_name: "Examples Run Analysis"
+  short_description: "Analyze completed example-run artifacts"
+  default_prompt: "Use $examples-run-analysis to inspect the latest completed manual examples run and validate every exit-0 example without executing or controlling any process."

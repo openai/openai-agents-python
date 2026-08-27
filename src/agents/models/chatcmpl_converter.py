@@ -1,0 +1,1009 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
+from typing import Any, Literal, cast
+
+from openai import Omit, omit
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
+    ChatCompletionDeveloperMessageParam,
+    ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCallParam,
+    ChatCompletionMessageParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionUserMessageParam,
+)
+from openai.types.chat.chat_completion_content_part_param import File, FileFile
+from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
+from openai.types.chat.completion_create_params import ResponseFormat
+from openai.types.responses import (
+    EasyInputMessageParam,
+    ResponseFileSearchToolCallParam,
+    ResponseFunctionToolCall,
+    ResponseFunctionToolCallParam,
+    ResponseInputAudioParam,
+    ResponseInputContentParam,
+    ResponseInputFileParam,
+    ResponseInputImageParam,
+    ResponseInputTextParam,
+    ResponseOutputMessage,
+    ResponseOutputMessageParam,
+    ResponseOutputRefusal,
+    ResponseOutputText,
+    ResponseReasoningItem,
+    ResponseReasoningItemParam,
+)
+from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_output_text import (
+    Annotation as ResponseOutputTextAnnotation,
+)
+from openai.types.responses.response_reasoning_item import Content, Summary
+
+from ..agent_output import AgentOutputSchemaBase
+from ..exceptions import AgentsException, UserError
+from ..handoffs import Handoff
+from ..items import TResponseInputItem, TResponseOutputItem
+from ..logger import logger
+from ..model_settings import MCPToolChoice
+from ..tool import (
+    FunctionTool,
+    Tool,
+    ensure_function_tool_supports_responses_only_features,
+    ensure_tool_choice_supports_backend,
+)
+from .chatcmpl_helpers import ChatCmplHelpers
+from .fake_id import FAKE_RESPONSES_ID
+from .reasoning_content_replay import (
+    _CHAT_COMPLETIONS_REASONING_FIELD_KEY,
+    ReasoningContentReplayContext,
+    ReasoningContentSource,
+    ShouldReplayReasoningContent,
+    default_should_replay_reasoning_content,
+)
+
+ResponseInputContentWithAudioParam = (
+    ResponseInputContentParam | ResponseInputAudioParam | dict[str, Any]
+)
+
+_OMITTED_TOOL_OUTPUT_PLACEHOLDER = "[tool output omitted]"
+
+
+class Converter:
+    @classmethod
+    def convert_tool_choice(
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
+    ) -> ChatCompletionToolChoiceOptionParam | Omit:
+        if tool_choice is None:
+            return omit
+        elif isinstance(tool_choice, MCPToolChoice):
+            raise UserError("MCPToolChoice is not supported for Chat Completions models")
+        elif tool_choice == "auto":
+            return "auto"
+        elif tool_choice == "required":
+            return "required"
+        elif tool_choice == "none":
+            return "none"
+        else:
+            ensure_tool_choice_supports_backend(
+                tool_choice,
+                backend_name="Chat Completions-compatible models",
+            )
+            return {
+                "type": "function",
+                "function": {
+                    "name": tool_choice,
+                },
+            }
+
+    @classmethod
+    def convert_response_format(
+        cls, final_output_schema: AgentOutputSchemaBase | None
+    ) -> ResponseFormat | Omit:
+        if final_output_schema is None or final_output_schema.is_plain_text():
+            return omit
+
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "final_output",
+                "strict": final_output_schema.is_strict_json_schema(),
+                "schema": final_output_schema.json_schema(),
+            },
+        }
+
+    @classmethod
+    def message_to_output_items(
+        cls,
+        message: ChatCompletionMessage,
+        provider_data: dict[str, Any] | None = None,
+        strict_feature_validation: bool = False,
+    ) -> list[TResponseOutputItem]:
+        """
+        Convert a ChatCompletionMessage to a list of response output items.
+
+        Args:
+            message: The chat completion message to convert
+            provider_data: Metadata indicating the source model that generated this message.
+                Contains provider-specific information like model name and response_id,
+                which is attached to output items.
+        """
+        items: list[TResponseOutputItem] = []
+
+        # Check if message is agents.extensions.models.litellm_model.InternalChatCompletionMessage.
+        # We can't actually import it here because litellm is an optional dependency.
+        # So we use hasattr to check for provider-specific reasoning fields.
+        reasoning_content = getattr(message, "reasoning_content", "")
+        raw_reasoning = getattr(message, "reasoning", "")
+        raw_thinking_blocks = getattr(message, "thinking_blocks", None)
+        thinking_blocks = (
+            [deepcopy(block) for block in raw_thinking_blocks if isinstance(block, dict)]
+            if isinstance(raw_thinking_blocks, list)
+            else []
+        )
+
+        # Prefer the existing structured/provider-native representations when a provider
+        # includes more than one reasoning field on the same message.
+        reasoning = (
+            raw_reasoning
+            if isinstance(raw_reasoning, str)
+            and raw_reasoning
+            and not reasoning_content
+            and not thinking_blocks
+            else ""
+        )
+
+        if reasoning_content or reasoning or thinking_blocks:
+            reasoning_kwargs: dict[str, Any] = {
+                "id": FAKE_RESPONSES_ID,
+                "summary": (
+                    [Summary(text=reasoning_content, type="summary_text")]
+                    if reasoning_content
+                    else []
+                ),
+                "type": "reasoning",
+            }
+            if reasoning:
+                reasoning_kwargs["content"] = [Content(text=reasoning, type="reasoning_text")]
+
+            reasoning_provider_data = dict(provider_data or {})
+            if reasoning:
+                reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY] = "reasoning"
+            if thinking_blocks:
+                # The normalized reasoning fields below cannot represent empty thinking text or
+                # redacted_thinking blocks. Keep the complete provider sequence as the replay
+                # source of truth while retaining those released fields as derived data.
+                reasoning_provider_data["thinking_blocks"] = thinking_blocks
+            if reasoning_provider_data:
+                reasoning_kwargs["provider_data"] = reasoning_provider_data
+
+            reasoning_item = ResponseReasoningItem(**reasoning_kwargs)
+
+            # Retain the released normalized representation for callers and legacy histories.
+            if thinking_blocks:
+                reasoning_item.content = []
+                signatures: list[str] = []
+                for block in thinking_blocks:
+                    thinking_text = block.get("thinking", "")
+                    if thinking_text:
+                        reasoning_item.content.append(
+                            Content(text=thinking_text, type="reasoning_text")
+                        )
+                    if signature := block.get("signature"):
+                        signatures.append(signature)
+
+                if signatures:
+                    reasoning_item.encrypted_content = "\n".join(signatures)
+
+            items.append(reasoning_item)
+
+        message_kwargs: dict[str, Any] = {
+            "id": FAKE_RESPONSES_ID,
+            "content": [],
+            "role": "assistant",
+            "type": "message",
+            "status": "completed",
+        }
+
+        # Add provider_data if available
+        if provider_data:
+            message_kwargs["provider_data"] = provider_data
+
+        message_item = ResponseOutputMessage(**message_kwargs)
+        if message.content:
+            message_item.content.append(
+                ResponseOutputText(
+                    text=message.content,
+                    type="output_text",
+                    annotations=cls._convert_annotations(message),
+                    logprobs=[],
+                )
+            )
+        if message.refusal:
+            message_item.content.append(
+                ResponseOutputRefusal(refusal=message.refusal, type="refusal")
+            )
+        if message.audio:
+            raise AgentsException("Audio is not currently supported")
+
+        if message_item.content:
+            items.append(message_item)
+
+        if message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.type == "function":
+                    # Create base function call item
+                    func_call_kwargs: dict[str, Any] = {
+                        "id": FAKE_RESPONSES_ID,
+                        "call_id": tool_call.id,
+                        "arguments": tool_call.function.arguments,
+                        "name": tool_call.function.name,
+                        "type": "function_call",
+                    }
+
+                    # Build provider_data for function call
+                    func_provider_data: dict[str, Any] = {}
+
+                    # Start with provider_data (if provided)
+                    if provider_data:
+                        func_provider_data.update(provider_data)
+
+                    # Convert Google's extra_content field data to item's provider_data field
+                    if hasattr(tool_call, "extra_content") and tool_call.extra_content:
+                        google_fields = tool_call.extra_content.get("google")
+                        if google_fields and isinstance(google_fields, dict):
+                            thought_sig = google_fields.get("thought_signature")
+                            if thought_sig:
+                                func_provider_data["thought_signature"] = thought_sig
+
+                    # Add provider_data if we have any
+                    if func_provider_data:
+                        func_call_kwargs["provider_data"] = func_provider_data
+
+                    items.append(ResponseFunctionToolCall(**func_call_kwargs))
+                elif tool_call.type == "custom":
+                    if strict_feature_validation:
+                        raise UserError(
+                            "Custom tool calls are not supported by the Chat Completions converter"
+                        )
+
+        return items
+
+    @classmethod
+    def _convert_annotations(
+        cls, message: ChatCompletionMessage
+    ) -> list[ResponseOutputTextAnnotation]:
+        """Convert Chat Completions url citations into output text annotations."""
+        return ChatCmplHelpers.convert_url_citations(message.annotations)
+
+    @classmethod
+    def maybe_easy_input_message(cls, item: Any) -> EasyInputMessageParam | None:
+        if not isinstance(item, dict):
+            return None
+
+        keys = set(item)
+        if not {"content", "role"} <= keys:
+            return None
+        if not keys <= {"content", "role", "type", "phase"}:
+            return None
+        if "type" in item and item["type"] != "message":
+            return None
+        if item.get("phase") not in (None, "commentary", "final_answer"):
+            return None
+
+        role = item.get("role", None)
+        if role not in ("user", "assistant", "system", "developer"):
+            return None
+
+        return cast(EasyInputMessageParam, item)
+
+    @classmethod
+    def maybe_input_message(cls, item: Any) -> Message | None:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "message"
+            and item.get("role")
+            in (
+                "user",
+                "system",
+                "developer",
+            )
+        ):
+            return cast(Message, item)
+
+        return None
+
+    @classmethod
+    def maybe_file_search_call(cls, item: Any) -> ResponseFileSearchToolCallParam | None:
+        if isinstance(item, dict) and item.get("type") == "file_search_call":
+            return cast(ResponseFileSearchToolCallParam, item)
+        return None
+
+    @classmethod
+    def maybe_function_tool_call(cls, item: Any) -> ResponseFunctionToolCallParam | None:
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            return cast(ResponseFunctionToolCallParam, item)
+        return None
+
+    @classmethod
+    def maybe_function_tool_call_output(
+        cls,
+        item: Any,
+    ) -> FunctionCallOutput | None:
+        if isinstance(item, dict) and item.get("type") == "function_call_output":
+            return cast(FunctionCallOutput, item)
+        return None
+
+    @classmethod
+    def maybe_item_reference(cls, item: Any) -> ItemReference | None:
+        if isinstance(item, dict) and item.get("type") == "item_reference":
+            return cast(ItemReference, item)
+        return None
+
+    @classmethod
+    def maybe_response_output_message(cls, item: Any) -> ResponseOutputMessageParam | None:
+        # ResponseOutputMessage is only used for messages with role assistant
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "message"
+            and item.get("role") == "assistant"
+            and {"id", "content"} <= set(item)
+        ):
+            return cast(ResponseOutputMessageParam, item)
+        return None
+
+    @classmethod
+    def maybe_reasoning_message(cls, item: Any) -> ResponseReasoningItemParam | None:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(ResponseReasoningItemParam, item)
+        return None
+
+    @classmethod
+    def extract_text_content(
+        cls, content: str | Iterable[ResponseInputContentWithAudioParam]
+    ) -> str | list[ChatCompletionContentPartTextParam]:
+        all_content = cls.extract_all_content(content)
+        if isinstance(all_content, str):
+            return all_content
+
+        out: list[ChatCompletionContentPartTextParam] = []
+        for c in all_content:
+            c_type = cast(dict[str, Any], c).get("type")
+            if c_type == "text":
+                out.append(cast(ChatCompletionContentPartTextParam, c))
+            elif c_type == "video_url":
+                raise UserError(f"Only text content is supported here, got: {c}")
+        return out
+
+    @classmethod
+    def _normalize_input_content_part_alias(
+        cls,
+        content_part: ResponseInputContentWithAudioParam,
+    ) -> ResponseInputContentWithAudioParam:
+        """Accept raw Chat Completions parts by mapping them to SDK canonical shapes."""
+        if not isinstance(content_part, dict):
+            return content_part
+
+        content_type = content_part.get("type")
+        if content_type == "text":
+            text = content_part.get("text")
+            if not isinstance(text, str):
+                raise UserError(f"Only text content is supported here, got: {content_part}")
+            # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+            normalized_text: dict[str, Any] = {"type": "input_text", "text": text}
+            cls._copy_prompt_cache_breakpoint(content_part, normalized_text)
+            return cast(ResponseInputTextParam, normalized_text)
+
+        if content_type != "image_url":
+            return content_part
+
+        image_payload = content_part.get("image_url")
+        if not isinstance(image_payload, dict):
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        image_url = image_payload.get("url")
+        if not isinstance(image_url, str) or not image_url:
+            raise UserError(f"Only image URLs are supported for image_url {content_part}")
+
+        normalized: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+        detail = image_payload.get("detail")
+        if detail is not None:
+            normalized["detail"] = detail
+        cls._copy_prompt_cache_breakpoint(content_part, normalized)
+        # Cast the normalized dict because we are constructing a TypedDict alias by hand.
+        return cast(ResponseInputImageParam, normalized)
+
+    @staticmethod
+    def _copy_prompt_cache_breakpoint(source: Mapping[str, Any], target: dict[str, Any]) -> None:
+        prompt_cache_breakpoint = source.get("prompt_cache_breakpoint")
+        if prompt_cache_breakpoint is not None:
+            target["prompt_cache_breakpoint"] = prompt_cache_breakpoint
+
+    @classmethod
+    def extract_all_content(
+        cls, content: str | Iterable[ResponseInputContentWithAudioParam]
+    ) -> str | list[ChatCompletionContentPartParam]:
+        if isinstance(content, str):
+            return content
+        out: list[ChatCompletionContentPartParam] = []
+
+        for c in content:
+            c = cls._normalize_input_content_part_alias(c)
+            if isinstance(c, dict) and c.get("type") == "input_text":
+                casted_text_param = cast(ResponseInputTextParam, c)
+                text_part: dict[str, Any] = {
+                    "type": "text",
+                    "text": casted_text_param["text"],
+                }
+                cls._copy_prompt_cache_breakpoint(c, text_part)
+                out.append(cast(ChatCompletionContentPartTextParam, text_part))
+            elif isinstance(c, dict) and c.get("type") == "input_image":
+                casted_image_param = cast(ResponseInputImageParam, c)
+                if "image_url" not in casted_image_param or not casted_image_param["image_url"]:
+                    raise UserError(
+                        f"Only image URLs are supported for input_image {casted_image_param}"
+                    )
+                detail = casted_image_param.get("detail", "auto")
+                if detail == "original":
+                    # Chat Completions only supports auto/low/high, so preserve the caller's
+                    # highest-fidelity intent with the closest available value.
+                    detail = "high"
+                image_part: dict[str, Any] = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": casted_image_param["image_url"],
+                        "detail": detail,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, image_part)
+                out.append(cast(ChatCompletionContentPartImageParam, image_part))
+            elif isinstance(c, dict) and c.get("type") == "video_url":
+                video_payload = c.get("video_url")
+                if not isinstance(video_payload, dict) or not video_payload.get("url"):
+                    raise UserError(f"Only video URLs are supported for video_url {c}")
+                out.append(
+                    cast(
+                        Any,
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": video_payload["url"]},
+                        },
+                    )
+                )
+            elif isinstance(c, dict) and c.get("type") == "input_audio":
+                casted_audio_param = cast(ResponseInputAudioParam, c)
+                audio_payload = casted_audio_param.get("input_audio")
+                if not audio_payload:
+                    raise UserError(
+                        f"Only audio data is supported for input_audio {casted_audio_param}"
+                    )
+                if not isinstance(audio_payload, dict):
+                    raise UserError(
+                        f"input_audio must provide audio data and format {casted_audio_param}"
+                    )
+                audio_data = audio_payload.get("data")
+                audio_format = audio_payload.get("format")
+                if not audio_data or not audio_format:
+                    raise UserError(
+                        f"input_audio requires both data and format {casted_audio_param}"
+                    )
+                audio_part: dict[str, Any] = {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_data,
+                        "format": audio_format,
+                    },
+                }
+                cls._copy_prompt_cache_breakpoint(c, audio_part)
+                out.append(cast(ChatCompletionContentPartInputAudioParam, audio_part))
+            elif isinstance(c, dict) and c.get("type") == "input_file":
+                casted_file_param = cast(ResponseInputFileParam, c)
+                # The Chat Completions file content part accepts either inline file_data or a
+                # reference to an uploaded file_id. Prefer inline data when present, otherwise
+                # fall back to the file id (the SDK's own ToolOutputFileContent emits file-id
+                # only input_file items). A file_url is not representable here.
+                file_data = casted_file_param.get("file_data")
+                file_id = casted_file_param.get("file_id")
+                if file_data:
+                    filedata = FileFile(file_data=file_data)
+                elif file_id:
+                    filedata = FileFile(file_id=file_id)
+                else:
+                    raise UserError(
+                        f"Only file_data or file_id is supported for input_file {casted_file_param}"
+                    )
+
+                if "filename" in casted_file_param and casted_file_param["filename"]:
+                    filedata["filename"] = casted_file_param["filename"]
+
+                file_part: dict[str, Any] = {"type": "file", "file": filedata}
+                cls._copy_prompt_cache_breakpoint(c, file_part)
+                out.append(cast(File, file_part))
+            else:
+                raise UserError(f"Unknown content: {c}")
+        return out
+
+    @classmethod
+    def items_to_messages(
+        cls,
+        items: str | Iterable[TResponseInputItem],
+        model: str | None = None,
+        preserve_thinking_blocks: bool = False,
+        preserve_tool_output_all_content: bool = False,
+        base_url: str | None = None,
+        should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
+    ) -> list[ChatCompletionMessageParam]:
+        """
+        Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
+
+        Args:
+            items: A string or iterable of response input items to convert
+            model: The target model to convert to. Used to restore provider-specific data
+                (e.g., Gemini thought signatures, Claude thinking blocks) when converting
+                items back to chat completion messages for the target model.
+            preserve_thinking_blocks: Whether to preserve thinking blocks in tool calls
+                for reasoning models like Claude 4 Sonnet/Opus which support interleaved
+                thinking. When True, thinking blocks are reconstructed and included in
+                assistant messages with tool calls.
+            preserve_tool_output_all_content: Whether to preserve non-text content (like images)
+                in tool outputs. When False (default), only text content is extracted.
+                OpenAI Chat Completions API doesn't support non-text content in tool results.
+                When True, all content types including images are preserved. This is useful
+                for model providers (e.g. Anthropic via LiteLLM) that support processing
+                non-text content in tool results.
+            base_url: The request base URL, if the caller knows the concrete endpoint.
+                This is used by reasoning-content replay hooks to distinguish direct
+                provider calls from proxy or gateway requests.
+            should_replay_reasoning_content: Optional hook that decides whether a
+                reasoning item should be replayed into the next assistant message as
+                `reasoning_content`.
+            strict_feature_validation: Whether to raise a UserError for Responses-only
+                features that Chat Completions cannot faithfully represent.
+
+        Rules:
+        - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
+        - EasyInputMessage or InputMessage (role=system) => ChatCompletionSystemMessageParam
+        - EasyInputMessage or InputMessage (role=developer) => ChatCompletionDeveloperMessageParam
+        - InputMessage (role=assistant) => Start or flush a ChatCompletionAssistantMessageParam
+        - response_output_message => Also produces/flushes a ChatCompletionAssistantMessageParam
+        - tool calls get attached to the *current* assistant message, or create one if none.
+        - tool outputs => ChatCompletionToolMessageParam
+        """
+
+        if isinstance(items, str):
+            return [
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content=items,
+                )
+            ]
+
+        result: list[ChatCompletionMessageParam] = []
+        current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
+        pending_thinking_blocks: list[dict[str, Any]] | None = None
+        pending_thinking_blocks_are_native = False
+        pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
+        pending_reasoning: str | None = None
+        normalized_base_url = base_url.rstrip("/") if base_url is not None else None
+
+        def clear_pending_reasoning_state() -> None:
+            nonlocal pending_reasoning, pending_reasoning_content
+            nonlocal pending_thinking_blocks, pending_thinking_blocks_are_native
+            pending_reasoning = None
+            pending_reasoning_content = None
+            pending_thinking_blocks = None
+            pending_thinking_blocks_are_native = False
+
+        def flush_assistant_message(*, clear_pending_reasoning: bool = True) -> None:
+            nonlocal current_assistant_msg, pending_reasoning, pending_reasoning_content
+            if current_assistant_msg is not None:
+                # The API doesn't support empty arrays for tool_calls
+                if not current_assistant_msg.get("tool_calls"):
+                    del current_assistant_msg["tool_calls"]
+                    # prevents stale reasoning_content from contaminating later turns
+                    pending_reasoning_content = None
+                    pending_reasoning = None
+                result.append(current_assistant_msg)
+                current_assistant_msg = None
+            if clear_pending_reasoning:
+                # Thinking blocks belong to the assistant turn that produced them, so a
+                # reasoning item that is not directly followed by that turn's assistant
+                # message must not leak its signed blocks into a later one.
+                clear_pending_reasoning_state()
+
+        def apply_pending_thinking_blocks(
+            assistant_msg: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_thinking_blocks, pending_thinking_blocks_are_native
+            if not pending_thinking_blocks:
+                return
+
+            if pending_thinking_blocks_are_native:
+                # LiteLLM's native field preserves the complete Anthropic block sequence,
+                # including empty thinking and redacted_thinking blocks.
+                assistant_msg["thinking_blocks"] = pending_thinking_blocks  # type: ignore[typeddict-unknown-key]
+            else:
+                # Legacy stored reasoning items only contain normalized text and signatures.
+                # Preserve their released inline-content reconstruction behavior.
+                current_content = assistant_msg.get("content")
+                if isinstance(current_content, str):
+                    text_content = ChatCompletionContentPartTextParam(
+                        text=current_content, type="text"
+                    )
+                    content_parts: list[Any] = [text_content]
+                elif current_content is None:
+                    content_parts = []
+                else:
+                    content_parts = list(current_content)
+
+                assistant_msg["content"] = pending_thinking_blocks + content_parts
+
+            pending_thinking_blocks = None
+            pending_thinking_blocks_are_native = False
+
+        def apply_pending_reasoning_content(
+            assistant_msg: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_reasoning, pending_reasoning_content
+            if pending_reasoning_content:
+                assistant_msg["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
+                pending_reasoning_content = None
+            if pending_reasoning:
+                assistant_msg["reasoning"] = pending_reasoning  # type: ignore[typeddict-unknown-key]
+                pending_reasoning = None
+
+        def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
+            nonlocal current_assistant_msg, pending_thinking_blocks
+            if current_assistant_msg is None:
+                current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
+                current_assistant_msg["content"] = None
+                current_assistant_msg["tool_calls"] = []
+
+            apply_pending_thinking_blocks(current_assistant_msg)
+            apply_pending_reasoning_content(current_assistant_msg)
+
+            return current_assistant_msg
+
+        for item in items:
+            # 1) Check easy input message
+            if easy_msg := cls.maybe_easy_input_message(item):
+                role = easy_msg["role"]
+                content = easy_msg["content"]
+
+                if role == "user":
+                    flush_assistant_message()
+                    msg_user: ChatCompletionUserMessageParam = {
+                        "role": "user",
+                        "content": cls.extract_all_content(content),
+                    }
+                    result.append(msg_user)
+                elif role == "system":
+                    flush_assistant_message()
+                    msg_system: ChatCompletionSystemMessageParam = {
+                        "role": "system",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_system)
+                elif role == "developer":
+                    flush_assistant_message()
+                    msg_developer: ChatCompletionDeveloperMessageParam = {
+                        "role": "developer",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_developer)
+                elif role == "assistant":
+                    flush_assistant_message()
+                    msg_assistant: ChatCompletionAssistantMessageParam = {
+                        "role": "assistant",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_assistant)
+                else:
+                    raise UserError(f"Unexpected role in easy_input_message: {role}")
+
+            # 2) Check input message
+            elif in_msg := cls.maybe_input_message(item):
+                role = in_msg["role"]
+                content = in_msg["content"]
+                flush_assistant_message()
+
+                if role == "user":
+                    msg_user = {
+                        "role": "user",
+                        "content": cls.extract_all_content(content),
+                    }
+                    result.append(msg_user)
+                elif role == "system":
+                    msg_system = {
+                        "role": "system",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_system)
+                elif role == "developer":
+                    msg_developer = {
+                        "role": "developer",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_developer)
+                else:
+                    raise UserError(f"Unexpected role in input_message: {role}")
+
+            # 3) response output message => assistant
+            elif resp_msg := cls.maybe_response_output_message(item):
+                # A reasoning item can be followed by an assistant message and then tool calls
+                # in the same turn, so preserve pending reasoning state across this flush.
+                flush_assistant_message(clear_pending_reasoning=False)
+                new_asst = ChatCompletionAssistantMessageParam(role="assistant")
+                contents = resp_msg["content"]
+
+                text_segments = []
+                for c in contents:
+                    if c["type"] == "output_text":
+                        text_segments.append(c["text"])
+                    elif c["type"] == "refusal":
+                        new_asst["refusal"] = c["refusal"]
+                    elif c["type"] == "output_audio":
+                        # Can't handle this, b/c chat completions expects an ID which we dont have
+                        raise UserError(
+                            f"Only audio IDs are supported for chat completions, but got: {c}"
+                        )
+                    else:
+                        raise UserError(f"Unknown content type in ResponseOutputMessage: {c}")
+
+                if text_segments:
+                    combined = "\n".join(text_segments)
+                    new_asst["content"] = combined
+
+                apply_pending_thinking_blocks(new_asst)
+                new_asst["tool_calls"] = []
+                apply_pending_reasoning_content(new_asst)
+                current_assistant_msg = new_asst
+
+            # 4) function/file-search calls => attach to assistant
+            elif file_search := cls.maybe_file_search_call(item):
+                asst = ensure_assistant_message()
+                tool_calls = list(asst.get("tool_calls", []))
+                new_tool_call = ChatCompletionMessageFunctionToolCallParam(
+                    id=file_search["id"],
+                    type="function",
+                    function={
+                        "name": "file_search_call",
+                        "arguments": json.dumps(
+                            {
+                                "queries": file_search.get("queries", []),
+                                "status": file_search.get("status"),
+                            }
+                        ),
+                    },
+                )
+                tool_calls.append(new_tool_call)
+                asst["tool_calls"] = tool_calls
+
+            elif func_call := cls.maybe_function_tool_call(item):
+                asst = ensure_assistant_message()
+
+                tool_calls = list(asst.get("tool_calls", []))
+                arguments = func_call["arguments"] if func_call["arguments"] else "{}"
+                new_tool_call = ChatCompletionMessageFunctionToolCallParam(
+                    id=func_call["call_id"],
+                    type="function",
+                    function={
+                        "name": func_call["name"],
+                        "arguments": arguments,
+                    },
+                )
+
+                # Restore provider_data back to chat completion message for non-OpenAI models
+                if "provider_data" in func_call:
+                    provider_fields = func_call["provider_data"]  # type: ignore[typeddict-item]
+                    if isinstance(provider_fields, dict):
+                        # Restore thought_signature for Gemini in Google's extra_content format
+                        if model and "gemini" in model.lower():
+                            thought_sig = provider_fields.get("thought_signature")
+
+                            if thought_sig:
+                                new_tool_call["extra_content"] = {  # type: ignore[typeddict-unknown-key]
+                                    "google": {"thought_signature": thought_sig}
+                                }
+
+                tool_calls.append(new_tool_call)
+                asst["tool_calls"] = tool_calls
+            # 5) function call output => tool message
+            elif func_output := cls.maybe_function_tool_call_output(item):
+                call_id = func_output.get("call_id")
+                if call_id is None:
+                    raise UserError(
+                        "Unpaired function outputs are supported by Responses but cannot be "
+                        "converted to Chat Completions tool messages. "
+                        "Use a Responses model to preserve this input."
+                    )
+                flush_assistant_message()
+                output_content = cast(
+                    str | Iterable[ResponseInputContentWithAudioParam], func_output["output"]
+                )
+                if preserve_tool_output_all_content:
+                    tool_result_content = cls.extract_all_content(output_content)
+                else:
+                    all_output_content = cls.extract_all_content(output_content)
+                    if isinstance(all_output_content, str):
+                        tool_result_content = all_output_content
+                    else:
+                        tool_result_content = [
+                            cast(ChatCompletionContentPartTextParam, c)
+                            for c in all_output_content
+                            if c.get("type") == "text"
+                        ]
+                        if not tool_result_content:
+                            message = (
+                                "Chat Completions tool outputs cannot be empty or contain only "
+                                "non-text content unless preserve_tool_output_all_content=True."
+                            )
+                            if strict_feature_validation:
+                                raise UserError(message)
+                            logger.warning(
+                                "%s Replacing the tool output with a placeholder; enable strict "
+                                "feature validation to raise an error instead.",
+                                message,
+                            )
+                            tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
+                msg: ChatCompletionToolMessageParam = {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": tool_result_content,  # type: ignore[typeddict-item]
+                }
+                result.append(msg)
+
+            # 6) item reference => handle or raise
+            elif item_ref := cls.maybe_item_reference(item):
+                raise UserError(
+                    f"Encountered an item_reference, which is not supported: {item_ref}"
+                )
+
+            # 7) reasoning message => extract thinking blocks if present
+            elif reasoning_item := cls.maybe_reasoning_message(item):
+                clear_pending_reasoning_state()
+                # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
+                content_items = reasoning_item.get("content", [])
+                encrypted_content = reasoning_item.get("encrypted_content")
+
+                item_provider_data: dict[str, Any] = reasoning_item.get("provider_data", {})  # type: ignore[assignment]
+                item_model = item_provider_data.get("model", "")
+                reasoning_field = item_provider_data.get(_CHAT_COMPLETIONS_REASONING_FIELD_KEY)
+                origin_provider_data = {
+                    key: value
+                    for key, value in item_provider_data.items()
+                    if key != "thinking_blocks"
+                }
+                should_replay = False
+
+                if reasoning_field == "reasoning" and model == item_model:
+                    reasoning_texts = []
+                    for content_item in content_items:
+                        if (
+                            isinstance(content_item, dict)
+                            and content_item.get("type") == "reasoning_text"
+                            and content_item.get("text")
+                        ):
+                            reasoning_texts.append(content_item["text"])
+                    if reasoning_texts:
+                        pending_reasoning = "\n".join(reasoning_texts)
+
+                if (
+                    model
+                    and ("claude" in model.lower() or "anthropic" in model.lower())
+                    and preserve_thinking_blocks
+                    # Items may not all originate from Claude, so we need to check for model match.
+                    # New thinking-block metadata alone does not establish a conflicting origin,
+                    # but other provider metadata without a model must remain origin-unknown.
+                    and (model == item_model or not origin_provider_data)
+                ):
+                    complete_thinking_blocks = item_provider_data.get("thinking_blocks")
+                    if (
+                        isinstance(complete_thinking_blocks, list)
+                        and complete_thinking_blocks
+                        and all(isinstance(block, dict) for block in complete_thinking_blocks)
+                    ):
+                        pending_reasoning = None
+                        pending_thinking_blocks = deepcopy(complete_thinking_blocks)
+                        pending_thinking_blocks_are_native = True
+                    elif content_items and reasoning_field != "reasoning":
+                        signatures = encrypted_content.split("\n") if encrypted_content else []
+
+                        reconstructed_thinking_blocks: list[dict[str, Any]] = []
+                        for content_item in content_items:
+                            if (
+                                isinstance(content_item, dict)
+                                and content_item.get("type") == "reasoning_text"
+                            ):
+                                thinking_block = {
+                                    "type": "thinking",
+                                    "thinking": content_item.get("text", ""),
+                                }
+                                if signatures:
+                                    thinking_block["signature"] = signatures.pop(0)
+                                reconstructed_thinking_blocks.append(thinking_block)
+
+                        pending_thinking_blocks = reconstructed_thinking_blocks
+                        pending_thinking_blocks_are_native = False
+
+                if model is not None:
+                    replay_context = ReasoningContentReplayContext(
+                        model=model,
+                        base_url=normalized_base_url,
+                        reasoning=ReasoningContentSource(
+                            item=reasoning_item,
+                            origin_model=item_model or None,
+                            provider_data=item_provider_data,
+                        ),
+                    )
+                    should_replay = (
+                        should_replay_reasoning_content(replay_context)
+                        if should_replay_reasoning_content is not None
+                        else default_should_replay_reasoning_content(replay_context)
+                    )
+
+                if should_replay:
+                    summary_items = reasoning_item.get("summary", [])
+                    if summary_items:
+                        reasoning_texts = []
+                        for summary_item in summary_items:
+                            if isinstance(summary_item, dict) and summary_item.get("text"):
+                                reasoning_texts.append(summary_item["text"])
+                        if reasoning_texts:
+                            pending_reasoning_content = "\n".join(reasoning_texts)
+
+            # 8) compaction items => reject for chat completions
+            elif isinstance(item, dict) and item.get("type") == "compaction":
+                raise UserError(
+                    "Compaction items are not supported for chat completions. "
+                    "Please use the Responses API to handle compaction."
+                )
+
+            # 9) If we haven't recognized it => fail or ignore
+            else:
+                raise UserError(f"Unhandled item type or structure: {item}")
+
+        flush_assistant_message()
+        return result
+
+    @classmethod
+    def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
+        if isinstance(tool, FunctionTool):
+            ensure_function_tool_supports_responses_only_features(
+                tool,
+                backend_name="Chat Completions-compatible models",
+            )
+            return {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.params_json_schema,
+                    "strict": tool.strict_json_schema,
+                },
+            }
+
+        raise UserError(
+            f"Hosted tools are not supported with the ChatCompletions API. Got tool type: "
+            f"{type(tool)}, tool: {tool}"
+        )
+
+    @classmethod
+    def convert_handoff_tool(cls, handoff: Handoff[Any, Any]) -> ChatCompletionToolParam:
+        return {
+            "type": "function",
+            "function": {
+                "name": handoff.tool_name,
+                "description": handoff.tool_description,
+                "parameters": handoff.input_json_schema,
+                "strict": handoff.strict_json_schema,
+            },
+        }

@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any, cast
+
+from openai.types.responses import ResponseFunctionToolCall
+
+from ._tool_identity import HostedMCPApprovalKey, get_tool_call_namespace, tool_trace_name
+from ._tool_invocation import tool_invocation_identity, tool_invocation_identity_and_scope
+from .agent_tool_state import (
+    get_agent_tool_state_scope,
+    peek_agent_tool_run_result,
+    set_agent_tool_state_scope,
+)
+from .exceptions import UserError
+from .run_context import RunContextWrapper, TContext
+from .usage import Usage
+
+if TYPE_CHECKING:
+    from .agent import AgentBase
+    from .items import ToolApprovalItem, TResponseInputItem
+    from .run_config import RunConfig
+    from .run_context import _ApprovalRecord
+
+
+def _assert_must_pass_tool_call_id() -> str:
+    raise ValueError("tool_call_id must be passed to ToolContext")
+
+
+def _assert_must_pass_tool_name() -> str:
+    raise ValueError("tool_name must be passed to ToolContext")
+
+
+def _assert_must_pass_tool_arguments() -> str:
+    raise ValueError("tool_arguments must be passed to ToolContext")
+
+
+_MISSING = object()
+
+
+@dataclass(eq=False)
+class ToolContext(RunContextWrapper[TContext]):
+    """The context of a tool call."""
+
+    tool_name: str = field(default_factory=_assert_must_pass_tool_name)
+    """The name of the tool being invoked."""
+
+    tool_call_id: str = field(default_factory=_assert_must_pass_tool_call_id)
+    """The ID of the tool call."""
+
+    tool_arguments: str = field(default_factory=_assert_must_pass_tool_arguments)
+    """The raw arguments string of the tool call."""
+
+    tool_call: ResponseFunctionToolCall | None = None
+    """The tool call object associated with this invocation."""
+
+    tool_namespace: str | None = None
+    """The Responses API namespace for this tool call, when present."""
+
+    agent: AgentBase[Any] | None = None
+    """The active agent for this tool call, when available."""
+
+    run_config: RunConfig | None = None
+    """The active run config for this tool call, when available."""
+
+    def __init__(
+        self,
+        context: TContext,
+        usage: Usage | object = _MISSING,
+        tool_name: str | object = _MISSING,
+        tool_call_id: str | object = _MISSING,
+        tool_arguments: str | object = _MISSING,
+        tool_call: ResponseFunctionToolCall | None = None,
+        *,
+        tool_namespace: str | None = None,
+        agent: AgentBase[Any] | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
+        turn_input: list[TResponseInputItem] | None = None,
+        _approvals: dict[str | HostedMCPApprovalKey, _ApprovalRecord] | None = None,
+        tool_input: Any | None = None,
+    ) -> None:
+        """Preserve the v0.7 positional constructor while accepting new context fields."""
+        resolved_usage = Usage() if usage is _MISSING else cast(Usage, usage)
+        super().__init__(
+            context=context,
+            usage=resolved_usage,
+            turn_input=list(turn_input or []),
+            _approvals={} if _approvals is None else _approvals,
+            tool_input=tool_input,
+        )
+        self.tool_name = (
+            _assert_must_pass_tool_name() if tool_name is _MISSING else cast(str, tool_name)
+        )
+        self.tool_arguments = (
+            _assert_must_pass_tool_arguments()
+            if tool_arguments is _MISSING
+            else cast(str, tool_arguments)
+        )
+        self.tool_call_id = (
+            _assert_must_pass_tool_call_id()
+            if tool_call_id is _MISSING
+            else cast(str, tool_call_id)
+        )
+        self.tool_call = tool_call
+        self.tool_namespace = (
+            tool_namespace
+            if isinstance(tool_namespace, str)
+            else get_tool_call_namespace(tool_call)
+        )
+        self.agent = agent
+        if run_config is not None:
+            from .run_config import _coerce_run_config
+
+            self.run_config = _coerce_run_config(run_config)
+        else:
+            self.run_config = None
+        # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
+        self._custom_data: dict[str, Any] | None = None
+
+    @property
+    def qualified_tool_name(self) -> str:
+        """Return the tool name qualified by namespace when available."""
+        return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
+
+    def _find_nested_approval_target(
+        self,
+        approval_item: ToolApprovalItem,
+    ) -> tuple[RunContextWrapper[Any], ToolApprovalItem] | None:
+        """Find a pending nested agent-tool context that owns an approval item."""
+        if self.tool_call is None:
+            return None
+        pending_result = peek_agent_tool_run_result(
+            self.tool_call,
+            scope_id=get_agent_tool_state_scope(self),
+        )
+        interruptions = getattr(pending_result, "interruptions", None)
+        to_state = getattr(pending_result, "to_state", None)
+        if not isinstance(interruptions, list) or not callable(to_state):
+            return None
+        nested_context = getattr(to_state(), "_context", None)
+        if not isinstance(nested_context, RunContextWrapper) or nested_context is self:
+            return None
+
+        target_identity = tool_invocation_identity(
+            approval_item.raw_item,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        target_identity_and_scope = tool_invocation_identity_and_scope(
+            approval_item.raw_item,
+            tool_lookup_key=approval_item.tool_lookup_key,
+            tool_name=approval_item.tool_name,
+        )
+        current_context_owns_approval = False
+        if target_identity_and_scope is not None:
+            invocation_type, call_id, approval_scope, fingerprint = target_identity_and_scope
+            current_record = self._tool_invocations.get(call_id)
+            current_context_owns_approval = current_record is not None and (
+                not current_record.completed
+                and current_record.invocation_type == invocation_type
+                and current_record.approval_scope == approval_scope
+                and current_record.fingerprint == fingerprint
+            )
+
+        exact_match: ToolApprovalItem | None = None
+        canonical_matches: list[ToolApprovalItem] = []
+        for candidate in interruptions:
+            if candidate is approval_item:
+                exact_match = candidate
+                continue
+            candidate_identity = tool_invocation_identity(
+                candidate.raw_item,
+                tool_lookup_key=candidate.tool_lookup_key,
+                tool_name=candidate.tool_name,
+            )
+            if target_identity is not None and candidate_identity == target_identity:
+                canonical_matches.append(candidate)
+        if current_context_owns_approval and (exact_match is not None or canonical_matches):
+            raise UserError(
+                "Cannot apply approval because the same tool invocation identity belongs to both "
+                "the current run and a nested agent-tool run."
+            )
+        if exact_match is not None:
+            return (nested_context, exact_match)
+        if len(canonical_matches) == 1:
+            return (nested_context, canonical_matches[0])
+        if len(canonical_matches) > 1:
+            raise UserError(
+                "Cannot apply approval because multiple nested agent-tool calls contain the same "
+                "tool invocation identity. Use distinct call IDs."
+            )
+        return None
+
+    def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
+        """Approve this context's call or route a surfaced nested approval to its owner."""
+        nested_target = self._find_nested_approval_target(approval_item)
+        if nested_target is None:
+            super().approve_tool(approval_item, always_approve=always_approve)
+            return
+        nested_context, nested_item = nested_target
+        RunContextWrapper.approve_tool(
+            nested_context,
+            nested_item,
+            always_approve=always_approve,
+        )
+
+    def reject_tool(
+        self,
+        approval_item: ToolApprovalItem,
+        always_reject: bool = False,
+        rejection_message: str | None = None,
+    ) -> None:
+        """Reject this context's call or route a surfaced nested rejection to its owner."""
+        nested_target = self._find_nested_approval_target(approval_item)
+        if nested_target is None:
+            super().reject_tool(
+                approval_item,
+                always_reject=always_reject,
+                rejection_message=rejection_message,
+            )
+            return
+        nested_context, nested_item = nested_target
+        RunContextWrapper.reject_tool(
+            nested_context,
+            nested_item,
+            always_reject=always_reject,
+            rejection_message=rejection_message,
+        )
+
+    @classmethod
+    def from_agent_context(
+        cls,
+        context: RunContextWrapper[TContext],
+        tool_call_id: str,
+        tool_call: ResponseFunctionToolCall | None = None,
+        agent: AgentBase[Any] | None = None,
+        *,
+        tool_name: str | None = None,
+        tool_arguments: str | None = None,
+        tool_namespace: str | None = None,
+        run_config: RunConfig | dict[str, Any] | None = None,
+    ) -> ToolContext:
+        """
+        Create a ToolContext from a RunContextWrapper.
+        """
+        # Grab the names of the RunContextWrapper's init=True fields
+        base_values: dict[str, Any] = {
+            f.name: getattr(context, f.name)
+            for f in fields(RunContextWrapper)
+            if f.init and f.name != "_approvals"
+        }
+        resolved_tool_name = (
+            tool_name
+            if tool_name is not None
+            else (tool_call.name if tool_call is not None else _assert_must_pass_tool_name())
+        )
+        resolved_tool_args = (
+            tool_arguments
+            if tool_arguments is not None
+            else (
+                tool_call.arguments if tool_call is not None else _assert_must_pass_tool_arguments()
+            )
+        )
+        tool_agent = agent
+        if tool_agent is None and isinstance(context, ToolContext):
+            tool_agent = context.agent
+        tool_run_config = run_config
+        if tool_run_config is None and isinstance(context, ToolContext):
+            tool_run_config = context.run_config
+
+        tool_context = cls(
+            tool_name=resolved_tool_name,
+            tool_call_id=tool_call_id,
+            tool_arguments=resolved_tool_args,
+            tool_call=tool_call,
+            tool_namespace=(
+                tool_namespace
+                if isinstance(tool_namespace, str)
+                else (
+                    getattr(tool_call, "namespace", None)
+                    if tool_call is not None
+                    and isinstance(getattr(tool_call, "namespace", None), str)
+                    else None
+                )
+            ),
+            agent=tool_agent,
+            run_config=tool_run_config,
+            **base_values,
+        )
+        context._share_tool_state_with(tool_context)
+        set_agent_tool_state_scope(tool_context, get_agent_tool_state_scope(context))
+        return tool_context

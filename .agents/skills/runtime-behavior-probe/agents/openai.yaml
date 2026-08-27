@@ -1,0 +1,6 @@
+interface:
+  display_name: "Runtime Behavior Probe"
+  short_description: "Plan and run runtime behavior probes"
+  default_prompt: "Use $runtime-behavior-probe to plan this runtime investigation; invocation authorizes planning only, so disclose the exact probe and capabilities and obtain explicit approval before execution, then report only observed evidence from the approved scope."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,325 @@
+{
+  "$schemaVersion": "1.13",
+  "auto_previous_response_id": false,
+  "context": {
+    "approvals": {},
+    "context": null,
+    "context_meta": {
+      "omitted": false,
+      "original_type": "none",
+      "requires_deserializer": false,
+      "serialized_via": "none"
+    },
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "conversation_id": null,
+  "current_agent": {
+    "name": "compat-agent"
+  },
+  "current_step": {
+    "data": {
+      "interruptions": [
+        {
+          "agent": {
+            "name": "compat-agent"
+          },
+          "raw_item": {
+            "arguments": "{\"account_id\":\"account-1\"}",
+            "call_id": "historical-approval-1",
+            "id": "1",
+            "name": "historical_approval",
+            "type": "function_call"
+          },
+          "tool_lookup_key": {
+            "kind": "bare",
+            "name": "historical_approval"
+          },
+          "tool_name": "historical_approval",
+          "tool_origin": {
+            "type": "function"
+          },
+          "type": "tool_approval_item"
+        }
+      ]
+    },
+    "type": "next_step_interruption"
+  },
+  "current_turn": 1,
+  "current_turn_persisted_item_count": 0,
+  "generated_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "description": "",
+      "raw_item": {
+        "arguments": "{\"account_id\":\"account-1\"}",
+        "call_id": "historical-approval-1",
+        "id": "1",
+        "name": "historical_approval",
+        "type": "function_call"
+      },
+      "tool_name": "historical_approval",
+      "tool_origin": {
+        "type": "function"
+      },
+      "type": "tool_call_item"
+    },
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "arguments": "{\"account_id\":\"account-1\"}",
+        "call_id": "historical-approval-1",
+        "id": "1",
+        "name": "historical_approval",
+        "type": "function_call"
+      },
+      "tool_lookup_key": {
+        "kind": "bare",
+        "name": "historical_approval"
+      },
+      "tool_name": "historical_approval",
+      "tool_origin": {
+        "type": "function"
+      },
+      "type": "tool_approval_item"
+    }
+  ],
+  "generated_prompt_cache_key": null,
+  "generated_session_item_indexes": [
+    0,
+    1
+  ],
+  "input_guardrail_results": [],
+  "last_model_response": {
+    "output": [
+      {
+        "arguments": "{\"account_id\":\"account-1\"}",
+        "call_id": "historical-approval-1",
+        "id": "1",
+        "name": "historical_approval",
+        "type": "function_call"
+      }
+    ],
+    "request_id": null,
+    "response_id": "resp-789",
+    "usage": {
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "request_usage_entries": [],
+      "requests": 0,
+      "total_tokens": 0
+    }
+  },
+  "last_processed_response": {
+    "apply_patch_actions": [],
+    "computer_actions": [],
+    "custom_tool_actions": [],
+    "functions": [
+      {
+        "tool": {
+          "description": "",
+          "lookupKey": {
+            "kind": "bare",
+            "name": "historical_approval"
+          },
+          "name": "historical_approval",
+          "paramsJsonSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "account_id": {
+                "title": "Account Id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "account_id"
+            ],
+            "title": "historical_approval_args",
+            "type": "object"
+          }
+        },
+        "tool_call": {
+          "arguments": "{\"account_id\":\"account-1\"}",
+          "call_id": "historical-approval-1",
+          "id": "1",
+          "name": "historical_approval",
+          "type": "function_call"
+        }
+      }
+    ],
+    "handoffs": [],
+    "interruptions": [
+      {
+        "agent": {
+          "name": "compat-agent"
+        },
+        "raw_item": {
+          "arguments": "{\"account_id\":\"account-1\"}",
+          "call_id": "historical-approval-1",
+          "id": "1",
+          "name": "historical_approval",
+          "type": "function_call"
+        },
+        "tool_lookup_key": {
+          "kind": "bare",
+          "name": "historical_approval"
+        },
+        "tool_name": "historical_approval",
+        "tool_origin": {
+          "type": "function"
+        },
+        "type": "tool_approval_item"
+      }
+    ],
+    "local_shell_actions": [],
+    "mcp_approval_requests": [],
+    "new_items": [
+      {
+        "agent": {
+          "name": "compat-agent"
+        },
+        "description": "",
+        "raw_item": {
+          "arguments": "{\"account_id\":\"account-1\"}",
+          "call_id": "historical-approval-1",
+          "id": "1",
+          "name": "historical_approval",
+          "type": "function_call"
+        },
+        "tool_name": "historical_approval",
+        "tool_origin": {
+          "type": "function"
+        },
+        "type": "tool_call_item"
+      }
+    ],
+    "shell_actions": [],
+    "tools_used": [
+      "historical_approval"
+    ]
+  },
+  "max_turns": 10,
+  "model_responses": [
+    {
+      "output": [
+        {
+          "arguments": "{\"account_id\":\"account-1\"}",
+          "call_id": "historical-approval-1",
+          "id": "1",
+          "name": "historical_approval",
+          "type": "function_call"
+        }
+      ],
+      "request_id": null,
+      "response_id": "resp-789",
+      "usage": {
+        "input_tokens": 0,
+        "input_tokens_details": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        ],
+        "output_tokens": 0,
+        "output_tokens_details": [
+          {
+            "reasoning_tokens": 0
+          }
+        ],
+        "request_usage_entries": [],
+        "requests": 0,
+        "total_tokens": 0
+      }
+    }
+  ],
+  "nested_history_owned_session_item_refs": [],
+  "no_active_agent_run": true,
+  "original_input": "historical input",
+  "output_guardrail_results": [],
+  "previous_response_id": null,
+  "reasoning_item_id_policy": null,
+  "session_items": [
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "description": "",
+      "raw_item": {
+        "arguments": "{\"account_id\":\"account-1\"}",
+        "call_id": "historical-approval-1",
+        "id": "1",
+        "name": "historical_approval",
+        "type": "function_call"
+      },
+      "tool_name": "historical_approval",
+      "tool_origin": {
+        "type": "function"
+      },
+      "type": "tool_call_item"
+    },
+    {
+      "agent": {
+        "name": "compat-agent"
+      },
+      "raw_item": {
+        "arguments": "{\"account_id\":\"account-1\"}",
+        "call_id": "historical-approval-1",
+        "id": "1",
+        "name": "historical_approval",
+        "type": "function_call"
+      },
+      "tool_lookup_key": {
+        "kind": "bare",
+        "name": "historical_approval"
+      },
+      "tool_name": "historical_approval",
+      "tool_origin": {
+        "type": "function"
+      },
+      "type": "tool_approval_item"
+    }
+  ],
+  "tool_input_guardrail_results": [],
+  "tool_output_guardrail_results": [],
+  "tool_use_tracker": {
+    "compat-agent": [
+      "historical_approval"
+    ]
+  },
+  "trace": {
+    "id": "trace_179a5e809d614cf89ac5a1f24b415704",
+    "object": "trace",
+    "workflow_name": "Agent workflow"
+  }
+}

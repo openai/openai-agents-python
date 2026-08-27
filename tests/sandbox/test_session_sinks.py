@@ -1,0 +1,974 @@
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import tarfile
+import uuid
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from inline_snapshot import snapshot
+
+from agents.sandbox.entries import Dir, File
+from agents.sandbox.errors import WorkspaceReadNotFoundError
+from agents.sandbox.manifest import Manifest
+from agents.sandbox.sandboxes.unix_local import (
+    UnixLocalSandboxSession,
+    UnixLocalSandboxSessionState,
+)
+from agents.sandbox.session import (
+    CallbackSink,
+    ChainedSink,
+    EventPayloadPolicy,
+    HttpProxySink,
+    Instrumentation,
+    JsonlOutboxSink,
+    SandboxSession,
+    SandboxSessionEvent,
+    SandboxSessionFinishEvent,
+    SandboxSessionStartEvent,
+    WorkspaceJsonlSink,
+)
+from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.sandbox_session import _read_with_expected_span_errors
+from agents.sandbox.snapshot import LocalSnapshot
+from agents.sandbox.types import ExecResult
+from agents.tracing import custom_span, trace
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
+from tests.testing_processor import fetch_normalized_spans, fetch_ordered_spans
+
+
+def _build_unix_local_session(
+    tmp_path: Path,
+    *,
+    manifest: Manifest | None = None,
+    exposed_ports: tuple[int, ...] = (),
+) -> UnixLocalSandboxSession:
+    workspace = tmp_path / "workspace"
+    snapshot = LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path)
+    session_manifest = (
+        manifest.model_copy(update={"root": str(workspace)}, deep=True)
+        if manifest is not None
+        else Manifest(root=str(workspace))
+    )
+    state = UnixLocalSandboxSessionState(
+        manifest=session_manifest,
+        snapshot=snapshot,
+        exposed_ports=exposed_ports,
+    )
+    return UnixLocalSandboxSession.from_state(state)
+
+
+def _build_filesystem_test_session(
+    tmp_path: Path,
+    *,
+    manifest: Manifest | None = None,
+) -> FilesystemTestSandboxSession:
+    workspace = tmp_path / "workspace"
+    session_manifest = (
+        manifest.model_copy(update={"root": str(workspace)}, deep=True)
+        if manifest is not None
+        else Manifest(root=str(workspace))
+    )
+    state = UnixLocalSandboxSessionState(
+        manifest=session_manifest,
+        snapshot=LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path),
+    )
+    return FilesystemTestSandboxSession(state=state)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_test_session_rejects_process_backed_operations(tmp_path: Path) -> None:
+    session = _build_filesystem_test_session(tmp_path)
+
+    assert session.supports_pty() is False
+    with pytest.raises(NotImplementedError, match="PTY execution is not supported"):
+        await session.pty_exec_start("echo hi")
+    with pytest.raises(AssertionError, match="user-scoped filesystem operations"):
+        await session.write(Path("x.txt"), io.BytesIO(b"hello"), user="sandbox-user")
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_sandbox_session_exec_emits_stdout_when_enabled(tmp_path: Path) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+        payload_policy=EventPayloadPolicy(include_exec_output=True),
+    )
+
+    inner = _build_unix_local_session(tmp_path)
+    async with SandboxSession(inner, instrumentation=instrumentation) as session:
+        result = await session.exec("echo hi")
+        assert result.ok()
+
+    exec_finish = [event for event in events if event.op == "exec" and event.phase == "finish"][0]
+    assert isinstance(exec_finish, SandboxSessionFinishEvent)
+    assert exec_finish.stdout is not None
+    assert "hi" in exec_finish.stdout
+    assert exec_finish.trace_id is None
+    assert exec_finish.span_id.startswith("sandbox_op_")
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_write_does_not_include_bytes_when_disabled(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+        payload_policy=EventPayloadPolicy(include_write_len=False),
+    )
+
+    inner = _build_filesystem_test_session(tmp_path)
+    async with SandboxSession(inner, instrumentation=instrumentation) as session:
+        await session.write(Path("x.txt"), io.BytesIO(b"hello"))
+
+    write_start = [event for event in events if event.op == "write" and event.phase == "start"][0]
+    assert "bytes" not in write_start.data
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_apply_manifest_preserves_write_instrumentation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+    )
+    inner = _build_unix_local_session(
+        tmp_path,
+        manifest=Manifest(entries={"materialized.txt": File(content=b"hello")}),
+    )
+
+    async def successful_exec(*_command: str | Path, timeout: float | None = None) -> ExecResult:
+        _ = timeout
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(inner, "_exec_internal", successful_exec)
+    session = SandboxSession(inner, instrumentation=instrumentation)
+
+    await session.apply_manifest()
+
+    write_events = [event for event in events if event.op == "write"]
+    assert [event.phase for event in write_events] == ["start", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_jsonl_outbox_sink_appends_one_line_per_event(tmp_path: Path) -> None:
+    outbox = tmp_path / "events.jsonl"
+    sink = JsonlOutboxSink(outbox, mode="sync", on_error="raise")
+
+    start_event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="write",
+        span_id="span_write",
+    )
+    finish_event = SandboxSessionFinishEvent(
+        session_id=start_event.session_id,
+        seq=2,
+        op="write",
+        span_id=start_event.span_id,
+        ok=True,
+        duration_ms=0.0,
+    )
+
+    await sink.handle(start_event)
+    await sink.handle(finish_event)
+
+    lines = outbox.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["phase"] == "start"
+    assert json.loads(lines[1])["phase"] == "finish"
+
+
+@pytest.mark.asyncio
+async def test_chained_sink_runs_in_order(tmp_path: Path) -> None:
+    outbox = tmp_path / "events.jsonl"
+    seen: list[int] = []
+
+    def _callback(_event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        seen.append(len(outbox.read_text(encoding="utf-8").splitlines()))
+
+    inner = _build_unix_local_session(tmp_path)
+    callback_sink = CallbackSink(_callback, mode="sync")
+    callback_sink.bind(inner)
+
+    instrumentation = Instrumentation(
+        sinks=[
+            ChainedSink(
+                JsonlOutboxSink(outbox, mode="sync", on_error="raise"),
+                callback_sink,
+            )
+        ]
+    )
+
+    start_event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="write",
+        span_id="span_write",
+    )
+    finish_event = SandboxSessionFinishEvent(
+        session_id=start_event.session_id,
+        seq=2,
+        op="write",
+        span_id=start_event.span_id,
+        ok=True,
+        duration_ms=0.0,
+    )
+
+    await instrumentation.emit(start_event)
+    await instrumentation.emit(finish_event)
+
+    assert seen == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_workspace_jsonl_sink_writes_into_workspace_and_persists(tmp_path: Path) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    instrumentation = Instrumentation(
+        sinks=[WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False)]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+
+    outbox_stream = await inner.read(Path(f"logs/events-{inner.state.session_id}.jsonl"))
+    lines = outbox_stream.read().decode("utf-8").splitlines()
+    assert any(json.loads(line)["op"] == "exec" for line in lines)
+
+    snapshot_path = tmp_path / f"{inner.state.snapshot.id}.tar"
+    with tarfile.open(snapshot_path, mode="r:*") as tar:
+        names = [member.name for member in tar.getmembers()]
+        assert any(f"logs/events-{inner.state.session_id}.jsonl" in name for name in names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_workspace_jsonl_sink_supports_session_id_template(tmp_path: Path) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    relpath = Path("logs/events-{session_id}.jsonl")
+    instrumentation = Instrumentation(
+        sinks=[
+            WorkspaceJsonlSink(
+                mode="sync",
+                on_error="raise",
+                ephemeral=False,
+                workspace_relpath=relpath,
+            )
+        ]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+
+    expected_path = Path(f"logs/events-{inner.state.session_id}.jsonl")
+    outbox_stream = await inner.read(expected_path)
+    lines = outbox_stream.read().decode("utf-8").splitlines()
+    assert any(json.loads(line)["op"] == "exec" for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_preserves_preexisting_outbox_contents(tmp_path: Path) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+    old_line = b'{"old":true}\n'
+
+    async with inner:
+        await inner.write(relpath, io.BytesIO(old_line))
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False)
+        sink.bind(inner)
+
+        start = SandboxSessionStartEvent(
+            session_id=inner.state.session_id,
+            seq=1,
+            op="write",
+            span_id=str(uuid.uuid4()),
+        )
+        finish = SandboxSessionFinishEvent(
+            session_id=inner.state.session_id,
+            seq=2,
+            op="write",
+            span_id=start.span_id,
+            ok=True,
+            duration_ms=0.0,
+        )
+
+        await sink.handle(start)
+        await sink.handle(finish)
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert len(lines) == 3
+    assert json.loads(lines[0]) == {"old": True}
+    assert json.loads(lines[1])["seq"] == 1
+    assert json.loads(lines[2])["seq"] == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_does_not_duplicate_lines_across_flushes(
+    tmp_path: Path,
+) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+
+    async with inner:
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False, flush_every=1)
+        sink.bind(inner)
+
+        for seq in (1, 2, 3):
+            await sink.handle(
+                SandboxSessionStartEvent(
+                    session_id=inner.state.session_id,
+                    seq=seq,
+                    op="write",
+                    span_id=str(uuid.uuid4()),
+                )
+            )
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_workspace_jsonl_sink_clears_flushed_buffer(tmp_path: Path) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+
+    async with inner:
+        sink = WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=False, flush_every=1)
+        sink.bind(inner)
+
+        for seq in (1, 2):
+            await sink.handle(
+                SandboxSessionStartEvent(
+                    session_id=inner.state.session_id,
+                    seq=seq,
+                    op="write",
+                    span_id=str(uuid.uuid4()),
+                )
+            )
+            assert sink._buf == bytearray()
+
+        outbox_stream = await inner.read(relpath)
+        lines = outbox_stream.read().decode("utf-8").splitlines()
+
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_workspace_jsonl_sink_ephemeral_excludes_runtime_outbox_with_existing_parent(
+    tmp_path: Path,
+) -> None:
+    inner = _build_unix_local_session(
+        tmp_path,
+        manifest=Manifest(
+            entries={
+                "logs": Dir(
+                    children={
+                        "keep.txt": File(content=b"keep"),
+                    }
+                )
+            }
+        ),
+    )
+    instrumentation = Instrumentation(
+        sinks=[WorkspaceJsonlSink(mode="sync", on_error="raise", ephemeral=True)]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+        relpath = Path(f"logs/events-{inner.state.session_id}.jsonl")
+        outbox_stream = await inner.read(relpath)
+        assert outbox_stream.read()
+
+        logs_entry = inner.state.manifest.entries["logs"]
+        assert isinstance(logs_entry, Dir)
+        assert {str(child) for child in logs_entry.children.keys()} == {"keep.txt"}
+
+    snapshot_path = tmp_path / f"{inner.state.snapshot.id}.tar"
+    with tarfile.open(snapshot_path, mode="r:*") as tar:
+        names = [member.name for member in tar.getmembers()]
+        assert any(name.endswith("logs/keep.txt") for name in names)
+        assert not any(f"logs/events-{inner.state.session_id}.jsonl" in name for name in names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_workspace_jsonl_sink_flushes_on_stop_when_flush_every_gt_one(
+    tmp_path: Path,
+) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    instrumentation = Instrumentation(
+        sinks=[
+            WorkspaceJsonlSink(
+                mode="sync",
+                on_error="raise",
+                ephemeral=False,
+                flush_every=10,
+            )
+        ]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+
+    outbox_stream = await inner.read(Path(f"logs/events-{inner.state.session_id}.jsonl"))
+    lines = outbox_stream.read().decode("utf-8").splitlines()
+    assert lines
+
+    snapshot_path = tmp_path / f"{inner.state.snapshot.id}.tar"
+    with tarfile.open(snapshot_path, mode="r:*") as tar:
+        names = [member.name for member in tar.getmembers()]
+        assert any(f"logs/events-{inner.state.session_id}.jsonl" in name for name in names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_callback_sink_receives_bound_inner_session(tmp_path: Path) -> None:
+    inner = _build_unix_local_session(tmp_path)
+    seen: list[tuple[str, BaseSandboxSession]] = []
+
+    def _callback(event: SandboxSessionEvent, session: BaseSandboxSession) -> None:
+        seen.append((event.op, session))
+
+    instrumentation = Instrumentation(sinks=[CallbackSink(_callback, mode="sync")])
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    async with wrapped as session:
+        await session.exec("echo hi")
+
+    assert seen
+    assert all(session is inner for _op, session in seen)
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_sink_spools_direct_timeout(tmp_path: Path) -> None:
+    spool_path = tmp_path / "events.jsonl"
+    sink = HttpProxySink(
+        "http://127.0.0.1:9/events",
+        mode="sync",
+        on_error="raise",
+        spool_path=spool_path,
+    )
+    event = SandboxSessionStartEvent(
+        session_id=uuid.uuid4(),
+        seq=1,
+        op="write",
+        span_id=str(uuid.uuid4()),
+    )
+
+    with patch("agents.sandbox.session.sinks.urlopen", side_effect=TimeoutError("timed out")):
+        with pytest.raises(RuntimeError, match="http proxy sink POST failed"):
+            await sink.handle(event)
+
+    lines = spool_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["seq"] == 1
+
+
+def test_http_proxy_sink_snapshots_headers() -> None:
+    headers = {"authorization": "Bearer original"}
+    sink = HttpProxySink("https://example.test/events", headers=headers)
+    headers["authorization"] = "Bearer changed"
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b""
+
+    with patch("agents.sandbox.session.sinks.urlopen", return_value=response) as urlopen:
+        sink._post(b"{}", None)
+
+    request = urlopen.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer original"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_error_events_and_traces_include_retryability(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")]
+    )
+    inner = _build_filesystem_test_session(tmp_path)
+
+    with trace("sandbox_retryability_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            with pytest.raises(WorkspaceReadNotFoundError):
+                await session.read(Path("missing.txt"))
+
+    read_finish = [event for event in events if event.op == "read" and event.phase == "finish"][0]
+    assert isinstance(read_finish, SandboxSessionFinishEvent)
+    assert read_finish.error_retryable is False
+
+    spans = fetch_normalized_spans()
+    read_span = next(
+        child for child in spans[0]["children"] if child["data"]["name"] == "sandbox.read"
+    )
+    span_data = read_span["data"]
+    assert isinstance(span_data, dict)
+    span_payload = span_data["data"]
+    assert isinstance(span_payload, dict)
+    assert span_payload["error_retryable"] is False
+
+    raw_read_span = next(
+        span for span in fetch_ordered_spans() if span.span_data.export()["name"] == "sandbox.read"
+    )
+    span_error = raw_read_span.error
+    assert span_error is not None
+    error_payload = span_error["data"]
+    assert isinstance(error_payload, dict)
+    assert error_payload["error_retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_expected_read_span_error_is_call_scoped_and_preserves_audit_failures(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")]
+    )
+    inner = _build_filesystem_test_session(tmp_path)
+    expected_path = Path("expected-missing.txt")
+    ordinary_path = Path("ordinary-missing.txt")
+
+    with trace("sandbox_expected_read_error_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            results = await asyncio.gather(
+                _read_with_expected_span_errors(
+                    session,
+                    expected_path,
+                    expected_span_errors=(WorkspaceReadNotFoundError,),
+                ),
+                session.read(ordinary_path),
+                return_exceptions=True,
+            )
+
+    assert all(isinstance(result, WorkspaceReadNotFoundError) for result in results)
+
+    read_starts = [
+        event
+        for event in events
+        if isinstance(event, SandboxSessionStartEvent) and event.op == "read"
+    ]
+    path_by_span_id = {event.span_id: event.data["path"] for event in read_starts}
+    read_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.read"
+    ]
+    error_by_path = {path_by_span_id[span.span_id]: span.error for span in read_spans}
+    assert error_by_path[str(expected_path)] is None
+    assert error_by_path[str(ordinary_path)] is not None
+
+    read_finishes = [
+        event
+        for event in events
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "read"
+    ]
+    assert len(read_finishes) == 2
+    for event in read_finishes:
+        assert event.ok is False
+        assert event.error_type == "WorkspaceReadNotFoundError"
+        assert event.error_code == "workspace_read_not_found"
+        assert event.error_retryable is False
+
+
+@pytest.mark.asyncio
+async def test_expected_read_span_records_finish_sink_failure(tmp_path: Path) -> None:
+    def fail_read_finish(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "read":
+            raise ValueError("simulated sink failure")
+
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(fail_read_finish, mode="sync", on_error="raise")]
+    )
+    inner = _build_filesystem_test_session(tmp_path)
+
+    with trace("sandbox_expected_read_sink_failure_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            with pytest.raises(RuntimeError, match="sandbox event sink failed"):
+                await _read_with_expected_span_errors(
+                    session,
+                    Path("expected-missing.txt"),
+                    expected_span_errors=(WorkspaceReadNotFoundError,),
+                )
+
+    read_span = next(
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.read"
+    )
+    assert read_span.error is not None
+    assert read_span.error["message"] == "RuntimeError"
+    assert read_span.span_data.data["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_exec_span_records_cancellation_during_finish_sink_delivery(tmp_path: Path) -> None:
+    finish_delivery_started = asyncio.Event()
+    completed_exit_codes: list[int] = []
+
+    async def block_exec_finish(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        if isinstance(event, SandboxSessionFinishEvent) and event.op == "exec":
+            exit_code = event.data["exit_code"]
+            assert isinstance(exit_code, int)
+            completed_exit_codes.append(exit_code)
+            finish_delivery_started.set()
+            await asyncio.Event().wait()
+
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(block_exec_finish, mode="sync", on_error="raise")]
+    )
+    inner = _build_unix_local_session(tmp_path)
+
+    with trace("sandbox_exec_finish_cancellation_test"):
+        async with SandboxSession(inner, instrumentation=instrumentation) as session:
+            exec_task = asyncio.create_task(session.exec("exit 7"))
+            await finish_delivery_started.wait()
+            exec_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await exec_task
+
+    exec_span = next(
+        span
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.exec"
+    )
+    assert exec_span.error is not None
+    assert exec_span.error["message"] == "CancelledError"
+    assert exec_span.span_data.data["error_type"] == "CancelledError"
+    assert completed_exit_codes
+    assert exec_span.span_data.data["exit_code"] == completed_exit_codes[0]
+    assert exec_span.span_data.data["process.exit.code"] == completed_exit_codes[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_sandbox_session_ops_nest_under_sdk_trace_and_events_carry_trace_ids(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+        payload_policy=EventPayloadPolicy(include_exec_output=True),
+    )
+    inner = _build_unix_local_session(tmp_path, exposed_ports=(8765,))
+    written_bytes = b"hello from sandbox tracing test\n"
+
+    with trace("sandbox_test"):
+        with custom_span("sandbox_parent"):
+            async with SandboxSession(inner, instrumentation=instrumentation) as session:
+                running = await session.running()
+                assert running
+
+                await session.write(Path("notes.txt"), io.BytesIO(written_bytes))
+                read_handle = await session.read(Path("notes.txt"))
+                try:
+                    assert read_handle.read() == written_bytes
+                finally:
+                    read_handle.close()
+
+                endpoint = await session.resolve_exposed_port(8765)
+                assert (endpoint.host, endpoint.port, endpoint.tls) == ("127.0.0.1", 8765, False)
+
+                persisted_workspace = await session.persist_workspace()
+                try:
+                    persisted_workspace_bytes = persisted_workspace.read()
+                finally:
+                    persisted_workspace.close()
+                assert persisted_workspace_bytes
+
+                await session.hydrate_workspace(io.BytesIO(persisted_workspace_bytes))
+
+                slow_result = await session.exec("sleep 1 && echo slow span")
+                assert slow_result.ok()
+
+                fast_result = await session.exec("echo hi")
+                assert fast_result.ok()
+
+                failing_result = await session.exec("echo failing >&2; exit 7")
+                assert failing_result.exit_code == 7
+                assert failing_result.stderr.strip()
+
+    spans = fetch_normalized_spans()
+    assert len(spans) == 1
+    parent_span = spans[0]["children"][0]
+    sandbox_children = parent_span["children"]
+
+    stable_span_tree = [
+        {
+            "workflow_name": spans[0]["workflow_name"],
+            "children": [
+                {
+                    "type": parent_span["type"],
+                    "data": parent_span["data"],
+                    "children": [
+                        {
+                            "type": child["type"],
+                            "data": {
+                                "name": child["data"]["name"],
+                                "data": {
+                                    key: value
+                                    for key, value in child["data"]["data"].items()
+                                    if key
+                                    in {
+                                        "alive",
+                                        "error.type",
+                                        "exit_code",
+                                        "process.exit.code",
+                                        "sandbox.backend",
+                                        "sandbox.operation",
+                                        "server.address",
+                                        "server.port",
+                                    }
+                                },
+                            },
+                            **({"error": child["error"]} if "error" in child else {}),
+                        }
+                        for child in sandbox_children
+                    ],
+                }
+            ],
+        }
+    ]
+
+    assert stable_span_tree == snapshot(
+        [
+            {
+                "workflow_name": "sandbox_test",
+                "children": [
+                    {
+                        "type": "custom",
+                        "data": {"name": "sandbox_parent", "data": {}},
+                        "children": [
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.start",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "start",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.running",
+                                    "data": {
+                                        "alive": True,
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "running",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.write",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "write",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.read",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "read",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.resolve_exposed_port",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "resolve_exposed_port",
+                                        "server.address": "127.0.0.1",
+                                        "server.port": 8765,
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.persist_workspace",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "persist_workspace",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.hydrate_workspace",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "hydrate_workspace",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.exec",
+                                    "data": {
+                                        "exit_code": 0,
+                                        "process.exit.code": 0,
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "exec",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.exec",
+                                    "data": {
+                                        "exit_code": 0,
+                                        "process.exit.code": 0,
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "exec",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.exec",
+                                    "data": {
+                                        "error.type": "ExecNonZeroError",
+                                        "exit_code": 7,
+                                        "process.exit.code": 7,
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "exec",
+                                    },
+                                },
+                                "error": {
+                                    "message": "Sandbox operation returned an unsuccessful result.",
+                                    "data": {"operation": "exec", "exit_code": 7},
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.stop",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "stop",
+                                    },
+                                },
+                            },
+                            {
+                                "type": "custom",
+                                "data": {
+                                    "name": "sandbox.shutdown",
+                                    "data": {
+                                        "sandbox.backend": "unix_local",
+                                        "sandbox.operation": "shutdown",
+                                    },
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+    session_ids = {child["data"]["data"]["session_id"] for child in sandbox_children}
+    sandbox_session_ids = {
+        child["data"]["data"]["sandbox.session.id"] for child in sandbox_children
+    }
+    assert len(session_ids) == 1
+    assert len(sandbox_session_ids) == 1
+    session_id = session_ids.pop()
+    sandbox_session_id = sandbox_session_ids.pop()
+    assert isinstance(session_id, str)
+    assert isinstance(sandbox_session_id, str)
+    assert str(uuid.UUID(session_id)) == session_id
+    assert sandbox_session_id == session_id
+
+    exec_spans = [child for child in sandbox_children if child["data"]["name"] == "sandbox.exec"]
+    assert len(exec_spans) == 3
+
+    exec_finish = [event for event in events if event.op == "exec" and event.phase == "finish"][0]
+    assert isinstance(exec_finish, SandboxSessionFinishEvent)
+    assert exec_finish.trace_id is not None
+    assert exec_finish.span_id.startswith("span_")
+    assert exec_finish.parent_span_id is not None
+    assert sum(1 for event in events if event.op == "exec" and event.phase == "finish") == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+async def test_sandbox_session_events_fallback_to_audit_ids_under_disabled_parent_span(
+    tmp_path: Path,
+) -> None:
+    events: list[SandboxSessionEvent] = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda e, _sess: events.append(e), mode="sync")],
+    )
+    inner = _build_unix_local_session(tmp_path)
+
+    with trace("sandbox_disabled_parent_test"):
+        with custom_span("disabled_parent", disabled=True):
+            async with SandboxSession(inner, instrumentation=instrumentation) as session:
+                result = await session.exec("echo hi")
+                assert result.ok()
+
+    exec_events = [event for event in events if event.op == "exec"]
+    assert len(exec_events) == 2
+    start_event, finish_event = exec_events
+    assert isinstance(start_event, SandboxSessionStartEvent)
+    assert isinstance(finish_event, SandboxSessionFinishEvent)
+    assert start_event.trace_id is None
+    assert finish_event.trace_id is None
+    assert start_event.parent_span_id is None
+    assert finish_event.parent_span_id is None
+    assert start_event.span_id == finish_event.span_id
+    assert start_event.span_id.startswith("sandbox_op_")
+    assert start_event.span_id != "no-op"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_aclose_flushes_best_effort_sink_tasks(tmp_path: Path) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    seen: list[tuple[str, str]] = []
+
+    async def _callback(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        await asyncio.sleep(0)
+        seen.append((event.op, event.phase))
+
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(_callback, mode="best_effort", on_error="log")]
+    )
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    await wrapped.start()
+    await wrapped.aclose()
+
+    assert ("stop", "finish") in seen
+    assert ("shutdown", "finish") in seen
