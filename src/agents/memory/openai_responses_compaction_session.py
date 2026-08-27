@@ -27,6 +27,10 @@ logger = logging.getLogger("openai-agents.openai.compaction")
 
 DEFAULT_COMPACTION_THRESHOLD = 10
 _ALL_SESSION_ITEMS_LIMIT = 2_147_483_647
+# Recorded response boundaries are pruned oldest first past this size so ids whose
+# compaction never runs (for example turns whose compaction was deferred) cannot
+# grow the map without bound.
+_MAX_RECORDED_RESPONSE_BOUNDARIES = 50
 
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
@@ -137,6 +141,16 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
+        # Each response id is paired with the exact local item count at the moment
+        # its batch was persisted, recorded under the mutation lock. A
+        # previous_response_id compaction covers the server side history through
+        # that response only, so the replacement must preserve every local item
+        # past the recorded boundary, not past a snapshot taken later. A None
+        # value is a tombstone: the response was recorded, but a later
+        # replacement rewrote the prefix its boundary counted, so no count on
+        # the current history describes that response's coverage and a
+        # compaction keyed on it must skip instead of guessing.
+        self._response_boundaries: dict[str, int | None] = {}
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
@@ -232,6 +246,33 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 )
                 return
 
+            # The boundary recorded when this response's batch was persisted is
+            # the authority on what previous_response_id compaction covers. The
+            # snapshot below can already contain turns another run appended after
+            # that persist, so it only anchors the divergence check and never the
+            # ownership boundary. clear_session and pop_item drop recorded
+            # boundaries outright and a successful replacement translates the
+            # survivors, so a stale count can never be read here. A tombstone
+            # means an earlier replacement rewrote the prefix this boundary
+            # counted; the snapshot fallback would classify turns persisted
+            # after this response into its baseline and drop them, so skip. An
+            # id with no entry was never persisted through the response hook;
+            # such direct callers persist before compacting and own that
+            # ordering, which keeps the snapshot fallback sound for them.
+            recorded_boundary: int | None = None
+            if resolved_mode == "previous_response_id" and response_id is not None:
+                if response_id in self._response_boundaries:
+                    recorded_boundary = self._response_boundaries[response_id]
+                    if recorded_boundary is None:
+                        logger.warning(
+                            "Skipped compaction for %s (mode=%s): an earlier replacement "
+                            "rewrote the history prefix this response's boundary counted, "
+                            "so no boundary on the current history describes its coverage.",
+                            response_id,
+                            resolved_mode,
+                        )
+                        return
+
             # Capture the full stored history while the lock still excludes writers.
             # It anchors the post-flight check that detects concurrent mutations.
             snapshot_items = await self._get_all_underlying_session_items()
@@ -283,9 +324,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     resolved_mode,
                 )
                 return
-            # Items appended concurrently while the request was in flight sit past
-            # the snapshot; carry them over so the replacement cannot drop them.
-            concurrent_tail = previous_items[baseline_count:]
+            # Preserve every item past the recorded boundary for this response.
+            # Turns another run appended between this response's persisted batch
+            # and the snapshot are not covered by previous_response_id compaction,
+            # so they must survive alongside items appended while the request was
+            # in flight. Without a recorded boundary (direct run_compaction calls,
+            # or input mode where the compaction input was captured under the same
+            # lock as the snapshot) the snapshot length is the boundary.
+            preserve_from = recorded_boundary if recorded_boundary is not None else baseline_count
+            concurrent_tail = previous_items[preserve_from:]
             await self._replace_underlying_session_items(
                 output_items=output_items + concurrent_tail,
                 previous_items=previous_items,
@@ -298,6 +345,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # a concurrent tail. With a non empty snapshot the prefix check would
             # catch that; when both snapshots were empty only the counter can.
             self._destructive_generation += 1
+            # Translate every recorded boundary onto the rewritten history. The
+            # replacement rewrote previous_items[:preserve_from] into output_items
+            # and kept the tail, so a boundary at or past preserve_from still
+            # counts the same persisted batch at its shifted position, and an
+            # overlapping compaction keyed on that response stays sound. A
+            # boundary inside the rewritten prefix has no counterpart in the new
+            # history, and any count would claim newer items for that response;
+            # keep a tombstone so its compaction skips instead.
+            self._response_boundaries = {
+                rid: (
+                    boundary - preserve_from + len(output_items)
+                    if boundary is not None and boundary >= preserve_from
+                    else None
+                )
+                for rid, boundary in self._response_boundaries.items()
+            }
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s, concurrent_tail=%s)",
@@ -457,21 +520,45 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         async with self._mutation_lock:
-            try:
-                await self.underlying_session.add_items(items)
-            except (Exception, asyncio.CancelledError):
-                # The backend may have committed before acknowledgement failed. Re-read its
-                # authoritative history before compaction instead of retaining a stale cache.
-                self._compaction_candidate_items = None
-                self._session_items = None
-                raise
-            if self._compaction_candidate_items is not None:
-                new_items = _normalize_compaction_session_items(items)
-                new_candidates = select_compaction_candidate_items(new_items)
-                if new_candidates:
-                    self._compaction_candidate_items.extend(new_candidates)
-            if self._session_items is not None:
-                self._session_items.extend(_normalize_compaction_session_items(items))
+            await self._add_items_locked(items)
+
+    async def _add_items_for_response(
+        self, items: list[TResponseInputItem], *, response_id: str
+    ) -> None:
+        """Append a response's persisted batch and record its compaction boundary.
+
+        The runner calls this instead of add_items when the batch belongs to a
+        specific response. Recording the boundary in the same locked region as
+        the append keeps the pairing exact: no other writer can slip items in
+        between the batch and the count recorded for it, so run_compaction can
+        later preserve everything past the boundary regardless of what other
+        runs appended before its own snapshot.
+        """
+        async with self._mutation_lock:
+            await self._add_items_locked(items)
+            boundary = len(await self._get_all_underlying_session_items())
+            self._response_boundaries.pop(response_id, None)
+            self._response_boundaries[response_id] = boundary
+            while len(self._response_boundaries) > _MAX_RECORDED_RESPONSE_BOUNDARIES:
+                del self._response_boundaries[next(iter(self._response_boundaries))]
+
+    async def _add_items_locked(self, items: list[TResponseInputItem]) -> None:
+        try:
+            await self.underlying_session.add_items(items)
+        except (Exception, asyncio.CancelledError):
+            # The backend may have committed before acknowledgement failed. Read its
+            # authoritative history again before compaction instead of retaining a
+            # stale cache.
+            self._compaction_candidate_items = None
+            self._session_items = None
+            raise
+        if self._compaction_candidate_items is not None:
+            new_items = _normalize_compaction_session_items(items)
+            new_candidates = select_compaction_candidate_items(new_items)
+            if new_candidates:
+                self._compaction_candidate_items.extend(new_candidates)
+        if self._session_items is not None:
+            self._session_items.extend(_normalize_compaction_session_items(items))
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
@@ -480,6 +567,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._compaction_candidate_items = None
                 self._session_items = None
                 self._destructive_generation += 1
+                # Recorded boundaries are item counts, so removing an item makes
+                # them stale even when the pop only trimmed the tail.
+                self._response_boundaries.clear()
             return popped
 
     async def clear_session(self) -> None:
@@ -489,6 +579,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._session_items = []
             self._deferred_response_id = None
             self._destructive_generation += 1
+            self._response_boundaries.clear()
 
     async def _ensure_compaction_candidates(
         self,

@@ -662,9 +662,29 @@ async def save_result_to_session(
                 resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
             ),
         }
-        await resume_pending_session_write(resumed_write_state, session, wrapper=wrapper)
+        await resume_pending_session_write(
+            resumed_write_state, session, response_id=response_id, wrapper=wrapper
+        )
     else:
-        await _session_add_items(session, items_to_save, wrapper=wrapper)
+        add_items_for_response = (
+            getattr(session, "_add_items_for_response", None)
+            if response_id and is_openai_responses_compaction_aware_session(session)
+            else None
+        )
+        if callable(add_items_for_response):
+            # Persisting this response's batch is the only moment its response id
+            # and its exact local item boundary coincide, so record the pairing
+            # here. A later previous_response_id compaction preserves everything
+            # past the recorded boundary, including turns other runs append
+            # before that compaction takes its own snapshot.
+            await _call_session_method(
+                add_items_for_response,
+                items_to_save,
+                response_id=response_id,
+                wrapper=wrapper,
+            )
+        else:
+            await _session_add_items(session, items_to_save, wrapper=wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -751,6 +771,7 @@ async def resume_pending_session_write(
     run_state: RunState,
     session: Session | None,
     *,
+    response_id: str | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Settle a resumed output batch before allowing further model work.
@@ -758,6 +779,11 @@ async def resume_pending_session_write(
     The application must supply the original backend and serialize access to its history,
     including independently restored RunState copies. Session has no distributed compare-and-swap
     or backend identity contract. A changed tail is not repaired or searched for similar items.
+
+    When a response_id is supplied and this call performs the append itself, the batch is
+    persisted through the compaction boundary hook so the response id is paired with its
+    item count. The serialized pending write carries no response id, so resumes from a
+    restored RunState leave it unset and record no boundary.
     """
     pending = run_state._pending_session_write
     if pending is None:
@@ -801,7 +827,26 @@ async def resume_pending_session_write(
             append = unchanged
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
-            await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+            items_to_append = copy.deepcopy(pending["items"])
+            add_items_for_response = (
+                getattr(session, "_add_items_for_response", None)
+                if response_id and is_openai_responses_compaction_aware_session(session)
+                else None
+            )
+            if callable(add_items_for_response):
+                # Only the branch that appends can record a boundary: the hook pairs
+                # the response id with the item count in one locked region. When an
+                # earlier attempt already committed the batch, other writers may
+                # have appended since, so any count read now could claim their
+                # items for this response; no boundary is recorded in that case.
+                await _call_session_method(
+                    add_items_for_response,
+                    items_to_append,
+                    response_id=response_id,
+                    wrapper=wrapper,
+                )
+            else:
+                await _session_add_items(session, items_to_append, wrapper=wrapper)
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
         run_state._pending_session_write = None
     finally:

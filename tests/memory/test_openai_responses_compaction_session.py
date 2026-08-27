@@ -16,8 +16,9 @@ from openai.types.responses.response_usage import (
 
 import agents._debug as _debug
 from agents import Agent, Runner
-from agents.items import TResponseInputItem
+from agents.items import RunItem, TResponseInputItem
 from agents.memory import (
+    OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionSession,
     Session,
     SessionSettings,
@@ -34,6 +35,7 @@ from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
+from agents.run_internal.session_persistence import save_result_to_session
 from agents.testing import ScriptedModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
@@ -2127,6 +2129,246 @@ class TestCompactionConcurrentMutations:
         # The first replacement landed; the second detected the rewrite and skipped.
         assert await underlying.get_items() == [first_output]
         assert await session.get_items() == [first_output]
+
+    @pytest.mark.asyncio
+    async def test_turn_persisted_before_late_snapshot_survives_replacement(self) -> None:
+        """A turn landing between a response's persisted batch and its snapshot survives.
+
+        Ordering under test: run A's response batch is persisted, run B persists
+        its own turn, and only then does run A snapshot and compact. The compact
+        call with previous_response_id covers history through A's batch only, so
+        the replacement must preserve B's turn even though A's late snapshot
+        already contains it and the prefix and generation checks see no rewrite.
+        """
+        compacted_item = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+        a_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        b_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+
+        underlying = SimpleListSession(history=[])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        mock_client = self.create_gated_compact_client(
+            [compacted_item], compact_entered, release_compact
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="persist-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp_a",
+        )
+
+        class StubMessageRunItem:
+            def __init__(self, payload: TResponseInputItem) -> None:
+                self.raw_item = payload
+                self.type = "message_output_item"
+
+            def to_input_item(self) -> TResponseInputItem:
+                return self.raw_item
+
+        real_run_compaction = session.run_compaction
+        run_a_compaction_requested = asyncio.Event()
+        release_run_a_compaction = asyncio.Event()
+
+        async def paused_run_compaction(args: OpenAIResponsesCompactionArgs | None = None) -> None:
+            # Hold back only the first call, which belongs to run A. Run B's call
+            # passes straight through and is declined by the decision hook.
+            if not run_a_compaction_requested.is_set():
+                run_a_compaction_requested.set()
+                await release_run_a_compaction.wait()
+            await real_run_compaction(args)
+
+        session.run_compaction = paused_run_compaction  # type: ignore[method-assign]
+
+        save_a = asyncio.create_task(
+            save_result_to_session(
+                session,
+                [],
+                [cast(RunItem, StubMessageRunItem(a_turn))],
+                None,
+                response_id="resp_a",
+            )
+        )
+        await run_a_compaction_requested.wait()
+        # Run A's batch is persisted and paired with its boundary, but its
+        # compaction has not snapshotted yet. Run B's turn lands now.
+        await save_result_to_session(
+            session,
+            [],
+            [cast(RunItem, StubMessageRunItem(b_turn))],
+            None,
+            response_id="resp_b",
+        )
+        assert await underlying.get_items() == [a_turn, b_turn]
+
+        release_run_a_compaction.set()
+        await compact_entered.wait()
+        release_compact.set()
+        await save_a
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert mock_client.responses.compact.call_args.kwargs["previous_response_id"] == "resp_a"
+        assert await underlying.get_items() == [compacted_item, b_turn]
+        assert await session.get_items() == [compacted_item, b_turn]
+
+    @pytest.mark.asyncio
+    async def test_overlapping_compaction_lands_on_translated_boundary(self) -> None:
+        """A second compaction must preserve turns past its translated boundary.
+
+        Ordering under test: response A's batch is persisted, response B's batch
+        follows, and A's replacement lands while run C's turn is appended mid
+        flight. A's replacement rewrites the prefix that B's recorded boundary
+        counted into A's summary, so the boundary must be translated onto the
+        rewritten history. B's later replacement then preserves C's turn.
+        Clearing the boundary instead would make B fall back to its snapshot
+        and drop the turn.
+        """
+        a_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        b_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+        c_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn c"}
+        )
+        a_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+        b_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through b"})
+
+        underlying = SimpleListSession(history=[])
+        first_compact_entered = asyncio.Event()
+        release_first_compact = asyncio.Event()
+        outputs = [[a_summary], [b_summary]]
+        call_index = 0
+
+        async def gated_compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_index
+            index = call_index
+            call_index += 1
+            if index == 0:
+                first_compact_entered.set()
+                await release_first_compact.wait()
+            response = MagicMock()
+            response.output = outputs[index]
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=gated_compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="translated-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([a_turn], response_id="resp_a")
+        await session._add_items_for_response([b_turn], response_id="resp_b")
+
+        compaction_a = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_a"})
+        )
+        try:
+            await first_compact_entered.wait()
+            # A's request is in flight with its snapshot taken; C's turn lands now.
+            await session.add_items([c_turn])
+        finally:
+            release_first_compact.set()
+        await compaction_a
+        assert await underlying.get_items() == [a_summary, b_turn, c_turn]
+
+        await session.run_compaction({"force": True, "response_id": "resp_b"})
+
+        sent_ids = [
+            call.kwargs["previous_response_id"]
+            for call in mock_client.responses.compact.call_args_list
+        ]
+        assert sent_ids == ["resp_a", "resp_b"]
+        # B's boundary now sits past A's summary and B's own batch, so C's turn
+        # is the only tail B's replacement must keep.
+        assert await underlying.get_items() == [b_summary, c_turn]
+        assert await session.get_items() == [b_summary, c_turn]
+
+    @pytest.mark.asyncio
+    async def test_compaction_skips_when_replacement_rewrote_its_recorded_baseline(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A compaction whose recorded prefix was rewritten away must skip.
+
+        Ordering under test: response B's batch is persisted with a boundary,
+        response A's batch follows, run C's turn lands while A's compaction is
+        in flight, and A's replacement rewrites both batches into A's summary
+        before B takes its snapshot. B's recorded prefix ended inside the
+        rewritten region, so no boundary on the new history describes what B's
+        compaction covers. B must skip; falling back to its snapshot would
+        classify C's turn and A's summary into B's baseline and drop both.
+        """
+        b_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+        a_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        c_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn c"}
+        )
+        a_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+        stale_b_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through b"})
+
+        underlying = SimpleListSession(history=[])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        outputs = [[a_summary], [stale_b_summary]]
+        call_index = 0
+
+        async def gated_compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_index
+            index = call_index
+            call_index += 1
+            if index == 0:
+                compact_entered.set()
+                await release_compact.wait()
+            response = MagicMock()
+            response.output = outputs[index]
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=gated_compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="rewritten-baseline",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([b_turn], response_id="resp_b")
+        await session._add_items_for_response([a_turn], response_id="resp_a")
+
+        compaction_a = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_a"})
+        )
+        try:
+            await compact_entered.wait()
+            # A's request is in flight; C's turn lands before A's replacement.
+            await session.add_items([c_turn])
+        finally:
+            release_compact.set()
+        await compaction_a
+        # A's replacement covered both batches and preserved C's turn.
+        assert await underlying.get_items() == [a_summary, c_turn]
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_b"})
+
+        # B's compaction skipped without calling the API and replaced nothing,
+        # so C's turn and A's summary both survive.
+        assert await underlying.get_items() == [a_summary, c_turn]
+        assert await session.get_items() == [a_summary, c_turn]
+        assert mock_client.responses.compact.await_count == 1
+        assert "Skipped compaction for resp_b" in caplog.text
 
 
 class TestTypeGuard:
