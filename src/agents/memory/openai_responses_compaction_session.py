@@ -141,23 +141,26 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
-        # Each response id is paired with the exact local item count at the moment
-        # its batch was persisted, recorded under the mutation lock. A
-        # previous_response_id compaction covers the server side history through
-        # that response only, so the replacement must preserve every local item
-        # past the recorded boundary, not past a snapshot taken later. A None
-        # value is a tombstone: the response was recorded, but a later
-        # replacement rewrote the prefix its boundary counted, so no count on
-        # the current history describes that response's coverage and a
-        # compaction keyed on it must skip instead of guessing.
-        self._response_boundaries: dict[str, int | None] = {}
+        # Authoritative record of what previous_response_id compaction covers.
+        # Each response id maps to the exact local item count at the moment its
+        # batch was persisted, recorded under the mutation lock. Such a
+        # compaction covers the server side history through that response only,
+        # so the replacement must preserve every local item past the recorded
+        # boundary, not past a snapshot taken later. clear_session and pop_item
+        # drop recorded boundaries outright, and a successful replacement
+        # translates boundaries at or past the rewritten prefix onto the new
+        # history and drops the rest, so a stale count can never be read from
+        # the map. An absent entry therefore means the boundary was dropped by
+        # one of those paths or evicted past the cap; once anything was ever
+        # recorded, a compaction keyed on an absent id skips instead of
+        # guessing, because the snapshot fallback would claim turns persisted
+        # after that response. The fallback stays reserved for sessions that
+        # never record boundaries, whose direct callers persist before
+        # compacting and own that ordering.
+        self._response_boundaries: dict[str, int] = {}
         # True once any response boundary has been recorded on this instance.
-        # Eviction past the cap and the wipes in clear_session and pop_item
-        # can drop the entry for a response whose compaction is still pending,
-        # so an absent id alone cannot distinguish such a response from a
-        # direct caller that never records boundaries. The flag keeps that
-        # distinction, and it is never reset: a compaction keyed on a response
-        # recorded before a clear must still skip after the clear.
+        # It is never reset: a compaction keyed on a response recorded before
+        # a clear must still skip after the clear.
         self._response_boundaries_ever_recorded = False
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
@@ -254,43 +257,19 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 )
                 return
 
-            # The boundary recorded when this response's batch was persisted is
-            # the authority on what previous_response_id compaction covers. The
-            # snapshot below can already contain turns another run appended after
-            # that persist, so it only anchors the divergence check and never the
-            # ownership boundary. clear_session and pop_item drop recorded
-            # boundaries outright and a successful replacement translates the
-            # survivors, so a stale count can never be read here. A tombstone
-            # means an earlier replacement rewrote the prefix this boundary
-            # counted; the snapshot fallback would classify turns persisted
-            # after this response into its baseline and drop them, so skip. An
-            # absent entry is ambiguous once anything was ever recorded:
-            # eviction past the cap and the wipes in clear_session and
-            # pop_item drop entries for responses whose compactions may still
-            # be pending, and guessing from the snapshot would claim newer
-            # turns for such a response, so those skip like tombstones. The
-            # snapshot fallback stays reserved for sessions that never record
-            # boundaries, whose direct callers persist before compacting and
-            # own that ordering.
+            # _response_boundaries is the authority on what previous_response_id
+            # compaction covers; the snapshot below only anchors the divergence
+            # check. Skip when the map cannot vouch for this response.
             recorded_boundary: int | None = None
             if resolved_mode == "previous_response_id" and response_id is not None:
                 if response_id in self._response_boundaries:
                     recorded_boundary = self._response_boundaries[response_id]
-                    if recorded_boundary is None:
-                        logger.warning(
-                            "Skipped compaction for %s (mode=%s): an earlier replacement "
-                            "rewrote the history prefix this response's boundary counted, "
-                            "so no boundary on the current history describes its coverage.",
-                            response_id,
-                            resolved_mode,
-                        )
-                        return
                 elif self._response_boundaries_ever_recorded:
                     logger.warning(
                         "Skipped compaction for %s (mode=%s): this session records response "
                         "boundaries but has no entry for this response, so its boundary was "
-                        "evicted or removed and the snapshot fallback would claim turns "
-                        "persisted after this response.",
+                        "invalidated by a history rewrite, evicted, or removed, and the "
+                        "snapshot fallback would claim turns persisted after this response.",
                         response_id,
                         resolved_mode,
                     )
@@ -300,8 +279,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # It anchors the post-flight check that detects concurrent mutations.
             snapshot_items = await self._get_all_underlying_session_items()
             snapshot_generation = self._destructive_generation
+            # Clear the deferred id before releasing the lock: this call
+            # subsumes the deferral, and a concurrent run that defers after the
+            # release must not have its deferral wiped.
+            self._deferred_response_id = None
 
-        self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
             response_id,
@@ -332,12 +314,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._destructive_generation != snapshot_generation
                 or previous_items[:baseline_count] != snapshot_items
             ):
-                # A concurrent clear_session or pop_item rewrote history while the
-                # compaction request was in flight, so the snapshot no longer
-                # describes the stored items. Replacing them would resurrect
-                # deleted history; keep the current items and drop the caches. The
-                # generation counter catches the case the prefix check cannot: a
-                # clear_session while the snapshot itself was empty.
+                # The stored history no longer extends the snapshot, so
+                # replacing it could resurrect deleted items; keep the current
+                # items and drop the caches. The generation counter catches
+                # every rewrite made through this wrapper, including those the
+                # prefix comparison cannot see because the snapshot was empty
+                # or the rewrite restored identical items. The prefix
+                # comparison catches writers that bypass this wrapper and
+                # mutate the underlying session directly.
                 self._compaction_candidate_items = None
                 self._session_items = None
                 logger.warning(
@@ -347,42 +331,65 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     resolved_mode,
                 )
                 return
-            # Preserve every item past the recorded boundary for this response.
-            # Turns another run appended between this response's persisted batch
-            # and the snapshot are not covered by previous_response_id compaction,
-            # so they must survive alongside items appended while the request was
-            # in flight. Without a recorded boundary (direct run_compaction calls,
-            # or input mode where the compaction input was captured under the same
-            # lock as the snapshot) the snapshot length is the boundary.
+            if recorded_boundary is not None and recorded_boundary > baseline_count:
+                # No healthy path records a boundary past the stored history:
+                # appends record the post append count, and rewrites drop or
+                # translate entries. Treat the boundary state as corrupt and
+                # skip instead of slicing past the end, which would classify
+                # the whole history as covered and replace it outright.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._response_boundaries.clear()
+                logger.warning(
+                    "Skipped compaction replacement for %s (mode=%s): the recorded boundary "
+                    "exceeds the stored history, so the boundary state no longer describes "
+                    "this session.",
+                    response_id,
+                    resolved_mode,
+                )
+                return
+            # The recorded boundary, not the snapshot, decides what the
+            # replacement preserves; see _response_boundaries. The snapshot
+            # length substitutes only when nothing was recorded: direct
+            # run_compaction calls, and input mode, where the compaction input
+            # was captured under the same lock as the snapshot.
             preserve_from = recorded_boundary if recorded_boundary is not None else baseline_count
             concurrent_tail = previous_items[preserve_from:]
-            await self._replace_underlying_session_items(
-                output_items=output_items + concurrent_tail,
-                previous_items=previous_items,
-            )
+            # Build the refreshed caches before the replacement so nothing that
+            # can raise sits between the durable write and the bookkeeping
+            # assignments below.
             cached_items = output_items + _normalize_compaction_session_items(concurrent_tail)
-            self._compaction_candidate_items = select_compaction_candidate_items(cached_items)
+            cached_candidate_items = select_compaction_candidate_items(cached_items)
+            try:
+                await self._replace_underlying_session_items(
+                    output_items=output_items + concurrent_tail,
+                    previous_items=previous_items,
+                )
+            except (Exception, asyncio.CancelledError):
+                # The replacement transaction failed and its restore is best
+                # effort, so the store may hold anything. Count the attempt as
+                # a rewrite and drop every recorded boundary, matching pop_item
+                # and clear_session, so no later compaction trusts a count the
+                # store may no longer back.
+                self._destructive_generation += 1
+                self._response_boundaries.clear()
+                raise
+            self._compaction_candidate_items = cached_candidate_items
             self._session_items = cached_items
             # The replacement itself rewrote stored history, so a second in flight
             # compaction that snapshotted before it must not treat this output as
             # a concurrent tail. With a non empty snapshot the prefix check would
             # catch that; when both snapshots were empty only the counter can.
             self._destructive_generation += 1
-            # Translate every recorded boundary onto the rewritten history. The
-            # replacement rewrote previous_items[:preserve_from] into output_items
-            # and kept the tail, so a boundary at or past preserve_from still
-            # counts the same persisted batch at its shifted position, and an
-            # overlapping compaction keyed on that response stays sound. A
-            # boundary inside the rewritten prefix has no counterpart in the new
-            # history, and any count would claim newer items for that response;
-            # keep a tombstone so its compaction skips instead.
+            # Translate the surviving boundaries onto the rewritten history: a
+            # boundary at or past preserve_from still counts the same persisted
+            # batch at its shifted position. A boundary inside the rewritten
+            # prefix has no counterpart in the new history, so drop it and let
+            # its compaction skip; see _response_boundaries.
             self._response_boundaries = {
-                rid: (
-                    boundary - preserve_from + len(output_items)
-                    if boundary is not None and boundary >= preserve_from
-                    else None
-                )
+                rid: boundary - preserve_from + len(output_items)
                 for rid, boundary in self._response_boundaries.items()
+                if boundary >= preserve_from
             }
 
         logger.debug(
@@ -516,24 +523,28 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
-        if self._deferred_response_id is not None:
-            return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-        resolved_mode = self._resolve_compaction_mode_for_response(
-            response_id=response_id,
-            store=store,
-            requested_mode=None,
-        )
-        should_compact = self.should_trigger_compaction(
-            {
-                "response_id": response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
-        )
-        if should_compact:
-            self._deferred_response_id = response_id
+        # The cache fill below must not interleave with a replacement that is
+        # installing fresh caches, so the whole decision runs under the
+        # mutation lock. The runner call site holds no lock here.
+        async with self._mutation_lock:
+            if self._deferred_response_id is not None:
+                return
+            compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+            resolved_mode = self._resolve_compaction_mode_for_response(
+                response_id=response_id,
+                store=store,
+                requested_mode=None,
+            )
+            should_compact = self.should_trigger_compaction(
+                {
+                    "response_id": response_id,
+                    "compaction_mode": resolved_mode,
+                    "compaction_candidate_items": compaction_candidate_items,
+                    "session_items": session_items,
+                }
+            )
+            if should_compact:
+                self._deferred_response_id = response_id
 
     def _get_deferred_compaction_response_id(self) -> str | None:
         return self._deferred_response_id
@@ -551,11 +562,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         """Append a response's persisted batch and record its compaction boundary.
 
         The runner calls this instead of add_items when the batch belongs to a
-        specific response. Recording the boundary in the same locked region as
-        the append keeps the pairing exact: no other writer can slip items in
-        between the batch and the count recorded for it, so run_compaction can
-        later preserve everything past the boundary regardless of what other
-        runs appended before its own snapshot.
+        specific response. Appending and recording in one locked region keeps
+        the pairing exact: no other writer can slip items in between the batch
+        and the count recorded for it. See _response_boundaries for how the
+        recorded boundary is consumed.
 
         The count that seeds the boundary is read before the append. The lock
         excludes every other writer for the whole region, so that count plus
@@ -570,6 +580,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             boundary = len(await self._get_all_underlying_session_items()) + len(items)
             await self._add_items_locked(items)
+            # Pop before reinserting so a recorded id moves to the newest slot;
+            # the eviction loop below removes oldest first by insertion order.
             self._response_boundaries.pop(response_id, None)
             self._response_boundaries[response_id] = boundary
             self._response_boundaries_ever_recorded = True
@@ -597,7 +609,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
             popped = await self.underlying_session.pop_item()
-            if popped:
+            if popped is not None:
                 self._compaction_candidate_items = None
                 self._session_items = None
                 self._destructive_generation += 1

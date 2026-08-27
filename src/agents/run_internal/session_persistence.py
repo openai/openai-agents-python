@@ -207,10 +207,29 @@ async def _session_add_items(
     session: Session,
     items: list[TResponseInputItem],
     *,
+    response_id: str | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
-    """Append session items while preserving the legacy method call shape."""
+    """Append session items while preserving the legacy method call shape.
+
+    When a response id is supplied and the session is compaction aware, the
+    batch is routed through the session's boundary hook so the response id is
+    paired with its exact item count in one locked region.
+    """
     wrapper = _get_session_wrapper(session, wrapper)
+    add_items_for_response = (
+        getattr(session, "_add_items_for_response", None)
+        if response_id and is_openai_responses_compaction_aware_session(session)
+        else None
+    )
+    if callable(add_items_for_response):
+        await _call_session_method(
+            add_items_for_response,
+            items,
+            response_id=response_id,
+            wrapper=wrapper,
+        )
+        return
     await _call_session_method(session.add_items, items, wrapper=wrapper)
 
 
@@ -666,25 +685,12 @@ async def save_result_to_session(
             resumed_write_state, session, response_id=response_id, wrapper=wrapper
         )
     else:
-        add_items_for_response = (
-            getattr(session, "_add_items_for_response", None)
-            if response_id and is_openai_responses_compaction_aware_session(session)
-            else None
-        )
-        if callable(add_items_for_response):
-            # Persisting this response's batch is the only moment its response id
-            # and its exact local item boundary coincide, so record the pairing
-            # here. A later previous_response_id compaction preserves everything
-            # past the recorded boundary, including turns other runs append
-            # before that compaction takes its own snapshot.
-            await _call_session_method(
-                add_items_for_response,
-                items_to_save,
-                response_id=response_id,
-                wrapper=wrapper,
-            )
-        else:
-            await _session_add_items(session, items_to_save, wrapper=wrapper)
+        # Persisting this response's batch is the only moment its response id
+        # and its exact local item boundary coincide, so pass the id along and
+        # let the boundary hook record the pairing. A later previous_response_id
+        # compaction preserves everything past the recorded boundary, including
+        # turns other runs append before that compaction takes its own snapshot.
+        await _session_add_items(session, items_to_save, response_id=response_id, wrapper=wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -828,25 +834,14 @@ async def resume_pending_session_write(
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             items_to_append = copy.deepcopy(pending["items"])
-            add_items_for_response = (
-                getattr(session, "_add_items_for_response", None)
-                if response_id and is_openai_responses_compaction_aware_session(session)
-                else None
+            # Only the branch that appends can record a boundary: the hook pairs
+            # the response id with the item count in one locked region. When an
+            # earlier attempt already committed the batch, other writers may
+            # have appended since, so any count read now could claim their
+            # items for this response; no boundary is recorded in that case.
+            await _session_add_items(
+                session, items_to_append, response_id=response_id, wrapper=wrapper
             )
-            if callable(add_items_for_response):
-                # Only the branch that appends can record a boundary: the hook pairs
-                # the response id with the item count in one locked region. When an
-                # earlier attempt already committed the batch, other writers may
-                # have appended since, so any count read now could claim their
-                # items for this response; no boundary is recorded in that case.
-                await _call_session_method(
-                    add_items_for_response,
-                    items_to_append,
-                    response_id=response_id,
-                    wrapper=wrapper,
-                )
-            else:
-                await _session_add_items(session, items_to_append, wrapper=wrapper)
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
         run_state._pending_session_write = None
     finally:

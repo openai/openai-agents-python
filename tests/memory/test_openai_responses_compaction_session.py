@@ -2224,8 +2224,8 @@ class TestCompactionConcurrentMutations:
         flight. A's replacement rewrites the prefix that B's recorded boundary
         counted into A's summary, so the boundary must be translated onto the
         rewritten history. B's later replacement then preserves C's turn.
-        Clearing the boundary instead would make B fall back to its snapshot
-        and drop the turn.
+        Dropping the boundary instead would make B skip its compaction, and
+        keeping the raw count would misplace the boundary and drop the turn.
         """
         a_turn = cast(
             TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
@@ -2302,9 +2302,11 @@ class TestCompactionConcurrentMutations:
         response A's batch follows, run C's turn lands while A's compaction is
         in flight, and A's replacement rewrites both batches into A's summary
         before B takes its snapshot. B's recorded prefix ended inside the
-        rewritten region, so no boundary on the new history describes what B's
-        compaction covers. B must skip; falling back to its snapshot would
-        classify C's turn and A's summary into B's baseline and drop both.
+        rewritten region, so the replacement drops B's entry: no boundary on
+        the new history describes what B's compaction covers. B must skip
+        through the absent entry path without a billed call; falling back to
+        its snapshot would classify C's turn and A's summary into B's baseline
+        and drop both.
         """
         b_turn = cast(
             TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
@@ -2357,8 +2359,10 @@ class TestCompactionConcurrentMutations:
         finally:
             release_compact.set()
         await compaction_a
-        # A's replacement covered both batches and preserved C's turn.
+        # A's replacement covered both batches and preserved C's turn, and it
+        # dropped B's entry because B's recorded prefix was rewritten.
         assert await underlying.get_items() == [a_summary, c_turn]
+        assert "resp_b" not in session._response_boundaries
 
         with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
             await session.run_compaction({"force": True, "response_id": "resp_b"})
@@ -2547,6 +2551,340 @@ class TestCompactionConcurrentMutations:
         # tail the replacement preserves.
         assert await underlying.get_items() == [summary, later_turn]
         assert await session.get_items() == [summary, later_turn]
+
+    @pytest.mark.asyncio
+    async def test_replacement_translates_boundaries_at_nonzero_shift(self) -> None:
+        """Boundary translation must apply the exact shift of the rewrite.
+
+        Ordering under test: response A persists a two item batch, response B
+        persists one item, and A's replacement rewrites A's batch into a one
+        item summary. The rewrite shrinks the prefix by one, so B's recorded
+        boundary must shift from three to two. B's compaction then preserves
+        exactly the turn appended past the translated boundary. Keeping B's
+        raw count instead would place the boundary past that turn and drop
+        it from the replaced history.
+        """
+        a_turn_one = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a1"}
+        )
+        a_turn_two = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a2"}
+        )
+        b_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+        later_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn later"}
+        )
+        a_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+        b_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through b"})
+
+        underlying = SimpleListSession(history=[])
+        outputs = [[a_summary], [b_summary]]
+        call_index = 0
+
+        async def sequenced_compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_index
+            response = MagicMock()
+            response.output = outputs[call_index]
+            call_index += 1
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=sequenced_compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="translated-shift",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([a_turn_one, a_turn_two], response_id="resp_a")
+        await session._add_items_for_response([b_turn], response_id="resp_b")
+        assert session._response_boundaries == {"resp_a": 2, "resp_b": 3}
+
+        await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        # The replacement rewrote two items into one, so every surviving
+        # boundary shifts back by one.
+        assert await underlying.get_items() == [a_summary, b_turn]
+        assert session._response_boundaries["resp_b"] == 2
+
+        await session.add_items([later_turn])
+        await session.run_compaction({"force": True, "response_id": "resp_b"})
+
+        # B's replacement preserved exactly the turn past the translated
+        # boundary.
+        assert await underlying.get_items() == [b_summary, later_turn]
+        assert await session.get_items() == [b_summary, later_turn]
+
+    @pytest.mark.asyncio
+    async def test_defer_compaction_waits_for_mutation_lock(self) -> None:
+        """The deferral decision must not run while another task holds the lock.
+
+        Ordering under test: a writer holds the mutation lock, the way the
+        replacement phase does, while _defer_compaction is called with cold
+        caches. The deferral must park at the lock instead of reading the
+        store and installing caches mid replacement; an unserialized fill
+        here could overwrite the caches a replacement just installed with a
+        torn read of the store.
+        """
+        turn = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn"})
+        underlying = SimpleListSession(history=[turn])
+        session = OpenAIResponsesCompactionSession(
+            session_id="defer-lock",
+            underlying_session=underlying,
+            client=MagicMock(),
+            should_trigger_compaction=lambda context: True,
+        )
+
+        async with session._mutation_lock:
+            defer_task = asyncio.create_task(session._defer_compaction("resp_a"))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # Parked at the lock: no cache fill and no deferred id yet.
+            assert not defer_task.done()
+            assert session._compaction_candidate_items is None
+            assert session._session_items is None
+            assert session._get_deferred_compaction_response_id() is None
+        await defer_task
+
+        assert session._get_deferred_compaction_response_id() == "resp_a"
+        assert session._session_items == [turn]
+
+    @pytest.mark.asyncio
+    async def test_deferred_id_survives_concurrent_run_compaction(self) -> None:
+        """A deferral landing after the decision phase must not be wiped.
+
+        Ordering under test: run A passes the compaction decision, and run B
+        defers its own response while A still holds the decision phase lock.
+        A subsumes only deferrals made before its decision, so B's deferral
+        must survive A and keep the forced follow up compaction for B's
+        response armed.
+        """
+        history: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"m{i}"})
+            for i in range(3)
+        ]
+        summary = cast(TResponseInputItem, {"type": "compaction", "summary": "compacted"})
+
+        class SnapshotPausingSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.snapshot_entered = asyncio.Event()
+                self.release_snapshot = asyncio.Event()
+                self.full_reads = 0
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is not None and limit > 1_000_000:
+                    self.full_reads += 1
+                    if self.full_reads == 1:
+                        self.snapshot_entered.set()
+                        await self.release_snapshot.wait()
+                return await super().get_items(limit)
+
+        underlying = SnapshotPausingSession(history=history)
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="deferral-survives",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda context: True,
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        try:
+            await underlying.snapshot_entered.wait()
+            # A holds the decision phase lock at its snapshot read; B's
+            # deferral arrives now and parks at the lock.
+            defer_task = asyncio.create_task(session._defer_compaction("resp_b"))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not defer_task.done()
+        finally:
+            underlying.release_snapshot.set()
+        await compaction_task
+        await defer_task
+
+        # B's deferral survived A's compaction instead of being wiped.
+        assert session._get_deferred_compaction_response_id() == "resp_b"
+        assert await underlying.get_items() == [summary]
+
+    @pytest.mark.asyncio
+    async def test_failed_replacement_drops_boundary_state(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed replacement transaction must invalidate the boundary records.
+
+        Ordering under test: a response's batch is persisted with a boundary,
+        its replacement fails, and the restore fails too, leaving the store
+        empty while the boundary still counts the old history. The failure
+        must drop every recorded boundary and count as a rewrite, matching
+        pop_item and clear_session; a retried compaction keyed on the same
+        response then skips. Keeping the boundary instead would let the retry
+        slice a shorter store past its end and silently delete a batch
+        persisted while the retry was in flight.
+        """
+        turns: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"t{i}"})
+            for i in range(3)
+        ]
+        batch_turns: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": f"b{i}"})
+            for i in range(2)
+        ]
+        stale_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "stale"})
+
+        class DoubleFailureSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failing_adds = 0
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                if self.failing_adds > 0:
+                    self.failing_adds -= 1
+                    raise RuntimeError("backend write failed")
+                await super().add_items(items)
+
+        underlying = DoubleFailureSession()
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [stale_summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="failed-replacement",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response(turns, response_id="resp_a")
+        generation_before = session._destructive_generation
+
+        # The replacement add and the restore add both fail in one outage.
+        underlying.failing_adds = 2
+        with pytest.raises(RuntimeError, match="backend write failed"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        assert await underlying.get_items() == []
+        assert session._response_boundaries == {}
+        assert session._destructive_generation == generation_before + 1
+        assert session._response_boundaries_ever_recorded is True
+
+        # A batch persisted after the failure records its boundary cleanly.
+        await session._add_items_for_response(batch_turns, response_id="resp_b")
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        # The retry skipped before the billed call instead of trusting a
+        # boundary the store no longer backs, so the newer batch survives.
+        assert "Skipped compaction for resp_a" in caplog.text
+        assert await underlying.get_items() == batch_turns
+        assert mock_client.responses.compact.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_compaction_skips_when_recorded_boundary_exceeds_history(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A boundary past the stored history must skip the replacement.
+
+        No healthy path records such a boundary: appends record the post
+        append count and every rewrite drops or translates entries, so the
+        state here is planted directly to stand in for corrupted
+        bookkeeping. The replacement must treat it as invalid instead of
+        slicing past the end, which would classify the whole history as
+        covered and replace it outright.
+        """
+        turn = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn"})
+        stale_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "stale"})
+
+        underlying = SimpleListSession(history=[])
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [stale_summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="oversized-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([turn], response_id="resp_a")
+        session._response_boundaries["resp_a"] = 99
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        # The replacement was skipped and the corrupt records were dropped.
+        assert "Skipped compaction replacement for resp_a" in caplog.text
+        assert await underlying.get_items() == [turn]
+        assert session._response_boundaries == {}
+        assert mock_client.responses.compact.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_tail_normalization_keeps_store_untouched(self) -> None:
+        """A cache build failure must surface before the store is rewritten.
+
+        Ordering under test: a response's batch is persisted with a boundary,
+        and while the compaction request is in flight a writer sharing the
+        underlying store appends an item whose serialization hook raises.
+        Building the refreshed caches from that tail fails; the failure must
+        surface before the replacement, leaving the store, the generation
+        counter, and the recorded boundaries all describing the same history.
+        A replacement that lands before the failure would strand a rewritten
+        store behind bookkeeping that still describes the old one.
+        """
+
+        class UnserializableItem:
+            @property
+            def model_dump(self) -> Any:
+                raise RuntimeError("serialization failed")
+
+        a_turn_one = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a1"}
+        )
+        a_turn_two = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a2"}
+        )
+        poisoned_item = cast(TResponseInputItem, UnserializableItem())
+        summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+
+        underlying = SimpleListSession(history=[])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+        session = OpenAIResponsesCompactionSession(
+            session_id="poisoned-tail",
+            underlying_session=underlying,
+            client=self.create_gated_compact_client([summary], compact_entered, release_compact),
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([a_turn_one, a_turn_two], response_id="resp_a")
+        generation_before = session._destructive_generation
+
+        compaction_task = asyncio.create_task(
+            session.run_compaction({"force": True, "response_id": "resp_a"})
+        )
+        try:
+            await compact_entered.wait()
+            # A writer sharing the store appends the item that cannot be
+            # serialized while the request is in flight.
+            await underlying.add_items([poisoned_item])
+        finally:
+            release_compact.set()
+        with pytest.raises(RuntimeError, match="serialization failed"):
+            await compaction_task
+
+        # The store was not rewritten, and the bookkeeping still describes it.
+        assert await underlying.get_items() == [a_turn_one, a_turn_two, poisoned_item]
+        assert session._response_boundaries == {"resp_a": 2}
+        assert session._destructive_generation == generation_before
 
 
 class TestTypeGuard:
