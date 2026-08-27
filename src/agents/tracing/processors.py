@@ -761,3 +761,10 @@ def default_processor() -> BatchTraceProcessor:
             _global_processor = processor
 
     return processor
+
+
+def shutdown_default_exporter() -> None:
+    """Close the lazily-created default exporter, if tracing initialized it."""
+    exporter = _global_exporter
+    if exporter is not None:
+        exporter.close()

@@ -12,7 +12,7 @@ import httpx2
 import pytest
 
 import agents._debug as _debug
-from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing import flush_traces, get_trace_provider, setup as tracing_setup
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
@@ -435,6 +435,20 @@ def test_get_trace_provider_force_flush_flushes_default_processor(mocked_exporte
     )
     assert total_exported == 2
     processor.shutdown()
+
+
+def test_global_default_provider_shutdown_closes_default_exporter(monkeypatch):
+    provider = DefaultTraceProvider()
+    exporter = MagicMock()
+
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+    monkeypatch.setattr("agents.tracing.processors._global_exporter", exporter)
+    monkeypatch.setattr(provider, "shutdown", MagicMock())
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    provider.shutdown.assert_called_once_with(timeout=5.0)
+    exporter.close.assert_called_once_with()
 
 
 def mock_processor():
