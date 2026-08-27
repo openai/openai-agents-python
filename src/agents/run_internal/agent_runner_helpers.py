@@ -42,9 +42,9 @@ from .run_steps import (
     ProcessedResponse,
 )
 from .session_persistence import (
+    record_terminal_checkpoint,
     save_result_to_session,
     save_resumed_turn_items,
-    terminal_checkpoint_owner,
 )
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
@@ -628,8 +628,8 @@ async def save_final_turn_items_after_guardrails(
         return 0
     # An accepted terminal output is appended after the output guardrails, so this is the last
     # fallible step of the run. Only the caller that saw every guardrail succeed opts in to
-    # letting the resumed state own the batch and settle the same output later.
-    terminal_write_state = terminal_checkpoint_owner(
+    # checkpointing it, and the checkpoint records whether a resume may settle it or must reject.
+    terminal_write_state = record_terminal_checkpoint(
         run_state, session, settle_terminal_output=settle_terminal_output
     )
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:

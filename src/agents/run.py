@@ -140,14 +140,15 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
-    recoverable_terminal_step,
+    record_terminal_checkpoint,
     resume_pending_session_write,
     resumed_turn_items,
     resumed_write_owner,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
-    terminal_checkpoint_owner,
+    settleable_terminal_step,
+    terminal_state_is_unrecoverable,
     update_run_state_after_resume,
 )
 from .run_internal.tool_use_tracker import (
@@ -640,9 +641,16 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
+            if terminal_state_is_unrecoverable(run_state):
+                # Fail closed before any Session, sandbox, guardrail, model, tool, or hook
+                # work: this run already produced an output that cannot be produced again.
+                raise UserError(
+                    "This RunState accepted a final output that cannot be restored, so the "
+                    "run cannot be resumed. Start a new run instead of retrying this state."
+                )
             # Capture before reconciling: settling the pending write clears the checkpoint
-            # that proves the append was the only work still owed for this run.
-            resumed_terminal_step = recoverable_terminal_step(run_state)
+            # that proves the output was accepted before the append failed.
+            resumed_terminal_step = settleable_terminal_step(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -1394,15 +1402,16 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                # Reached only after every output guardrail succeeded, so
+                                # this append is the post-acceptance one.
                                 if (
-                                    terminal_checkpoint_owner(
+                                    record_terminal_checkpoint(
                                         run_state, session, settle_terminal_output=True
                                     )
                                     is not None
                                 ):
-                                    # Every output guardrail passed for this exact output. Publish
-                                    # them before the append can raise so a settled retry reports
-                                    # the original evidence instead of evaluating a new one.
+                                    # Publish the results before the append can raise so a settled
+                                    # retry reports the original evidence instead of a new one.
                                     run_state._output_guardrail_results = list(
                                         output_guardrail_results
                                     )

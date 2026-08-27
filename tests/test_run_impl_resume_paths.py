@@ -1221,8 +1221,10 @@ async def test_settled_terminal_output_rejects_ambiguous_recovery(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_structured_terminal_output_stays_non_resumable(streamed: bool) -> None:
-    """A non-string terminal output cannot round-trip unchanged, so it stays non-resumable."""
+async def test_structured_terminal_output_rejects_resume_as_unrecoverable(
+    streamed: bool,
+) -> None:
+    """A non-string terminal output cannot round-trip, so its state fails closed."""
     effects: list[int] = []
 
     @tool(needs_approval=True)
@@ -1258,9 +1260,18 @@ async def test_structured_terminal_output_stays_non_resumable(streamed: bool) ->
     session.failure = "before"
     with pytest.raises(RuntimeError, match="session append failed"):
         await _run_session_resume(agent, state, session, streamed)
+
     payload = state.to_json()
-    assert payload["current_step"] is None
-    assert "pending_session_write" not in payload
+    assert payload["current_step"] == {
+        "type": "next_step_final_output",
+        "data": {"unrecoverable": True},
+    }
+
+    for candidate in (state, await RunState.from_json(agent, payload)):
+        with pytest.raises(UserError, match="cannot be restored"):
+            await _run_session_resume(agent, candidate, session, not streamed)
+    # Rejecting keeps the accepted output from being produced a second time.
+    assert len(model.calls) == 1
     assert effects == [7]
 
 
@@ -1355,16 +1366,19 @@ async def test_terminal_output_is_not_settled_after_failed_post_append_persisten
     with pytest.raises(RuntimeError, match="compaction failed"):
         await _run_session_resume(agent, state, session, streamed)
 
-    # The batch committed, so its checkpoint is gone and the terminal step is no longer durable.
+    # The batch committed but its maintenance did not, and the checkpoint cannot replay that.
     payload = state.to_json()
-    assert "pending_session_write" not in payload
-    assert payload["current_step"] is None
+    assert payload["current_step"] == {
+        "type": "next_step_final_output",
+        "data": {"unrecoverable": True},
+    }
     assert session.deferred == []
 
-    restored = await RunState.from_json(agent, payload)
-    result = await _run_session_resume(agent, restored, session, not streamed)
-    # The failed maintenance must not be reported as a completed run for the accepted output.
-    assert result.final_output != "receipt-7"
+    for candidate in (state, await RunState.from_json(agent, payload)):
+        with pytest.raises(UserError, match="cannot be restored"):
+            await _run_session_resume(agent, candidate, session, not streamed)
+    # Failed maintenance is never reported as a completed run for the accepted output.
+    assert len(model.calls) == 1
     assert effects == [7]
 
 
@@ -1428,11 +1442,11 @@ async def test_terminal_output_is_not_settled_when_an_output_guardrail_raises(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_compaction_aware_session_does_not_arm_a_terminal_checkpoint(
+async def test_compaction_aware_session_rejects_resume_as_unrecoverable(
     streamed: bool,
 ) -> None:
-    """The checkpoint replays the append alone, so it cannot own a batch that also owes
-    post-append compaction work."""
+    """The checkpoint replays the append alone, so a batch that also owes post-append
+    compaction fails closed instead of settling."""
     session = _CompactionSession()
     agent, model, _, state, effects, _ = await _terminal_output_session_state(
         streamed, session=session
@@ -1443,6 +1457,85 @@ async def test_compaction_aware_session_does_not_arm_a_terminal_checkpoint(
         await _run_session_resume(agent, state, session, streamed)
 
     payload = state.to_json()
-    assert payload["current_step"] is None
-    assert "pending_session_write" not in payload
+    assert payload["current_step"] == {
+        "type": "next_step_final_output",
+        "data": {"unrecoverable": True},
+    }
+
+    for candidate in (state, await RunState.from_json(agent, payload)):
+        with pytest.raises(UserError, match="cannot be restored"):
+            await _run_session_resume(agent, candidate, session, not streamed)
+    assert len(model.calls) == 1
     assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_unrecoverable_terminal_state_rejects_before_any_run_work(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rejection is a fail-closed branch: no sandbox, model, tool, guardrail, or hook work."""
+    effects: list[int] = []
+    guardrail_outputs: list[str] = []
+    hooks = _CountingRunHooks()
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    @output_guardrail
+    async def record_output(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        guardrail_outputs.append(str(output))
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=False)
+
+    async def stop_with_structured_output(
+        context: RunContextWrapper[Any], results: list[Any]
+    ) -> ToolsToFinalOutputResult:
+        return ToolsToFinalOutputResult(
+            is_final_output=True, final_output={"receipt": results[0].output}
+        )
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=stop_with_structured_output,
+        output_type=AgentOutputSchema(dict[str, str], strict_json_schema=False),
+        output_guardrails=[record_output],
+    )
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed, hooks=hooks)
+
+    assert hooks.ends == ["{'receipt': 'receipt-7'}"]
+    starts_before_retry = hooks.starts
+    guardrails_before_retry = list(guardrail_outputs)
+
+    async def _fail_prepare_agent(*args: Any, **kwargs: Any):
+        raise AssertionError("sandbox preparation must not run for a rejected terminal state")
+
+    monkeypatch.setattr(SandboxRuntime, "prepare_agent", _fail_prepare_agent)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="cannot be restored"):
+        await _run_session_resume(agent, restored, session, not streamed, hooks=hooks)
+
+    assert len(model.calls) == 1
+    assert effects == [7]
+    assert guardrail_outputs == guardrails_before_retry
+    assert hooks.starts == starts_before_retry
+    assert hooks.ends == ["{'receipt': 'receipt-7'}"]

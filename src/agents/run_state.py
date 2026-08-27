@@ -226,7 +226,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes and accepted terminal outputs."
+        "resume flows, including pending resumed Session writes and accepted terminal "
+        "outputs, recoverable or not."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -1982,8 +1983,15 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current resumable step."""
         # Import at runtime to avoid circular import
-        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
-        from .run_internal.session_persistence import recoverable_terminal_step
+        from .run_internal.run_steps import (
+            NextStepFinalOutput,
+            NextStepInterruption,
+            NextStepRunAgain,
+        )
+        from .run_internal.session_persistence import (
+            TerminalOutputUnrecoverable,
+            settleable_terminal_step,
+        )
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
@@ -1994,12 +2002,21 @@ class RunState(Generic[TContext, TAgent]):
         if isinstance(self._current_step, NextStepRunAgain):
             return {"type": "next_step_run_again"}
 
-        terminal_step = recoverable_terminal_step(self)
-        if terminal_step is not None:
-            return {
-                "type": "next_step_final_output",
-                "data": {"output": terminal_step.output},
-            }
+        if isinstance(self._current_step, NextStepFinalOutput):
+            if isinstance(self._current_step.output, TerminalOutputUnrecoverable):
+                return {
+                    "type": "next_step_final_output",
+                    "data": {"unrecoverable": True},
+                }
+            settleable = settleable_terminal_step(self)
+            if settleable is not None:
+                return {
+                    "type": "next_step_final_output",
+                    "data": {"output": settleable.output},
+                }
+            # A terminal step the checkpoint never recorded carries no resume promise, so there
+            # is nothing durable to write for it.
+            return None
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -4319,13 +4336,20 @@ async def _build_run_state_from_json(
         state._current_step = NextStepRunAgain()
     elif current_step_data and current_step_data.get("type") == "next_step_final_output":
         from .run_internal.run_steps import NextStepFinalOutput
+        from .run_internal.session_persistence import TERMINAL_OUTPUT_UNRECOVERABLE
 
-        terminal_output = current_step_data.get("data", {}).get("output")
+        terminal_data = current_step_data.get("data", {})
+        terminal_output = terminal_data.get("output")
+        unrecoverable = terminal_data.get("unrecoverable") is True
         # An older label never wrote this step, so accepting one would grant a snapshot a
         # resume shortcut the schema it claims does not have.
-        if (schema_major, schema_minor) < (1, 17) or not isinstance(terminal_output, str):
+        if (schema_major, schema_minor) < (1, 17) or not (
+            unrecoverable or isinstance(terminal_output, str)
+        ):
             raise validation_error_factory("Run state terminal output step is invalid", UserError)
-        state._current_step = NextStepFinalOutput(output=terminal_output)
+        state._current_step = NextStepFinalOutput(
+            output=TERMINAL_OUTPUT_UNRECOVERABLE if unrecoverable else terminal_output
+        )
     elif current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
