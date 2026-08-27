@@ -37,7 +37,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 Advanced hosted search options:
 
 -   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`. Set `max_num_results` to an integer from 1 through 50; `None` or zero uses the provider default.
--   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
+-   `WebSearchTool` supports `filters`, `user_location`, `search_context_size`, `external_web_access`, and `search_content_types` with `image_settings` for image results.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
