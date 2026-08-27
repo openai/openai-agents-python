@@ -790,10 +790,17 @@ class Converter:
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
 
+                call_id = func_call.get("call_id")
+                if call_id is None:
+                    raise UserError(
+                        "Unpaired function calls are supported by Responses but cannot be "
+                        "converted to Chat Completions tool calls. "
+                        "Use a Responses model to preserve this input."
+                    )
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
                 new_tool_call = ChatCompletionMessageFunctionToolCallParam(
-                    id=func_call["call_id"],
+                    id=call_id,
                     type="function",
                     function={
                         "name": func_call["name"],
