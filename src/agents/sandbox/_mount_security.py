@@ -157,7 +157,11 @@ _CANONICAL_MOUNT_TYPES: tuple[tuple[type[Mount], str], ...] = (
 # from durable state as a unit.
 _OPAQUE_STRATEGY_AUTHORITY_FIELDS: dict[str, tuple[str, ...]] = {
     "docker_volume": ("driver_options",),
-    "modal_cloud_bucket": ("secret_name", "secret_environment_name"),
+    "modal_cloud_bucket": (
+        "secret_name",
+        "secret_environment_name",
+        "oidc_auth_role_arn",
+    ),
 }
 
 # SDK-owned extension entry types are not necessarily imported when raw RunState is restored.
@@ -263,7 +267,9 @@ _SERIALIZED_FIELDS_BY_STRATEGY_TYPE: dict[str, frozenset[str]] = {
     "cloudflare_bucket_mount": frozenset({"type"}),
     "daytona_cloud_bucket": frozenset({"type", "pattern"}),
     "e2b_cloud_bucket": frozenset({"type", "pattern"}),
-    "modal_cloud_bucket": frozenset({"type", "secret_name", "secret_environment_name"}),
+    "modal_cloud_bucket": frozenset(
+        {"type", "secret_name", "secret_environment_name", "oidc_auth_role_arn"}
+    ),
     "runloop_cloud_bucket": frozenset({"type", "pattern"}),
     "vercel_cloud_bucket": frozenset({"type"}),
 }
