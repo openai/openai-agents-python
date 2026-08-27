@@ -1436,7 +1436,8 @@ def test_public_provider_shutdown_closes_default_exporter(mock_client):
         # Public shutdown -- not the private atexit hook.
         provider.shutdown()
 
-        default._client.close.assert_called_once()
+        # Closed on shutdown. close() is idempotent, so the reset that follows may call it again.
+        default._client.close.assert_called()
     finally:
         setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
         processors_module._global_exporter = None
@@ -1495,6 +1496,43 @@ def test_non_global_default_provider_shutdown_leaves_globals(mock_client):
 
         assert setup_module.GLOBAL_TRACE_PROVIDER is global_provider
         assert processors_module._global_processor is not None
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
+def test_default_exporter_is_closed_even_when_default_processor_was_replaced(mock_client):
+    """set_trace_processors swaps out the default processor; its exporter must still be closed.
+
+    Otherwise the default processor never runs its shutdown, and clearing the singleton would
+    orphan the exporter's still-open HTTP client (a per-rebuild leak / ResourceWarning).
+    """
+    from agents.tracing import (
+        processors as processors_module,
+        set_trace_processors,
+        setup as setup_module,
+    )
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        provider = setup_module.get_trace_provider()
+        default_exporter = processors_module._global_exporter
+        assert default_exporter is not None
+
+        # Replace the provider's processors so the default processor is no longer registered.
+        set_trace_processors([BatchTraceProcessor(ConsoleSpanExporter())])
+        assert processors_module._global_exporter is default_exporter
+
+        provider.shutdown()
+
+        # The module-owned default exporter is closed on reset, not leaked.
+        default_exporter._client.close.assert_called_once()
+        assert processors_module._global_exporter is None
     finally:
         setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
         processors_module._global_exporter = None

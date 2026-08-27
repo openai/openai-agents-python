@@ -789,10 +789,27 @@ def _reset_default_processor() -> None:
     The next ``default_processor``/``default_exporter`` call rebuilds them. The caller (the setup
     layer, when the default provider shuts down) resets ``GLOBAL_TRACE_PROVIDER`` in the same step
     so the default provider, processor, and exporter stay a single coherent source of truth.
+
+    The module-owned exporter is closed before the reference is dropped. When the default processor
+    shut down normally it already closed the exporter (``close`` is idempotent); this also covers
+    the case where the default processor was replaced -- e.g. ``set_trace_processors`` swaps the
+    provider's processors after the default stack was bootstrapped -- so it never ran its shutdown,
+    which would otherwise leak the exporter's open HTTP client on each rebuild cycle.
     """
     global _global_exporter
     global _global_processor
 
     with _global_lock:
+        exporter = _global_exporter
         _global_exporter = None
         _global_processor = None
+
+    if exporter is not None:
+        close = getattr(exporter, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                log_model_and_tool_action_error(
+                    logger, "[non-fatal] Tracing: error closing default exporter on reset", exc
+                )
