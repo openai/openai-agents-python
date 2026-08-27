@@ -1,3 +1,0 @@
-# `Agents`
-
-::: agents.agent

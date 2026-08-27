@@ -1,3 +1,0 @@
-# `Session`
-
-::: agents.memory.session

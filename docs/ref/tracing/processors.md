@@ -1,3 +1,0 @@
-# `Processors`
-
-::: agents.tracing.processors

@@ -1,3 +1,0 @@
-# `Computer`
-
-::: agents.computer

@@ -1,3 +1,0 @@
-# Tracing module
-
-::: agents.tracing

@@ -1,3 +1,0 @@
-# `Manager`
-
-::: agents.mcp.manager

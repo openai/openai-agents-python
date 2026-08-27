@@ -1,3 +1,0 @@
-# `Results`
-
-::: agents.result
