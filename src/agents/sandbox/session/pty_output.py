@@ -8,6 +8,23 @@ from collections.abc import Callable
 from .pty_types import truncate_text_by_tokens
 
 
+def _incomplete_utf8_suffix_length(data: bytes | bytearray) -> int:
+    """Return how many trailing bytes start a UTF-8 sequence that is not finished yet."""
+    for back in range(1, min(3, len(data)) + 1):
+        byte = data[-back]
+        if byte < 0x80:
+            return 0
+        if byte >= 0xC0:
+            if byte >= 0xF0:
+                needed = 4
+            elif byte >= 0xE0:
+                needed = 3
+            else:
+                needed = 2
+            return back if back < needed else 0
+    return 0
+
+
 async def collect_pty_output(
     *,
     output_chunks: deque[bytes],
@@ -44,6 +61,18 @@ async def collect_pty_output(
         except asyncio.TimeoutError:
             break
         output_notify.clear()
+
+    if not is_done():
+        # A multi-byte character can straddle two collection windows. Decoding a partial
+        # sequence with errors="replace" destroys those bytes, so hold the unfinished tail
+        # back for the next window. Once the producer is done nothing can complete it, so
+        # the replacement behaviour below is the right answer then.
+        carry = _incomplete_utf8_suffix_length(output)
+        if carry:
+            tail = bytes(output[-carry:])
+            del output[-carry:]
+            async with output_lock:
+                output_chunks.appendleft(tail)
 
     text = output.decode("utf-8", errors="replace")
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)

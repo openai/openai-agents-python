@@ -57,3 +57,60 @@ async def test_collect_pty_output_drains_chunks_added_when_done() -> None:
 
     assert output == b"before done after done"
     assert original_token_count is None
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_holds_split_utf8_character_for_the_next_window() -> None:
+    """A character split across two collection windows must survive, not become U+FFFD."""
+    text = "h\u00e9llo w\u00f6rld \u2705"
+    raw = text.encode("utf-8")
+    split = 2  # after "h" and the first byte of the two-byte "e" with acute
+
+    output_chunks: deque[bytes] = deque()
+    output_lock = asyncio.Lock()
+    output_notify = asyncio.Event()
+    producer_done = False
+
+    async def window() -> bytes:
+        output_notify.set()
+        collected, _ = await collect_pty_output(
+            output_chunks=output_chunks,
+            output_lock=output_lock,
+            output_notify=output_notify,
+            is_done=lambda: producer_done,
+            yield_time_ms=1,
+            max_output_tokens=None,
+        )
+        return collected
+
+    output_chunks.append(raw[:split])
+    first = await window()
+    # The partial sequence is withheld rather than decoded, so the window ends on "h".
+    assert first == b"h"
+
+    output_chunks.append(raw[split:])
+    producer_done = True
+    second = await window()
+
+    assert (first + second).decode("utf-8") == text
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_replaces_partial_utf8_once_the_producer_is_done() -> None:
+    """Nothing can complete a truncated sequence after the producer closes, so replace it."""
+    output_chunks: deque[bytes] = deque([b"ok\xc3"])
+    output_notify = asyncio.Event()
+    output_notify.set()
+
+    output, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=output_notify,
+        is_done=lambda: True,
+        yield_time_ms=1,
+        max_output_tokens=None,
+    )
+
+    assert output.decode("utf-8") == "ok\ufffd"
+    assert not output_chunks
+
