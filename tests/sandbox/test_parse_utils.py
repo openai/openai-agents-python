@@ -39,6 +39,20 @@ def test_parse_ls_la_keeps_arrow_in_regular_file_names() -> None:
     assert entries[0].kind == EntryKind.FILE
 
 
+def test_parse_ls_la_keeps_arrows_in_symlink_names() -> None:
+    target = "target -> 失败"
+    output = (
+        f"lrwxrwxrwx 1 root root {len(target.encode('utf-8'))} Jan 1 00:00 "
+        f"link -> alias -> {target}\n"
+    )
+
+    entries = parse_ls_la(output, base="/workspace/docs")
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/link -> alias"
+    assert entries[0].kind == EntryKind.SYMLINK
+
+
 def test_parse_ls_la_accepts_special_permission_bits() -> None:
     output = (
         "drwxrwxrwt 2 root root 4096 Jan 1 00:00 tmp\n"

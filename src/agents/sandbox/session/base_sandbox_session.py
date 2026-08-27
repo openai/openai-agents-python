@@ -1120,7 +1120,7 @@ class BaseSandboxSession(abc.ABC):
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
 
-        return parse_ls_la(result.stdout.decode("utf-8", errors="replace"), base=path_arg)
+        return parse_ls_la(result.stdout, base=path_arg)
 
     async def rm(
         self,
