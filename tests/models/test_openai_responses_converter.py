@@ -503,6 +503,8 @@ def test_convert_tools_includes_web_search_content_types_and_image_settings() ->
 
     converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.6")
 
+    # Image results arrive through the web_search_call.results include.
+    assert converted.includes == ["web_search_call.results"]
     assert converted.tools == [
         {
             "type": "web_search",
@@ -513,6 +515,15 @@ def test_convert_tools_includes_web_search_content_types_and_image_settings() ->
             "image_settings": {"max_results": 3, "caption": True},
         }
     ]
+
+
+def test_convert_tools_text_only_content_types_adds_no_include() -> None:
+    web_tool = WebSearchTool(search_content_types=["text"])
+
+    converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.6")
+
+    assert converted.includes == []
+    assert converted.tools[0].get("search_content_types") == ["text"]
 
 
 def test_convert_tools_includes_explicit_false_external_web_access() -> None:
