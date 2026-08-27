@@ -612,6 +612,32 @@ def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries
     exporter.close()
 
 
+@patch("httpx2.Client")
+def test_reusing_exporter_after_shutdown_preserves_retries(mock_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 504
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        max_retries=3,
+        base_delay=0.1,
+        max_delay=0.2,
+    )
+    first_processor = BatchTraceProcessor(exporter=exporter)
+    first_processor.shutdown(timeout=1.0)
+
+    second_processor = BatchTraceProcessor(exporter=exporter)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        second_processor._queue.put_nowait(get_span(second_processor))
+        second_processor.force_flush()
+
+    assert mock_client.return_value.post.call_count == 3
+    assert wait_for_retry.call_count == 2
+
+    exporter.close()
+
+
 @pytest.mark.serial
 @pytest.mark.review_optional
 def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:
