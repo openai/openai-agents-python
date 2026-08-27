@@ -8,7 +8,7 @@ from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
 
 from agents import RunContextWrapper, function_tool
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.function_schema import function_schema, generate_func_documentation
 
 
@@ -171,6 +171,28 @@ def test_varargs_function():
     result2 = varargs_function(*args2, **kwargs_dict2)
     # result2 should be (7, (9.9,), False, {'some_key': 'some_value'})
     assert result2 == (7, (9.9,), False, {"some_key": "some_value"})
+
+
+def test_to_call_args_rejects_kwargs_colliding_with_keyword_only_argument():
+    def func(*, option: int, **kwargs: Any) -> None:
+        pass
+
+    func_schema = function_schema(func, strict_json_schema=False)
+    parsed = func_schema.params_pydantic_model(option=5, kwargs={"option": 9})
+
+    with pytest.raises(ModelBehaviorError, match="option"):
+        func_schema.to_call_args(parsed)
+
+
+def test_to_call_args_rejects_kwargs_colliding_with_positional_argument():
+    def func(value: int, *args: int, **kwargs: Any) -> None:
+        pass
+
+    func_schema = function_schema(func, strict_json_schema=False)
+    parsed = func_schema.params_pydantic_model(value=1, args=[2], kwargs={"value": 9})
+
+    with pytest.raises(ModelBehaviorError, match="value"):
+        func_schema.to_call_args(parsed)
 
 
 class Foo(TypedDict):

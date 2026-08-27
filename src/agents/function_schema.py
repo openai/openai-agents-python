@@ -13,7 +13,7 @@ from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untype
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
-from .exceptions import UserError
+from .exceptions import ModelBehaviorError, UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
@@ -51,6 +51,13 @@ class FuncSchema:
         positional_args: list[Any] = []
         keyword_args: dict[str, Any] = {}
         seen_var_positional = False
+        named_parameter_names = {
+            name
+            for idx, (name, param) in enumerate(self.signature.parameters.items())
+            if not (self.takes_context and idx == 0)
+            and param.kind
+            in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+        }
         # Read instance storage first so Pydantic properties such as ``model_extra``
         # and ``model_fields_set`` do not shadow tool parameters of the same name.
         # ``model_dump()`` is unsuitable here because it converts nested models to dicts.
@@ -69,7 +76,15 @@ class FuncSchema:
                 seen_var_positional = True
             elif param.kind == param.VAR_KEYWORD:
                 # e.g. **kwargs handling
-                keyword_args.update(value or {})
+                var_keyword_args = value or {}
+                collisions = var_keyword_args.keys() & named_parameter_names
+                if collisions:
+                    names = ", ".join(sorted(collisions))
+                    raise ModelBehaviorError(
+                        f"Invalid tool arguments: **{name} contains keys that conflict with "
+                        f"named arguments: {names}"
+                    )
+                keyword_args.update(var_keyword_args)
             elif param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
                 # Before *args, add to positional args. After *args, add to keyword args.
                 if not seen_var_positional:
