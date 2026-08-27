@@ -171,6 +171,19 @@ def test_batch_trace_processor_force_flush_waits_for_in_flight_background_export
     processor.shutdown()
 
 
+def test_batch_trace_processor_shutdown_interrupts_idle_worker(mocked_exporter):
+    processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=60.0)
+    processor.on_span_end(get_span(processor))
+
+    assert processor._worker_thread is not None
+    time.sleep(0.01)
+    start = time.monotonic()
+    processor.shutdown()
+
+    assert time.monotonic() - start < 0.1
+    assert not processor._worker_thread.is_alive()
+
+
 def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=5.0)
     processor.on_trace_start(get_trace(processor))

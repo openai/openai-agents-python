@@ -661,8 +661,9 @@ class BatchTraceProcessor(TracingProcessor):
                 # Reset the next scheduled flush time
                 self._next_export_time = time.monotonic() + self._schedule_delay
             else:
-                # Sleep a short interval so we don't busy-wait.
-                time.sleep(0.2)
+                # Wait until the next scheduled export or shutdown, whichever comes first.
+                timeout = max(0.0, min(0.2, self._next_export_time - time.monotonic()))
+                self._shutdown_event.wait(timeout)
 
         # Final drain after shutdown
         self._export_batches(deadline=self._shutdown_deadline)
