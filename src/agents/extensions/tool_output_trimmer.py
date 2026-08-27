@@ -115,6 +115,10 @@ class ToolOutputTrimmer:
     trimmable_tools: str | Iterable[str] | None = field(default=None)
 
     def __post_init__(self) -> None:
+        for field_name in ("recent_turns", "max_output_chars", "preview_chars"):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{field_name} must be an integer, got {value!r}")
         if self.recent_turns < 1:
             raise ValueError(f"recent_turns must be >= 1, got {self.recent_turns}")
         if self.max_output_chars < 1:

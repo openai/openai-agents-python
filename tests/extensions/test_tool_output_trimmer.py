@@ -108,6 +108,12 @@ class TestValidation:
         trimmer = ToolOutputTrimmer(preview_chars=0)
         assert trimmer.preview_chars == 0
 
+    @pytest.mark.parametrize("field_name", ["recent_turns", "max_output_chars", "preview_chars"])
+    @pytest.mark.parametrize("value", [1.5, True])
+    def test_integer_settings_reject_non_integers(self, field_name: str, value: object) -> None:
+        with pytest.raises(ValueError, match=rf"{field_name} must be an integer"):
+            ToolOutputTrimmer(**{field_name: value})  # type: ignore[arg-type]
+
     def test_trimmable_tools_bytes_raises(self) -> None:
         with pytest.raises(ValueError, match="trimmable_tools must be a string or iterable"):
             ToolOutputTrimmer(trimmable_tools=b"search")  # type: ignore[arg-type]
