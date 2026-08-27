@@ -4,7 +4,7 @@ from collections import OrderedDict
 import pytest
 
 from agents.exceptions import UserError
-from agents.strict_schema import ensure_strict_json_schema
+from agents.strict_schema import ensure_strict_json_schema, resolve_ref
 
 
 def _nested_object_schema(depth: int) -> dict[str, object]:
@@ -688,6 +688,60 @@ def test_allOf_single_ref_entry_decodes_json_pointer_tokens(definition_name, ref
     assert result["properties"] == {"value": {"type": "string"}}
     assert result["required"] == ["value"]
     assert result["additionalProperties"] is False
+
+
+def test_resolve_ref_follows_json_pointer_array_indexes():
+    root = {
+        "allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "integer"}}},
+        ]
+    }
+
+    assert resolve_ref(root=root, ref="#/allOf/0") == root["allOf"][0]
+    assert resolve_ref(root=root, ref="#/allOf/1") == root["allOf"][1]
+
+
+def test_resolve_ref_rejects_non_integer_json_pointer_array_index():
+    root = {"allOf": [{"type": "object"}]}
+
+    with pytest.raises(ValueError, match="Invalid JSON Pointer array index"):
+        resolve_ref(root=root, ref="#/allOf/x")
+
+
+def test_ensure_strict_json_schema_inlines_ref_to_allof_member():
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {
+                "$ref": "#/allOf/0",
+                "description": "from the first allOf member",
+            }
+        },
+        "required": ["value"],
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"b": {"type": "integer"}},
+                "required": ["b"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    value_schema = result["properties"]["value"]
+    assert value_schema["type"] == "object"
+    assert value_schema["description"] == "from the first allOf member"
+    assert "$ref" not in value_schema
+    assert value_schema["properties"]["a"]["type"] == "string"
 
 
 @pytest.mark.parametrize("additional_properties", [True, {}], ids=["true", "schema"])

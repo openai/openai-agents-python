@@ -410,18 +410,30 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
         raise ValueError(f"Unexpected $ref format {ref!r}; Does not start with #/")
 
     path = ref[2:].split("/")
-    resolved = root
+    resolved: object = root
     for raw_key in path:
         key = raw_key.replace("~1", "/").replace("~0", "~")
-        value = resolved[key]
-        assert is_dict(value), (
-            f"encountered non-dictionary entry while resolving {ref} - {resolved}"
-        )
-        resolved = value
-        if _declares_schema_resource(resolved):
+        resolved = _json_pointer_child(resolved, key, ref=ref)
+        if is_dict(resolved) and _declares_schema_resource(resolved):
             raise UserError(_NESTED_RESOURCE_REF_ERROR)
 
     return resolved
+
+
+def _json_pointer_child(container: object, token: str, *, ref: str) -> object:
+    """Return the JSON Pointer child named by ``token`` (RFC 6901)."""
+    if is_dict(container):
+        return container[token]
+    if is_list(container):
+        if not token.isdigit() or (len(token) > 1 and token.startswith("0")):
+            raise ValueError(f"Invalid JSON Pointer array index {token!r} while resolving {ref}")
+        index = int(token)
+        if index >= len(container):
+            raise ValueError(
+                f"JSON Pointer array index {token} is out of range while resolving {ref}"
+            )
+        return container[index]
+    raise TypeError(f"encountered non-container entry while resolving {ref} - {container}")
 
 
 def _declares_schema_resource(schema: dict[str, object]) -> bool:
