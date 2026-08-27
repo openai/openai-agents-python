@@ -649,6 +649,21 @@ def test_reusing_exporter_does_not_reset_shutdown_while_previous_processor_runs(
 
 
 @patch("httpx2.Client")
+def test_exporter_shutdown_reset_only_applies_to_current_generation(mock_client):
+    exporter = BackendSpanExporter(api_key="test_key")
+
+    old_generation = exporter._request_shutdown()
+    new_generation = exporter._request_shutdown()
+    exporter._reset_shutdown(old_generation)
+    assert exporter._shutdown_event.is_set()
+
+    exporter._reset_shutdown(new_generation)
+    assert not exporter._shutdown_event.is_set()
+
+    exporter.close()
+
+
+@patch("httpx2.Client")
 def test_reusing_exporter_does_not_cancel_old_worker(mock_client):
     export_started = threading.Event()
     release_export = threading.Event()

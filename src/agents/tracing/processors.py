@@ -85,6 +85,8 @@ class BackendSpanExporter(TracingExporter):
         self.base_delay = base_delay
         self.max_delay = max_delay
         self._shutdown_event = threading.Event()
+        self._shutdown_generation = 0
+        self._shutdown_lock = threading.Lock()
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
@@ -534,11 +536,17 @@ class BackendSpanExporter(TracingExporter):
         """Close the underlying HTTP client."""
         self._client.close()
 
-    def _request_shutdown(self) -> None:
-        self._shutdown_event.set()
+    def _request_shutdown(self) -> int:
+        with self._shutdown_lock:
+            self._shutdown_generation += 1
+            generation = self._shutdown_generation
+            self._shutdown_event.set()
+            return generation
 
-    def _reset_shutdown(self) -> None:
-        self._shutdown_event.clear()
+    def _reset_shutdown(self, generation: int) -> None:
+        with self._shutdown_lock:
+            if generation == self._shutdown_generation:
+                self._shutdown_event.clear()
 
 
 class BatchTraceProcessor(TracingProcessor):
@@ -583,6 +591,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._thread_start_lock = threading.Lock()
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
+        self._exporter_shutdown_generation: int | None = None
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -631,7 +640,7 @@ class BatchTraceProcessor(TracingProcessor):
         if timeout is not None:
             request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
             if callable(request_exporter_shutdown):
-                request_exporter_shutdown()
+                self._exporter_shutdown_generation = request_exporter_shutdown()
 
         deadline = None if timeout is None else time.monotonic() + timeout
         self._shutdown_deadline = deadline
@@ -644,23 +653,26 @@ class BatchTraceProcessor(TracingProcessor):
                     "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
                 )
             else:
-                reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
-                if callable(reset_exporter_shutdown):
-                    reset_exporter_shutdown()
+                self._reset_exporter_shutdown()
         else:
             # No background thread: process any remaining items synchronously.
             try:
                 self._export_batches(deadline=deadline)
             finally:
-                reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
-                if callable(reset_exporter_shutdown):
-                    reset_exporter_shutdown()
+                self._reset_exporter_shutdown()
 
     def force_flush(self):
         """
         Forces an immediate flush of all queued spans.
         """
         self._export_batches()
+
+    def _reset_exporter_shutdown(self) -> None:
+        if self._exporter_shutdown_generation is None:
+            return
+        reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+        if callable(reset_exporter_shutdown):
+            reset_exporter_shutdown(self._exporter_shutdown_generation)
 
     def _run(self):
         try:
@@ -683,9 +695,7 @@ class BatchTraceProcessor(TracingProcessor):
             # Final drain after shutdown
             self._export_batches(deadline=self._shutdown_deadline)
         finally:
-            reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
-            if callable(reset_exporter_shutdown):
-                reset_exporter_shutdown()
+            self._reset_exporter_shutdown()
 
     def _export_batches(self, deadline: float | None = None):
         """Drains the queue and exports in batches of up to `max_batch_size` until the queue
