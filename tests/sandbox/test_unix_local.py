@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
 import signal
+import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -40,6 +44,54 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         _ = timeout
         self.exec_commands.append(tuple(str(part) for part in command))
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_cancellation_terminates_process_group(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pid_file = workspace / "pids"
+    command = (
+        f'sleep 30 & child=$!; printf \'%s %s\' "$$" "$child" > {shlex.quote(str(pid_file))}; '
+        'wait "$child"'
+    )
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    task = asyncio.create_task(session._exec_internal("sh", "-c", command))
+    shell_pid: int | None = None
+    child_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert pid_file.exists()
+        shell_pid, child_pid = (int(value) for value in pid_file.read_text().split())
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        def is_alive(pid: int) -> bool:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and (is_alive(shell_pid) or is_alive(child_pid)):
+            await asyncio.sleep(0.01)
+        assert not is_alive(shell_pid)
+        assert not is_alive(child_pid)
+    finally:
+        if shell_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(shell_pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio

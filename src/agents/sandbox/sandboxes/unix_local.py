@@ -102,6 +102,13 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 logger = logging.getLogger(__name__)
 
 
+async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        with suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    await proc.communicate()
+
+
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
     return {"mount_path": str(mount_path)}
 
@@ -298,6 +305,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 except Exception:
                     pass
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
+            except asyncio.CancelledError:
+                await _terminate_process_group_and_reap(proc)
+                raise
         except ExecTimeoutError:
             raise
         except Exception as e:
