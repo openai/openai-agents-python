@@ -15,13 +15,22 @@ _SHUTDOWN_HANDLER_REGISTERED = False
 
 def _shutdown_global_trace_provider() -> None:
     provider = GLOBAL_TRACE_PROVIDER
-    if provider is not None:
-        from .provider import DefaultTraceProvider
+    try:
+        if provider is not None:
+            from .provider import DefaultTraceProvider
 
-        if isinstance(provider, DefaultTraceProvider):
-            provider.shutdown(timeout=_DEFAULT_SHUTDOWN_TIMEOUT)
-            return
-        provider.shutdown()
+            if isinstance(provider, DefaultTraceProvider):
+                provider.shutdown(timeout=_DEFAULT_SHUTDOWN_TIMEOUT)
+            else:
+                provider.shutdown()
+    finally:
+        # The default backend exporter keeps a pooled HTTP client open for the process lifetime.
+        # The setup layer created and owns that exporter, so close it here -- after the processors
+        # above have drained -- rather than letting a BatchTraceProcessor guess ownership of an
+        # exporter handed to it.
+        from .processors import _shutdown_default_exporter
+
+        _shutdown_default_exporter()
 
 
 def set_trace_provider(provider: TraceProvider) -> None:

@@ -1354,3 +1354,83 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+@patch("httpx2.Client")
+def test_shutdown_default_exporter_closes_and_clears_singletons(mock_client):
+    """The module-owned default exporter's HTTP client is closed and singletons cleared."""
+    from agents.tracing import processors as processors_module
+
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    try:
+        exporter = processors_module.default_exporter()
+        processor = processors_module.default_processor()
+        assert processors_module._global_exporter is exporter
+        assert processors_module._global_processor is processor
+
+        processors_module._shutdown_default_exporter()
+
+        exporter._client.close.assert_called_once()
+        assert processors_module._global_exporter is None
+        assert processors_module._global_processor is None
+
+        # A later trace rebuilds a fresh default stack instead of reusing a closed exporter.
+        rebuilt = processors_module.default_exporter()
+        assert rebuilt is not exporter
+    finally:
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+def test_shutdown_default_exporter_is_noop_without_a_default():
+    """Closing the default exporter when none was created must not raise."""
+    from agents.tracing import processors as processors_module
+
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    processors_module._shutdown_default_exporter()  # no default created yet
+    assert processors_module._global_exporter is None
+
+
+@patch("httpx2.Client")
+def test_shutdown_default_exporter_leaves_injected_exporter_open(mock_client):
+    """An injected exporter is owned by its caller, so the default shutdown must not close it."""
+    from agents.tracing import processors as processors_module
+
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    try:
+        injected = BackendSpanExporter(api_key="test_key")
+        BatchTraceProcessor(exporter=injected)
+
+        processors_module._shutdown_default_exporter()
+
+        injected._client.close.assert_not_called()
+    finally:
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
+def test_global_provider_shutdown_closes_default_exporter(mock_client):
+    """The atexit/setup shutdown path closes the default backend exporter's HTTP client."""
+    from agents.tracing import processors as processors_module, setup as setup_module
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    try:
+        provider = DefaultTraceProvider()
+        provider.register_processor(processors_module.default_processor())
+        setup_module.set_trace_provider(provider)
+        default = processors_module._global_exporter
+        assert default is not None
+
+        setup_module._shutdown_global_trace_provider()
+
+        default._client.close.assert_called_once()
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None

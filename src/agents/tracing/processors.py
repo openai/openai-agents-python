@@ -761,3 +761,24 @@ def default_processor() -> BatchTraceProcessor:
             _global_processor = processor
 
     return processor
+
+
+def _shutdown_default_exporter() -> None:
+    """Close and release the module-owned default exporter and processor.
+
+    Only the exporter created by ``default_exporter``/``default_processor`` is closed here, so an
+    exporter injected into a caller-constructed ``BatchTraceProcessor`` is never closed on its
+    behalf -- the module owns this instance, an injected one is owned by its caller. Clearing the
+    singletons lets a later trace lazily rebuild a fresh default stack instead of reusing an
+    exporter whose HTTP client is already closed.
+    """
+    global _global_exporter
+    global _global_processor
+
+    with _global_lock:
+        exporter = _global_exporter
+        _global_exporter = None
+        _global_processor = None
+
+    if exporter is not None:
+        exporter.close()
