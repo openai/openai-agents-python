@@ -41,3 +41,10 @@ def test_to_dump_compatible_preserves_non_dict_mapping_values():
     assert out == {"config": {"timeout": 30, "retries": 3}}
     # A top-level mapping is preserved as an object, not flattened to its keys.
     assert _to_dump_compatible(MappingProxyType({"a": 1, "b": 2})) == {"a": 1, "b": 2}
+
+
+def test_to_dump_compatible_does_not_expand_memoryview():
+    view = memoryview(b"hello")
+
+    assert _to_dump_compatible(view) is view
+    assert _to_dump_compatible({"data": view})["data"] is view

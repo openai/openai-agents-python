@@ -73,7 +73,7 @@ def _to_dump_compatible_internal(obj: Any) -> Any:
     if isinstance(obj, list | tuple):
         return [_to_dump_compatible_internal(x) for x in obj]
 
-    if isinstance(obj, Iterable) and not isinstance(obj, str | bytes | bytearray):
+    if isinstance(obj, Iterable) and not isinstance(obj, str | bytes | bytearray | memoryview):
         return [_to_dump_compatible_internal(x) for x in obj]
 
     return obj
