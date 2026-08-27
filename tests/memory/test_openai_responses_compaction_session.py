@@ -2370,6 +2370,113 @@ class TestCompactionConcurrentMutations:
         assert mock_client.responses.compact.await_count == 1
         assert "Skipped compaction for resp_b" in caplog.text
 
+    @pytest.mark.asyncio
+    async def test_compaction_skips_when_recorded_boundary_was_evicted(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A delayed compaction whose recorded boundary was evicted must skip.
+
+        Ordering under test: an old response's batch is persisted with a
+        boundary, enough newer response batches follow to push that entry past
+        the recording cap, and only then does the compaction keyed on the old
+        response run. Its entry is gone, so no boundary on the current history
+        describes what the compaction covers. Falling back to the snapshot
+        would classify every newer turn into the old response's baseline and
+        replace them all with a summary that covers the old response alone.
+        """
+        monkeypatch.setattr(
+            "agents.memory.openai_responses_compaction_session._MAX_RECORDED_RESPONSE_BOUNDARIES",
+            2,
+        )
+        old_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn old"}
+        )
+        newer_turns = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": f"turn new {index}"},
+            )
+            for index in range(2)
+        ]
+        stale_summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through old"})
+
+        underlying = SimpleListSession(history=[])
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [stale_summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="evicted-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([old_turn], response_id="resp_old")
+        for index, turn in enumerate(newer_turns):
+            await session._add_items_for_response([turn], response_id=f"resp_new_{index}")
+        assert "resp_old" not in session._response_boundaries
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_old"})
+
+        # The compaction skipped before the billed call and replaced nothing,
+        # so every newer turn survives.
+        assert await underlying.get_items() == [old_turn, *newer_turns]
+        assert await session.get_items() == [old_turn, *newer_turns]
+        mock_client.responses.compact.assert_not_awaited()
+        assert "Skipped compaction for resp_old" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_compaction_skips_for_recorded_response_after_clear_session(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A compaction keyed on a response recorded before clear_session must skip.
+
+        Ordering under test: a response's batch is persisted with a boundary,
+        clear_session wipes the history and every recorded boundary, and a
+        fresh turn lands afterwards. The delayed compaction keyed on the
+        cleared response then runs. Its entry is gone, so falling back to the
+        snapshot would replace the fresh turn with a summary of history the
+        clear already discarded.
+        """
+        recorded_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "recorded"}
+        )
+        later_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "later"}
+        )
+        stale_summary = cast(
+            TResponseInputItem, {"type": "compaction", "summary": "cleared history"}
+        )
+
+        underlying = SimpleListSession(history=[])
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [stale_summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="cleared-boundary",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session._add_items_for_response([recorded_turn], response_id="resp_recorded")
+        await session.clear_session()
+        await session.add_items([later_turn])
+        assert "resp_recorded" not in session._response_boundaries
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_recorded"})
+
+        # The compaction skipped instead of repopulating cleared history, so
+        # the turn persisted after the clear survives untouched.
+        assert await underlying.get_items() == [later_turn]
+        assert await session.get_items() == [later_turn]
+        mock_client.responses.compact.assert_not_awaited()
+        assert "Skipped compaction for resp_recorded" in caplog.text
+
 
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:

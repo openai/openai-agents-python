@@ -151,6 +151,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # the current history describes that response's coverage and a
         # compaction keyed on it must skip instead of guessing.
         self._response_boundaries: dict[str, int | None] = {}
+        # True once any response boundary has been recorded on this instance.
+        # Eviction past the cap and the wipes in clear_session and pop_item
+        # can drop the entry for a response whose compaction is still pending,
+        # so an absent id alone cannot distinguish such a response from a
+        # direct caller that never records boundaries. The flag keeps that
+        # distinction, and it is never reset: a compaction keyed on a response
+        # recorded before a clear must still skip after the clear.
+        self._response_boundaries_ever_recorded = False
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
@@ -256,9 +264,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # means an earlier replacement rewrote the prefix this boundary
             # counted; the snapshot fallback would classify turns persisted
             # after this response into its baseline and drop them, so skip. An
-            # id with no entry was never persisted through the response hook;
-            # such direct callers persist before compacting and own that
-            # ordering, which keeps the snapshot fallback sound for them.
+            # absent entry is ambiguous once anything was ever recorded:
+            # eviction past the cap and the wipes in clear_session and
+            # pop_item drop entries for responses whose compactions may still
+            # be pending, and guessing from the snapshot would claim newer
+            # turns for such a response, so those skip like tombstones. The
+            # snapshot fallback stays reserved for sessions that never record
+            # boundaries, whose direct callers persist before compacting and
+            # own that ordering.
             recorded_boundary: int | None = None
             if resolved_mode == "previous_response_id" and response_id is not None:
                 if response_id in self._response_boundaries:
@@ -272,6 +285,16 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                             resolved_mode,
                         )
                         return
+                elif self._response_boundaries_ever_recorded:
+                    logger.warning(
+                        "Skipped compaction for %s (mode=%s): this session records response "
+                        "boundaries but has no entry for this response, so its boundary was "
+                        "evicted or removed and the snapshot fallback would claim turns "
+                        "persisted after this response.",
+                        response_id,
+                        resolved_mode,
+                    )
+                    return
 
             # Capture the full stored history while the lock still excludes writers.
             # It anchors the post-flight check that detects concurrent mutations.
@@ -539,6 +562,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             boundary = len(await self._get_all_underlying_session_items())
             self._response_boundaries.pop(response_id, None)
             self._response_boundaries[response_id] = boundary
+            self._response_boundaries_ever_recorded = True
             while len(self._response_boundaries) > _MAX_RECORDED_RESPONSE_BOUNDARIES:
                 del self._response_boundaries[next(iter(self._response_boundaries))]
 
