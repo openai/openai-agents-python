@@ -144,13 +144,20 @@ class RedisSession(SessionABC):
         result = await self._redis.incr(self._counter_key)
         return int(result)
 
-    async def _set_ttl_if_configured(self, *keys: str) -> None:
-        """Set TTL on keys if configured."""
-        if self._ttl is not None:
-            pipe = self._redis.pipeline()
-            for key in keys:
-                pipe.expire(key, self._ttl)
-            await pipe.execute()
+    async def _set_ttl_if_configured(self, *keys: str, pipe: Any = None) -> None:
+        """Set TTL on keys if configured.
+
+        When a pipeline is supplied, the expire commands are queued into it so the TTL is
+        applied atomically with the caller's writes, instead of in a separate transaction
+        that can leave the history committed while the expiration is never set.
+        """
+        if self._ttl is None:
+            return
+        target = pipe if pipe is not None else self._redis.pipeline()
+        for key in keys:
+            target.expire(key, self._ttl)
+        if pipe is None:
+            await target.execute()
 
     # ------------------------------------------------------------------
     # Session protocol implementation
@@ -258,13 +265,15 @@ class RedisSession(SessionABC):
             # Update the session timestamp
             pipe.hset(self._session_key, "updated_at", now)
 
-            # Execute all commands
-            await pipe.execute()
-
-            # Set TTL if configured
+            # Queue the TTL in the same transaction as the history write, so a failed
+            # expiration cannot leave committed items without their expiration (and a caller
+            # retry cannot duplicate history).
             await self._set_ttl_if_configured(
-                self._session_key, self._messages_key, self._counter_key
+                self._session_key, self._messages_key, self._counter_key, pipe=pipe
             )
+
+            # Execute all commands atomically
+            await pipe.execute()
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
