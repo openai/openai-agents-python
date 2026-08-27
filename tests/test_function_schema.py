@@ -493,6 +493,14 @@ def test_var_positional_fixed_tuple_annotation():
         fs.params_pydantic_model.model_validate({"args": [["wrong", 1]]})
 
 
+def test_var_positional_fixed_tuple_rejects_open_dict_item():
+    def func(*args: tuple[dict[str, int], str]) -> None:
+        pass
+
+    with pytest.raises(UserError, match="additionalProperties"):
+        function_schema(func, use_docstring_info=False)
+
+
 @pytest.mark.parametrize(
     "annotation",
     [tuple[()], typing.Tuple[()]],  # noqa: UP006

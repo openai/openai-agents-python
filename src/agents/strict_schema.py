@@ -273,6 +273,20 @@ def _ensure_strict_json_schema(
             inside_nested_resource=inside_nested_resource,
         )
 
+    prefix_items = json_schema.get("prefixItems")
+    if is_list(prefix_items):
+        json_schema["prefixItems"] = [
+            _ensure_strict_json_schema(
+                item,
+                path=(*path, "prefixItems", str(i)),
+                root=root,
+                budget=budget,
+                depth=next_depth,
+                inside_nested_resource=inside_nested_resource,
+            )
+            for i, item in enumerate(prefix_items)
+        ]
+
     # unions
     any_of = json_schema.get("anyOf")
     if is_list(any_of):

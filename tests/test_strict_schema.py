@@ -71,6 +71,31 @@ def test_reasonably_nested_schema_remains_supported():
     assert result["additionalProperties"] is False
 
 
+def test_prefix_items_are_made_strict():
+    schema = {
+        "type": "array",
+        "prefixItems": [
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            },
+            {"type": "string"},
+        ],
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["prefixItems"] == [
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        {"type": "string"},
+    ]
+
+
 def test_deeply_chained_refs_are_rejected_before_recursive_conversion():
     with pytest.raises(UserError, match="too deeply nested"):
         ensure_strict_json_schema(_chained_ref_schema(1_000))
