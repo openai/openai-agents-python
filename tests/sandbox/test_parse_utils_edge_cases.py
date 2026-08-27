@@ -83,7 +83,7 @@ def test_parse_ls_la_decodes_octal_escapes() -> None:
     entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
 
     assert len(entries) == 1
-    assert entries[0].path == "/workspace/docs/octet\ufffd"
+    assert entries[0].path == "/workspace/docs/octal\ufffd"
 
 
 def test_parse_ls_la_decodes_backslash_escapes() -> None:
