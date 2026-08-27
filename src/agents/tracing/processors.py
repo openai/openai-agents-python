@@ -649,10 +649,12 @@ class BatchTraceProcessor(TracingProcessor):
                     reset_exporter_shutdown()
         else:
             # No background thread: process any remaining items synchronously.
-            self._export_batches(deadline=deadline)
-            reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
-            if callable(reset_exporter_shutdown):
-                reset_exporter_shutdown()
+            try:
+                self._export_batches(deadline=deadline)
+            finally:
+                reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+                if callable(reset_exporter_shutdown):
+                    reset_exporter_shutdown()
 
     def force_flush(self):
         """
