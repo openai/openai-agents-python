@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import signal
+import tarfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -464,3 +468,48 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled hydrate must not leave a worker writing into the workspace.
+
+    `restore_snapshot_into_workspace_on_resume` closes the archive stream in a `finally` as
+    soon as its await returns, so if cancellation propagated while the extractor was still
+    running it would read a closed stream and write into a workspace resume then clears.
+    """
+    workspace = tmp_path / "workspace"
+    session = _RecordingUnixLocalSession(workspace)
+
+    started = threading.Event()
+    events: list[str] = []
+
+    def _slow_extract(tar: object, **kwargs: object) -> None:
+        _ = tar, kwargs
+        events.append("extract-start")
+        started.set()
+        time.sleep(0.2)
+        events.append("extract-end")
+
+    monkeypatch.setattr(unix_local_module, "safe_extract_tarfile", _slow_extract)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w"):
+        pass
+    buf.seek(0)
+
+    task = asyncio.create_task(session.hydrate_workspace(buf))
+    while not started.is_set():
+        await asyncio.sleep(0.005)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The worker finished before the caller observed cancellation, so the archive stream and
+    # the workspace root are only released once nothing is still writing to them.
+    assert events == ["extract-start", "extract-end"]
+    assert not buf.closed

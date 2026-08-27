@@ -464,8 +464,9 @@ def test_var_positional_tuple_annotation():
 
 def test_var_keyword_dict_annotation():
     # Case 3:
-    # When a function has a var-keyword parameter annotated with a dict type,
-    # function_schema() should convert it into a field with type Dict[<key>, <value>].
+    # A ``**kwargs: X`` annotation applies to each keyword *value* (PEP 484), so a
+    # ``**kwargs: dict[str, int]`` parameter collects into ``dict[str, dict[str, int]]`` --
+    # mirroring the variadic-positional handling in test_var_positional_tuple_annotation.
     def func(**kwargs: dict[str, int]):
         return kwargs
 
@@ -473,9 +474,37 @@ def test_var_keyword_dict_annotation():
 
     properties = fs.params_json_schema.get("properties", {})
     # The name of the field is "kwargs", and it's a JSON object i.e. a dict.
-    assert properties.get("kwargs").get("type") == "object"
-    # The values in the dict are integers.
-    assert properties.get("kwargs").get("additionalProperties").get("type") == "integer"
+    kwargs_schema = properties.get("kwargs", {})
+    assert kwargs_schema.get("type") == "object"
+    # Each keyword value is itself a dict[str, int].
+    value_schema = kwargs_schema.get("additionalProperties", {})
+    assert value_schema.get("type") == "object"
+    assert value_schema.get("additionalProperties", {}).get("type") == "integer"
+
+    # A correctly-shaped input round-trips back to the original call.
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"a": {"x": 1}, "b": {"y": 2}}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == {"a": {"x": 1}, "b": {"y": 2}}
+
+    # A flat mapping of ints no longer matches the declared value type.
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"kwargs": {"a": 1, "b": 2}})
+
+
+def test_var_keyword_scalar_annotation():
+    # A ``**kwargs: int`` parameter collects each keyword value as an int: ``dict[str, int]``.
+    def func(**kwargs: int) -> int:
+        return sum(kwargs.values())
+
+    fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
+
+    kwargs_schema = fs.params_json_schema.get("properties", {}).get("kwargs", {})
+    assert kwargs_schema.get("type") == "object"
+    assert kwargs_schema.get("additionalProperties", {}).get("type") == "integer"
+
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"a": 2, "b": 3}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == 5
 
 
 def test_schema_with_mapping_raises_strict_mode_error():
