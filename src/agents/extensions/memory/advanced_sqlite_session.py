@@ -36,6 +36,17 @@ def _allow_all_sqlite_actions(
     return sqlite3.SQLITE_OK
 
 
+def _stored_message_data_needle(search_term: str) -> str:
+    """Return ``search_term`` in the encoding used by the stored ``message_data`` column.
+
+    Session rows are written as ``json.dumps(item)``, which escapes every non-ASCII character
+    as ``\\uXXXX`` and escapes ``"``, ``\\``, and control characters. Matching a raw search term
+    against that column therefore never finds non-ASCII content. Re-encoding the term the same
+    way keeps ASCII searches byte-identical while making non-ASCII searches match.
+    """
+    return json.dumps(search_term)[1:-1]
+
+
 def _content_preview(content: Any, max_length: int | None = None) -> str:
     """Return a string preview of a stored user-message ``content``.
 
@@ -1598,7 +1609,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                         AND am.message_data LIKE ?
                         ORDER BY ms.branch_turn_number
                     """,
-                        (self.session_id, resolved_branch_id, f"%{search_term}%"),
+                        (
+                            self.session_id,
+                            resolved_branch_id,
+                            f"%{_stored_message_data_needle(search_term)}%",
+                        ),
                     )
 
                     matches = []
