@@ -1,3 +1,0 @@
-# `Decorators`
-
-::: agents.decorators

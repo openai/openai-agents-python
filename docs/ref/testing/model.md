@@ -1,3 +1,0 @@
-# `Model`
-
-::: agents.testing.model

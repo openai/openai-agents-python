@@ -1,3 +1,0 @@
-# `Runtime`
-
-::: agents.sandbox.runtime

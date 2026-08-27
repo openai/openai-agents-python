@@ -1,3 +1,0 @@
-# `Pipeline`
-
-::: agents.voice.pipeline

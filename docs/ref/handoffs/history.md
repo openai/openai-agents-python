@@ -1,3 +1,0 @@
-# `History`
-
-::: agents.handoffs.history

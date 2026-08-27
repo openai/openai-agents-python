@@ -1,3 +1,0 @@
-# `Context`
-
-::: agents.tracing.context

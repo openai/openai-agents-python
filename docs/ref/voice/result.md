@@ -1,3 +1,0 @@
-# `Result`
-
-::: agents.voice.result
