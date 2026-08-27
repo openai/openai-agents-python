@@ -11,6 +11,8 @@ from ..items import TResponseInputItem
 from .session import SessionABC
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
+_MAX_ITEMS_PAGE_SIZE = 100
+
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
     _maybe_openai_client = openai_client
@@ -100,7 +102,7 @@ class OpenAIConversationsSession(SessionABC):
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
-                limit=session_limit,
+                limit=min(session_limit, _MAX_ITEMS_PAGE_SIZE),
                 order="desc",
             ):
                 # calling model_dump() to make this serializable
