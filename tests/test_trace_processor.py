@@ -451,6 +451,33 @@ def test_global_default_provider_shutdown_closes_default_exporter(monkeypatch):
     exporter.close.assert_called_once_with()
 
 
+def test_custom_provider_shutdown_closes_default_exporter(monkeypatch):
+    provider = MagicMock()
+    exporter = MagicMock()
+
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+    monkeypatch.setattr("agents.tracing.processors._global_exporter", exporter)
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    provider.shutdown.assert_called_once_with()
+    exporter.close.assert_called_once_with()
+
+
+def test_default_exporter_closes_when_provider_shutdown_fails(monkeypatch):
+    provider = MagicMock()
+    provider.shutdown.side_effect = RuntimeError("provider shutdown failed")
+    exporter = MagicMock()
+
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+    monkeypatch.setattr("agents.tracing.processors._global_exporter", exporter)
+
+    with pytest.raises(RuntimeError, match="provider shutdown failed"):
+        tracing_setup._shutdown_global_trace_provider()
+
+    exporter.close.assert_called_once_with()
+
+
 def mock_processor():
     processor = MagicMock()
     processor.on_trace_start = MagicMock()
