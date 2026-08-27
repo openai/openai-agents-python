@@ -113,4 +113,3 @@ async def test_collect_pty_output_replaces_partial_utf8_once_the_producer_is_don
 
     assert output.decode("utf-8") == "ok\ufffd"
     assert not output_chunks
-
