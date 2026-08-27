@@ -811,6 +811,76 @@ async def test_stream_response_close_closes_inner_http_stream_with_async_close(m
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_stream_span_records_io_when_consumer_stops_at_completed(monkeypatch):
+    """A consumer that stops at `response.completed` closes the generator.
+
+    The SDK's own run loop does this (it wraps the model stream in `aclosing()` and
+    breaks once it sees the terminal event). Anything recorded only after the yield
+    loop therefore never runs for such a consumer, so the response and input must be
+    attached to the span before the terminal event is yielded, mirroring the existing
+    usage handling and the non-streamed `get_response` path.
+    """
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    class DummyHTTPStream:
+        def __init__(self, response):
+            self._response = response
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=self._response,
+                sequence_number=0,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    response = get_response_obj(
+        [],
+        response_id="resp-stream-early-close",
+        usage=Usage(requests=1, input_tokens=10, output_tokens=4, total_tokens=14),
+    )
+    inner_stream = DummyHTTPStream(response)
+
+    async def fake_fetch_response(*args: Any, **kwargs: Any) -> DummyHTTPStream:
+        return inner_stream
+
+    monkeypatch.setattr(model, "_fetch_response", fake_fetch_response)
+
+    with trace(workflow_name="test"):
+        stream = model.stream_response(
+            system_instructions=None,
+            input="the user prompt",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+        )
+        stream_agen = cast(Any, stream)
+        async for event in stream_agen:
+            if event.type == "response.completed":
+                break  # stop consuming, as a caller watching for the terminal event would
+        await stream_agen.aclose()
+
+    response_spans = [span for span in fetch_ordered_spans() if span.span_data.type == "response"]
+    assert len(response_spans) == 1
+    assert response_spans[0].span_data.response is not None
+    assert response_spans[0].span_data.input is not None
+    assert response_spans[0].span_data.usage is not None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_normal_exhaustion_closes_inner_http_stream(monkeypatch):
     client = DummyWSClient()
     model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]

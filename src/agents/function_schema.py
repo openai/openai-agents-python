@@ -416,17 +416,12 @@ def function_schema(
             )
 
         elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling
-            if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
-                dict_args = get_args(ann)
-                if len(dict_args) == 2:
-                    ann = dict[dict_args[0], dict_args[1]]  # type: ignore
-                else:
-                    ann = dict[str, Any]
-            else:
-                # e.g. def foo(**kwargs: int) -> Dict[str, int]
-                ann = dict[str, ann]  # type: ignore
+            # **kwargs handling: a ``**kwargs: X`` annotation applies to each keyword *value*
+            # (PEP 484), so the collected container is always ``dict[str, X]``. Preserve the full
+            # annotation as the value type -- mirroring the variadic-positional handling above,
+            # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
+            # set to ``Any`` above, yielding ``dict[str, Any]``.
+            ann = dict[str, ann]  # type: ignore
 
             fields[name] = (
                 ann,
