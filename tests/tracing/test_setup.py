@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -59,6 +60,19 @@ def test_shutdown_global_trace_provider_passes_timeout_to_default_provider(
     tracing_setup._shutdown_global_trace_provider()
 
     assert provider.shutdown_timeout == tracing_setup._DEFAULT_SHUTDOWN_TIMEOUT
+
+
+def test_custom_provider_shutdown_closes_default_exporter(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _DummyProvider()
+    exporter = MagicMock()
+
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+    monkeypatch.setattr("agents.tracing.processors._global_exporter", exporter)
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    assert provider.shutdown_calls == 1
+    exporter.close.assert_called_once_with()
 
 
 def test_set_trace_provider_registers_shutdown_once(monkeypatch: pytest.MonkeyPatch) -> None:

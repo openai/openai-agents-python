@@ -20,11 +20,12 @@ def _shutdown_global_trace_provider() -> None:
 
         if isinstance(provider, DefaultTraceProvider):
             provider.shutdown(timeout=_DEFAULT_SHUTDOWN_TIMEOUT)
-            from .processors import shutdown_default_exporter
+        else:
+            provider.shutdown()
 
-            shutdown_default_exporter()
-            return
-        provider.shutdown()
+        from .processors import shutdown_default_exporter
+
+        shutdown_default_exporter()
 
 
 def set_trace_provider(provider: TraceProvider) -> None:
