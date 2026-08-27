@@ -34,15 +34,22 @@ def _reset_default_trace_provider_if_current(provider: TraceProvider) -> None:
     """
     global GLOBAL_TRACE_PROVIDER
 
+    from .processors import _close_default_exporter, _detach_default_processor
+
+    exporter = None
     with _GLOBAL_TRACE_PROVIDER_LOCK:
         if GLOBAL_TRACE_PROVIDER is not provider:
             return
+        # Clear the module singletons *before* publishing ``GLOBAL_TRACE_PROVIDER = None``, in the
+        # same critical section. Otherwise a thread calling ``get_trace_provider()`` in the gap
+        # would see no global provider and rebuild one from the stale processor singleton, adopting
+        # the just-shut-down processor/closed exporter. ``_detach_default_processor`` acquires the
+        # processor lock nested inside this one, matching the ``get_trace_provider`` lock order.
+        exporter = _detach_default_processor()
         GLOBAL_TRACE_PROVIDER = None
 
-    # Release the processor lock outside the provider lock to avoid nested locking.
-    from .processors import _reset_default_processor
-
-    _reset_default_processor()
+    # Close outside both locks; ``close`` is idempotent and may do I/O.
+    _close_default_exporter(exporter)
 
 
 def set_trace_provider(provider: TraceProvider) -> None:
