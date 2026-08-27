@@ -745,6 +745,58 @@ async def test_get_response_rejects_prompt_in_strict_mode(monkeypatch) -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("call_id_fields", [{}, {"call_id": None}], ids=["omitted", "null"])
+@pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
+@pytest.mark.parametrize("strict_feature_validation", [False, True], ids=["default", "strict"])
+async def test_unpaired_function_output_rejected_before_chat_request(
+    call_id_fields: dict[str, None], stream: bool, strict_feature_validation: bool
+) -> None:
+    """Unpaired Responses context cannot become a Chat Completions tool message."""
+    requests: list[httpx2.Request] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        raise AssertionError("Unpaired outputs must not reach Chat Completions")
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
+        model = OpenAIChatCompletionsModel(
+            model="gpt-4",
+            openai_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+            strict_feature_validation=strict_feature_validation,
+        )
+        request_kwargs: dict[str, Any] = {
+            "system_instructions": None,
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "name": "notifications",
+                    "namespace": "slack",
+                    "output": "Alice mentioned you in #deployments.",
+                    **call_id_fields,
+                }
+            ],
+            "model_settings": ModelSettings(),
+            "tools": [],
+            "output_schema": None,
+            "handoffs": [],
+            "tracing": ModelTracing.DISABLED,
+        }
+
+        with pytest.raises(
+            UserError,
+            match="Unpaired function outputs.*Chat Completions.*Use a Responses model",
+        ):
+            if stream:
+                async for _ in model.stream_response(**request_kwargs):
+                    pass
+            else:
+                await model.get_response(**request_kwargs)
+
+    assert requests == []
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_rejects_non_text_tool_output_in_strict_mode() -> None:
     class DummyCompletions:
         async def create(self, **kwargs: Any) -> Any:
