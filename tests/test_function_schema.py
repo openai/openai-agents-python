@@ -131,6 +131,37 @@ def test_to_call_args_does_not_shadow_pydantic_model_fields_set():
     assert result == "hello:42"
 
 
+@pytest.mark.parametrize(
+    "param_name",
+    ["model_dump", "model_dump_json", "model_validate", "model_validate_json", "model_json_schema"],
+)
+def test_parameter_named_like_a_basemodel_method_is_supported(param_name: str) -> None:
+    """A tool parameter that shadows a ``BaseModel`` method must not crash at definition time."""
+    namespace: dict[str, Any] = {}
+    exec(
+        f"def tool({param_name}: int, query: str) -> str:\n"
+        f"    return f'{{{param_name}}}:{{query}}'",
+        namespace,
+    )
+    tool = namespace["tool"]
+
+    func_schema = function_schema(tool, use_docstring_info=False, strict_json_schema=False)
+    parsed = func_schema.params_pydantic_model.model_validate({param_name: 7, "query": "q"})
+
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    assert tool(*args, **kwargs_dict) == "7:q"
+
+
+def test_parameter_named_model_config_raises_actionable_error() -> None:
+    """``model_config`` is reserved by ``create_model``; surface a clear error, not a TypeError."""
+
+    def tool(model_config: str) -> str:
+        return model_config
+
+    with pytest.raises(UserError, match="model_config"):
+        function_schema(tool, use_docstring_info=False, strict_json_schema=False)
+
+
 def varargs_function(x: int, *numbers: float, flag: bool = False, **kwargs: Any):
     return x, numbers, flag, kwargs
 

@@ -10,13 +10,26 @@ from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 # griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from pydantic.fields import FieldInfo
 
 from .exceptions import UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
+
+
+class _ToolArgsBaseModel(BaseModel):
+    """Base for dynamically generated tool-argument models.
+
+    ``protected_namespaces=()`` disables Pydantic's ``model_`` guard so a tool may declare
+    parameters whose names collide with ``BaseModel`` members (for example ``model_dump`` or
+    ``model_validate``) without raising at tool-definition time. The runtime call layer reads
+    argument values from instance ``__dict__`` rather than by attribute access, so a field that
+    shadows a model member is still resolved correctly.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
 
 
 @dataclass
@@ -470,7 +483,18 @@ def function_schema(
                 )
 
     # 3. Dynamically build a Pydantic model
-    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+    #
+    # ``model_config`` cannot be a field name: ``create_model`` interprets a ``model_config``
+    # keyword as the model's configuration, not a field, which otherwise fails with an opaque
+    # ``TypeError`` deep inside Pydantic. Reject it with an actionable error. Other names that
+    # collide with ``BaseModel`` members (``model_dump``, ``model_validate``, ...) are handled by
+    # ``_ToolArgsBaseModel`` disabling the protected-namespace guard.
+    if "model_config" in fields:
+        raise UserError(
+            "Tool parameter 'model_config' is not supported because Pydantic reserves that name "
+            "for model configuration. Rename the parameter (for example to 'config')."
+        )
+    dynamic_model = create_model(f"{func_name}_args", __base__=_ToolArgsBaseModel, **fields)
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
