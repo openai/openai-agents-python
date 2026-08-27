@@ -566,9 +566,6 @@ class BatchTraceProcessor(TracingProcessor):
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
         self._exporter = exporter
-        reset_exporter_shutdown = getattr(exporter, "_reset_shutdown", None)
-        if callable(reset_exporter_shutdown):
-            reset_exporter_shutdown()
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
@@ -646,9 +643,16 @@ class BatchTraceProcessor(TracingProcessor):
                 logger.warning(
                     "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
                 )
+            else:
+                reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+                if callable(reset_exporter_shutdown):
+                    reset_exporter_shutdown()
         else:
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
+            reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+            if callable(reset_exporter_shutdown):
+                reset_exporter_shutdown()
 
     def force_flush(self):
         """

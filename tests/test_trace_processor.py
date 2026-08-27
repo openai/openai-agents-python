@@ -638,6 +638,17 @@ def test_reusing_exporter_after_shutdown_preserves_retries(mock_client):
     exporter.close()
 
 
+@patch("httpx2.Client")
+def test_reusing_exporter_does_not_reset_shutdown_while_previous_processor_runs(mock_client):
+    exporter = BackendSpanExporter(api_key="test_key")
+    exporter._request_shutdown()
+
+    BatchTraceProcessor(exporter=exporter)
+
+    assert exporter._shutdown_event.is_set()
+    exporter.close()
+
+
 @pytest.mark.serial
 @pytest.mark.review_optional
 def test_tracing_atexit_cleanup_timeout_preserves_process_exit_code_on_504() -> None:
