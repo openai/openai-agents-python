@@ -404,6 +404,24 @@ class _LocalShellExecSession(_FakeSession):
         )
 
 
+class _LsFallbackSession(_FakeSession):
+    def __init__(self, results: list[ExecResult]) -> None:
+        super().__init__(Manifest(root="/workspace"))
+        self.results = results
+        self.commands: list[tuple[str, ...]] = []
+
+    async def exec(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: str | User | None = None,
+    ) -> ExecResult:
+        _ = (timeout, shell, user)
+        self.commands.append(tuple(str(part) for part in command))
+        return self.results.pop(0)
+
+
 class _EmptyRemoteRealpathSession(_FakeSession):
     def __init__(self, manifest: Manifest) -> None:
         super().__init__(manifest)
@@ -806,6 +824,35 @@ async def test_sandbox_session_routes_helper_path_checks_to_inner_session() -> N
         Path("link/nested"),
         Path("link/file.txt"),
         Path("bundle.tar"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ls_falls_back_for_images_without_gnu_ls_format_options() -> None:
+    session = _LsFallbackSession(
+        [
+            ExecResult(stdout=b"", stderr=b"ls: unrecognized option", exit_code=1),
+            ExecResult(
+                stdout=b"-rw-r--r-- 1 root root 1 Jan 1 00:00 file.txt\n",
+                stderr=b"",
+                exit_code=0,
+            ),
+        ]
+    )
+
+    entries = await session.ls("/workspace")
+
+    assert entries[0].path == "/workspace/file.txt"
+    assert session.commands == [
+        (
+            "ls",
+            "-lab",
+            "--block-size=1",
+            "--quoting-style=escape",
+            "--",
+            "/workspace",
+        ),
+        ("ls", "-la", "--", "/workspace"),
     ]
 
 

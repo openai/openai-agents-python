@@ -1115,12 +1115,27 @@ class BaseSandboxSession(abc.ABC):
         path = await self._validate_path_access(path)
 
         path_arg = sandbox_path_str(path)
-        cmd = ("ls", "-lab", "--quoting-style=escape", "--", path_arg)
+        cmd = (
+            "ls",
+            "-lab",
+            "--block-size=1",
+            "--quoting-style=escape",
+            "--",
+            path_arg,
+        )
         result = await self.exec(*cmd, shell=False, user=user)
-        if not result.ok():
-            raise ExecNonZeroError(result, command=cmd)
+        if result.ok():
+            return parse_ls_la(result.stdout, base=path_arg, escaped=True)
 
-        return parse_ls_la(result.stdout, base=path_arg, escaped=True)
+        # BusyBox and other small-image ls implementations do not understand the
+        # GNU-only formatting options above. Keep the historical command as a
+        # portable fallback for those supported sandbox images.
+        fallback_cmd = ("ls", "-la", "--", path_arg)
+        fallback_result = await self.exec(*fallback_cmd, shell=False, user=user)
+        if not fallback_result.ok():
+            raise ExecNonZeroError(fallback_result, command=fallback_cmd)
+
+        return parse_ls_la(fallback_result.stdout, base=path_arg)
 
     async def rm(
         self,

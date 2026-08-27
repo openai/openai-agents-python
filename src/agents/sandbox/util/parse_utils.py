@@ -10,6 +10,7 @@ _LS_C_ESCAPES = {
     ord("r"): b"\r",
     ord("t"): b"\t",
     ord("v"): b"\v",
+    # GNU `ls -b` escapes spaces so the final name field remains unambiguous.
     ord(" "): b" ",
     ord("\\"): b"\\",
 }
