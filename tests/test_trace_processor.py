@@ -1483,6 +1483,41 @@ def test_set_trace_processors_keeps_retained_default_exporter_open(mock_client):
 
 
 @patch("httpx2.Client")
+def test_set_trace_processors_detach_uses_bounded_shutdown(mock_client):
+    """Detaching the replaced default must not block on its exporter's network flush."""
+    from agents.tracing import (
+        processors as processors_module,
+        set_trace_processors,
+        setup as setup_module,
+    )
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        setup_module.get_trace_provider()
+        default_processor = processors_module._global_processor
+        recorded: dict[str, Any] = {}
+        original_shutdown = default_processor.shutdown
+
+        def recording_shutdown(timeout=None):
+            recorded["timeout"] = timeout
+            return original_shutdown(timeout=timeout)
+
+        default_processor.shutdown = recording_shutdown  # type: ignore[method-assign]
+
+        set_trace_processors([BatchTraceProcessor(ConsoleSpanExporter())])
+
+        # A bounded (zero) timeout: swapping processors never waits on the backend.
+        assert recorded["timeout"] == 0.0
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
 def test_public_provider_shutdown_closes_default_exporter(mock_client):
     """A public get_trace_provider().shutdown() closes the module-owned default exporter."""
     from agents.tracing import processors as processors_module, setup as setup_module

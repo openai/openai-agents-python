@@ -803,5 +803,8 @@ def _detach_default_processor_if_replaced(active_processors: list[TracingProcess
         _global_processor = None
         _global_exporter = None
 
-    # Shut down outside the lock: it joins the worker thread and closes the exporter's client.
-    processor.shutdown()
+    # Shut down outside the lock. Use a zero timeout so swapping processors never blocks on the
+    # detached exporter's network flush/retries against a slow or unreachable backend: the queued
+    # work of the replaced default is abandoned, its retry backoff is cut short, and its exporter's
+    # client is closed. ``close`` still runs because the processor owns the exporter.
+    processor.shutdown(timeout=0.0)
