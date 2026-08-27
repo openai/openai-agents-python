@@ -661,21 +661,29 @@ class BatchTraceProcessor(TracingProcessor):
         self._export_batches()
 
     def _run(self):
-        while not self._shutdown_event.is_set():
-            current_time = time.monotonic()
-            queue_size = self._queue.qsize()
+        try:
+            while not self._shutdown_event.is_set():
+                current_time = time.monotonic()
+                queue_size = self._queue.qsize()
 
-            # If it's time for a scheduled flush or queue is above the trigger threshold
-            if current_time >= self._next_export_time or queue_size >= self._export_trigger_size:
-                self._export_batches()
-                # Reset the next scheduled flush time
-                self._next_export_time = time.monotonic() + self._schedule_delay
-            else:
-                # Sleep a short interval so we don't busy-wait.
-                time.sleep(0.2)
+                # If it's time for a scheduled flush or queue is above the trigger threshold
+                if (
+                    current_time >= self._next_export_time
+                    or queue_size >= self._export_trigger_size
+                ):
+                    self._export_batches()
+                    # Reset the next scheduled flush time
+                    self._next_export_time = time.monotonic() + self._schedule_delay
+                else:
+                    # Sleep a short interval so we don't busy-wait.
+                    time.sleep(0.2)
 
-        # Final drain after shutdown
-        self._export_batches(deadline=self._shutdown_deadline)
+            # Final drain after shutdown
+            self._export_batches(deadline=self._shutdown_deadline)
+        finally:
+            reset_exporter_shutdown = getattr(self._exporter, "_reset_shutdown", None)
+            if callable(reset_exporter_shutdown):
+                reset_exporter_shutdown()
 
     def _export_batches(self, deadline: float | None = None):
         """Drains the queue and exports in batches of up to `max_batch_size` until the queue

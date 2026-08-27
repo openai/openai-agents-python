@@ -646,6 +646,33 @@ def test_reusing_exporter_does_not_reset_shutdown_while_previous_processor_runs(
     BatchTraceProcessor(exporter=exporter)
 
     assert exporter._shutdown_event.is_set()
+
+
+@patch("httpx2.Client")
+def test_reusing_exporter_does_not_cancel_old_worker(mock_client):
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    class BlockingExporter(BackendSpanExporter):
+        def export(self, items):
+            export_started.set()
+            assert release_export.wait(timeout=2.0)
+
+    exporter = BlockingExporter(api_key="test_key")
+    first_processor = BatchTraceProcessor(exporter=exporter, schedule_delay=0.01)
+    first_processor.on_span_end(get_span(first_processor))
+    assert export_started.wait(timeout=2.0)
+
+    first_processor.shutdown(timeout=0.01)
+    second_processor = BatchTraceProcessor(exporter=exporter)
+    assert exporter._shutdown_event.is_set()
+
+    release_export.set()
+    first_processor._worker_thread.join(timeout=2.0)
+    assert not first_processor._worker_thread.is_alive()
+    assert not exporter._shutdown_event.is_set()
+
+    second_processor.shutdown()
     exporter.close()
 
 
