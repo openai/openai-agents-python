@@ -117,6 +117,64 @@ async def _run_responses_model_with_official_client(
     return requests
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_id_fields", [{}, {"call_id": None}], ids=["omitted", "null"])
+@pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
+async def test_unpaired_function_output_preserved_in_responses_request(
+    call_id_fields: dict[str, None], stream: bool
+) -> None:
+    """Responses keeps external-context output and its source without inventing a call ID."""
+    request_bodies: list[dict[str, Any]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        request_bodies.append(json.loads(request.content))
+        if stream:
+            event = _response_completed_frame("resp-id", sequence_number=0)
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {event}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=get_response_obj([]).model_dump_json(),
+            headers={"content-type": "application/json"},
+        )
+
+    expected_input = {
+        "type": "function_call_output",
+        "name": "notifications",
+        "namespace": "slack",
+        "output": [
+            {"type": "input_text", "text": "Alice mentioned you in #deployments."},
+            {"type": "input_image", "image_url": "https://example.com/image.png"},
+        ],
+        **call_id_fields,
+    }
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
+        model = OpenAIResponsesModel(
+            model="gpt-4",
+            openai_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+        )
+        request_kwargs: dict[str, Any] = {
+            "system_instructions": None,
+            "input": [dict(expected_input)],
+            "model_settings": ModelSettings(),
+            "tools": [],
+            "output_schema": None,
+            "handoffs": [],
+            "tracing": ModelTracing.DISABLED,
+        }
+        if stream:
+            async for _ in model.stream_response(**request_kwargs):
+                pass
+        else:
+            await model.get_response(**request_kwargs)
+
+    assert [body["input"] for body in request_bodies] == [[expected_input]]
+
+
 class DummyWSConnection:
     def __init__(self, frames: list[str]):
         self._frames = frames
