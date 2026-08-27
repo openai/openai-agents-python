@@ -949,6 +949,68 @@ def test_backend_span_exporter_keeps_non_generation_usage_for_custom_endpoint(mo
     exporter.close()
 
 
+@patch("httpx2.Client")
+def test_backend_span_exporter_drops_tool_call_id_for_openai_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def __init__(self):
+            self.exported_payload = {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "name": "lookup",
+                    "tool_call_id": "call_123",
+                },
+            }
+
+        def export(self):
+            return self.exported_payload
+
+    item = DummyItem()
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key")
+    exporter.export([cast(Any, item)])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert "tool_call_id" not in sent_payload["span_data"]
+    assert item.exported_payload["span_data"]["tool_call_id"] == "call_123"
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_keeps_tool_call_id_for_custom_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self):
+            return {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "name": "lookup",
+                    "tool_call_id": "call_123",
+                },
+            }
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        endpoint="https://example.com/v1/traces/ingest",
+    )
+    exporter.export([cast(Any, DummyItem())])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert sent_payload["span_data"]["tool_call_id"] == "call_123"
+    exporter.close()
+
+
 def test_sanitize_for_openai_tracing_api_keeps_allowed_generation_usage():
     exporter = BackendSpanExporter(api_key="test_key")
     payload = {

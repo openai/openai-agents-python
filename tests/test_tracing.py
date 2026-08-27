@@ -229,7 +229,7 @@ def spans_with_setters():
         with agent_span(name="agent_1") as span_a:
             span_a.span_data.name = "agent_2"
 
-            with function_span(name="function_1") as span_b:
+            with function_span(name="function_1", tool_call_id="call_function_1") as span_b:
                 span_b.span_data.input = "i"
                 span_b.span_data.output = "o"
 
@@ -255,7 +255,12 @@ def test_spans_with_setters() -> None:
                         "children": [
                             {
                                 "type": "function",
-                                "data": {"name": "function_1", "input": "i", "output": "o"},
+                                "data": {
+                                    "name": "function_1",
+                                    "input": "i",
+                                    "output": "o",
+                                    "tool_call_id": "call_function_1",
+                                },
                             },
                             {
                                 "type": "generation",

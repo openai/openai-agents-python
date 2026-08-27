@@ -278,6 +278,13 @@ class BackendSpanExporter(TracingExporter):
                 did_mutate = True
             sanitized_span_data[field_name] = sanitized_field
 
+        # Keep SDK-only fields without published ingest support off the OpenAI wire payload.
+        if span_data.get("type") == "function" and "tool_call_id" in span_data:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data.pop("tool_call_id", None)
+
         if span_data.get("type") not in self._OPENAI_TRACING_USAGE_SPAN_TYPES:
             if "usage" in span_data:
                 if not did_mutate:

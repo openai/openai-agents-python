@@ -3,13 +3,22 @@ from typing import Any, cast
 import pytest
 from openai.types.responses import ResponseCustomToolCall
 
-from agents import Agent, CustomTool, RunConfig, RunContextWrapper
+from agents import (
+    Agent,
+    CustomTool,
+    RunConfig,
+    RunContextWrapper,
+    set_tracing_disabled,
+    trace,
+)
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.lifecycle import RunHooks
 from agents.run_internal.run_steps import ToolRunCustom
 from agents.run_internal.tool_actions import CustomToolAction
 from agents.tool import CustomToolOnApprovalFunctionResult
 from agents.tool_context import ToolContext
+
+from .testing_processor import SPAN_PROCESSOR_TESTING
 
 
 @pytest.mark.asyncio
@@ -33,13 +42,15 @@ async def test_custom_tool_action_returns_custom_tool_call_output() -> None:
         input="hello",
     )
 
-    result = await CustomToolAction.execute(
-        agent=agent,
-        call=ToolRunCustom(tool_call=tool_call, custom_tool=tool),
-        hooks=RunHooks[Any](),
-        context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
-    )
+    set_tracing_disabled(False)
+    with trace("custom-tool-call-id-test"):
+        result = await CustomToolAction.execute(
+            agent=agent,
+            call=ToolRunCustom(tool_call=tool_call, custom_tool=tool),
+            hooks=RunHooks[Any](),
+            context_wrapper=RunContextWrapper(context=None),
+            config=RunConfig(),
+        )
 
     assert isinstance(result, ToolCallOutputItem)
     raw_item = cast(dict[str, Any], result.raw_item)
@@ -48,6 +59,16 @@ async def test_custom_tool_action_returns_custom_tool_call_output() -> None:
         "call_id": "call_custom",
         "output": "HELLO",
     }
+    function_spans = [
+        span.export()
+        for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True)
+        if span.span_data.type == "function"
+    ]
+    assert len(function_spans) == 1
+    exported_span = function_spans[0]
+    assert exported_span is not None
+    span_data = cast(dict[str, Any], exported_span["span_data"])
+    assert span_data["tool_call_id"] == "call_custom"
 
 
 @pytest.mark.asyncio

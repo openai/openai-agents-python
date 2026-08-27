@@ -1121,6 +1121,7 @@ async def with_tool_function_span(
     *,
     config: RunConfig,
     tool_name: str,
+    tool_call_id: str,
     fn: Callable[[Span[Any] | None], MaybeAwaitable[TToolSpanResult]],
 ) -> TToolSpanResult:
     """Execute a tool callback in a function span when tracing is active."""
@@ -1131,7 +1132,7 @@ async def with_tool_function_span(
         direct_result: object = result
         return cast(TToolSpanResult, direct_result)
 
-    with function_span(tool_name) as span:
+    with function_span(tool_name, tool_call_id=tool_call_id) as span:
         result = fn(span)
         if inspect.isawaitable(result):
             return await result
@@ -1802,7 +1803,7 @@ class _FunctionToolBatchExecutor:
             or get_function_tool_trace_name(func_tool)
             or func_tool.name
         )
-        with function_span(trace_tool_name) as span_fn:
+        with function_span(trace_tool_name, tool_call_id=tool_call.call_id) as span_fn:
             tool_context_namespace = get_tool_call_namespace(raw_tool_call)
             if tool_context_namespace is None:
                 tool_context_namespace = get_tool_call_namespace(tool_call)

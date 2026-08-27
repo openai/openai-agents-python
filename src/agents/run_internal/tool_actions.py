@@ -208,6 +208,7 @@ class ComputerAction:
         return await with_tool_function_span(
             config=config,
             tool_name=trace_tool_name,
+            tool_call_id=action.tool_call.call_id,
             fn=_run_action,
         )
 
@@ -658,6 +659,7 @@ class ShellAction:
         return await with_tool_function_span(
             config=config,
             tool_name=shell_tool.name,
+            tool_call_id=shell_call.call_id,
             fn=_run_call,
         )
 
@@ -829,6 +831,7 @@ class CustomToolAction:
         return await with_tool_function_span(
             config=config,
             tool_name=custom_tool.name,
+            tool_call_id=call_id,
             fn=_run_call,
         )
 
@@ -1067,6 +1070,7 @@ class ApplyPatchAction:
         return await with_tool_function_span(
             config=config,
             tool_name=apply_patch_tool.name,
+            tool_call_id=call_id,
             fn=_run_call,
         )
 

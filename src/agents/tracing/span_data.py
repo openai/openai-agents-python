@@ -135,10 +135,10 @@ class TurnSpanData(SpanData):
 class FunctionSpanData(SpanData):
     """
     Represents a Function Span in the trace.
-    Includes input, output and MCP data (if applicable).
+    Includes input, output, MCP data, and a provider tool call ID (if applicable).
     """
 
-    __slots__ = ("name", "input", "output", "mcp_data")
+    __slots__ = ("name", "input", "output", "mcp_data", "tool_call_id")
 
     def __init__(
         self,
@@ -146,11 +146,13 @@ class FunctionSpanData(SpanData):
         input: str | None,
         output: Any | None,
         mcp_data: dict[str, Any] | None = None,
+        tool_call_id: str | None = None,
     ):
         self.name = name
         self.input = input
         self.output = output
         self.mcp_data = mcp_data
+        self.tool_call_id = tool_call_id
 
     @property
     def type(self) -> str:
@@ -163,6 +165,7 @@ class FunctionSpanData(SpanData):
             "input": self.input,
             "output": str(self.output) if self.output is not None else None,
             "mcp_data": self.mcp_data,
+            "tool_call_id": self.tool_call_id,
         }
 
 

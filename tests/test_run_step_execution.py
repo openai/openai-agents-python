@@ -1623,6 +1623,48 @@ async def test_execute_function_tool_calls_allows_non_agent_function_tool() -> N
 
 
 @pytest.mark.asyncio
+async def test_parallel_function_tool_spans_preserve_provider_call_ids() -> None:
+    slow_started = asyncio.Event()
+    fast_finished = asyncio.Event()
+    completion_order: list[str] = []
+
+    async def _slow_tool() -> str:
+        slow_started.set()
+        await fast_finished.wait()
+        completion_order.append("slow")
+        return "slow-result"
+
+    async def _fast_tool() -> str:
+        await slow_started.wait()
+        completion_order.append("fast")
+        fast_finished.set()
+        return "fast-result"
+
+    slow_tool = function_tool(_slow_tool, name_override="slow_tool")
+    fast_tool = function_tool(_fast_tool, name_override="fast_tool")
+    agent = Agent(name="test", tools=[slow_tool, fast_tool])
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("slow_tool", "{}", call_id="call-slow"),
+            get_function_tool_call("fast_tool", "{}", call_id="call-fast"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("parallel-tool-call-id-test"):
+        await get_execute_result(agent, response)
+
+    span_data_by_name = {
+        cast(dict[str, Any], span["span_data"])["name"]: cast(dict[str, Any], span["span_data"])
+        for span in _function_spans()
+    }
+    assert completion_order == ["fast", "slow"]
+    assert span_data_by_name["slow_tool"]["tool_call_id"] == "call-slow"
+    assert span_data_by_name["fast_tool"]["tool_call_id"] == "call-fast"
+
+
+@pytest.mark.asyncio
 async def test_execute_function_tool_calls_collapse_trace_name_for_top_level_deferred_tools():
     async def _shipping_eta(tracking_number: str) -> str:
         return f"eta:{tracking_number}"

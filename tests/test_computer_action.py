@@ -622,6 +622,7 @@ async def test_execute_emits_function_span() -> None:
     assert ComputerAction.TRACE_TOOL_NAME == "computer"
     function_span = _get_function_span(ComputerAction.TRACE_TOOL_NAME)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "tool_trace"
     assert span_data.get("input") is not None
     assert cast(str, span_data.get("output", "")).startswith("data:image/png;base64,")
 
@@ -741,6 +742,7 @@ async def test_execute_redacts_span_error_when_sensitive_data_disabled() -> None
     }
     assert secret_error not in json.dumps(function_span)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "tool_trace_error"
     assert span_data.get("input") is None
     assert span_data.get("output") is None
 

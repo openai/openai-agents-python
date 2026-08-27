@@ -306,6 +306,7 @@ async def test_shell_tool_emits_function_span() -> None:
     assert isinstance(result, ToolCallOutputItem)
     function_span = _get_function_span(shell_tool.name)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "call_shell_trace"
     assert "echo hi" in cast(str, span_data.get("input", ""))
     assert span_data.get("output") == "shell span output"
 
@@ -347,6 +348,7 @@ async def test_shell_tool_redacts_span_error_when_sensitive_data_disabled() -> N
     }
     assert secret_error not in json.dumps(function_span)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "call_shell_trace_redacted"
     assert span_data.get("input") is None
     assert span_data.get("output") is None
 

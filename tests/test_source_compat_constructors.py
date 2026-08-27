@@ -29,6 +29,7 @@ from agents import (
     tool_output_guardrail,
 )
 from agents.tool_context import ToolContext
+from agents.tracing import FunctionSpanData, function_span
 
 
 def test_run_config_positional_arguments_remain_backward_compatible() -> None:
@@ -345,6 +346,21 @@ def test_tool_context_supports_agent_keyword_argument() -> None:
     assert context.tool_call_id == "call_id"
     assert context.tool_arguments == '{"x":1}'
     assert context.agent is agent
+
+
+def test_function_span_positional_prefix_remains_backward_compatible() -> None:
+    span_data = FunctionSpanData("tool", "input", "output", {"server": "mcp"})
+
+    assert span_data.name == "tool"
+    assert span_data.input == "input"
+    assert span_data.output == "output"
+    assert span_data.mcp_data == {"server": "mcp"}
+    assert span_data.tool_call_id is None
+
+    disabled_span = function_span("tool", "input", "output", None, None, True)
+
+    assert disabled_span.export() is None
+    assert disabled_span.span_data.tool_call_id is None
 
 
 def test_run_result_v070_positional_constructor_still_works() -> None:

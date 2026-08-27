@@ -175,6 +175,7 @@ async def test_apply_patch_tool_emits_function_span() -> None:
     assert isinstance(result, ToolCallOutputItem)
     function_span = _get_function_span(tool.name)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "call_apply_trace"
     assert "tasks.md" in cast(str, span_data.get("input", ""))
     assert "Updated tasks.md" in cast(str, span_data.get("output", ""))
 
@@ -215,6 +216,7 @@ async def test_apply_patch_tool_redacts_span_error_when_sensitive_data_disabled(
     }
     assert secret_error not in json.dumps(function_span)
     span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("tool_call_id") == "call_apply_trace_redacted"
     assert span_data.get("input") is None
     assert span_data.get("output") is None
 

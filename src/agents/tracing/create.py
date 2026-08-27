@@ -159,6 +159,7 @@ def function_span(
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
+    tool_call_id: str | None = None,
 ) -> Span[FunctionSpanData]:
     """Create a new function span. The span will not be started automatically, you should either do
     `with function_span() ...` or call `span.start()` + `span.finish()` manually.
@@ -173,12 +174,18 @@ def function_span(
         parent: The parent span or trace. If not provided, we will automatically use the current
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
+        tool_call_id: The provider-supplied ID for this tool invocation, if available.
 
     Returns:
         The newly created function span.
     """
     return get_trace_provider().create_span(
-        span_data=FunctionSpanData(name=name, input=input, output=output),
+        span_data=FunctionSpanData(
+            name=name,
+            input=input,
+            output=output,
+            tool_call_id=tool_call_id,
+        ),
         span_id=span_id,
         parent=parent,
         disabled=disabled,
