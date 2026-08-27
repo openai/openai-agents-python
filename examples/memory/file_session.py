@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agents.memory.session import Session
+from agents.memory.session import Session, slice_items_by_turn
 from agents.memory.session_settings import SessionSettings
 
 
@@ -43,9 +43,16 @@ class FileSession(Session):
         """Return the session id, creating one if needed."""
         return await self._ensure_session_id()
 
-    async def get_items(self, limit: int | None = None) -> list[Any]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[Any]:
         session_id = await self._ensure_session_id()
         items = await self._read_items(session_id)
+        if turn_limit is not None:
+            return slice_items_by_turn(items, turn_limit)
         if limit is not None and limit >= 0:
             return items[-limit:]
         return items

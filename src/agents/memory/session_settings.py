@@ -27,6 +27,27 @@ def resolve_session_limit(
     return None
 
 
+def resolve_session_turn_limit(
+    explicit_limit: int | None,
+    explicit_turn_limit: int | None,
+    settings: SessionSettings | dict[str, Any] | None,
+) -> int | None:
+    """Safely resolve the effective turn limit for session operations.
+
+    An explicit ``turn_limit`` always wins. Otherwise an explicit ``limit``
+    suppresses a settings-derived ``turn_limit`` so item-window requests are
+    not reshaped by a configured turn limit; the settings-derived ``turn_limit``
+    applies only when neither argument is given explicitly.
+    """
+    if explicit_turn_limit is not None:
+        return explicit_turn_limit
+    if explicit_limit is not None:
+        return None
+    if settings is not None:
+        return coerce_session_settings(settings).turn_limit
+    return None
+
+
 @dataclass
 class SessionSettings:
     """Settings for session operations.
@@ -37,6 +58,14 @@ class SessionSettings:
 
     limit: int | None = None
     """Maximum number of items to retrieve. If None, retrieves all items."""
+
+    turn_limit: int | None = None
+    """Maximum number of whole turns to retrieve, starting at a turn boundary.
+
+    When set, the returned history always begins at the start of a complete
+    turn so tool calls, outputs, and assistant messages within a turn are not
+    split by a mid-turn truncation. If None, ignores the turn boundary.
+    """
 
     def resolve(self, override: SessionSettings | dict[str, Any] | None) -> SessionSettings:
         """Produce a new SessionSettings by overlaying any non-None values from the

@@ -12,6 +12,40 @@ if TYPE_CHECKING:
     from .session_settings import SessionSettings
 
 
+def slice_items_by_turn(
+    items: list[TResponseInputItem],
+    turn_limit: int,
+) -> list[TResponseInputItem]:
+    """Return the latest ``turn_limit`` complete turns from ``items``.
+
+    A turn is a user message plus every item that follows it up to the next user
+    message. This helper walks backward from the newest item, counting
+    user-message items as turn boundaries, and returns the slice that starts at
+    the boundary of the ``turn_limit``-th newest turn. When fewer than
+    ``turn_limit`` turns exist in ``items``, the full list is returned so no
+    turn is ever split. A non-positive ``turn_limit`` returns an empty list,
+    matching the non-positive ``limit`` semantics.
+
+    Session implementations should use this helper when they support
+    ``get_items(turn_limit=...)`` so the boundary logic stays consistent across
+    backends.
+    """
+    if turn_limit <= 0:
+        return []
+    start = 0
+    turns = 0
+    index = len(items) - 1
+    while index >= 0:
+        item = items[index]
+        if isinstance(item, dict) and item.get("role") == "user":
+            turns += 1
+            if turns == turn_limit:
+                start = index
+                break
+        index -= 1
+    return items[start:]
+
+
 @runtime_checkable
 class Session(Protocol):
     """Protocol for session implementations.
@@ -23,12 +57,21 @@ class Session(Protocol):
     session_id: str
     session_settings: SessionSettings | None = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                   returns the latest N complete turns, starting at a turn boundary so
+                   a single turn's items are never split. If None, no turn boundary is
+                   applied.
 
         Returns:
             List of input items representing the conversation history
@@ -70,12 +113,21 @@ class SessionABC(ABC):
     session_settings: SessionSettings | None = None
 
     @abstractmethod
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                   returns the latest N complete turns, starting at a turn boundary so
+                   a single turn's items are never split. If None, no turn boundary is
+                   applied.
 
         Returns:
             List of input items representing the conversation history

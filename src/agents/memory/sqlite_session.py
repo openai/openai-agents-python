@@ -11,8 +11,13 @@ from pathlib import Path
 from typing import Any, ClassVar, TypeVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC
-from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
+from .session import SessionABC, slice_items_by_turn
+from .session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+    resolve_session_turn_limit,
+)
 
 _T = TypeVar("_T")
 
@@ -285,17 +290,25 @@ class SQLiteSession(SessionABC):
             (self.session_id,),
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                   returns the latest N complete turns starting at a turn boundary.
 
         Returns:
             List of input items representing the conversation history
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
+        session_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
 
         def _decode_rows(rows: list[Any]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
@@ -310,6 +323,19 @@ class SQLiteSession(SessionABC):
 
         def _get_items_sync():
             with self._locked_connection() as conn:
+                if session_turn_limit is not None:
+                    if session_turn_limit <= 0:
+                        return []
+                    cursor = conn.execute(
+                        f"""
+                        SELECT message_data FROM {self.messages_table}
+                        WHERE session_id = ?
+                        ORDER BY id ASC
+                    """,
+                        (self.session_id,),
+                    )
+                    return slice_items_by_turn(_decode_rows(cursor.fetchall()), session_turn_limit)
+
                 if session_limit is None:
                     # Fetch all items in chronological order
                     cursor = conn.execute(

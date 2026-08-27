@@ -43,16 +43,13 @@ except ImportError as e:
     )
 
 from ...items import TResponseInputItem
-from ...logger import (
-    log_model_and_tool_action_error,
-    log_model_and_tool_action_warning,
-    logger,
-)
-from ...memory.session import SessionABC
+from ...logger import log_model_and_tool_action_error, logger
+from ...memory.session import SessionABC, slice_items_by_turn
 from ...memory.session_settings import (
     SessionSettings,
     coerce_session_settings,
     resolve_session_limit,
+    resolve_session_turn_limit,
 )
 
 # Type alias for consistency levels
@@ -188,32 +185,6 @@ class DaprSession(SessionABC):
             metadata["ttlInSeconds"] = str(self._ttl)
         return metadata
 
-    async def _read_created_at(self) -> tuple[str | None, str | None]:
-        """Return the stored creation timestamp and the metadata etag backing it.
-
-        The timestamp is None when it is missing or unreadable. The etag is returned so the
-        caller can write the metadata conditionally against the same revision it read. The
-        Dapr SDK reports a missing etag as an empty string, so it is normalized to None and
-        callers can test for a real etag rather than for a particular empty representation.
-        """
-        response = await self._dapr_client.get_state(
-            store_name=self._state_store_name,
-            key=self._metadata_key,
-            state_metadata=self._get_read_metadata(),
-        )
-        etag = response.etag or None
-        data = response.data
-        if not data:
-            return None, etag
-        try:
-            stored = json.loads(data.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None, etag
-        if not isinstance(stored, dict):
-            return None, etag
-        created_at = stored.get("created_at")
-        return (created_at if isinstance(created_at, str) and created_at else None), etag
-
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
         return json.dumps(item, separators=(",", ":"))
@@ -295,17 +266,25 @@ class DaprSession(SessionABC):
         if self._closed:
             raise RuntimeError("DaprSession is closed")
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                   returns the latest N complete turns starting at a turn boundary.
 
         Returns:
             List of input items representing the conversation history
         """
         session_limit = resolve_session_limit(limit, self.session_settings)
+        session_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
 
         async with self._lock:
             self._check_not_closed()
@@ -319,6 +298,20 @@ class DaprSession(SessionABC):
             messages = self._decode_messages(response.data)
             if not messages:
                 return []
+            if session_turn_limit is not None:
+                if session_turn_limit <= 0:
+                    return []
+                turn_items: list[TResponseInputItem] = []
+                for msg in messages:
+                    try:
+                        if isinstance(msg, str):
+                            item = await self._deserialize_item(msg)
+                        else:
+                            item = msg
+                        turn_items.append(item)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                return slice_items_by_turn(turn_items, session_turn_limit)
             if session_limit is not None:
                 if session_limit <= 0:
                     return []
@@ -392,55 +385,19 @@ class DaprSession(SessionABC):
                         continue
                     raise
 
-            # Update metadata, preserving created_at across subsequent writes. A plain write
-            # would let a later append overwrite created_at with its own now, so the save is
-            # guarded by the etag that backed the value that was read.
-            #
-            # The guard only applies once a real etag was read. Dapr documents a write without
-            # an etag as last-write-wins even when first-write concurrency is requested, so
-            # asking for it on the create is not a race guarantee and is left off rather than
-            # implying one. Concurrent etag-less creation is therefore last-write-wins.
-            #
-            # The messages key is already committed once we reach here, so raising would tell
-            # the caller the append failed while their items are in the session, and the
-            # natural response of retrying add_items() would store the batch twice. Metadata
-            # is derived bookkeeping, so give up on it with a warning instead.
-            attempt = 0
-            while True:
-                attempt += 1
-                try:
-                    stored_created_at, metadata_etag = await self._read_created_at()
-                    now = str(int(time.time()))
-                    metadata = {
-                        "session_id": self.session_id,
-                        "created_at": stored_created_at or now,
-                        "updated_at": now,
-                    }
-                    await self._dapr_client.save_state(
-                        store_name=self._state_store_name,
-                        key=self._metadata_key,
-                        value=json.dumps(metadata),
-                        etag=metadata_etag,
-                        state_metadata=self._get_metadata(),
-                        options=self._get_state_options(
-                            concurrency=(
-                                Concurrency.first_write if metadata_etag is not None else None
-                            )
-                        ),
-                    )
-                    break
-                except Exception as error:
-                    should_retry = await self._handle_concurrency_conflict(error, attempt)
-                    if should_retry:
-                        continue
-                    log_model_and_tool_action_warning(
-                        logger,
-                        "DaprSession stored the new items but could not update the session "
-                        "metadata",
-                        error,
-                        diagnostic_extra=lambda: {"session_id": self.session_id},
-                    )
-                    break
+            # Update metadata
+            metadata = {
+                "session_id": self.session_id,
+                "created_at": str(int(time.time())),
+                "updated_at": str(int(time.time())),
+            }
+            await self._dapr_client.save_state(
+                store_name=self._state_store_name,
+                key=self._metadata_key,
+                value=json.dumps(metadata),
+                state_metadata=self._get_metadata(),
+                options=self._get_state_options(),
+            )
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.

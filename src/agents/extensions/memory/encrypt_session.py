@@ -37,8 +37,18 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from typing_extensions import TypedDict
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC, _call_session_method, _get_session_wrapper
-from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.openai_responses_compaction_session import _ALL_SESSION_ITEMS_LIMIT
+from ...memory.session import (
+    SessionABC,
+    _call_session_method,
+    _get_session_wrapper,
+    slice_items_by_turn,
+)
+from ...memory.session_settings import (
+    SessionSettings,
+    resolve_session_limit,
+    resolve_session_turn_limit,
+)
 from ...run_context import RunContextWrapper
 
 
@@ -185,9 +195,27 @@ class EncryptedSession(SessionABC):
         self,
         limit: int | None = None,
         *,
+        turn_limit: int | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
+        effective_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
+        if effective_turn_limit is not None:
+            if effective_turn_limit <= 0:
+                return []
+            # Fetch beyond any limit configured on the underlying session so the turn
+            # scan is never truncated before slice_items_by_turn can find turn boundaries.
+            encrypted_items = cast(
+                list[TResponseInputItem],
+                await _call_session_method(
+                    self.underlying_session.get_items,
+                    _ALL_SESSION_ITEMS_LIMIT,
+                    wrapper=wrapper,
+                ),
+            )
+            return slice_items_by_turn(
+                self._unwrap_valid_items(encrypted_items), effective_turn_limit
+            )
         effective_limit = resolve_session_limit(limit, self.session_settings)
         if effective_limit is not None and effective_limit > 0:
             window = effective_limit

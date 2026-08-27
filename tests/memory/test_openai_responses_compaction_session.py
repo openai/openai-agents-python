@@ -988,10 +988,15 @@ class TestOpenAIResponsesCompactionSession:
                 self.add_calls = 0
                 self.clear_calls = 0
 
-            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            async def get_items(
+                self,
+                limit: int | None = None,
+                *,
+                turn_limit: int | None = None,
+            ) -> list[TResponseInputItem]:
                 if limit is None and self.session_settings is not None:
                     limit = self.session_settings.limit
-                return await super().get_items(limit)
+                return await super().get_items(limit, turn_limit=turn_limit)
 
             async def add_items(self, items: list[TResponseInputItem]) -> None:
                 self.add_calls += 1
@@ -1778,6 +1783,61 @@ class TestCompactionStripsOrphanedIds:
         stored_items = mock_session.add_items.call_args[0][0]
         assistant_items = [i for i in stored_items if i.get("role") == "assistant"]
         assert assistant_items[0]["id"] == "msg_aaa"
+
+    @pytest.mark.asyncio
+    async def test_ensure_compaction_candidates_yields_all_history_with_settings_turn_limit(
+        self,
+    ) -> None:
+        """A settings-derived ``turn_limit`` must not truncate compaction candidates.
+
+        Compaction scans the full history to pick candidates and later replaces the
+        whole session, so a configured ``turn_limit`` on the underlying session must
+        not silently limit that scan to the last N turns.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from agents import SQLiteSession
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "test_compaction_turn_limit.db"
+            underlying = SQLiteSession(
+                "compaction_turn_limit",
+                db_path,
+                session_settings=SessionSettings(turn_limit=1),
+            )
+
+            history = [
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "u1"}),
+                cast(
+                    TResponseInputItem,
+                    {"type": "message", "role": "assistant", "content": "a1"},
+                ),
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "u2"}),
+                cast(
+                    TResponseInputItem,
+                    {"type": "message", "role": "assistant", "content": "a2"},
+                ),
+                cast(TResponseInputItem, {"type": "message", "role": "user", "content": "u3"}),
+                cast(
+                    TResponseInputItem,
+                    {"type": "message", "role": "assistant", "content": "a3"},
+                ),
+            ]
+            await underlying.add_items(history)
+
+            session = OpenAIResponsesCompactionSession(
+                session_id="test",
+                underlying_session=underlying,
+                client=MagicMock(),
+            )
+
+            candidates, session_history = await session._ensure_compaction_candidates()
+            assert session_history == history
+            # Candidate selection excludes user messages but must see all assistant items.
+            assert len(candidates) == 3
+
+            underlying.close()
 
 
 class TestTypeGuard:

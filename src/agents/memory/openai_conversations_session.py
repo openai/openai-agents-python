@@ -8,8 +8,13 @@ from openai import AsyncOpenAI
 from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
-from .session import SessionABC
-from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
+from .session import SessionABC, slice_items_by_turn
+from .session_settings import (
+    SessionSettings,
+    coerce_session_settings,
+    resolve_session_limit,
+    resolve_session_turn_limit,
+)
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -82,10 +87,28 @@ class OpenAIConversationsSession(SessionABC):
     async def _clear_session_id(self) -> None:
         self._session_id = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
+        session_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
+        if session_turn_limit is not None:
+            if session_turn_limit <= 0:
+                return []
+            all_items = []
+            async for item in self._openai_client.conversations.items.list(
+                conversation_id=session_id,
+                order="asc",
+            ):
+                # calling model_dump() to make this serializable
+                all_items.append(item.model_dump(exclude_unset=True))
+            return slice_items_by_turn(all_items, session_turn_limit)  # type: ignore
+
         if session_limit == 0:
             return []
 

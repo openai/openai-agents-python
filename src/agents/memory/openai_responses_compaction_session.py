@@ -262,7 +262,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             len(self._compaction_candidate_items or []),
         )
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
+        if turn_limit is not None:
+            return await self.underlying_session.get_items(limit, turn_limit=turn_limit)
         return await self.underlying_session.get_items(limit)
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
@@ -449,7 +456,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 
-        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+        history = _normalize_compaction_session_items(
+            await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
+        )
         candidates = select_compaction_candidate_items(history)
         self._compaction_candidate_items = candidates
         self._session_items = history

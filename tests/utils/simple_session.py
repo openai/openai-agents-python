@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 from agents.items import TResponseInputItem
-from agents.memory.session import Session
+from agents.memory.session import Session, slice_items_by_turn
 from agents.memory.session_settings import SessionSettings
 
 
@@ -24,7 +24,14 @@ class SimpleListSession(Session):
         # Mirror saved_items used by some tests for inspection.
         self.saved_items: list[TResponseInputItem] = self._items
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
+        if turn_limit is not None:
+            return slice_items_by_turn(self._items, turn_limit)
         if limit is None:
             return list(self._items)
         if limit <= 0:

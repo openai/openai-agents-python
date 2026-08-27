@@ -360,6 +360,51 @@ async def test_add_and_get_items(session: MongoDBSession) -> None:
     assert retrieved[1].get("content") == "Hi there!"
 
 
+async def test_get_items_turn_limit(session: MongoDBSession) -> None:
+    """turn_limit returns whole turns rather than a mid-turn item cut."""
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"type": "function_call", "name": "f", "call_id": "c1", "arguments": ""},
+        {"type": "function_call_output", "call_id": "c1", "output": "o1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    assert await session.get_items(turn_limit=1) == turn_two
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    assert await session.get_items(turn_limit=10) == turn_one + turn_two
+    assert await session.get_items(turn_limit=0) == []
+    # turn_limit takes precedence over limit.
+    assert await session.get_items(limit=1, turn_limit=1) == turn_two
+
+
+async def test_get_items_turn_limit_takes_precedence_over_nonpositive_limit(
+    session: MongoDBSession,
+) -> None:
+    """A non-positive configured limit must not shadow an explicit turn_limit."""
+    session.session_settings = SessionSettings(limit=0)
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    assert await session.get_items(turn_limit=1) == turn_two
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    # The configured limit of 0 still applies when no turn_limit is given.
+    assert await session.get_items() == []
+
+
 async def test_add_empty_list_is_noop(session: MongoDBSession) -> None:
     """Adding an empty list must not create any documents."""
     await session.add_items([])

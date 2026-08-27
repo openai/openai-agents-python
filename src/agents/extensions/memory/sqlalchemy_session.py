@@ -52,11 +52,12 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, slice_items_by_turn
 from ...memory.session_settings import (
     SessionSettings,
     coerce_session_settings,
     resolve_session_limit,
+    resolve_session_turn_limit,
 )
 from ...memory.sqlite_session import _await_mutation
 
@@ -298,12 +299,19 @@ class SQLAlchemySession(SessionABC):
         finally:
             self._init_lock.release()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                   returns the latest N complete turns starting at a turn boundary.
 
         Returns:
             List of input items representing the conversation history
@@ -311,6 +319,7 @@ class SQLAlchemySession(SessionABC):
         await self._ensure_tables()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
+        session_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
 
         async def _decode_rows(rows: list[str]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
@@ -336,6 +345,22 @@ class SQLAlchemySession(SessionABC):
             )
 
         async with self._session_factory() as sess:
+            if session_turn_limit is not None:
+                if session_turn_limit <= 0:
+                    return []
+                stmt = (
+                    select(self._messages.c.message_data)
+                    .where(self._messages.c.session_id == self.session_id)
+                    .order_by(
+                        self._messages.c.created_at.asc(),
+                        self._messages.c.id.asc(),
+                    )
+                )
+                result = await sess.execute(stmt)
+                return slice_items_by_turn(
+                    await _decode_rows([row[0] for row in result.all()]), session_turn_limit
+                )
+
             if session_limit is None:
                 stmt = (
                     select(self._messages.c.message_data)

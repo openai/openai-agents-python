@@ -96,6 +96,105 @@ async def test_encrypted_session_basic_functionality(
     underlying_session.close()
 
 
+async def test_encrypted_session_get_items_turn_limit(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """turn_limit on an encrypted session returns decrypted whole turns."""
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        ttl=600,
+    )
+
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    assert await session.get_items(turn_limit=1) == turn_two
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    assert await session.get_items(turn_limit=10) == turn_one + turn_two
+    assert await session.get_items(turn_limit=0) == []
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_turn_limit_ignores_underlying_limit(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """A configured limit on the underlying session must not truncate the turn scan."""
+    underlying_session.session_settings = SessionSettings(limit=1)
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        ttl=600,
+    )
+
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    assert await session.get_items(turn_limit=1) == turn_two
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    # The underlying configured limit still applies when no turn_limit is given.
+    assert await session.get_items() == [turn_two[-1]]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_turn_limit_ignores_underlying_turn_limit(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    """A settings-derived turn_limit on the underlying session must not truncate the turn scan.
+
+    The encrypt turn branch fetches all underlying items in a growing window, so a
+    settings-derived ``turn_limit`` on the underlying session must not cap each window
+    fetch to a turn window (which would end the scan after one fetch).
+    """
+    underlying_session.session_settings = SessionSettings(turn_limit=1)
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        ttl=600,
+    )
+
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    # Explicit turn_limit returns whole turns even though the underlying session
+    # would otherwise return only its configured single turn.
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    assert await session.get_items(turn_limit=1) == turn_two
+    # Without any explicit argument, the underlying settings-derived turn_limit applies.
+    assert await session.get_items() == turn_two
+
+    underlying_session.close()
+
+
 async def test_encrypted_session_with_runner(
     agent: Agent, encryption_key: str, underlying_session: SQLiteSession
 ):

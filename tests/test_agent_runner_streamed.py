@@ -1747,7 +1747,9 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
                     )
             self.saved.append(items)
 
-        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async def get_items(
+            self, limit: int | None = None, *, turn_limit: int | None = None
+        ) -> list[TResponseInputItem]:
             return []
 
         async def pop_item(self) -> TResponseInputItem | None:

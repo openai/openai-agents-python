@@ -61,11 +61,12 @@ except ImportError as e:
     )
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, slice_items_by_turn
 from ...memory.session_settings import (
     SessionSettings,
     coerce_session_settings,
     resolve_session_limit,
+    resolve_session_turn_limit,
 )
 from ...memory.sqlite_session import _await_mutation
 
@@ -289,7 +290,12 @@ class MongoDBSession(SessionABC):
     # Session protocol implementation
     # ------------------------------------------------------------------
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self,
+        limit: int | None = None,
+        *,
+        turn_limit: int | None = None,
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
@@ -298,6 +304,8 @@ class MongoDBSession(SessionABC):
                 If that is also ``None``, all items are returned.
                 The returned list is always in chronological (oldest-first)
                 order.
+            turn_limit: Maximum number of whole turns to retrieve. When specified,
+                returns the latest N complete turns starting at a turn boundary.
 
         Returns:
             List of input items representing the conversation history.
@@ -305,9 +313,7 @@ class MongoDBSession(SessionABC):
         await self._ensure_indexes()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
-
-        if session_limit is not None and session_limit <= 0:
-            return []
+        session_turn_limit = resolve_session_turn_limit(limit, turn_limit, self.session_settings)
 
         generation = await self._get_generation()
         query = {
@@ -327,6 +333,17 @@ class MongoDBSession(SessionABC):
                         # Skip corrupted or malformed entries, including legacy non-string values.
                         continue
             return items
+
+        if session_turn_limit is not None:
+            if session_turn_limit <= 0:
+                return []
+            cursor = self._messages.find(query).sort("seq", 1)
+            return slice_items_by_turn(
+                await _decode_docs(await cursor.to_list()), session_turn_limit
+            )
+
+        if session_limit is not None and session_limit <= 0:
+            return []
 
         if session_limit is None:
             cursor = self._messages.find(query).sort("seq", 1)

@@ -10,6 +10,7 @@ from .session import (
     Session,
     SessionABC,
     is_openai_responses_compaction_aware_session,
+    slice_items_by_turn,
 )
 from .session_settings import SessionSettings
 from .util import SessionInputCallback
@@ -28,6 +29,7 @@ __all__ = [
     "OpenAIResponsesCompactionArgs",
     "OpenAIResponsesCompactionAwareSession",
     "is_openai_responses_compaction_aware_session",
+    "slice_items_by_turn",
 ]
 
 

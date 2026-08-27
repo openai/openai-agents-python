@@ -2042,6 +2042,33 @@ async def test_get_items_with_parameters():
     session.close()
 
 
+async def test_get_items_turn_limit():
+    """turn_limit returns whole turns rather than a mid-turn item cut."""
+    session = AdvancedSQLiteSession(session_id="turn_limit_test", create_tables=True)
+
+    turn_one: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 1"},
+        {"type": "function_call", "name": "f", "call_id": "c1", "arguments": ""},
+        {"type": "function_call_output", "call_id": "c1", "output": "o1"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    turn_two: list[TResponseInputItem] = [
+        {"role": "user", "content": "Message 2"},
+        {"role": "assistant", "content": "Response 2"},
+    ]
+    await session.add_items(turn_one)
+    await session.add_items(turn_two)
+
+    assert await session.get_items(turn_limit=1) == turn_two
+    assert await session.get_items(turn_limit=2) == turn_one + turn_two
+    assert await session.get_items(turn_limit=10) == turn_one + turn_two
+    assert await session.get_items(turn_limit=0) == []
+    # turn_limit takes precedence over limit.
+    assert await session.get_items(limit=1, turn_limit=1) == turn_two
+
+    session.close()
+
+
 async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
     """Test usage data storage and retrieval."""
     session_id = "usage_test"

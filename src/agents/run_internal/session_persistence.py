@@ -192,12 +192,17 @@ async def _session_get_items(
     session: Session,
     limit: int | None | object = _SESSION_LIMIT_UNSET,
     *,
+    turn_limit: int | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> list[TResponseInputItem]:
     """Read session items while preserving the legacy method call shape."""
     wrapper = _get_session_wrapper(session, wrapper)
-    if limit is _SESSION_LIMIT_UNSET:
+    if limit is _SESSION_LIMIT_UNSET and turn_limit is None:
         result = await _call_session_method(session.get_items, wrapper=wrapper)
+    elif turn_limit is not None:
+        result = await _call_session_method(
+            session.get_items, limit=limit, turn_limit=turn_limit, wrapper=wrapper
+        )
     else:
         result = await _call_session_method(session.get_items, limit=limit, wrapper=wrapper)
     return cast(list[TResponseInputItem], result)
@@ -349,10 +354,11 @@ async def prepare_input_with_session(
     if session_settings is not None:
         resolved_settings = resolved_settings.resolve(session_settings)
 
-    if resolved_settings.limit is not None:
+    if resolved_settings.limit is not None or resolved_settings.turn_limit is not None:
         history = await _session_get_items(
             session,
             limit=resolved_settings.limit,
+            turn_limit=resolved_settings.turn_limit,
             wrapper=wrapper,
         )
     else:

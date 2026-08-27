@@ -150,6 +150,35 @@ async def test_async_sqlite_session_get_items_limit():
         await session.close()
 
 
+async def test_async_sqlite_session_get_items_turn_limit():
+    """Test AsyncSQLiteSession get_items turn_limit returns whole turns."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "async_turn_limit.db"
+        session = AsyncSQLiteSession("async_turn_limit", db_path)
+
+        turn_one: list[TResponseInputItem] = [
+            {"role": "user", "content": "Message 1"},
+            {"type": "function_call", "name": "f", "call_id": "c1", "arguments": ""},
+            {"type": "function_call_output", "call_id": "c1", "output": "o1"},
+            {"role": "assistant", "content": "Response 1"},
+        ]
+        turn_two: list[TResponseInputItem] = [
+            {"role": "user", "content": "Message 2"},
+            {"role": "assistant", "content": "Response 2"},
+        ]
+        await session.add_items(turn_one)
+        await session.add_items(turn_two)
+
+        assert await session.get_items(turn_limit=1) == turn_two
+        assert await session.get_items(turn_limit=2) == turn_one + turn_two
+        assert await session.get_items(turn_limit=10) == turn_one + turn_two
+        assert await session.get_items(turn_limit=0) == []
+        # turn_limit takes precedence over limit: the whole turn 2 is returned.
+        assert await session.get_items(limit=1, turn_limit=1) == turn_two
+
+        await session.close()
+
+
 async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
     """limit counts valid items, expanding past corrupt newest rows."""
     with tempfile.TemporaryDirectory() as temp_dir:

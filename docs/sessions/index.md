@@ -4,7 +4,7 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
-Use sessions when you want the SDK to manage client-side memory for you. In the same run, a session cannot be combined with the run-level continuation options `conversation_id`, `previous_response_id`, or `auto_previous_response_id`. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
+Use sessions when you want the SDK to manage client-side memory for you. Sessions cannot be combined with `conversation_id`, `previous_response_id`, or `auto_previous_response_id` in the same run. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
 ## Quick start
 
@@ -47,7 +47,7 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## Resuming interrupted runs with the same session
 
-If a run pauses for approval, resume it with the same session instance (or another instance configured with the same session ID and the same underlying storage backend) so the resumed turn continues the same stored conversation history.
+If a run pauses for approval, resume it with the same session instance (or another session instance that points at the same backing store) so the resumed turn continues the same stored conversation history.
 
 ```python
 result = await Runner.run(agent, "Delete temporary files that are no longer needed.", session=session)
@@ -113,6 +113,7 @@ Use [`SessionSettings`][agents.memory.SessionSettings] to control how much histo
 
 -   `SessionSettings(limit=None)` (default): retrieve all available session items
 -   `SessionSettings(limit=N)`: retrieve only the most recent `N` items
+-   `SessionSettings(turn_limit=N)`: retrieve the most recent `N` whole turns, always starting at a turn boundary (the user message that begins a turn). This avoids feeding the model a window that starts mid-turn — for example a tool call without its user input. When both `limit` and `turn_limit` are set, `turn_limit` takes precedence.
 
 You can apply this per run via [`RunConfig.session_settings`][agents.run.RunConfig.session_settings]:
 
@@ -126,11 +127,11 @@ result = await Runner.run(
     agent,
     "Summarize our recent discussion.",
     session=session,
-    run_config=RunConfig(session_settings=SessionSettings(limit=50)),
+    run_config=RunConfig(session_settings=SessionSettings(turn_limit=5)),
 )
 ```
 
-If your session implementation exposes default session settings, each non-`None` value in `RunConfig.session_settings` overrides the corresponding default for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
+If your session implementation exposes default session settings, `RunConfig.session_settings` overrides any non-`None` values for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
 
 ## Memory operations
 
@@ -274,19 +275,15 @@ result = await Runner.run(agent, "Hello", session=session)
 print(result.final_output)
 ```
 
-By default, after each turn, the SDK checks whether the compaction candidate meets the threshold and compacts only if it does.
+By default, compaction runs after each turn once the candidate threshold is reached.
 
-When automatic compaction runs, the SDK waits for it before `Runner.run(...)` returns or the streamed event iterator closes. Usage reported by the compaction request contributes to that run's [`Usage`](../usage.md) totals. By default, a manual `run_compaction()` call made later has no enclosing run context and does not update the completed run's usage object.
-
-`compaction_mode="previous_response_id"` uses Responses API response IDs retained by the compaction session and works best while that response chain remains available. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
+`compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
 
 If your agent runs with `ModelSettings(store=False)`, the Responses API does not retain the last response for later lookup. In that stateless setup, the default `"auto"` mode falls back to input-based compaction instead of relying on `previous_response_id`. See [`examples/memory/compaction_session_stateless_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py) for a complete example.
 
 #### auto-compaction can block streaming
 
 Compaction clears and rewrites the session history, so the SDK waits for compaction to finish before considering the run complete. In streaming mode, this means `run.stream_events()` can stay open for a few seconds after the last output token if compaction is heavy.
-
-`OpenAIResponsesCompactionSession.run_compaction()` treats the clear-and-rewrite operation as a recoverable replacement at the wrapper boundary. If replacement fails or is cancelled after the underlying history changes, the wrapper attempts to restore the previous history and waits for that recovery attempt to settle before the original exception or cancellation reaches the caller. If the underlying backend also fails during recovery, the previous history can remain unrestored and the SDK logs the recovery failure. The wrapper serializes calls to `add_items()`, `pop_item()`, and `clear_session()` with the locked replacement and recovery phase, but a mutation can complete while the remote compaction request is still in flight and then be overwritten by successful replacement. Run manual compaction between turns without concurrent wrapper mutations, and do not mutate the underlying session directly while compaction is running.
 
 If you want low-latency streaming or fast turn-taking, disable auto-compaction and call `run_compaction()` yourself between turns (or during idle time). You can decide when to force compaction based on your own criteria.
 
@@ -394,7 +391,7 @@ See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
 ### Dapr sessions
 
-Use `DaprSession` when you already run Dapr sidecars or want to switch the configured state-store backend without changing your agent code.
+Use `DaprSession` when you already run Dapr sidecars or want session storage that can move across different state-store backends without changing your agent code.
 
 ```bash
 pip install openai-agents[dapr]
@@ -419,7 +416,7 @@ Notes:
 
 -   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
 -   Exiting the context or calling `close()` makes an owned-client session terminal; subsequent session operations raise `RuntimeError`, while repeated or concurrent `close()` calls are safe. With an injected client, `close()` is a no-op and the session remains usable.
--   If the backing state store supports TTL, pass `ttl=...` so it automatically applies TTL expiration to the session data.
+-   Pass `ttl=...` to let the backing state store expire old session data automatically when the store supports TTL.
 -   Pass `consistency=DAPR_CONSISTENCY_STRONG` when you need stronger read-after-write guarantees.
 -   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
 -   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
@@ -452,9 +449,9 @@ await session.close()
 
 Notes:
 
--   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. An owned-client session is terminal after `close()`, and subsequent session operations raise `RuntimeError`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case, `session.close()` is a no-op, the caller retains responsibility for the client lifecycle, and the session remains usable.
+-   `from_uri(...)` creates and owns the `AsyncMongoClient` and closes it on `session.close()`. An owned-client session is terminal after `close()`, and subsequent session operations raise `RuntimeError`. If your application already manages a client, construct `MongoDBSession(...)` directly with `client=...`; in that case `session.close()` is a no-op, and lifecycle plus session usability stay with the caller.
 -   Connect to [MongoDB Atlas](https://www.mongodb.com/products/platform) by passing an `mongodb+srv://user:password@cluster.example.mongodb.net` URI to `from_uri(...)` with no other changes.
--   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each non-empty `add_items()` call writes one logical-batch document whose monotonically increasing `seq` orders the batch by its final item; legacy per-item message documents remain readable. A logical batch must fit within MongoDB's single-document size limit; an oversized batch fails atomically without storing a partial batch.
+-   Two collections are used and both names are configurable via `sessions_collection=` (default `agent_sessions`) and `messages_collection=` (default `agent_messages`). Indexes are created automatically on first use. Each message document carries a monotonically increasing `seq` counter that preserves ordering across concurrent writers and processes.
 -   Use `await session.ping()` to verify connectivity before your first run.
 
 ### Advanced SQLite sessions
@@ -530,7 +527,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use Redis-backed sessions (`RedisSession.from_url("session_id", url="redis://...")`) for shared, low-latency session memory
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
 -   Use MongoDB sessions (`MongoDBSession.from_uri("session_id", uri="mongodb://localhost:27017")`) for applications already using MongoDB or needing multi-process, horizontally-scalable session storage
--   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with built-in telemetry, tracing, and data isolation and support for 30+ database backends
+-   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 30+ database backends with built-in telemetry, tracing, and data isolation
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
 -   Consider implementing custom session backends for other production systems (for example, Django) for more advanced use cases
@@ -645,38 +642,46 @@ if __name__ == "__main__":
 
 ## Custom session implementations
 
-You can implement your own session memory by creating a class that structurally follows the [`Session`][agents.memory.session.Session] protocol. You do not need to inherit from `SessionABC`; define `session_id` and `session_settings`, and implement the four history methods directly:
+You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
 
 ```python
-from agents import Agent, Runner, SessionSettings
+from agents.memory.session import SessionABC
 from agents.items import TResponseInputItem
+from typing import List
 
-
-class MyCustomSession:
+class MyCustomSession(SessionABC):
     """Custom session implementation following the Session protocol."""
 
-    session_settings: SessionSettings | None = None
-
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str):
         self.session_id = session_id
-        self.items: list[TResponseInputItem] = []
+        # Your initialization here
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        if limit is None:
-            return list(self.items)
-        if limit <= 0:
-            return []
-        return list(self.items[-limit:])
+    async def get_items(
+        self, limit: int | None = None, *, turn_limit: int | None = None
+    ) -> List[TResponseInputItem]:
+        """Retrieve conversation history for this session.
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
-        self.items.extend(items)
+        turn_limit: maximum number of whole turns to return, starting at a
+            turn boundary. When None (default), uses session settings or
+            returns all items.
+        """
+        # Your implementation here
+        pass
+
+    async def add_items(self, items: List[TResponseInputItem]) -> None:
+        """Store new items for this session."""
+        # Your implementation here
+        pass
 
     async def pop_item(self) -> TResponseInputItem | None:
-        return self.items.pop() if self.items else None
+        """Remove and return the most recent item from this session."""
+        # Your implementation here
+        pass
 
     async def clear_session(self) -> None:
-        self.items.clear()
-
+        """Clear all items for this session."""
+        # Your implementation here
+        pass
 
 # Use your custom session
 agent = Agent(name="Assistant")
@@ -686,47 +691,6 @@ result = await Runner.run(
     session=MyCustomSession("my_session")
 )
 ```
-
-### Accessing run context from a custom session
-
-The Agents SDK can pass the active [`RunContextWrapper`][agents.run_context.RunContextWrapper] to a custom session for tenant routing, authorization, or other app-specific storage decisions. For the Agents SDK to pass the wrapper, add an explicitly named, keyword-compatible `wrapper` parameter to all four history methods:
-
-```python
-from typing import Any
-
-from agents import RunContextWrapper
-from agents.items import TResponseInputItem
-
-
-class ContextAwareSession:
-    async def get_items(
-        self,
-        limit: int | None = None,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> list[TResponseInputItem]: ...
-
-    async def add_items(
-        self,
-        items: list[TResponseInputItem],
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None: ...
-
-    async def pop_item(
-        self,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> TResponseInputItem | None: ...
-
-    async def clear_session(
-        self,
-        *,
-        wrapper: RunContextWrapper[Any] | None = None,
-    ) -> None: ...
-```
-
-The Agents SDK enables this integration only when `get_items`, `add_items`, `pop_item`, and `clear_session` all declare `wrapper`. A generic `**kwargs` parameter does not satisfy this signature check. Existing session implementations that omit `wrapper` keep their released call shape and continue to work without changes.
 
 ## Community session implementations
 
