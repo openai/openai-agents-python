@@ -72,8 +72,7 @@ def test_parse_ls_la_decodes_escaped_symlink_target_with_spaces() -> None:
     output = (
         b"lrwxrwxrwx 1 root root "
         + str(len(target)).encode()
-        + b" Jan 1 00:00 link -> "
-        + target
+        + b" Jan 1 00:00 link -> target\\ with\\ space"
         + b"\n"
     )
 
@@ -82,6 +81,16 @@ def test_parse_ls_la_decodes_escaped_symlink_target_with_spaces() -> None:
     assert len(entries) == 1
     assert entries[0].path == "/workspace/docs/link"
     assert entries[0].kind == EntryKind.SYMLINK
+
+
+def test_parse_ls_la_decodes_escaped_space_in_regular_file_name() -> None:
+    output = b"-rw-r--r-- 1 root root 123 Jan 1 00:00 space\\ name\n"
+
+    entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/space name"
+    assert entries[0].kind == EntryKind.FILE
 
 
 def test_parse_ls_la_decodes_escaped_newline_in_regular_file_name() -> None:

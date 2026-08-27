@@ -10,6 +10,7 @@ _LS_C_ESCAPES = {
     ord("r"): b"\r",
     ord("t"): b"\t",
     ord("v"): b"\v",
+    ord(" "): b" ",
     ord("\\"): b"\\",
 }
 
