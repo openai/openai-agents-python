@@ -24,34 +24,6 @@ def _shutdown_global_trace_provider() -> None:
         provider.shutdown()
 
 
-def _reset_default_trace_provider_if_current(provider: TraceProvider) -> None:
-    """Release the default stack when the registered default provider shuts down.
-
-    Clears ``GLOBAL_TRACE_PROVIDER`` together with the module-owned default processor/exporter so a
-    later trace rebuilds a fresh stack instead of reusing one whose exporter is already closed.
-    Only resets when ``provider`` is the current global provider, so a caller's own provider is
-    left untouched.
-    """
-    global GLOBAL_TRACE_PROVIDER
-
-    from .processors import _close_default_exporter, _detach_default_processor
-
-    exporter = None
-    with _GLOBAL_TRACE_PROVIDER_LOCK:
-        if GLOBAL_TRACE_PROVIDER is not provider:
-            return
-        # Clear the module singletons *before* publishing ``GLOBAL_TRACE_PROVIDER = None``, in the
-        # same critical section. Otherwise a thread calling ``get_trace_provider()`` in the gap
-        # would see no global provider and rebuild one from the stale processor singleton, adopting
-        # the just-shut-down processor/closed exporter. ``_detach_default_processor`` acquires the
-        # processor lock nested inside this one, matching the ``get_trace_provider`` lock order.
-        exporter = _detach_default_processor()
-        GLOBAL_TRACE_PROVIDER = None
-
-    # Close outside both locks; ``close`` is idempotent and may do I/O.
-    _close_default_exporter(exporter)
-
-
 def set_trace_provider(provider: TraceProvider) -> None:
     """Set the global trace provider used by tracing utilities."""
     global GLOBAL_TRACE_PROVIDER

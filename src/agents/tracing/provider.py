@@ -509,12 +509,3 @@ class DefaultTraceProvider(TraceProvider):
             self._multi_processor.shutdown(timeout=timeout)
         except Exception as e:
             log_model_and_tool_action_error(logger, "Error shutting down trace provider", e)
-        finally:
-            # If this is the registered global default provider, release the default stack so a
-            # later trace (for example from an atexit callback that runs after this shutdown)
-            # rebuilds a fresh provider/processor/exporter instead of reusing one whose exporter
-            # was just closed. Resetting the provider and the module singletons together keeps
-            # them a single coherent source of truth.
-            from .setup import _reset_default_trace_provider_if_current
-
-            _reset_default_trace_provider_if_current(self)
