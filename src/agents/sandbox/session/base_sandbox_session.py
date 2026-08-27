@@ -1115,12 +1115,12 @@ class BaseSandboxSession(abc.ABC):
         path = await self._validate_path_access(path)
 
         path_arg = sandbox_path_str(path)
-        cmd = ("ls", "-la", "--", path_arg)
+        cmd = ("ls", "-lab", "--", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
 
-        return parse_ls_la(result.stdout, base=path_arg)
+        return parse_ls_la(result.stdout, base=path_arg, escaped=True)
 
     async def rm(
         self,

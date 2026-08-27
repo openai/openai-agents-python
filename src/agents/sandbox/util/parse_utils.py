@@ -1,8 +1,57 @@
 from ..files import EntryKind, FileEntry
 from ..types import Permissions
 
+_LS_C_ESCAPES = {
+    ord("a"): b"\a",
+    ord("b"): b"\b",
+    ord("e"): b"\x1b",
+    ord("f"): b"\f",
+    ord("n"): b"\n",
+    ord("r"): b"\r",
+    ord("t"): b"\t",
+    ord("v"): b"\v",
+    ord("\\"): b"\\",
+}
 
-def parse_ls_la(output: str | bytes, *, base: str) -> list[FileEntry]:
+
+def _unescape_ls_bytes(value: bytes) -> bytes:
+    """Decode the C and octal escapes emitted by ``ls -b``."""
+    if b"\\" not in value:
+        return value
+
+    decoded = bytearray()
+    index = 0
+    while index < len(value):
+        if value[index] != ord("\\") or index + 1 >= len(value):
+            decoded.append(value[index])
+            index += 1
+            continue
+
+        index += 1
+        escaped = value[index]
+        replacement = _LS_C_ESCAPES.get(escaped)
+        if replacement is not None:
+            decoded.extend(replacement)
+            index += 1
+            continue
+
+        if ord("0") <= escaped <= ord("7"):
+            end = index + 1
+            while end < len(value) and end < index + 3 and ord("0") <= value[end] <= ord("7"):
+                end += 1
+            decoded.append(int(value[index:end], 8))
+            index = end
+            continue
+
+        # Preserve an escape that this decoder does not know rather than silently
+        # changing a filename.
+        decoded.extend((ord("\\"), escaped))
+        index += 1
+
+    return bytes(decoded)
+
+
+def parse_ls_la(output: str | bytes, *, base: str, escaped: bool = False) -> list[FileEntry]:
     entries: list[FileEntry] = []
     lines = output.split(b"\n") if isinstance(output, bytes) else output.split("\n")
     for raw_line in lines:
@@ -10,9 +59,12 @@ def parse_ls_la(output: str | bytes, *, base: str) -> list[FileEntry]:
             line_bytes = raw_line[:-1] if raw_line.endswith(b"\r") else raw_line
             if not line_bytes or line_bytes.startswith(b"total"):
                 continue
-            raw_parts = line_bytes.split(maxsplit=8)
-            if len(raw_parts) < 9:
+            encoded_parts = line_bytes.split(maxsplit=8)
+            if len(encoded_parts) < 9:
                 continue
+            raw_parts = (
+                [_unescape_ls_bytes(part) for part in encoded_parts] if escaped else encoded_parts
+            )
             parts = [part.decode("utf-8", errors="replace") for part in raw_parts]
         else:
             line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
@@ -22,6 +74,9 @@ def parse_ls_la(output: str | bytes, *, base: str) -> list[FileEntry]:
             parts = line.split(maxsplit=8)
             if len(parts) < 9:
                 continue
+            if escaped:
+                raw_parts = [_unescape_ls_bytes(part.encode("utf-8")) for part in parts]
+                parts = [part.decode("utf-8", errors="replace") for part in raw_parts]
 
         # Typical coreutils format:
         # drwxr-xr-x  2 root root     4096 Jan  1 00:00 dirname
@@ -40,7 +95,12 @@ def parse_ls_la(output: str | bytes, *, base: str) -> list[FileEntry]:
                 # GNU coreutils prints "major, minor", which occupies two
                 # fields and shifts every following field by one.
                 if raw_parts is not None:
-                    raw_parts = line_bytes.split(maxsplit=9)
+                    encoded_parts = line_bytes.split(maxsplit=9)
+                    raw_parts = (
+                        [_unescape_ls_bytes(part) for part in encoded_parts]
+                        if escaped
+                        else encoded_parts
+                    )
                     parts = [part.decode("utf-8", errors="replace") for part in raw_parts]
                 else:
                     parts = line.split(maxsplit=9)

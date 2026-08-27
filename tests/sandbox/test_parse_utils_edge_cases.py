@@ -52,6 +52,49 @@ def test_parse_ls_la_handles_crlf_raw_output() -> None:
     assert entries[0].path == "/workspace/docs/link -> alias"
 
 
+def test_parse_ls_la_decodes_escaped_newline_in_symlink_target() -> None:
+    target = b"target -> a\nline"
+    output = (
+        b"lrwxrwxrwx 1 root root "
+        + str(len(target)).encode()
+        + b" Jan 1 00:00 link -> alias -> target -> a\\nline\n"
+    )
+
+    entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/link -> alias"
+    assert entries[0].kind == EntryKind.SYMLINK
+
+
+def test_parse_ls_la_decodes_escaped_newline_in_regular_file_name() -> None:
+    output = b"-rw-r--r-- 1 root root 123 Jan 1 00:00 file\\nname\n"
+
+    entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/file\nname"
+    assert entries[0].kind == EntryKind.FILE
+
+
+def test_parse_ls_la_decodes_octal_escapes() -> None:
+    output = b"-rw-r--r-- 1 root root 123 Jan 1 00:00 octal\\377\n"
+
+    entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/octet\ufffd"
+
+
+def test_parse_ls_la_decodes_backslash_escapes() -> None:
+    output = b"-rw-r--r-- 1 root root 123 Jan 1 00:00 slash\\\\377\n"
+
+    entries = parse_ls_la(output, base="/workspace/docs", escaped=True)
+
+    assert len(entries) == 1
+    assert entries[0].path == "/workspace/docs/slash\\377"
+
+
 def test_parse_ls_la_preserves_unicode_line_separators_in_names() -> None:
     output = "-rw-r--r-- 1 root root 123 Jan 1 00:00 foo\u2028bar\n"
 
