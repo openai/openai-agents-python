@@ -1444,6 +1444,64 @@ def test_public_provider_shutdown_closes_default_exporter(mock_client):
 
 
 @patch("httpx2.Client")
+def test_default_provider_shutdown_resets_globals_so_reuse_rebuilds(mock_client):
+    """Shutting down the default provider releases the stack so a later trace rebuilds it.
+
+    Without this, a trace emitted after shutdown (e.g. from a later atexit callback) would reuse
+    the cached provider whose exporter is already closed and silently drop the export.
+    """
+    from agents.tracing import processors as processors_module, setup as setup_module
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        provider = setup_module.get_trace_provider()
+        old_exporter = processors_module._global_exporter
+
+        provider.shutdown()
+
+        # The whole default stack is released together, keeping a single source of truth.
+        assert setup_module.GLOBAL_TRACE_PROVIDER is None
+        assert processors_module._global_processor is None
+        assert processors_module._global_exporter is None
+
+        # A later trace rebuilds a fresh provider/processor/exporter instead of a closed one.
+        rebuilt_provider = setup_module.get_trace_provider()
+        assert rebuilt_provider is not provider
+        assert processors_module._global_exporter is not old_exporter
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
+def test_non_global_default_provider_shutdown_leaves_globals(mock_client):
+    """Shutting down a caller-created provider that is not the global one must not reset globals."""
+    from agents.tracing import processors as processors_module, setup as setup_module
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        global_provider = setup_module.get_trace_provider()
+
+        # A separate provider the caller owns; it is never the registered global one.
+        other = DefaultTraceProvider()
+        other.shutdown()
+
+        assert setup_module.GLOBAL_TRACE_PROVIDER is global_provider
+        assert processors_module._global_processor is not None
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
 def test_provider_replacement_preserves_injected_exporter(mock_client):
     """Replacing the provider and shutting down must not close a caller-injected exporter."""
     from agents.tracing import processors as processors_module, setup as setup_module

@@ -781,3 +781,18 @@ def default_processor() -> BatchTraceProcessor:
             _global_processor = processor
 
     return processor
+
+
+def _reset_default_processor() -> None:
+    """Release the module-owned default processor and exporter singletons.
+
+    The next ``default_processor``/``default_exporter`` call rebuilds them. The caller (the setup
+    layer, when the default provider shuts down) resets ``GLOBAL_TRACE_PROVIDER`` in the same step
+    so the default provider, processor, and exporter stay a single coherent source of truth.
+    """
+    global _global_exporter
+    global _global_processor
+
+    with _global_lock:
+        _global_exporter = None
+        _global_processor = None
