@@ -232,31 +232,37 @@ class AsyncSQLiteSession(SessionABC):
             return
 
         async with self._locked_connection() as conn:
-            await conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
-            """,
-                (self.session_id,),
-            )
+            try:
+                await conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+                """,
+                    (self.session_id,),
+                )
 
-            message_data = [(self.session_id, json.dumps(item)) for item in items]
-            await conn.executemany(
-                f"""
-                INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
-            """,
-                message_data,
-            )
+                message_data = [(self.session_id, json.dumps(item)) for item in items]
+                await conn.executemany(
+                    f"""
+                    INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
+                """,
+                    message_data,
+                )
 
-            await conn.execute(
-                f"""
-                UPDATE {self.sessions_table}
-                SET updated_at = CURRENT_TIMESTAMP
-                WHERE session_id = ?
-            """,
-                (self.session_id,),
-            )
+                await conn.execute(
+                    f"""
+                    UPDATE {self.sessions_table}
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE session_id = ?
+                """,
+                    (self.session_id,),
+                )
 
-            await conn.commit()
+                await conn.commit()
+            except Exception:
+                # Roll back so a dangling transaction on the shared connection cannot be
+                # committed later by an unrelated successful operation.
+                await conn.rollback()
+                raise
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
