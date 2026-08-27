@@ -62,11 +62,6 @@ from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 from .reasoning_content_replay import _CHAT_COMPLETIONS_REASONING_FIELD_KEY
 
-_UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE = (
-    "Chat Completions with multiple choices or nonzero choice indexes is not fully "
-    "supported; only one primary choice can be processed."
-)
-
 
 # Define a Part class for internal use
 class Part:
@@ -669,14 +664,18 @@ class ChatCmplStreamHandler:
                 choice.index for choice in chunk.choices if choice.index != 0
             ]
             if len(chunk.choices) > 1 or unsupported_choice_indexes:
+                message = (
+                    "Chat Completions streaming with multiple choices or nonzero choice indexes "
+                    "is not fully supported; only choice index 0 can be processed."
+                )
                 if strict_feature_validation:
-                    raise UserError(_UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE)
+                    raise UserError(message)
 
                 if not state.has_warned_unsupported_choice:
                     logger.warning(
                         "%s Ignoring the other choices; enable strict feature validation to "
                         "raise an error instead.",
-                        _UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE,
+                        message,
                     )
                     state.has_warned_unsupported_choice = True
 

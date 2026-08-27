@@ -24,6 +24,7 @@ from openai.types.chat.chat_completion_token_logprob import (
     TopLogprob,
 )
 from openai.types.completion_usage import (
+    CompletionTokensDetails,
     CompletionUsage,
     PromptTokensDetails,
 )
@@ -231,7 +232,11 @@ async def test_get_response_rejects_unsupported_choices_in_strict_mode(
         strict_feature_validation=True,
     ).get_model("gpt-4")
 
-    with pytest.raises(UserError, match="multiple choices or nonzero choice indexes"):
+    expected_message = (
+        "Chat Completions with multiple choices or nonzero choice indexes is not fully "
+        "supported; only one primary choice can be processed."
+    )
+    with pytest.raises(UserError) as exc_info:
         await model.get_response(
             system_instructions=None,
             input="",
@@ -244,16 +249,115 @@ async def test_get_response_rejects_unsupported_choices_in_strict_mode(
             conversation_id=None,
             prompt=None,
         )
+    assert str(exc_info.value) == expected_message
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_get_response_warns_once_and_uses_first_choice(
+async def test_get_response_accepts_single_primary_choice_in_strict_mode(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def patched_fetch_response(self, *args, **kwargs):
-        return _chat_completion_with_choice_indexes(0, 1)
+        return _chat_completion_with_choice_indexes(0)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(
+        use_responses=False,
+        strict_feature_validation=True,
+    ).get_model("gpt-4")
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert isinstance(response.output[0], ResponseOutputMessage)
+    assert isinstance(response.output[0].content[0], ResponseOutputText)
+    assert response.output[0].content[0].text == "choice-0"
+    assert not any(
+        "multiple choices or nonzero choice indexes" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_traces_usage_before_rejecting_unsupported_choices(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat = _chat_completion_with_choice_indexes(0, 1)
+    chat.usage = CompletionUsage(
+        completion_tokens=3,
+        prompt_tokens=7,
+        total_tokens=10,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+        completion_tokens_details=CompletionTokensDetails(reasoning_tokens=1),
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(
+        use_responses=False,
+        strict_feature_validation=True,
+    ).get_model("gpt-4")
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
+
+    with trace(workflow_name="unsupported-choices-usage"):
+        with pytest.raises(UserError, match="multiple choices or nonzero choice indexes"):
+            await model.get_response(
+                system_instructions=None,
+                input="",
+                model_settings=ModelSettings(),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                tracing=ModelTracing.ENABLED,
+                previous_response_id=None,
+                conversation_id=None,
+                prompt=None,
+            )
+
+    generation = next(span for span in fetch_ordered_spans() if span.span_data.type == "generation")
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1
+    assert generation.span_data.usage["input_tokens"] == 7
+    assert generation.span_data.usage["output_tokens"] == 3
+    assert generation.span_data.usage["total_tokens"] == 10
+    assert generation.span_data.usage["input_tokens_details"]["cached_tokens"] == 2
+    assert generation.span_data.usage["output_tokens_details"]["reasoning_tokens"] == 1
+    assert generation.span_data.output is None
+    exported_span = generation.export()
+    assert exported_span is not None
+    assert exported_span["error"] is not None
+    assert any(
+        message == "Received model response" or "LLM resp:" in message
+        for message in (record.getMessage() for record in caplog.records)
+    )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice_indexes", [(0, 1), (1,)])
+async def test_get_response_warns_once_and_uses_first_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    choice_indexes: tuple[int, ...],
+) -> None:
+    async def patched_fetch_response(self, *args, **kwargs):
+        return _chat_completion_with_choice_indexes(*choice_indexes)
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
@@ -278,7 +382,7 @@ async def test_get_response_warns_once_and_uses_first_choice(
     for response in responses:
         assert isinstance(response.output[0], ResponseOutputMessage)
         assert isinstance(response.output[0].content[0], ResponseOutputText)
-        assert response.output[0].content[0].text == "choice-0"
+        assert response.output[0].content[0].text == f"choice-{choice_indexes[0]}"
     warnings = [
         record
         for record in caplog.records

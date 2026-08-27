@@ -44,10 +44,7 @@ from ._retry_runtime import should_disable_provider_managed_retries
 from ._trace import model_config_for_trace
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
-from .chatcmpl_stream_handler import (
-    _UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE,
-    ChatCmplStreamHandler,
-)
+from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_responses import Converter as OpenAIResponsesConverter
@@ -55,6 +52,11 @@ from .reasoning_content_replay import ShouldReplayReasoningContent
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
+
+_UNSUPPORTED_NONSTREAMING_CHOICES_MESSAGE = (
+    "Chat Completions with multiple choices or nonzero choice indexes is not fully "
+    "supported; only one primary choice can be processed."
+)
 
 
 class OpenAIChatCompletionsModel(Model):
@@ -139,13 +141,13 @@ class OpenAIChatCompletionsModel(Model):
             return
 
         if self._strict_feature_validation:
-            raise UserError(_UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE)
+            raise UserError(_UNSUPPORTED_NONSTREAMING_CHOICES_MESSAGE)
 
         if not self._has_warned_unsupported_choice:
             logger.warning(
                 "%s Using the first returned choice; enable strict feature validation to "
                 "raise an error instead.",
-                _UNSUPPORTED_MULTIPLE_CHOICES_MESSAGE,
+                _UNSUPPORTED_NONSTREAMING_CHOICES_MESSAGE,
             )
             self._has_warned_unsupported_choice = True
 
@@ -287,8 +289,6 @@ class OpenAIChatCompletionsModel(Model):
                     f"{error_details}"
                 )
 
-            self._handle_unsupported_choices(response.choices)
-
             message: ChatCompletionMessage | None = None
             first_choice: Choice | None = None
             if response.choices and len(response.choices) > 0:
@@ -333,6 +333,8 @@ class OpenAIChatCompletionsModel(Model):
                 "input_tokens_details": usage.input_tokens_details.model_dump(),
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
+
+            self._handle_unsupported_choices(response.choices)
 
             # Some providers signal a filtered non-streaming completion only through
             # finish_reason="content_filter" and an otherwise empty message. Preserve
