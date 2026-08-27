@@ -552,6 +552,8 @@ class BatchTraceProcessor(TracingProcessor):
         max_batch_size: int = 128,
         schedule_delay: float = 5.0,
         export_trigger_ratio: float = 0.7,
+        *,
+        _owns_exporter: bool = False,
     ):
         """
         Args:
@@ -561,8 +563,12 @@ class BatchTraceProcessor(TracingProcessor):
             max_batch_size: The maximum number of spans to export in a single batch.
             schedule_delay: The delay between checks for new spans to export.
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
+            _owns_exporter: Internal. When ``True`` this processor closes ``exporter`` on
+                ``shutdown``. Only the module-owned default processor sets this; an exporter passed
+                in by a caller stays caller-owned and is never closed here.
         """
         self._exporter = exporter
+        self._owns_exporter = _owns_exporter
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
@@ -643,6 +649,19 @@ class BatchTraceProcessor(TracingProcessor):
         else:
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
+
+        # Close the exporter only when this processor owns it (the module-owned default
+        # processor). A caller-injected exporter is owned by its caller and left open. Runs after
+        # the final drain so pending spans still export, and is idempotent for repeated shutdowns.
+        if self._owns_exporter:
+            close = getattr(self._exporter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    log_model_and_tool_action_error(
+                        logger, "[non-fatal] Tracing: error closing exporter on shutdown", exc
+                    )
 
     def force_flush(self):
         """
@@ -757,28 +776,8 @@ def default_processor() -> BatchTraceProcessor:
             if exporter is None:
                 exporter = BackendSpanExporter()
                 _global_exporter = exporter
-            processor = BatchTraceProcessor(exporter)
+            # The module owns this exporter, so let the processor close it on shutdown.
+            processor = BatchTraceProcessor(exporter, _owns_exporter=True)
             _global_processor = processor
 
     return processor
-
-
-def _shutdown_default_exporter() -> None:
-    """Close and release the module-owned default exporter and processor.
-
-    Only the exporter created by ``default_exporter``/``default_processor`` is closed here, so an
-    exporter injected into a caller-constructed ``BatchTraceProcessor`` is never closed on its
-    behalf -- the module owns this instance, an injected one is owned by its caller. Clearing the
-    singletons lets a later trace lazily rebuild a fresh default stack instead of reusing an
-    exporter whose HTTP client is already closed.
-    """
-    global _global_exporter
-    global _global_processor
-
-    with _global_lock:
-        exporter = _global_exporter
-        _global_exporter = None
-        _global_processor = None
-
-    if exporter is not None:
-        exporter.close()
