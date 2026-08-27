@@ -103,6 +103,11 @@ def set_trace_processors(processors: list[TracingProcessor]) -> None:
     Set the list of trace processors. This will replace the current list of processors.
     """
     get_trace_provider().set_processors(processors)
+    # If this replacement dropped the module-owned default processor, close its exporter so the
+    # default BackendSpanExporter's HTTP client is not leaked.
+    from .processors import _detach_default_processor_if_replaced
+
+    _detach_default_processor_if_replaced(processors)
 
 
 def set_tracing_disabled(disabled: bool) -> None:

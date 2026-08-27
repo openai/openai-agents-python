@@ -781,3 +781,27 @@ def default_processor() -> BatchTraceProcessor:
             _global_processor = processor
 
     return processor
+
+
+def _detach_default_processor_if_replaced(active_processors: list[TracingProcessor]) -> None:
+    """Close the module-owned default exporter when its processor is no longer active.
+
+    ``set_trace_processors`` can drop the default processor after the default stack was already
+    bootstrapped. That processor's ``shutdown`` -- the only path that closes the module-owned
+    exporter -- then never runs, leaking its HTTP client. When the default processor is absent from
+    the replacement set, shut it down here (which closes the exporter via ``_owns_exporter``) and
+    clear the singletons so a later ``default_processor``/``default_exporter`` rebuilds a fresh
+    stack. A default processor the caller kept in the new set is left running.
+    """
+    global _global_processor
+    global _global_exporter
+
+    with _global_lock:
+        processor = _global_processor
+        if processor is None or processor in active_processors:
+            return
+        _global_processor = None
+        _global_exporter = None
+
+    # Shut down outside the lock: it joins the worker thread and closes the exporter's client.
+    processor.shutdown()

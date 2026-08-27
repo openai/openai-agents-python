@@ -1420,6 +1420,69 @@ def test_default_processor_owns_and_closes_its_exporter_on_shutdown(mock_client)
 
 
 @patch("httpx2.Client")
+def test_set_trace_processors_closes_replaced_default_exporter(mock_client):
+    """Replacing the default processor via set_trace_processors must close its exporter.
+
+    Otherwise the default processor never runs its shutdown and the default BackendSpanExporter's
+    HTTP client leaks (ResourceWarning) for the rest of the process.
+    """
+    from agents.tracing import (
+        processors as processors_module,
+        set_trace_processors,
+        setup as setup_module,
+    )
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        setup_module.get_trace_provider()  # bootstrap the default stack
+        default_exporter = processors_module._global_exporter
+        assert default_exporter is not None
+
+        set_trace_processors([BatchTraceProcessor(ConsoleSpanExporter())])
+
+        default_exporter._client.close.assert_called_once()
+        # Singletons cleared so a later default rebuilds fresh; the global provider is untouched.
+        assert processors_module._global_exporter is None
+        assert processors_module._global_processor is None
+        assert setup_module.GLOBAL_TRACE_PROVIDER is not None
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
+def test_set_trace_processors_keeps_retained_default_exporter_open(mock_client):
+    """A default processor the caller keeps in the replacement set is left running and open."""
+    from agents.tracing import (
+        processors as processors_module,
+        set_trace_processors,
+        setup as setup_module,
+    )
+
+    previous_provider = setup_module.GLOBAL_TRACE_PROVIDER
+    processors_module._global_exporter = None
+    processors_module._global_processor = None
+    setup_module.GLOBAL_TRACE_PROVIDER = None
+    try:
+        setup_module.get_trace_provider()
+        default_processor = processors_module._global_processor
+        default_exporter = processors_module._global_exporter
+
+        set_trace_processors([default_processor, BatchTraceProcessor(ConsoleSpanExporter())])
+
+        default_exporter._client.close.assert_not_called()
+        assert processors_module._global_processor is default_processor
+    finally:
+        setup_module.GLOBAL_TRACE_PROVIDER = previous_provider
+        processors_module._global_exporter = None
+        processors_module._global_processor = None
+
+
+@patch("httpx2.Client")
 def test_public_provider_shutdown_closes_default_exporter(mock_client):
     """A public get_trace_provider().shutdown() closes the module-owned default exporter."""
     from agents.tracing import processors as processors_module, setup as setup_module
