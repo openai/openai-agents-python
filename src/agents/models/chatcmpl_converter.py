@@ -818,6 +818,13 @@ class Converter:
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
             elif func_output := cls.maybe_function_tool_call_output(item):
+                call_id = func_output.get("call_id")
+                if call_id is None:
+                    raise UserError(
+                        "Unpaired function outputs are supported by Responses but cannot be "
+                        "converted to Chat Completions tool messages. "
+                        "Use a Responses model to preserve this input."
+                    )
                 flush_assistant_message()
                 output_content = cast(
                     str | Iterable[ResponseInputContentWithAudioParam], func_output["output"]
@@ -849,7 +856,7 @@ class Converter:
                             tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
-                    "tool_call_id": func_output["call_id"],
+                    "tool_call_id": call_id,
                     "content": tool_result_content,  # type: ignore[typeddict-item]
                 }
                 result.append(msg)
