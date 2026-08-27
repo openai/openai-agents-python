@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from typing import Any
+
+import httpx2
+from openai import AsyncOpenAI, DefaultAsyncHttpx2Client
+
+from ...exceptions import UserError
+from ...models import _openai_shared
+from ...models.openai_agent_registration import (
+    OpenAIAgentRegistrationConfig,
+    ResolvedOpenAIAgentRegistrationConfig,
+    resolve_openai_agent_registration_config,
+)
+from ..model import STTModel, TTSModel, VoiceModelProvider
+from .openai_stt import OpenAISTTModel
+from .openai_tts import OpenAITTSModel
+
+_http_client: httpx2.AsyncClient | None = None
+
+
+# If we create a new HTTP client for each request, that would mean no sharing of connection pools,
+# which would mean worse latency and resource usage. So, we share the client across requests.
+def shared_http_client() -> httpx2.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = DefaultAsyncHttpx2Client()
+    return _http_client
+
+
+DEFAULT_STT_MODEL = "gpt-4o-transcribe"
+DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+
+
+class OpenAIVoiceModelProvider(VoiceModelProvider):
+    """A voice model provider that uses OpenAI models."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        openai_client: AsyncOpenAI | None = None,
+        organization: str | None = None,
+        project: str | None = None,
+        agent_registration: OpenAIAgentRegistrationConfig | dict[str, Any] | None = None,
+    ) -> None:
+        """Create a new OpenAI voice model provider.
+
+        Args:
+            api_key: The API key to use for the OpenAI client. If not provided, we will use the
+                default API key.
+            base_url: The base URL to use for the OpenAI client. If not provided, we will use the
+                default base URL.
+            openai_client: An optional OpenAI client to use. If not provided, we will create a new
+                OpenAI client using the api_key and base_url.
+            organization: The organization to use for the OpenAI client.
+            project: The project to use for the OpenAI client.
+            agent_registration: Optional agent registration configuration.
+        """
+        if openai_client is not None:
+            if any(value is not None for value in (api_key, base_url, organization, project)):
+                raise UserError(
+                    "Don't provide api_key, base_url, organization, or project if you provide "
+                    "openai_client"
+                )
+            self._client: AsyncOpenAI | None = openai_client
+        else:
+            self._client = None
+            self._stored_api_key = api_key
+            self._stored_base_url = base_url
+            self._stored_organization = organization
+            self._stored_project = project
+        self._agent_registration = resolve_openai_agent_registration_config(agent_registration)
+
+    @property
+    def agent_registration(self) -> ResolvedOpenAIAgentRegistrationConfig | None:
+        return self._agent_registration
+
+    # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
+    # AsyncOpenAI() raises an error if you don't have an API key set.
+    def _get_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            has_explicit_client_options = any(
+                value is not None
+                for value in (
+                    self._stored_api_key,
+                    self._stored_base_url,
+                    self._stored_organization,
+                    self._stored_project,
+                )
+            )
+            default_client = (
+                None if has_explicit_client_options else _openai_shared.get_default_openai_client()
+            )
+            self._client = (
+                default_client
+                if default_client is not None
+                else AsyncOpenAI(
+                    api_key=(
+                        self._stored_api_key
+                        if self._stored_api_key is not None
+                        else _openai_shared.get_default_openai_key()
+                    ),
+                    base_url=self._stored_base_url,
+                    organization=self._stored_organization,
+                    project=self._stored_project,
+                    http_client=shared_http_client(),
+                )
+            )
+
+        return self._client
+
+    def get_stt_model(self, model_name: str | None) -> STTModel:
+        """Get a speech-to-text model by name.
+
+        Args:
+            model_name: The name of the model to get.
+
+        Returns:
+            The speech-to-text model.
+        """
+        return OpenAISTTModel(model_name or DEFAULT_STT_MODEL, self._get_client())
+
+    def get_tts_model(self, model_name: str | None) -> TTSModel:
+        """Get a text-to-speech model by name.
+
+        Args:
+            model_name: The name of the model to get.
+
+        Returns:
+            The text-to-speech model.
+        """
+        return OpenAITTSModel(model_name or DEFAULT_TTS_MODEL, self._get_client())

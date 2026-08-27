@@ -1,0 +1,16 @@
+{
+  "include": ["src", "tests"],
+  "exclude": [],
+  "extraPaths": ["."],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportAttributeAccessIssue": "none",
+  "reportArgumentType": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportIndexIssue": "none",
+  "reportMissingImports": "none",
+  "reportPrivateImportUsage": "none",
+  "reportSelfClsParameterName": "none",
+  "reportTypedDictNotRequiredAccess": "none",
+  "reportUnsupportedDunderAll": "none"
+}

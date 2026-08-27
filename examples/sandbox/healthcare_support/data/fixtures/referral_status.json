@@ -1,0 +1,34 @@
+{
+  "records": [
+    {
+      "referral_id": "REF-88421",
+      "patient_id": "PAT-1003",
+      "status": "approved",
+      "specialty": "Cardiology",
+      "requested_provider": "Dr. Ramos",
+      "authorized_visits": 6,
+      "remaining_visits": 4,
+      "notes": "Authorization valid through 2026-07-31."
+    },
+    {
+      "referral_id": "REF-77100",
+      "patient_id": "PAT-1002",
+      "status": "pending_clinical_review",
+      "specialty": "Radiology",
+      "requested_provider": "Riverfront Imaging",
+      "authorized_visits": 1,
+      "remaining_visits": 0,
+      "notes": "Pending prior authorization packet completion."
+    },
+    {
+      "referral_id": "REF-90171",
+      "patient_id": "PAT-1006",
+      "status": "pending",
+      "specialty": "Orthopedics",
+      "requested_provider": "Summit Ortho Group",
+      "authorized_visits": 8,
+      "remaining_visits": 8,
+      "notes": "Awaiting payer determination."
+    }
+  ]
+}

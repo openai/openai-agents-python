@@ -1,0 +1,1972 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sqlite3
+import time
+from contextlib import closing
+from pathlib import Path
+from typing import Any, ClassVar, cast
+
+from agents.result import RunResult
+from agents.usage import Usage
+
+from ... import _debug
+from ..._tool_identity import is_reserved_synthetic_tool_namespace, tool_qualified_name
+from ...items import TResponseInputItem
+from ...logger import (
+    log_model_action_error,
+    log_model_action_warning,
+    log_model_and_tool_action_error,
+)
+from ...memory import SQLiteSession
+from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.sqlite_session import _await_mutation
+
+
+def _allow_all_sqlite_actions(
+    _action: int,
+    _arg1: str | None,
+    _arg2: str | None,
+    _database: str | None,
+    _source: str | None,
+) -> int:
+    """Keep SQL authorized when an older Python cannot remove an authorizer."""
+    return sqlite3.SQLITE_OK
+
+
+def _content_preview(content: Any, max_length: int | None = None) -> str:
+    """Return a string preview of a stored user-message ``content``.
+
+    User-message ``content`` may be a plain string or a list of structured parts
+    (for example multimodal ``input_text``/``input_image`` items). Both shapes are
+    coerced to a string so callers always receive the documented preview type, then
+    truncated to ``max_length`` characters when a limit is provided.
+    """
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    if max_length is not None and len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
+
+
+class AdvancedSQLiteSession(SQLiteSession):
+    """Enhanced SQLite session with conversation branching and usage analytics."""
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        db_path: str | Path = ":memory:",
+        create_tables: bool = False,
+        logger: logging.Logger | None = None,
+        session_settings: SessionSettings | dict[str, Any] | None = None,
+        **kwargs,
+    ):
+        """Initialize the AdvancedSQLiteSession.
+
+        Args:
+            session_id: The ID of the session
+            db_path: The path to the SQLite database file. Defaults to `:memory:` for in-memory storage
+            create_tables: Whether to create the structure tables
+            logger: The logger to use. Defaults to the module logger
+            **kwargs: Additional keyword arguments to pass to the superclass
+        """  # noqa: E501
+        self._create_structure_tables_on_init = create_tables
+        try:
+            super().__init__(
+                session_id=session_id,
+                db_path=db_path,
+                session_settings=session_settings,
+                **kwargs,
+            )
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+        self._current_branch_id = "main"
+        # Synchronized with the durable session_clear_generations row whenever a
+        # branch pointer is established or a write begins. A mismatch means
+        # another instance cleared the session, so the local pointer resets to main.
+        self._generation = 0
+        self._logger = logger if logger is not None else logging.getLogger(__name__)
+
+    def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
+        """Initialize base tables only after validating advanced-table ownership."""
+        if self._create_structure_tables_on_init:
+            conn.execute("BEGIN IMMEDIATE")
+            self._create_schema_for_connection(conn)
+            self._init_structure_tables(conn)
+        else:
+            self._claim_structure_tables(conn)
+            self._create_schema_for_connection(conn)
+        conn.commit()
+
+    def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
+        """Set the current-branch pointer unless a clear has committed meanwhile.
+
+        Acquires the connection lock so the generation check and the assignment
+        are atomic with clear_session's reset. Returns True if the pointer was
+        updated, False if a clear_session committed after ``generation`` was
+        captured (in which case its reset to 'main' wins).
+        """
+        with self._locked_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT generation FROM session_clear_generations
+                WHERE session_id = ?
+                """,
+                (self.session_id,),
+            ).fetchone()
+            durable_generation = row[0] if row is not None else 0
+            if durable_generation != generation:
+                self._generation = durable_generation
+                self._current_branch_id = "main"
+                return False
+            self._generation = durable_generation
+            self._current_branch_id = branch_id
+            return True
+
+    # The structure tables that record which base-table pair owns a database file, and the
+    # foreign keys that record it. `branch_reservations` and `session_clear_generations` carry no
+    # foreign keys, but enforcing one pair per file keeps them unambiguous too.
+    _STRUCTURE_TABLE_OWNERS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "message_structure": ("session_id", "message_id"),
+        "turn_usage": ("session_id",),
+    }
+    _OWNER_TARGET_COLUMNS: ClassVar[dict[str, str]] = {
+        "session_id": "session_id",
+        "message_id": "id",
+    }
+
+    def _claim_structure_tables(self, conn: sqlite3.Connection) -> None:
+        """Require a complete structure-table layout owned by the configured base-table pair.
+
+        The structure tables are not named after ``sessions_table``/``messages_table``, so a
+        database file can only hold the structure rows of a single pair. ``CREATE TABLE IF NOT
+        EXISTS`` keeps the first pair's foreign keys, so a second session configured with
+        different base table names would join ``message_structure`` against the wrong messages
+        table and read back rows that belong to the other pair.
+
+        Missing or ambiguous ownership is rejected rather than accepted, so a
+        ``create_tables=False`` session cannot open a file before any pair has claimed it and
+        then have another pair claim it underneath.
+        """
+        owners_by_table: dict[str, dict[str, list[tuple[Any, ...]]]] = {}
+        for table, columns in self._STRUCTURE_TABLE_OWNERS.items():
+            foreign_keys = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+            owner_rows = {
+                column: [
+                    row for row in foreign_keys if self._identifiers_equal(conn, row[3], column)
+                ]
+                for column in columns
+            }
+            if any(len(owner_rows[column]) != 1 for column in columns):
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} does not record exactly one owner "
+                    "foreign key for each required base-table column. Construct an "
+                    "AdvancedSQLiteSession with create_tables=True to create and claim the "
+                    "structure tables before opening the database without them."
+                )
+            owners_by_table[table] = owner_rows
+
+        owned_by = self._resolve_base_table_owners(conn)
+        for table, columns in self._STRUCTURE_TABLE_OWNERS.items():
+            owner_rows = owners_by_table[table]
+            if any(
+                not self._identifiers_equal(conn, owner_rows[column][0][2], owned_by[column])
+                or not self._identifiers_equal(
+                    conn, owner_rows[column][0][4], self._OWNER_TARGET_COLUMNS[column]
+                )
+                for column in columns
+            ):
+                found = "/".join(
+                    f"{owner_rows[column][0][2]}({owner_rows[column][0][4]})" for column in columns
+                )
+                configured = "/".join(owned_by[column] for column in columns)
+                raise ValueError(
+                    f"The `{table}` table in {self.db_path} already belongs to '{found}', not to "
+                    f"the configured '{configured}'. Structure tables are shared per database "
+                    "file, so give each sessions_table/messages_table pair its own db_path."
+                )
+
+    def _resolve_base_table_owners(self, conn: sqlite3.Connection) -> dict[str, str]:
+        """Return the base-table names after SQLite has resolved configured identifiers."""
+        try:
+            sessions_table = self._resolve_table_identifier(conn, self.sessions_table)
+            messages_table = self._resolve_table_identifier(conn, self.messages_table)
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            raise ValueError(
+                f"The configured base tables in {self.db_path} are missing. Construct an "
+                "AdvancedSQLiteSession with create_tables=True to initialize and claim the "
+                "database before opening it without table creation."
+            ) from exc
+
+        base_foreign_keys = conn.execute(
+            f"PRAGMA foreign_key_list({self.messages_table})"
+        ).fetchall()
+        sessions_rows = [
+            row
+            for row in base_foreign_keys
+            if self._identifiers_equal(conn, row[3], "session_id")
+            and self._identifiers_equal(conn, row[4], "session_id")
+        ]
+        if len(sessions_rows) != 1 or not self._identifiers_equal(
+            conn, sessions_rows[0][2], sessions_table
+        ):
+            found = sessions_rows[0][2] if len(sessions_rows) == 1 else "ambiguous ownership"
+            raise ValueError(
+                f"The configured messages table '{messages_table}' in {self.db_path} belongs to "
+                f"sessions table '{found}', not to the configured '{sessions_table}'. Give each "
+                "sessions_table/messages_table pair its own db_path."
+            )
+        return {"session_id": sessions_table, "message_id": messages_table}
+
+    @staticmethod
+    def _resolve_table_identifier(conn: sqlite3.Connection, identifier: str) -> str:
+        """Ask SQLite for the table object selected by a configured identifier token."""
+        tables: set[str] = set()
+
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_READ and arg1 is not None:
+                tables.add(arg1)
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorizer)
+        try:
+            conn.execute(f"SELECT * FROM {identifier} LIMIT 0").fetchall()
+        finally:
+            conn.set_authorizer(None)
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except sqlite3.DatabaseError as exc:
+                if "not authorized" not in str(exc).lower():
+                    raise
+                conn.set_authorizer(_allow_all_sqlite_actions)
+        if len(tables) != 1:
+            raise ValueError(f"The configured table identifier '{identifier}' is ambiguous.")
+        return tables.pop()
+
+    @staticmethod
+    def _identifiers_equal(conn: sqlite3.Connection, left: str, right: str) -> bool:
+        """Compare two table names the way SQLite compares identifiers.
+
+        SQLite folds identifiers with ASCII rules only, so `NOCASE` is asked directly rather than
+        reimplemented. Python's ``casefold()`` would equate names SQLite keeps distinct, for
+        example ``ßsessions`` and ``sssessions``.
+        """
+        row = conn.execute("SELECT ? = ? COLLATE NOCASE", (left, right)).fetchone()
+        return bool(row[0])
+
+    def _init_structure_tables(self, conn: sqlite3.Connection) -> None:
+        """Add structure and usage tracking tables.
+
+        Creates the message_structure, branch_reservations, session_clear_generations,
+        and turn_usage tables with appropriate indexes for conversation branching
+        and usage analytics.
+        """
+        # Message structure with branch support
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS message_structure (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                message_type TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                user_turn_number INTEGER,
+                branch_turn_number INTEGER,
+                tool_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id)
+                    REFERENCES {self.messages_table}(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Turn-level usage tracking with branch support and full JSON details
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS turn_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                user_turn_number INTEGER NOT NULL,
+                requests INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                input_tokens_details JSON,
+                output_tokens_details JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id)
+                    REFERENCES {self.sessions_table}(session_id) ON DELETE CASCADE,
+                UNIQUE(session_id, branch_id, user_turn_number)
+            )
+        """)
+
+        # Validate the owner-bearing tables before any helper queries or indexes consume them.
+        self._claim_structure_tables(conn)
+
+        self._ensure_branch_reservations_table(conn)
+        self._ensure_session_clear_generations_table(conn)
+
+        # Indexes
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_session_seq
+            ON message_structure(session_id, sequence_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_branch
+            ON message_structure(session_id, branch_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_turn
+            ON message_structure(session_id, branch_id, user_turn_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structure_branch_seq
+            ON message_structure(session_id, branch_id, sequence_number)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_turn_usage_session_turn
+            ON turn_usage(session_id, branch_id, user_turn_number)
+        """)
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        """Add items to the session.
+
+        Args:
+            items: The items to add to the session
+        """
+        # Checked before the empty-list fast path, which would otherwise return
+        # successfully on a closed session.
+        self._check_not_closed()
+        if not items:
+            return
+
+        def _add_items_sync():
+            """Synchronous helper to add items and structure metadata together."""
+            with self._write_connection() as conn:
+                self._refresh_branch_after_external_clear(conn)
+                # Keep both writes in one transaction so metadata failures do not leave orphans.
+                self._insert_items(conn, items)
+                self._insert_structure_metadata(conn, items)
+                conn.commit()
+
+        try:
+            await _await_mutation(asyncio.to_thread(_add_items_sync))
+        except Exception as exc:
+            log_model_and_tool_action_error(self._logger, "Failed to add session items", exc)
+            raise
+
+    async def get_items(
+        self,
+        limit: int | None = None,
+        branch_id: str | None = None,
+    ) -> list[TResponseInputItem]:
+        """Get items from current or specified branch.
+
+        Args:
+            limit: Maximum number of items to return. If None, uses session_settings.limit.
+            branch_id: Branch to get items from. If None, uses current branch.
+
+        Returns:
+            List of conversation items from the specified branch.
+        """
+        session_limit = resolve_session_limit(limit, self.session_settings)
+
+        def _decode_rows(rows: list[Any]) -> list[TResponseInputItem]:
+            items: list[TResponseInputItem] = []
+            for (message_data,) in rows:
+                try:
+                    item = json.loads(message_data)
+                    items.append(item)
+                except json.JSONDecodeError:
+                    continue
+            return items
+
+        def _get_items_sync():
+            """Synchronous helper to get items for a specific branch."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                with closing(conn.cursor()) as cursor:
+                    # Get message IDs in correct order for this branch
+                    if session_limit is None:
+                        cursor.execute(
+                            f"""
+                            SELECT m.message_data
+                            FROM {self.messages_table} m
+                            JOIN message_structure s ON m.id = s.message_id
+                            WHERE m.session_id = ? AND s.branch_id = ?
+                            ORDER BY s.sequence_number ASC
+                        """,
+                            (self.session_id, resolved_branch_id),
+                        )
+                        return _decode_rows(cursor.fetchall())
+
+                    if session_limit > 0:
+                        # Expand the fetch window when corrupt rows sit among the newest
+                        # entries so limit counts valid conversation items, matching
+                        # SQLiteSession.get_items and the inherited pop_item.
+                        window = session_limit
+                        while True:
+                            cursor.execute(
+                                f"""
+                                SELECT m.message_data
+                                FROM {self.messages_table} m
+                                JOIN message_structure s ON m.id = s.message_id
+                                WHERE m.session_id = ? AND s.branch_id = ?
+                                ORDER BY s.sequence_number DESC
+                                LIMIT ?
+                            """,
+                                (self.session_id, resolved_branch_id, window),
+                            )
+                            rows = cursor.fetchall()
+                            items = _decode_rows(list(reversed(rows)))
+                            if len(items) >= session_limit:
+                                return items[-session_limit:]
+                            if len(rows) < window:
+                                return items
+                            window *= 2
+
+                    # Preserve historical non-positive LIMIT semantics (including SQLite's
+                    # unlimited behavior for negative values).
+                    cursor.execute(
+                        f"""
+                        SELECT m.message_data
+                        FROM {self.messages_table} m
+                        JOIN message_structure s ON m.id = s.message_id
+                        WHERE m.session_id = ? AND s.branch_id = ?
+                        ORDER BY s.sequence_number DESC
+                        LIMIT ?
+                    """,
+                        (self.session_id, resolved_branch_id, session_limit),
+                    )
+                    return _decode_rows(list(reversed(cursor.fetchall())))
+
+        return await asyncio.to_thread(_get_items_sync)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the current branch.
+
+        Overrides the base implementation so the popped message's
+        `message_structure` row is removed in the same transaction and only the
+        current branch is affected. The underlying message row is deleted only
+        when no other branch still references it, mirroring `delete_branch`. When
+        popping empties a turn on the current branch, its `turn_usage` row is
+        removed as well so usage analytics do not report a turn that no longer
+        exists.
+        """
+
+        # Snapshot the current branch at call time so a concurrent
+        # switch_to_branch() cannot redirect this pop to a different branch once
+        # it has been dispatched to the worker thread.
+        branch_id = self._current_branch_id
+        generation = self._generation
+
+        def _pop_item_sync():
+            with self._write_connection() as conn:
+                self._refresh_branch_after_external_clear(conn)
+                resolved_branch_id = (
+                    self._current_branch_id if self._generation != generation else branch_id
+                )
+                while True:
+                    with closing(conn.cursor()) as cursor:
+                        # Preserve every legacy branch ID before a pop can remove its
+                        # final message_structure row. This stays inside the existing
+                        # rollback boundary for the mutation.
+                        self._ensure_branch_reservations_table(conn)
+
+                        # Atomically claim the newest structure row across processes.
+                        cursor.execute(
+                            """
+                            DELETE FROM message_structure
+                            WHERE id = (
+                                SELECT id FROM message_structure
+                                WHERE session_id = ? AND branch_id = ?
+                                ORDER BY sequence_number DESC
+                                LIMIT 1
+                            )
+                            RETURNING message_id, user_turn_number
+                            """,
+                            (self.session_id, resolved_branch_id),
+                        )
+                        claimed_row = cursor.fetchone()
+                        if claimed_row is None:
+                            conn.commit()
+                            return None
+
+                        message_id, user_turn_number = claimed_row
+                        cursor.execute(
+                            f"SELECT message_data FROM {self.messages_table} WHERE id = ?",
+                            (message_id,),
+                        )
+                        message_row = cursor.fetchone()
+
+                        # Drop the underlying message only if no other branch references it.
+                        self._cleanup_orphaned_messages_sync(conn)
+
+                        # If this was the last item of the turn on this
+                        # branch, drop the now-stale turn_usage row for it.
+                        if user_turn_number is not None:
+                            cursor.execute(
+                                """
+                                SELECT COUNT(*) FROM message_structure
+                                WHERE session_id = ? AND branch_id = ?
+                                AND user_turn_number = ?
+                                """,
+                                (self.session_id, resolved_branch_id, user_turn_number),
+                            )
+                            if cursor.fetchone()[0] == 0:
+                                cursor.execute(
+                                    """
+                                    DELETE FROM turn_usage
+                                    WHERE session_id = ? AND branch_id = ?
+                                    AND user_turn_number = ?
+                                    """,
+                                    (self.session_id, resolved_branch_id, user_turn_number),
+                                )
+
+                        conn.commit()
+
+                        if message_row is None:
+                            # Structure row pointed at a missing message; keep looking.
+                            continue
+
+                        try:
+                            return json.loads(message_row[0])
+                        except (json.JSONDecodeError, TypeError):
+                            # Drop corrupted JSON entries and keep looking for a valid item.
+                            continue
+
+        return await _await_mutation(asyncio.to_thread(_pop_item_sync))
+
+    async def clear_session(self) -> None:
+        """Clear all items for this session.
+
+        Overrides the base implementation so the `message_structure` and
+        `turn_usage` metadata tables are cleared in the same transaction. Those
+        rows declare an `ON DELETE CASCADE` foreign key, but SQLite does not
+        enforce foreign keys unless `PRAGMA foreign_keys=ON` is set, so they must
+        be deleted explicitly to avoid leaking stale structure and usage data.
+
+        Previously used branch IDs remain reserved so a stale session instance
+        cannot write into a later branch that reused the same ID.
+        """
+
+        def _clear_session_sync():
+            with self._write_connection() as conn:
+                # Backfill legacy branch IDs before clearing their only durable
+                # identity evidence.
+                self._ensure_branch_reservations_table(conn)
+                self._ensure_session_clear_generations_table(conn)
+                conn.execute(
+                    f"DELETE FROM {self.messages_table} WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    f"DELETE FROM {self.sessions_table} WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM message_structure WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM turn_usage WHERE session_id = ?",
+                    (self.session_id,),
+                )
+                conn.execute(
+                    """
+                    UPDATE session_clear_generations
+                    SET generation = generation + 1
+                    WHERE session_id = ?
+                    """,
+                    (self.session_id,),
+                )
+                generation = conn.execute(
+                    """
+                    SELECT generation FROM session_clear_generations
+                    WHERE session_id = ?
+                    """,
+                    (self.session_id,),
+                ).fetchone()[0]
+                conn.commit()
+                # All branches were removed, so reset the in-memory pointer to
+                # 'main' while still holding the lock. Doing this inside the
+                # locked operation keeps the reset atomic with the clear, so no
+                # other locked operation observes the session as cleared while
+                # the pointer still references a deleted branch. Bumping the
+                # generation invalidates any in-flight switch/create that
+                # captured the pre-clear generation.
+                self._generation = generation
+                self._current_branch_id = "main"
+
+        await _await_mutation(asyncio.to_thread(_clear_session_sync))
+
+    async def store_run_usage(self, result: RunResult) -> None:
+        """Store usage data for the current conversation turn.
+
+        This is designed to be called after `Runner.run()` completes.
+        Session-level usage can be aggregated from turn data when needed.
+
+        Args:
+            result: The result from the run
+        """
+        try:
+            if result.context_wrapper.usage is not None:
+                # Capture the current turn together with an anchor that pins the
+                # exact turn incarnation: the id of its first message_structure
+                # row (ids are monotonic and never reused). If that turn is
+                # removed before the write commits — even if a new turn later
+                # reuses the same numeric id — the anchor row is gone and the
+                # write is skipped. The anchor is scoped to this branch/turn, so
+                # unrelated removals (e.g. delete_branch on another branch) do
+                # not drop this write.
+                current_turn, branch_id, turn_anchor = self._capture_current_turn()
+                # Only update turn-level usage - session usage is aggregated on demand
+                await self._update_turn_usage_internal(
+                    current_turn,
+                    result.context_wrapper.usage,
+                    branch_id=branch_id,
+                    turn_anchor=turn_anchor,
+                )
+        except Exception as e:
+
+            def diagnostic_extra() -> dict[str, object]:
+                return {"session_id": self.session_id}
+
+            log_model_action_error(
+                self._logger,
+                "Failed to store session usage",
+                e,
+                diagnostic_extra=diagnostic_extra,
+            )
+
+    def _capture_current_turn(self) -> tuple[int, str, int | None]:
+        """Return (current_turn, branch_id, turn_anchor) in one locked read.
+
+        ``turn_anchor`` is the smallest ``message_structure.id`` of the current
+        turn on the current branch (``None`` if the turn has no rows). Because
+        ids are monotonic and never reused, it uniquely identifies this turn
+        incarnation, so a later pop+recreate that reuses the numeric turn id
+        yields a different anchor.
+        """
+        with self._locked_connection() as conn:
+            branch_id = self._resolve_read_branch(conn, None)
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MAX(user_turn_number), 0)
+                    FROM message_structure
+                    WHERE session_id = ? AND branch_id = ?
+                    """,
+                    (self.session_id, branch_id),
+                )
+                current_turn = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    SELECT MIN(id) FROM message_structure
+                    WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                    """,
+                    (self.session_id, branch_id, current_turn),
+                )
+                turn_anchor = cursor.fetchone()[0]
+                return current_turn, branch_id, turn_anchor
+
+    def _get_next_turn_number(self, branch_id: str) -> int:
+        """Get the next turn number for a specific branch.
+
+        Args:
+            branch_id: The branch ID to get the next turn number for.
+
+        Returns:
+            The next available turn number for the specified branch.
+        """
+        with self._locked_connection() as conn:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MAX(user_turn_number), 0)
+                    FROM message_structure
+                    WHERE session_id = ? AND branch_id = ?
+                """,
+                    (self.session_id, branch_id),
+                )
+                result = cursor.fetchone()
+                max_turn = result[0] if result else 0
+                return max_turn + 1
+
+    def _get_next_branch_turn_number(self, branch_id: str) -> int:
+        """Get the next branch turn number for a specific branch.
+
+        Args:
+            branch_id: The branch ID to get the next branch turn number for.
+
+        Returns:
+            The next available branch turn number for the specified branch.
+        """
+        with self._locked_connection() as conn:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MAX(branch_turn_number), 0)
+                    FROM message_structure
+                    WHERE session_id = ? AND branch_id = ?
+                """,
+                    (self.session_id, branch_id),
+                )
+                result = cursor.fetchone()
+                max_turn = result[0] if result else 0
+                return max_turn + 1
+
+    def _get_current_turn_number(self) -> int:
+        """Get the current turn number for the current branch.
+
+        Returns:
+            The current turn number for the active branch.
+        """
+        with self._locked_connection() as conn:
+            branch_id = self._resolve_read_branch(conn, None)
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MAX(user_turn_number), 0)
+                    FROM message_structure
+                    WHERE session_id = ? AND branch_id = ?
+                    """,
+                    (self.session_id, branch_id),
+                )
+                result = cursor.fetchone()
+                return result[0] if result else 0
+
+    async def _add_structure_metadata(self, items: list[TResponseInputItem]) -> None:
+        """Extract structure metadata with branch-aware turn tracking.
+
+        This method:
+        - Assigns turn numbers per branch (not globally)
+        - Assigns explicit sequence numbers for precise ordering
+        - Links messages to their database IDs for structure tracking
+        - Handles multiple user messages in a single batch correctly
+
+        Args:
+            items: The items to add to the session
+        """
+
+        def _add_structure_sync():
+            """Synchronous helper to add structure metadata to database."""
+            with self._write_connection() as conn:
+                self._insert_structure_metadata(conn, items)
+                conn.commit()
+
+        try:
+            await _await_mutation(asyncio.to_thread(_add_structure_sync))
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                self._logger,
+                "Failed to add session structure metadata",
+                exc,
+            )
+            # Try to clean up any orphaned messages to maintain consistency.
+            try:
+                await self._cleanup_orphaned_messages()
+            except Exception as cleanup_exc:
+                log_model_and_tool_action_error(
+                    self._logger, "Failed to cleanup orphaned session messages", cleanup_exc
+                )
+            raise
+
+    def _insert_structure_metadata(
+        self,
+        conn: sqlite3.Connection,
+        items: list[TResponseInputItem],
+    ) -> None:
+        # Get the IDs of messages we just inserted, in order.
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                f"SELECT id FROM {self.messages_table} "
+                f"WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (self.session_id, len(items)),
+            )
+            message_ids = [row[0] for row in cursor.fetchall()]
+            message_ids.reverse()
+
+        if len(message_ids) != len(items):
+            raise RuntimeError(
+                "Failed to resolve inserted message IDs while writing structure metadata"
+            )
+
+        # Get current max sequence number (global).
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                """
+                SELECT COALESCE(MAX(sequence_number), 0)
+                FROM message_structure
+                WHERE session_id = ?
+            """,
+                (self.session_id,),
+            )
+            seq_start = cursor.fetchone()[0]
+
+        # Get current turn numbers atomically with a single query.
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COALESCE(MAX(user_turn_number), 0) as max_global_turn,
+                    COALESCE(MAX(branch_turn_number), 0) as max_branch_turn
+                FROM message_structure
+                WHERE session_id = ? AND branch_id = ?
+            """,
+                (self.session_id, self._current_branch_id),
+            )
+            result = cursor.fetchone()
+            current_turn = result[0] if result else 0
+            current_branch_turn = result[1] if result else 0
+
+        # Process items and assign turn numbers correctly.
+        structure_data = []
+        user_message_count = 0
+
+        for i, (item, msg_id) in enumerate(zip(items, message_ids, strict=False)):
+            msg_type = self._classify_message_type(item)
+            tool_name = self._extract_tool_name(item)
+
+            if self._is_user_message(item):
+                user_message_count += 1
+                item_turn = current_turn + user_message_count
+                item_branch_turn = current_branch_turn + user_message_count
+            else:
+                item_turn = current_turn + user_message_count
+                item_branch_turn = current_branch_turn + user_message_count
+
+            structure_data.append(
+                (
+                    self.session_id,
+                    msg_id,
+                    self._current_branch_id,
+                    msg_type,
+                    seq_start + i + 1,
+                    item_turn,
+                    item_branch_turn,
+                    tool_name,
+                )
+            )
+
+        with closing(conn.cursor()) as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO message_structure
+                (session_id, message_id, branch_id, message_type, sequence_number,
+                 user_turn_number, branch_turn_number, tool_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                structure_data,
+            )
+
+    async def _cleanup_orphaned_messages(self) -> int:
+        """Remove messages that exist in the configured message table but not in message_structure.
+
+        This can happen for rows written by older or non-atomic structure metadata paths.
+        `add_items()` writes message rows and structure metadata in a single transaction.
+        """
+
+        def _cleanup_sync():
+            """Synchronous helper to cleanup orphaned messages."""
+            with self._write_connection() as conn:
+                deleted_count = self._cleanup_orphaned_messages_sync(conn)
+                conn.commit()
+                return deleted_count
+
+        return await _await_mutation(asyncio.to_thread(_cleanup_sync))
+
+    def _cleanup_orphaned_messages_sync(self, conn: sqlite3.Connection) -> int:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute(
+                f"""
+                DELETE FROM {self.messages_table}
+                WHERE session_id = ?
+                AND id NOT IN (
+                    SELECT message_id
+                    FROM message_structure ms
+                    WHERE ms.session_id = ?
+                )
+                """,
+                (self.session_id, self.session_id),
+            )
+
+            deleted_count = cursor.rowcount
+            if deleted_count:
+                self._logger.info("Cleaned up %s orphaned messages", deleted_count)
+            return deleted_count
+
+    def _classify_message_type(self, item: TResponseInputItem) -> str:
+        """Classify the type of a message item.
+
+        Args:
+            item: The message item to classify.
+
+        Returns:
+            String representing the message type (user, assistant, etc.).
+        """
+        if isinstance(item, dict):
+            if item.get("role") == "user":
+                return "user"
+            elif item.get("role") == "assistant":
+                return "assistant"
+            elif item.get("type"):
+                return str(item.get("type"))
+        return "other"
+
+    def _extract_tool_name(self, item: TResponseInputItem) -> str | None:
+        """Extract tool name if this is a tool call/output.
+
+        Args:
+            item: The message item to extract tool name from.
+
+        Returns:
+            Tool name if item is a tool call, None otherwise.
+        """
+        if isinstance(item, dict):
+            item_type = item.get("type")
+
+            # For MCP tools, try to extract from server_label if available
+            if item_type in {"mcp_call", "mcp_approval_request"} and "server_label" in item:
+                server_label = item.get("server_label")
+                tool_name = item.get("name")
+                if tool_name and server_label:
+                    return f"{server_label}.{tool_name}"
+                elif server_label:
+                    return str(server_label)
+                elif tool_name:
+                    return str(tool_name)
+
+            # For tool types without a 'name' field, derive from the type
+            elif item_type in {
+                "computer_call",
+                "file_search_call",
+                "web_search_call",
+                "code_interpreter_call",
+                "tool_search_call",
+                "tool_search_output",
+            }:
+                if item_type in {"tool_search_call", "tool_search_output"}:
+                    return "tool_search"
+                return item_type
+
+            # Most other tool calls have a 'name' field
+            elif "name" in item:
+                name = item.get("name")
+                namespace = item.get("namespace")
+                if name is not None:
+                    name_str = str(name)
+                    namespace_str = str(namespace) if namespace is not None else None
+                    if is_reserved_synthetic_tool_namespace(name_str, namespace_str):
+                        return name_str
+                    qualified_name = tool_qualified_name(
+                        name_str,
+                        namespace_str,
+                    )
+                    return qualified_name or name_str
+                return None
+
+        return None
+
+    def _is_user_message(self, item: TResponseInputItem) -> bool:
+        """Check if this is a user message.
+
+        Args:
+            item: The message item to check.
+
+        Returns:
+            True if the item is a user message, False otherwise.
+        """
+        return isinstance(item, dict) and item.get("role") == "user"
+
+    async def create_branch_from_turn(
+        self, turn_number: int, branch_name: str | None = None
+    ) -> str:
+        """Create a new branch starting from a specific user message turn.
+
+        Args:
+            turn_number: The branch turn number of the user message to branch from
+            branch_name: Optional name for the branch. Must not use a previously used branch ID.
+                Auto-generated if None.
+
+        Returns:
+            The branch_id of the newly created branch
+
+        Raises:
+            ValueError: If turn doesn't exist, doesn't contain a user message, or
+                `branch_name` has already been used in this session
+        """
+
+        async def _create_and_switch() -> tuple[str, Any, str]:
+            # Copying the branch is the first durable side effect. Keep the
+            # generation-guarded pointer update in the same completion-owned task.
+            (
+                resolved_name,
+                turn_content,
+                source_branch_id,
+                generation,
+            ) = await self._copy_messages_to_new_branch(branch_name, turn_number)
+            await asyncio.to_thread(
+                self._commit_branch_pointer,
+                resolved_name,
+                generation,
+            )
+            return resolved_name, turn_content, source_branch_id
+
+        resolved_branch_name, turn_content, source_branch_id = await _await_mutation(
+            _create_and_switch()
+        )
+
+        if _debug.DONT_LOG_MODEL_DATA:
+            self._logger.debug(
+                "Created branch '%s' from turn %s in '%s'",
+                resolved_branch_name,
+                turn_number,
+                source_branch_id,
+            )
+        else:
+            self._logger.debug(
+                "Created branch '%s' from turn %s ('%s') in '%s'",
+                resolved_branch_name,
+                turn_number,
+                turn_content,
+                source_branch_id,
+            )
+        return resolved_branch_name
+
+    async def create_branch_from_content(
+        self, search_term: str, branch_name: str | None = None
+    ) -> str:
+        """Create branch from the first user turn matching the search term.
+
+        Args:
+            search_term: Text to search for in user messages.
+            branch_name: Optional name for the branch. Must not use a previously used branch ID.
+                Auto-generated if None.
+
+        Returns:
+            The branch_id of the newly created branch.
+
+        Raises:
+            ValueError: If no matching turns are found or `branch_name` has already been used
+                in this session.
+        """
+        matching_turns = await self.find_turns_by_content(search_term)
+        if not matching_turns:
+            raise ValueError(f"No user turns found containing '{search_term}'")
+
+        # Use the first (earliest) match
+        turn_number = matching_turns[0]["turn"]
+        return await self.create_branch_from_turn(turn_number, branch_name)
+
+    async def switch_to_branch(self, branch_id: str) -> None:
+        """Switch to a different branch.
+
+        Args:
+            branch_id: The branch to switch to.
+
+        Raises:
+            ValueError: If the branch doesn't exist.
+        """
+
+        # Validate branch exists
+        def _validate_branch() -> int:
+            """Validate the branch and return its current durable clear generation."""
+            with self._write_connection() as conn:
+                self._ensure_session_clear_generations_table(conn)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM message_structure
+                        WHERE session_id = ? AND branch_id = ?
+                    """,
+                        (self.session_id, branch_id),
+                    )
+
+                    count = cursor.fetchone()[0]
+                    if count == 0:
+                        raise ValueError(f"Branch '{branch_id}' does not exist")
+                    generation = cast(
+                        int,
+                        cursor.execute(
+                            """
+                            SELECT generation FROM session_clear_generations
+                            WHERE session_id = ?
+                            """,
+                            (self.session_id,),
+                        ).fetchone()[0],
+                    )
+                conn.commit()
+                return generation
+
+        generation = await _await_mutation(asyncio.to_thread(_validate_branch))
+
+        old_branch = self._current_branch_id
+        # Update the pointer under the lock; a no-op if a clear_session has
+        # committed since `generation` was captured (its reset to 'main' wins).
+        switched = await _await_mutation(
+            asyncio.to_thread(self._commit_branch_pointer, branch_id, generation)
+        )
+        if switched:
+            self._logger.info("Switched from branch '%s' to '%s'", old_branch, branch_id)
+
+    async def delete_branch(self, branch_id: str, force: bool = False) -> None:
+        """Delete a branch and all its associated data.
+
+        The branch ID remains reserved and cannot be reused in this session.
+
+        Args:
+            branch_id: The branch to delete.
+            force: If True, allows deleting the current branch (will switch to 'main').
+
+        Raises:
+            ValueError: If branch doesn't exist, is 'main', or is current branch without force.
+        """
+        if not branch_id or not branch_id.strip():
+            raise ValueError("Branch ID cannot be empty")
+
+        branch_id = branch_id.strip()
+
+        # Protect main branch
+        if branch_id == "main":
+            raise ValueError("Cannot delete the 'main' branch")
+
+        # Check if trying to delete current branch
+        if branch_id == self._current_branch_id:
+            if not force:
+                raise ValueError(
+                    f"Cannot delete current branch '{branch_id}'. Use force=True or switch branches first"  # noqa: E501
+                )
+            else:
+                # Switch to main before deleting
+                await self.switch_to_branch("main")
+
+        def _delete_sync():
+            """Synchronous helper to delete branch and associated data."""
+            with self._write_connection() as conn:
+                # Backfill legacy branch IDs before deleting their message structure.
+                self._ensure_branch_reservations_table(conn)
+                with closing(conn.cursor()) as cursor:
+                    # First verify the branch exists
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM message_structure
+                        WHERE session_id = ? AND branch_id = ?
+                    """,
+                        (self.session_id, branch_id),
+                    )
+
+                    count = cursor.fetchone()[0]
+                    if count == 0:
+                        raise ValueError(f"Branch '{branch_id}' does not exist")
+
+                    # Delete from turn_usage first (foreign key constraint)
+                    cursor.execute(
+                        """
+                        DELETE FROM turn_usage
+                        WHERE session_id = ? AND branch_id = ?
+                    """,
+                        (self.session_id, branch_id),
+                    )
+
+                    usage_deleted = cursor.rowcount
+
+                    # Delete from message_structure
+                    cursor.execute(
+                        """
+                        DELETE FROM message_structure
+                        WHERE session_id = ? AND branch_id = ?
+                    """,
+                        (self.session_id, branch_id),
+                    )
+
+                    structure_deleted = cursor.rowcount
+
+                    orphaned_messages_deleted = self._cleanup_orphaned_messages_sync(conn)
+
+                conn.commit()
+
+                return usage_deleted, structure_deleted, orphaned_messages_deleted
+
+        usage_deleted, structure_deleted, orphaned_messages_deleted = await _await_mutation(
+            asyncio.to_thread(_delete_sync)
+        )
+
+        self._logger.info(
+            "Deleted branch '%s': %s message entries, %s usage entries, %s orphaned messages",
+            branch_id,
+            structure_deleted,
+            usage_deleted,
+            orphaned_messages_deleted,
+        )
+
+    async def list_branches(self) -> list[dict[str, Any]]:
+        """List all branches in this session.
+
+        Returns:
+            List of dicts with branch info containing:
+                - 'branch_id': Branch identifier
+                - 'message_count': Number of messages in branch
+                - 'user_turns': Number of user turns in branch
+                - 'is_current': Whether this is the current branch
+                - 'created_at': When the branch was first created
+        """
+
+        def _list_branches_sync():
+            """Synchronous helper to list all branches."""
+            with self._locked_connection() as conn:
+                current_branch_id = self._resolve_read_branch(conn, None)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            ms.branch_id,
+                            COUNT(*) as message_count,
+                            COUNT(CASE WHEN ms.message_type = 'user' THEN 1 END) as user_turns,
+                            MIN(ms.created_at) as created_at
+                        FROM message_structure ms
+                        WHERE ms.session_id = ?
+                        GROUP BY ms.branch_id
+                        ORDER BY created_at
+                    """,
+                        (self.session_id,),
+                    )
+
+                    branches = []
+                    for row in cursor.fetchall():
+                        branch_id, msg_count, user_turns, created_at = row
+                        branches.append(
+                            {
+                                "branch_id": branch_id,
+                                "message_count": msg_count,
+                                "user_turns": user_turns,
+                                "is_current": branch_id == current_branch_id,
+                                "created_at": created_at,
+                            }
+                        )
+
+                    return branches
+
+        return await asyncio.to_thread(_list_branches_sync)
+
+    def _ensure_branch_reservations_table(self, conn: sqlite3.Connection) -> None:
+        """Create the reservation table and backfill populated branches for this session."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS branch_reservations (
+                session_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL,
+                PRIMARY KEY (session_id, branch_id)
+            )
+        """)
+        missing_branch = conn.execute(
+            """
+            SELECT 1
+            FROM message_structure ms
+            WHERE ms.session_id = ?
+            AND NOT EXISTS (
+                SELECT 1 FROM branch_reservations br
+                WHERE br.session_id = ms.session_id AND br.branch_id = ms.branch_id
+            )
+            LIMIT 1
+            """,
+            (self.session_id,),
+        ).fetchone()
+        if missing_branch is not None:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
+                SELECT DISTINCT session_id, branch_id
+                FROM message_structure
+                WHERE session_id = ?
+                """,
+                (self.session_id,),
+            )
+
+    def _ensure_session_clear_generations_table(self, conn: sqlite3.Connection) -> None:
+        """Create and initialize the durable clear generation for this session."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_clear_generations (
+                session_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO session_clear_generations (session_id, generation)
+            VALUES (?, 0)
+            """,
+            (self.session_id,),
+        )
+
+    def _refresh_branch_after_external_clear(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        initialize: bool = True,
+    ) -> None:
+        """Reset a stale branch pointer after another session instance clears history."""
+        if initialize:
+            self._ensure_session_clear_generations_table(conn)
+        else:
+            table_exists = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'session_clear_generations'
+                """
+            ).fetchone()
+            if table_exists is None:
+                return
+
+        row = conn.execute(
+            """
+            SELECT generation FROM session_clear_generations
+            WHERE session_id = ?
+            """,
+            (self.session_id,),
+        ).fetchone()
+        generation = row[0] if row is not None else 0
+        if generation != self._generation:
+            self._generation = generation
+            self._current_branch_id = "main"
+
+    def _resolve_read_branch(
+        self,
+        conn: sqlite3.Connection,
+        branch_id: str | None,
+    ) -> str:
+        """Resolve an implicit branch after synchronizing an external clear."""
+        if branch_id is not None:
+            return branch_id
+        self._refresh_branch_after_external_clear(conn, initialize=False)
+        return self._current_branch_id
+
+    def _reserve_branch_id(
+        self, cursor: sqlite3.Cursor, new_branch_id: str | None, from_turn_number: int
+    ) -> str:
+        """Reserve and return a new branch ID for this session."""
+        if new_branch_id is not None:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
+                VALUES (?, ?)
+                """,
+                (self.session_id, new_branch_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(
+                    f"Branch ID '{new_branch_id}' has already been used. Choose a new branch ID."
+                )
+            return new_branch_id
+
+        base_branch_id = f"branch_from_turn_{from_turn_number}_{int(time.time())}"
+        branch_id = base_branch_id
+        suffix = 1
+        while True:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
+                VALUES (?, ?)
+                """,
+                (self.session_id, branch_id),
+            )
+            if cursor.rowcount == 1:
+                return branch_id
+            suffix += 1
+            branch_id = f"{base_branch_id}_{suffix}"
+
+    async def _copy_messages_to_new_branch(
+        self, new_branch_id: str | None, from_turn_number: int
+    ) -> tuple[str, Any, str, int]:
+        """Copy messages before the branch point to the new branch.
+
+        Args:
+            new_branch_id: The ID of the new branch, or None to generate an unused ID.
+            from_turn_number: The turn number to copy messages up to (exclusive).
+        Returns:
+            The resolved branch ID, source preview, source branch, and clear generation.
+
+        Raises:
+            ValueError: If `new_branch_id` has already been used in this session.
+        """
+
+        def _copy_sync() -> tuple[str, Any, str, int]:
+            """Synchronous helper to copy messages to new branch."""
+            with self._write_connection() as conn:
+                # Acquire SQLite's write reservation before checking the branch ID so
+                # sessions in other processes cannot pass the same check concurrently.
+                conn.execute("BEGIN IMMEDIATE")
+                self._ensure_branch_reservations_table(conn)
+                self._refresh_branch_after_external_clear(conn)
+                source_branch_id = self._current_branch_id
+                generation = self._generation
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT am.message_data
+                        FROM message_structure ms
+                        JOIN {self.messages_table} am ON ms.message_id = am.id
+                        WHERE ms.session_id = ? AND ms.branch_id = ?
+                        AND ms.branch_turn_number = ? AND ms.message_type = 'user'
+                        """,
+                        (self.session_id, source_branch_id, from_turn_number),
+                    )
+                    result = cursor.fetchone()
+                    if result is None:
+                        raise ValueError(
+                            f"Turn {from_turn_number} does not contain a user message "
+                            f"in branch '{source_branch_id}'"
+                        )
+
+                    try:
+                        content = json.loads(result[0]).get("content", "")
+                        turn_content = content[:50] + "..." if len(content) > 50 else content
+                    except Exception:
+                        turn_content = "Unable to parse content"
+
+                    branch_id = self._reserve_branch_id(cursor, new_branch_id, from_turn_number)
+
+                    # Get all messages before the branch point
+                    cursor.execute(
+                        """
+                        SELECT
+                            ms.message_id,
+                            ms.message_type,
+                            ms.sequence_number,
+                            ms.user_turn_number,
+                            ms.branch_turn_number,
+                            ms.tool_name
+                        FROM message_structure ms
+                        WHERE ms.session_id = ? AND ms.branch_id = ?
+                        AND ms.branch_turn_number < ?
+                        ORDER BY ms.sequence_number
+                    """,
+                        (self.session_id, source_branch_id, from_turn_number),
+                    )
+
+                    messages_to_copy = cursor.fetchall()
+
+                    if messages_to_copy:
+                        # Get the max sequence number for the new inserts
+                        cursor.execute(
+                            """
+                            SELECT COALESCE(MAX(sequence_number), 0)
+                            FROM message_structure
+                            WHERE session_id = ?
+                        """,
+                            (self.session_id,),
+                        )
+
+                        seq_start = cursor.fetchone()[0]
+
+                        # Insert copied messages with new branch_id
+                        new_structure_data = []
+                        for i, (
+                            msg_id,
+                            msg_type,
+                            _,
+                            user_turn,
+                            branch_turn,
+                            tool_name,
+                        ) in enumerate(messages_to_copy):
+                            new_structure_data.append(
+                                (
+                                    self.session_id,
+                                    msg_id,  # Same message_id (sharing the actual message data)
+                                    branch_id,
+                                    msg_type,
+                                    seq_start + i + 1,  # New sequence number
+                                    user_turn,  # Keep same global turn number
+                                    branch_turn,  # Keep same branch turn number
+                                    tool_name,
+                                )
+                            )
+
+                        cursor.executemany(
+                            """
+                            INSERT INTO message_structure
+                            (session_id, message_id, branch_id, message_type, sequence_number,
+                             user_turn_number, branch_turn_number, tool_name)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            new_structure_data,
+                        )
+
+                conn.commit()
+                return branch_id, turn_content, source_branch_id, generation
+
+        return await asyncio.to_thread(_copy_sync)
+
+    async def get_conversation_turns(self, branch_id: str | None = None) -> list[dict[str, Any]]:
+        """Get user turns with content for easy browsing and branching decisions.
+
+        Args:
+            branch_id: Branch to get turns from (current branch if None).
+
+        Returns:
+            List of dicts with turn info containing:
+                - 'turn': Branch turn number
+                - 'content': User message content (truncated)
+                - 'full_content': Full user message content
+                - 'timestamp': When the turn was created
+                - 'can_branch': Always True (all user messages can branch)
+        """
+
+        def _get_turns_sync():
+            """Synchronous helper to get conversation turns."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            ms.branch_turn_number,
+                            am.message_data,
+                            ms.created_at
+                        FROM message_structure ms
+                        JOIN {self.messages_table} am ON ms.message_id = am.id
+                        WHERE ms.session_id = ? AND ms.branch_id = ?
+                        AND ms.message_type = 'user'
+                        ORDER BY ms.branch_turn_number
+                    """,
+                        (self.session_id, resolved_branch_id),
+                    )
+
+                    turns = []
+                    for row in cursor.fetchall():
+                        turn_num, message_data, created_at = row
+                        try:
+                            content = json.loads(message_data).get("content", "")
+                            turns.append(
+                                {
+                                    "turn": turn_num,
+                                    "content": _content_preview(content, 100),
+                                    "full_content": content,
+                                    "timestamp": created_at,
+                                    "can_branch": True,
+                                }
+                            )
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+
+                    return turns
+
+        return await asyncio.to_thread(_get_turns_sync)
+
+    async def find_turns_by_content(
+        self, search_term: str, branch_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Find user turns containing specific content.
+
+        Args:
+            search_term: Text to search for in user messages.
+            branch_id: Branch to search in (current branch if None).
+
+        Returns:
+            List of matching turns with same format as get_conversation_turns().
+        """
+
+        def _search_sync():
+            """Synchronous helper to search turns by content."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            ms.branch_turn_number,
+                            am.message_data,
+                            ms.created_at
+                        FROM message_structure ms
+                        JOIN {self.messages_table} am ON ms.message_id = am.id
+                        WHERE ms.session_id = ? AND ms.branch_id = ?
+                        AND ms.message_type = 'user'
+                        AND am.message_data LIKE ?
+                        ORDER BY ms.branch_turn_number
+                    """,
+                        (self.session_id, resolved_branch_id, f"%{search_term}%"),
+                    )
+
+                    matches = []
+                    for row in cursor.fetchall():
+                        turn_num, message_data, created_at = row
+                        try:
+                            content = json.loads(message_data).get("content", "")
+                            matches.append(
+                                {
+                                    "turn": turn_num,
+                                    "content": _content_preview(content),
+                                    "full_content": content,
+                                    "timestamp": created_at,
+                                    "can_branch": True,
+                                }
+                            )
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+
+                    return matches
+
+        return await asyncio.to_thread(_search_sync)
+
+    async def get_conversation_by_turns(
+        self, branch_id: str | None = None
+    ) -> dict[int, list[dict[str, str | None]]]:
+        """Get conversation grouped by user turns for specified branch.
+
+        Args:
+            branch_id: Branch to get conversation from (current branch if None).
+
+        Returns:
+            Dictionary mapping turn numbers to lists of message metadata.
+        """
+
+        def _get_conversation_sync():
+            """Synchronous helper to get conversation by turns."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT user_turn_number, message_type, tool_name
+                        FROM message_structure
+                        WHERE session_id = ? AND branch_id = ?
+                        ORDER BY sequence_number
+                    """,
+                        (self.session_id, resolved_branch_id),
+                    )
+
+                    turns: dict[int, list[dict[str, str | None]]] = {}
+                    for row in cursor.fetchall():
+                        turn_num, msg_type, tool_name = row
+                        if turn_num not in turns:
+                            turns[turn_num] = []
+                        turns[turn_num].append({"type": msg_type, "tool_name": tool_name})
+                    return turns
+
+        return await asyncio.to_thread(_get_conversation_sync)
+
+    async def get_tool_usage(self, branch_id: str | None = None) -> list[tuple[str, int, int]]:
+        """Get all tool usage by turn for specified branch.
+
+        Args:
+            branch_id: Branch to get tool usage from (current branch if None).
+
+        Returns:
+            List of tuples containing (tool_name, usage_count, turn_number).
+        """
+
+        def _get_tool_usage_sync():
+            """Synchronous helper to get tool usage statistics."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        SELECT tool_name, SUM(usage_count), user_turn_number
+                        FROM (
+                            SELECT tool_name, 1 AS usage_count, user_turn_number
+                            FROM message_structure
+                            WHERE session_id = ? AND branch_id = ? AND message_type IN (
+                                'tool_call', 'function_call', 'computer_call', 'file_search_call',
+                                'web_search_call', 'code_interpreter_call', 'tool_search_call',
+                                'custom_tool_call', 'mcp_call', 'mcp_approval_request'
+                            )
+
+                            UNION ALL
+
+                            SELECT ms.tool_name, 1 AS usage_count, ms.user_turn_number
+                            FROM message_structure ms
+                            WHERE ms.session_id = ? AND ms.branch_id = ?
+                              AND ms.message_type = 'tool_search_output'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM message_structure calls
+                                  WHERE calls.session_id = ms.session_id
+                                    AND calls.branch_id = ms.branch_id
+                                    AND calls.user_turn_number = ms.user_turn_number
+                                    AND calls.tool_name = ms.tool_name
+                                    AND calls.message_type = 'tool_search_call'
+                              )
+                        )
+                        GROUP BY tool_name, user_turn_number
+                        ORDER BY user_turn_number
+                    """,
+                        (
+                            self.session_id,
+                            resolved_branch_id,
+                            self.session_id,
+                            resolved_branch_id,
+                        ),
+                    )
+                    return cursor.fetchall()
+
+        return await asyncio.to_thread(_get_tool_usage_sync)
+
+    async def get_session_usage(self, branch_id: str | None = None) -> dict[str, int] | None:
+        """Get cumulative usage for session or specific branch.
+
+        Args:
+            branch_id: If provided, only get usage for that branch. If None, get all branches.
+
+        Returns:
+            Dictionary with usage statistics or None if no usage data found.
+        """
+
+        def _get_usage_sync():
+            """Synchronous helper to get session usage data."""
+            with self._locked_connection() as conn:
+                if branch_id:
+                    # Branch-specific usage
+                    query = """
+                        SELECT
+                            SUM(requests) as total_requests,
+                            SUM(input_tokens) as total_input_tokens,
+                            SUM(output_tokens) as total_output_tokens,
+                            SUM(total_tokens) as total_total_tokens,
+                            COUNT(*) as total_turns
+                        FROM turn_usage
+                        WHERE session_id = ? AND branch_id = ?
+                    """
+                    params: tuple[str, ...] = (self.session_id, branch_id)
+                else:
+                    # All branches
+                    query = """
+                        SELECT
+                            SUM(requests) as total_requests,
+                            SUM(input_tokens) as total_input_tokens,
+                            SUM(output_tokens) as total_output_tokens,
+                            SUM(total_tokens) as total_total_tokens,
+                            COUNT(*) as total_turns
+                        FROM turn_usage
+                        WHERE session_id = ?
+                    """
+                    params = (self.session_id,)
+
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(query, params)
+                    row = cursor.fetchone()
+
+                    if row and row[0] is not None:
+                        return {
+                            "requests": row[0] or 0,
+                            "input_tokens": row[1] or 0,
+                            "output_tokens": row[2] or 0,
+                            "total_tokens": row[3] or 0,
+                            "total_turns": row[4] or 0,
+                        }
+                    return None
+
+        result = await asyncio.to_thread(_get_usage_sync)
+
+        return cast(dict[str, int] | None, result)
+
+    async def get_turn_usage(
+        self,
+        user_turn_number: int | None = None,
+        branch_id: str | None = None,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Get usage statistics by turn with full JSON token details.
+
+        Args:
+            user_turn_number: Specific turn to get usage for. If None, returns all turns.
+            branch_id: Branch to get usage from (current branch if None).
+
+        Returns:
+            Dictionary with usage data for specific turn, or list of dictionaries for all turns.
+        """
+
+        def _get_turn_usage_sync():
+            """Synchronous helper to get turn usage statistics."""
+            with self._locked_connection() as conn:
+                resolved_branch_id = self._resolve_read_branch(conn, branch_id)
+                if user_turn_number is not None:
+                    query = """
+                        SELECT requests, input_tokens, output_tokens, total_tokens,
+                               input_tokens_details, output_tokens_details
+                        FROM turn_usage
+                        WHERE session_id = ? AND branch_id = ? AND user_turn_number = ?
+                    """
+
+                    with closing(conn.cursor()) as cursor:
+                        cursor.execute(
+                            query,
+                            (self.session_id, resolved_branch_id, user_turn_number),
+                        )
+                        row = cursor.fetchone()
+
+                        if row:
+                            # Parse JSON details if present
+                            input_details = None
+                            output_details = None
+
+                            if row[4]:  # input_tokens_details
+                                try:
+                                    input_details = json.loads(row[4])
+                                except json.JSONDecodeError:
+                                    pass
+
+                            if row[5]:  # output_tokens_details
+                                try:
+                                    output_details = json.loads(row[5])
+                                except json.JSONDecodeError:
+                                    pass
+
+                            return {
+                                "requests": row[0],
+                                "input_tokens": row[1],
+                                "output_tokens": row[2],
+                                "total_tokens": row[3],
+                                "input_tokens_details": input_details,
+                                "output_tokens_details": output_details,
+                            }
+                        return {}
+
+                query = """
+                    SELECT user_turn_number, requests, input_tokens, output_tokens,
+                           total_tokens, input_tokens_details, output_tokens_details
+                    FROM turn_usage
+                    WHERE session_id = ? AND branch_id = ?
+                    ORDER BY user_turn_number
+                """
+
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(query, (self.session_id, resolved_branch_id))
+                    results = []
+                    for row in cursor.fetchall():
+                        # Parse JSON details if present
+                        input_details = None
+                        output_details = None
+
+                        if row[5]:  # input_tokens_details
+                            try:
+                                input_details = json.loads(row[5])
+                            except json.JSONDecodeError:
+                                pass
+
+                        if row[6]:  # output_tokens_details
+                            try:
+                                output_details = json.loads(row[6])
+                            except json.JSONDecodeError:
+                                pass
+
+                        results.append(
+                            {
+                                "user_turn_number": row[0],
+                                "requests": row[1],
+                                "input_tokens": row[2],
+                                "output_tokens": row[3],
+                                "total_tokens": row[4],
+                                "input_tokens_details": input_details,
+                                "output_tokens_details": output_details,
+                            }
+                        )
+                    return results
+
+        result = await asyncio.to_thread(_get_turn_usage_sync)
+
+        return cast(list[dict[str, Any]] | dict[str, Any], result)
+
+    async def _update_turn_usage_internal(
+        self,
+        user_turn_number: int,
+        usage_data: Usage,
+        branch_id: str | None = None,
+        turn_anchor: int | None = None,
+    ) -> None:
+        """Internal method to update usage for a specific turn with full JSON details.
+
+        Args:
+            user_turn_number: The turn number to update usage for.
+            usage_data: The usage data to store.
+            branch_id: The branch the turn was read from. Defaults to the current
+                branch when not provided.
+            turn_anchor: The id of the turn's first ``message_structure`` row,
+                captured when the turn was read. When provided, the write is
+                skipped unless that exact row still exists for the given
+                branch/turn, so usage is never recorded against a turn that was
+                removed — even if a new turn reused the same numeric id. Because
+                the check is scoped to this branch/turn, unrelated removals (e.g.
+                delete_branch on another branch) do not drop this write.
+        """
+
+        target_branch = branch_id if branch_id is not None else self._current_branch_id
+
+        def _update_sync():
+            """Synchronous helper to update turn usage data."""
+            with self._write_connection() as conn:
+                if turn_anchor is not None:
+                    with closing(conn.cursor()) as guard_cursor:
+                        guard_cursor.execute(
+                            """
+                            SELECT 1 FROM message_structure
+                            WHERE session_id = ? AND branch_id = ?
+                            AND user_turn_number = ? AND id = ?
+                            """,
+                            (self.session_id, target_branch, user_turn_number, turn_anchor),
+                        )
+                        if guard_cursor.fetchone() is None:
+                            # The exact turn incarnation is gone (removed, or its
+                            # numeric id reused by a new turn); skip the stale write.
+                            return
+                # Serialize token details as JSON
+                input_details_json = None
+                output_details_json = None
+
+                if hasattr(usage_data, "input_tokens_details") and usage_data.input_tokens_details:
+                    try:
+                        input_details_json = json.dumps(usage_data.input_tokens_details.__dict__)
+                    except (TypeError, ValueError) as e:
+                        log_model_action_warning(
+                            self._logger, "Failed to serialize input token details", e
+                        )
+                        input_details_json = None
+
+                if (
+                    hasattr(usage_data, "output_tokens_details")
+                    and usage_data.output_tokens_details
+                ):
+                    try:
+                        output_details_json = json.dumps(usage_data.output_tokens_details.__dict__)
+                    except (TypeError, ValueError) as e:
+                        log_model_action_warning(
+                            self._logger, "Failed to serialize output token details", e
+                        )
+                        output_details_json = None
+
+                with closing(conn.cursor()) as cursor:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO turn_usage
+                        (session_id, branch_id, user_turn_number, requests, input_tokens, output_tokens,
+                         total_tokens, input_tokens_details, output_tokens_details)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,  # noqa: E501
+                        (
+                            self.session_id,
+                            target_branch,
+                            user_turn_number,
+                            usage_data.requests or 0,
+                            usage_data.input_tokens or 0,
+                            usage_data.output_tokens or 0,
+                            usage_data.total_tokens or 0,
+                            input_details_json,
+                            output_details_json,
+                        ),
+                    )
+                    conn.commit()
+
+        await _await_mutation(asyncio.to_thread(_update_sync))

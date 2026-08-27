@@ -1,0 +1,303 @@
+import asyncio
+from typing import Any, cast
+
+import pytest
+
+from agents import (
+    Agent,
+    MultiProvider,
+    OpenAIResponsesModel,
+    OpenAIResponsesWSModel,
+    RunConfig,
+    UserError,
+)
+from agents.extensions.models.litellm_model import LitellmModel
+from agents.models.multi_provider import MultiProviderMap
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.run_internal.run_loop import get_model
+
+
+def test_no_prefix_is_openai():
+    agent = Agent(model="gpt-4o", instructions="", name="test")
+    model = get_model(agent, RunConfig())
+    assert isinstance(model, OpenAIResponsesModel)
+
+
+def test_openai_prefix_is_openai():
+    agent = Agent(model="openai/gpt-4o", instructions="", name="test")
+    model = get_model(agent, RunConfig())
+    assert isinstance(model, OpenAIResponsesModel)
+
+
+def test_litellm_prefix_is_litellm():
+    agent = Agent(model="litellm/foo/bar", instructions="", name="test")
+    model = get_model(agent, RunConfig())
+    assert isinstance(model, LitellmModel)
+
+
+def test_any_llm_prefix_uses_any_llm_provider(monkeypatch):
+    import sys
+    import types as pytypes
+
+    captured_model: dict[str, Any] = {}
+
+    class FakeAnyLLMModel:
+        pass
+
+    class FakeAnyLLMProvider:
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            return FakeAnyLLMModel()
+
+    fake_module: Any = pytypes.ModuleType("agents.extensions.models.any_llm_provider")
+    fake_module.AnyLLMProvider = FakeAnyLLMProvider
+    monkeypatch.setitem(sys.modules, "agents.extensions.models.any_llm_provider", fake_module)
+
+    agent = Agent(model="any-llm/openrouter/openai/gpt-5.4-mini", instructions="", name="test")
+    model = get_model(agent, RunConfig())
+    assert isinstance(model, FakeAnyLLMModel)
+    assert captured_model["value"] == "openrouter/openai/gpt-5.4-mini"
+
+
+def test_no_prefix_can_use_openai_responses_websocket():
+    agent = Agent(model="gpt-4o", instructions="", name="test")
+    model = get_model(
+        agent,
+        RunConfig(model_provider=MultiProvider(openai_use_responses_websocket=True)),
+    )
+    assert isinstance(model, OpenAIResponsesWSModel)
+
+
+def test_openai_prefix_can_use_openai_responses_websocket():
+    agent = Agent(model="openai/gpt-4o", instructions="", name="test")
+    model = get_model(
+        agent,
+        RunConfig(model_provider=MultiProvider(openai_use_responses_websocket=True)),
+    )
+    assert isinstance(model, OpenAIResponsesWSModel)
+
+
+def test_multi_provider_passes_websocket_base_url_to_openai_provider(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        def get_model(self, model_name):
+            raise AssertionError("This test only verifies constructor passthrough.")
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    MultiProvider(openai_websocket_base_url="wss://proxy.example.test/v1")
+    assert captured_kwargs["websocket_base_url"] == "wss://proxy.example.test/v1"
+
+
+def test_multi_provider_forwards_openai_buffer_streamed_tool_calls_to_chat_model():
+    provider = MultiProvider(
+        openai_client=cast(Any, object()),
+        openai_use_responses=False,
+        openai_buffer_streamed_tool_calls=True,
+    )
+
+    model = provider.get_model("gpt-4o")
+
+    assert isinstance(model, OpenAIChatCompletionsModel)
+    assert model._buffer_streamed_tool_calls is True
+
+
+def test_openai_prefix_defaults_to_alias_mode(monkeypatch):
+    captured_model: dict[str, Any] = {}
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            return object()
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    provider = MultiProvider()
+    provider.get_model("openai/gpt-4o")
+    assert captured_model["value"] == "gpt-4o"
+
+
+def test_openai_prefix_can_be_preserved_as_literal_model_id(monkeypatch):
+    captured_model: dict[str, Any] = {}
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            return object()
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    provider = MultiProvider(openai_prefix_mode="model_id")
+    provider.get_model("openai/gpt-4o")
+    assert captured_model["value"] == "openai/gpt-4o"
+
+
+def test_unknown_prefix_defaults_to_error():
+    provider = MultiProvider()
+
+    with pytest.raises(UserError, match="Unknown prefix: openrouter"):
+        provider.get_model("openrouter/openai/gpt-4o")
+
+
+def test_unknown_prefix_can_be_preserved_for_openai_compatible_model_ids(monkeypatch):
+    captured_model: dict[str, Any] = {}
+    captured_result: dict[str, Any] = {}
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            mapped_model = object()
+            captured_result["value"] = mapped_model
+            return mapped_model
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    provider = MultiProvider(unknown_prefix_mode="model_id")
+    result = provider.get_model("openrouter/openai/gpt-4o")
+    assert result is captured_result["value"]
+    assert captured_model["value"] == "openrouter/openai/gpt-4o"
+
+
+def test_provider_map_entries_override_openai_prefix_mode(monkeypatch):
+    captured_model: dict[str, Any] = {}
+
+    class FakeCustomProvider:
+        def get_model(self, model_name):
+            captured_model["value"] = model_name
+            return object()
+
+    class FakeOpenAIProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_model(self, model_name):
+            raise AssertionError("Expected the explicit provider_map entry to win.")
+
+    monkeypatch.setattr("agents.models.multi_provider.OpenAIProvider", FakeOpenAIProvider)
+
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("openai", cast(Any, FakeCustomProvider()))
+
+    provider = MultiProvider(
+        provider_map=provider_map,
+        openai_prefix_mode="model_id",
+    )
+    provider.get_model("openai/gpt-4o")
+    assert captured_model["value"] == "gpt-4o"
+
+
+def test_provider_map_routes_to_falsey_provider():
+    captured_model: dict[str, Any] = {}
+    expected_model = object()
+
+    class FalseyProvider:
+        def __bool__(self) -> bool:
+            return False
+
+        def get_model(self, model_name: str | None):
+            captured_model["value"] = model_name
+            return expected_model
+
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("custom", cast(Any, FalseyProvider()))
+
+    result = MultiProvider(provider_map=provider_map).get_model("custom/test-model")
+
+    assert result is expected_model
+    assert captured_model["value"] == "test-model"
+
+
+def test_multi_provider_rejects_invalid_prefix_modes():
+    bad_openai_prefix_mode: Any = "invalid"
+    bad_unknown_prefix_mode: Any = "invalid"
+
+    with pytest.raises(UserError, match="openai_prefix_mode"):
+        MultiProvider(openai_prefix_mode=bad_openai_prefix_mode)
+
+    with pytest.raises(UserError, match="unknown_prefix_mode"):
+        MultiProvider(unknown_prefix_mode=bad_unknown_prefix_mode)
+
+
+@pytest.mark.asyncio
+async def test_multi_provider_aclose_continues_and_preserves_first_failure():
+    close_error = RuntimeError("close failed")
+    later_error = ValueError("later close failed")
+
+    class CloseTrackingProvider:
+        def __init__(self, error: Exception | None = None):
+            self.error = error
+            self.closed = False
+
+        def get_model(self, model_name: str | None):
+            return object()
+
+        async def aclose(self) -> None:
+            self.closed = True
+            if self.error is not None:
+                raise self.error
+
+    failing_provider = CloseTrackingProvider(close_error)
+    later_provider = CloseTrackingProvider(later_error)
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("failing", cast(Any, failing_provider))
+    provider_map.add_provider("later", cast(Any, later_provider))
+    provider = MultiProvider(provider_map=provider_map, openai_api_key="test")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value is close_error
+    assert failing_provider.closed
+    assert later_provider.closed
+
+
+@pytest.mark.asyncio
+async def test_multi_provider_aclose_propagates_hybrid_cancellation():
+    closed: list[str] = []
+
+    class HybridCancellation(asyncio.CancelledError, Exception):
+        pass
+
+    class CloseTrackingProvider:
+        def __init__(self, name: str, error: BaseException | None = None):
+            self.name = name
+            self.error = error
+
+        def get_model(self, model_name: str | None):
+            return object()
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.error is not None:
+                raise self.error
+
+    cancellation = HybridCancellation("cancelled")
+    provider_map = MultiProviderMap()
+    provider_map.add_provider(
+        "failing",
+        cast(Any, CloseTrackingProvider("failing", RuntimeError("close failed"))),
+    )
+    provider_map.add_provider(
+        "cancelling", cast(Any, CloseTrackingProvider("cancelling", cancellation))
+    )
+    provider_map.add_provider("later", cast(Any, CloseTrackingProvider("later")))
+    provider = MultiProvider(provider_map=provider_map, openai_api_key="test")
+
+    with pytest.raises(HybridCancellation) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value is cancellation
+    assert closed == ["failing", "cancelling"]

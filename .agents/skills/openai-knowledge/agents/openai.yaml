@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenAI Knowledge"
+  short_description: "Pull authoritative OpenAI platform documentation"
+  default_prompt: "Use $openai-knowledge to fetch the exact OpenAI docs needed for this API or platform question."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implementation Strategy"
+  short_description: "Choose a compatibility-aware implementation plan"
+  default_prompt: "Use $implementation-strategy before initial runtime or API edits and each review-feedback batch to check the full diff, supported contract, convergence, and any finding-derived reset spec before patching."

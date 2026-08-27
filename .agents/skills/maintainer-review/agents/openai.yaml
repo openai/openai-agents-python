@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintainer Review"
+  short_description: "Gate PR value on demonstrated user need"
+  default_prompt: "Use $maintainer-review to verify the demonstrated need and practical impact for this issue or PR, keep the assessment desk-review-only, recommend the maintainer action, and provide a copy-ready English comment when changes, evidence, or closure are needed."

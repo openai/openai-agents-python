@@ -1,0 +1,1373 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
+from typing import Any, cast
+
+from openai import AsyncStream
+from openai.types.chat import ChatCompletionChunk
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
+from openai.types.completion_usage import CompletionUsage
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseCreatedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
+    ResponseOutputText,
+    ResponseReasoningItem,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseTextDeltaEvent,
+    ResponseUsage,
+)
+from openai.types.responses.response_reasoning_item import Content, Summary
+from openai.types.responses.response_reasoning_summary_part_added_event import (
+    Part as AddedEventPart,
+)
+from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
+from openai.types.responses.response_reasoning_text_delta_event import (
+    ResponseReasoningTextDeltaEvent,
+)
+from openai.types.responses.response_reasoning_text_done_event import (
+    ResponseReasoningTextDoneEvent,
+)
+from openai.types.responses.response_usage import OutputTokensDetails
+
+from ..exceptions import AgentsException, ModelBehaviorError, UserError
+from ..items import TResponseStreamEvent
+from ..logger import logger
+from ..usage import (
+    _attach_raw_usage_snapshot,
+    _cache_write_tokens,
+    _extract_raw_usage_snapshot,
+    _make_input_tokens_details,
+    _mark_request_completed_without_usage,
+)
+from .chatcmpl_helpers import ChatCmplHelpers
+from .fake_id import FAKE_RESPONSES_ID
+from .reasoning_content_replay import _CHAT_COMPLETIONS_REASONING_FIELD_KEY
+
+
+# Define a Part class for internal use
+class Part:
+    def __init__(self, text: str, type: str):
+        self.text = text
+        self.type = type
+
+
+@dataclass
+class StreamingState:
+    started: bool = False
+    text_content_index_and_output: tuple[int, ResponseOutputText] | None = None
+    refusal_content_index_and_output: tuple[int, ResponseOutputRefusal] | None = None
+    reasoning_content_index_and_output: tuple[int, ResponseReasoningItem] | None = None
+    active_reasoning_summary_index: int | None = None
+    reasoning_item_done: bool = False
+    function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
+    # Fields for real-time function call streaming
+    function_call_streaming: dict[int, bool] = field(default_factory=dict)
+    ignored_tool_call_indexes: set[int] = field(default_factory=set)
+    # Store the ordered Anthropic thinking block sequence for replay. Text and signatures
+    # cannot be flattened into scalars: each block carries its own signature, and a
+    # redacted_thinking block carries neither text nor signature.
+    thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
+    # Store provider data for all output items
+    provider_data: dict[str, Any] = field(default_factory=dict)
+    has_warned_unsupported_choice: bool = False
+
+    def accumulate_thinking_block(self, block: dict[str, Any]) -> bool:
+        """Fold one streamed thinking delta into the ordered block sequence.
+
+        Anthropic streams a thinking block as a run of `thinking_delta` chunks terminated by a
+        single `signature_delta`, so a signature both belongs to the block being accumulated and
+        marks its end. A `redacted_thinking` block arrives whole and is kept verbatim.
+        """
+        block_type = block.get("type", "thinking")
+        if block_type == "redacted_thinking":
+            self.thinking_blocks.append(dict(block))
+            return True
+
+        if block_type != "thinking":
+            return False
+
+        for field_name in ("thinking", "signature"):
+            if field_name not in block:
+                continue
+            field_value = block[field_name]
+            if not isinstance(field_value, str):
+                raise ModelBehaviorError(
+                    f"Expected streamed thinking block field '{field_name}' to be a string, "
+                    f"got {type(field_value).__name__}."
+                )
+
+        thinking_text = block.get("thinking") or ""
+        signature = block.get("signature") or ""
+        metadata = {
+            key: value
+            for key, value in block.items()
+            if key not in {"type", "thinking", "signature"}
+        }
+        if not thinking_text and not signature and not metadata:
+            return False
+
+        current = self._open_thinking_block()
+        current.update(metadata)
+        if thinking_text:
+            current["thinking"] = f"{current.get('thinking', '')}{thinking_text}"
+        if signature:
+            # A signature closes the block, so later text starts a new one.
+            current["signature"] = signature
+        return True
+
+    def _open_thinking_block(self) -> dict[str, Any]:
+        """Return the thinking block still accepting deltas, creating one when needed."""
+        if self.thinking_blocks:
+            last_block = self.thinking_blocks[-1]
+            if last_block.get("type") == "thinking" and "signature" not in last_block:
+                return last_block
+        new_block: dict[str, Any] = {"type": "thinking", "thinking": ""}
+        self.thinking_blocks.append(new_block)
+        return new_block
+
+
+@dataclass
+class _BufferedToolCall:
+    """Accumulates a streamed Chat Completions function tool call."""
+
+    index: int
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str = ""
+    provider_specific_fields: dict[str, Any] | None = None
+    extra_content: dict[str, Any] | None = None
+
+
+def _merge_buffered_metadata(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Merge provider metadata without letting empty chunks erase earlier fields."""
+    if not incoming:
+        return current
+
+    if current is None:
+        return incoming.copy()
+
+    merged = current.copy()
+    for key, value in incoming.items():
+        current_value = merged.get(key)
+        if isinstance(current_value, dict) and isinstance(value, dict):
+            merged[key] = _merge_buffered_metadata(current_value, value) or {}
+        elif isinstance(value, dict) and not value and key in merged:
+            continue
+        else:
+            merged[key] = value
+
+    return merged
+
+
+class SequenceNumber:
+    def __init__(self):
+        self._sequence_number = 0
+
+    def get_and_increment(self) -> int:
+        num = self._sequence_number
+        self._sequence_number += 1
+        return num
+
+
+@dataclass
+class _StreamOutputLayout:
+    """Tracks output slots that have been exposed to stream consumers."""
+
+    assistant_message_output_idx: int | None = None
+    function_call_output_idxs: dict[int, int] = field(default_factory=dict)
+
+    @staticmethod
+    def _reasoning_output_count(state: StreamingState) -> int:
+        return 1 if state.reasoning_content_index_and_output is not None else 0
+
+    def assistant_message_output_index(self, state: StreamingState) -> int:
+        if self.assistant_message_output_idx is None:
+            output_index = self._reasoning_output_count(state)
+            if self.function_call_output_idxs:
+                output_index += len(state.function_calls)
+            self.assistant_message_output_idx = output_index
+
+        return self.assistant_message_output_idx
+
+    def function_call_output_index(
+        self,
+        state: StreamingState,
+        function_call_index: int,
+    ) -> int:
+        if function_call_index in self.function_call_output_idxs:
+            return self.function_call_output_idxs[function_call_index]
+
+        function_call_indices = list(state.function_calls)
+        try:
+            function_call_offset = function_call_indices.index(function_call_index)
+        except ValueError as exc:
+            raise KeyError(
+                f"Function call index {function_call_index} has not been tracked"
+            ) from exc
+
+        output_index = self._reasoning_output_count(state)
+        if self.assistant_message_output_idx is None:
+            output_index += function_call_offset
+        else:
+            function_calls_before_message = (
+                self.assistant_message_output_idx - self._reasoning_output_count(state)
+            )
+            if function_call_offset < function_calls_before_message:
+                output_index += function_call_offset
+            else:
+                output_index += function_call_offset + 1
+
+        self.function_call_output_idxs[function_call_index] = output_index
+        return output_index
+
+    def function_calls_before_message(
+        self,
+        state: StreamingState,
+    ) -> list[ResponseFunctionToolCall]:
+        if self.assistant_message_output_idx is None:
+            return []
+
+        function_call_count = self.assistant_message_output_idx - self._reasoning_output_count(
+            state
+        )
+        return list(state.function_calls.values())[:function_call_count]
+
+    def function_calls_after_message(
+        self,
+        state: StreamingState,
+    ) -> list[ResponseFunctionToolCall]:
+        if self.assistant_message_output_idx is None:
+            return list(state.function_calls.values())
+
+        function_call_count = self.assistant_message_output_idx - self._reasoning_output_count(
+            state
+        )
+        return list(state.function_calls.values())[function_call_count:]
+
+
+class ChatCmplStreamHandler:
+    @staticmethod
+    def _choice_finished_tool_calls(choice: Choice) -> bool:
+        return choice.finish_reason == "tool_calls"
+
+    @staticmethod
+    def _should_buffer_tool_call_delta(tool_call_delta: ChoiceDeltaToolCall) -> bool:
+        tool_call_type = getattr(tool_call_delta, "type", None)
+        return tool_call_type in (None, "function")
+
+    @staticmethod
+    def _delta_has_passthrough_output(delta: ChoiceDelta | None) -> bool:
+        if delta is None:
+            return False
+
+        if delta.content is not None or delta.tool_calls:
+            return True
+
+        if hasattr(delta, "refusal") and delta.refusal:
+            return True
+
+        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+            return True
+
+        if hasattr(delta, "reasoning") and delta.reasoning:
+            return True
+
+        if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+            return True
+
+        if getattr(delta, "annotations", None):
+            return True
+
+        if getattr(delta, "audio", None):
+            return True
+
+        return False
+
+    @staticmethod
+    def _accumulate_tool_call_delta(
+        buffered_calls: dict[int, _BufferedToolCall],
+        tool_call_delta: ChoiceDeltaToolCall,
+    ) -> None:
+        buffered_call = buffered_calls.setdefault(
+            tool_call_delta.index,
+            _BufferedToolCall(index=tool_call_delta.index),
+        )
+
+        if tool_call_delta.id:
+            buffered_call.call_id = tool_call_delta.id
+
+        if tool_call_delta.function:
+            if tool_call_delta.function.name:
+                buffered_call.name = tool_call_delta.function.name
+            if tool_call_delta.function.arguments:
+                buffered_call.arguments += tool_call_delta.function.arguments
+
+        provider_specific_fields = getattr(tool_call_delta, "provider_specific_fields", None)
+        if isinstance(provider_specific_fields, dict):
+            buffered_call.provider_specific_fields = _merge_buffered_metadata(
+                buffered_call.provider_specific_fields,
+                provider_specific_fields,
+            )
+
+        extra_content = getattr(tool_call_delta, "extra_content", None)
+        if isinstance(extra_content, dict):
+            buffered_call.extra_content = _merge_buffered_metadata(
+                buffered_call.extra_content,
+                extra_content,
+            )
+
+    @staticmethod
+    def _buffered_tool_call_delta(
+        buffered_call: _BufferedToolCall,
+    ) -> ChoiceDeltaToolCall:
+        if not buffered_call.call_id:
+            raise ModelBehaviorError(
+                "Buffered Chat Completions tool call stream ended without a tool call id."
+            )
+
+        if not buffered_call.name:
+            raise ModelBehaviorError(
+                "Buffered Chat Completions tool call stream ended without a function name."
+            )
+
+        tool_call_delta = ChoiceDeltaToolCall(
+            index=buffered_call.index,
+            id=buffered_call.call_id,
+            function=ChoiceDeltaToolCallFunction(
+                name=buffered_call.name,
+                arguments=buffered_call.arguments,
+            ),
+            type="function",
+        )
+
+        tool_call_delta_any = cast(Any, tool_call_delta)
+        if buffered_call.provider_specific_fields is not None:
+            tool_call_delta_any.provider_specific_fields = buffered_call.provider_specific_fields
+        if buffered_call.extra_content is not None:
+            tool_call_delta_any.extra_content = buffered_call.extra_content
+
+        return tool_call_delta
+
+    @classmethod
+    def _buffered_tool_calls_chunk(
+        cls,
+        template_chunk: ChatCompletionChunk,
+        buffered_calls: dict[int, _BufferedToolCall],
+    ) -> ChatCompletionChunk:
+        tool_call_deltas = [
+            cls._buffered_tool_call_delta(buffered_call)
+            for _, buffered_call in sorted(buffered_calls.items())
+        ]
+        choice = Choice(
+            index=0,
+            delta=ChoiceDelta(tool_calls=tool_call_deltas),
+            finish_reason="tool_calls",
+        )
+        return template_chunk.model_copy(update={"choices": [choice], "usage": None})
+
+    @classmethod
+    async def buffer_tool_call_stream(
+        cls,
+        stream: AsyncIterator[ChatCompletionChunk],
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Buffer streamed function tool-call deltas until they are complete."""
+        buffered_calls: dict[int, _BufferedToolCall] = {}
+        passthrough_tool_call_indexes: set[int] = set()
+        saw_passthrough_tool_call = False
+        last_chunk: ChatCompletionChunk | None = None
+
+        async for chunk in stream:
+            last_chunk = chunk
+
+            if not chunk.choices:
+                yield chunk
+                continue
+
+            passthrough_choices: list[Choice] = []
+            for choice in chunk.choices:
+                if choice.index != 0:
+                    if choice.delta and choice.delta.tool_calls:
+                        saw_passthrough_tool_call = True
+                    passthrough_choices.append(choice)
+                    continue
+
+                delta = choice.delta
+
+                if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
+                    remaining_tool_calls: list[ChoiceDeltaToolCall] = []
+                    for tool_call_delta in tool_call_deltas:
+                        if tool_call_delta.index in passthrough_tool_call_indexes:
+                            saw_passthrough_tool_call = True
+                            remaining_tool_calls.append(tool_call_delta)
+                        elif cls._should_buffer_tool_call_delta(tool_call_delta):
+                            cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
+                        else:
+                            passthrough_tool_call_indexes.add(tool_call_delta.index)
+                            saw_passthrough_tool_call = True
+                            remaining_tool_calls.append(tool_call_delta)
+
+                    delta = delta.model_copy(update={"tool_calls": remaining_tool_calls or None})
+                    choice = choice.model_copy(update={"delta": delta})
+
+                has_passthrough_output = cls._delta_has_passthrough_output(choice.delta)
+                if (
+                    cls._choice_finished_tool_calls(choice)
+                    and not buffered_calls
+                    and not saw_passthrough_tool_call
+                    and not has_passthrough_output
+                ):
+                    raise ModelBehaviorError(
+                        "Chat Completions stream finished with finish_reason='tool_calls' "
+                        "but did not include any streamed tool call deltas."
+                    )
+
+                if has_passthrough_output:
+                    passthrough_choices.append(choice)
+                elif choice.finish_reason in {"content_filter", "length"}:
+                    # A content-filtered or truncated choice ends the stream with an empty
+                    # delta, so it would otherwise be dropped here and the handler would
+                    # never see the finish_reason it needs to act on.
+                    # Forward a delta-stripped copy so buffering semantics are unchanged.
+                    passthrough_choices.append(choice.model_copy(update={"delta": ChoiceDelta()}))
+
+            if passthrough_choices or chunk.usage is not None:
+                yield chunk.model_copy(update={"choices": passthrough_choices})
+
+        if buffered_calls:
+            if last_chunk is None:
+                return
+            yield cls._buffered_tool_calls_chunk(last_chunk, buffered_calls)
+
+    @staticmethod
+    def _merged_provider_data(
+        state: StreamingState,
+        function_call: ResponseFunctionToolCall,
+    ) -> dict[str, Any] | None:
+        if not (
+            state.provider_data
+            or (hasattr(function_call, "provider_data") and function_call.provider_data)
+        ):
+            return None
+
+        merged_provider_data = state.provider_data.copy() if state.provider_data else {}
+        if hasattr(function_call, "provider_data") and function_call.provider_data:
+            merged_provider_data.update(function_call.provider_data)
+        return merged_provider_data
+
+    @classmethod
+    def _function_call_item(
+        cls,
+        state: StreamingState,
+        function_call: ResponseFunctionToolCall,
+        *,
+        arguments: str,
+    ) -> ResponseFunctionToolCall:
+        function_call_kwargs: dict[str, Any] = {
+            "id": FAKE_RESPONSES_ID,
+            "call_id": function_call.call_id,
+            "arguments": arguments,
+            "name": function_call.name,
+            "type": "function_call",
+        }
+
+        if merged_provider_data := cls._merged_provider_data(state, function_call):
+            function_call_kwargs["provider_data"] = merged_provider_data
+
+        return ResponseFunctionToolCall(**function_call_kwargs)
+
+    @classmethod
+    def _finish_reasoning_summary_part(
+        cls,
+        state: StreamingState,
+        sequence_number: SequenceNumber,
+    ) -> Iterator[TResponseStreamEvent]:
+        if (
+            not state.reasoning_content_index_and_output
+            or state.active_reasoning_summary_index is None
+        ):
+            return
+
+        reasoning_item = state.reasoning_content_index_and_output[1]
+        summary_index = state.active_reasoning_summary_index
+        if not reasoning_item.summary or summary_index >= len(reasoning_item.summary):
+            state.active_reasoning_summary_index = None
+            return
+
+        yield ResponseReasoningSummaryPartDoneEvent(
+            item_id=FAKE_RESPONSES_ID,
+            output_index=0,
+            summary_index=summary_index,
+            part=DoneEventPart(
+                text=reasoning_item.summary[summary_index].text,
+                type="summary_text",
+            ),
+            type="response.reasoning_summary_part.done",
+            sequence_number=sequence_number.get_and_increment(),
+        )
+        state.active_reasoning_summary_index = None
+
+    @staticmethod
+    def _finalize_thinking_blocks(state: StreamingState) -> None:
+        if not state.thinking_blocks or not state.reasoning_content_index_and_output:
+            return
+
+        reasoning_item = state.reasoning_content_index_and_output[1]
+        provider_data = getattr(reasoning_item, "provider_data", None)
+        reasoning_provider_data = provider_data.copy() if isinstance(provider_data, dict) else {}
+        reasoning_provider_data["thinking_blocks"] = [
+            dict(block) for block in state.thinking_blocks
+        ]
+        reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
+
+        # Retain the released normalized representation for callers and legacy replay.
+        thinking_text = ""
+        last_signature: str | None = None
+        for block in state.thinking_blocks:
+            if block.get("type") != "thinking":
+                continue
+            thinking_text += block.get("thinking") or ""
+            if signature := block.get("signature"):
+                last_signature = signature
+        if thinking_text:
+            if not reasoning_item.content:
+                reasoning_item.content = []
+            reasoning_item.content.append(Content(text=thinking_text, type="reasoning_text"))
+        if last_signature:
+            reasoning_item.encrypted_content = last_signature
+
+    @staticmethod
+    def _discard_plaintext_reasoning_replay_marker(
+        reasoning_item: ResponseReasoningItem,
+    ) -> None:
+        provider_data = getattr(reasoning_item, "provider_data", None)
+        if not isinstance(provider_data, dict):
+            return
+        if provider_data.get(_CHAT_COMPLETIONS_REASONING_FIELD_KEY) != "reasoning":
+            return
+
+        reasoning_provider_data = provider_data.copy()
+        del reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY]
+        reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
+
+    @classmethod
+    def _finish_reasoning_item(
+        cls,
+        state: StreamingState,
+        sequence_number: SequenceNumber,
+    ) -> Iterator[TResponseStreamEvent]:
+        if not state.reasoning_content_index_and_output or state.reasoning_item_done:
+            return
+
+        reasoning_item = state.reasoning_content_index_and_output[1]
+        if reasoning_item.summary and len(reasoning_item.summary) > 0:
+            yield from cls._finish_reasoning_summary_part(state, sequence_number)
+        elif reasoning_item.content is not None:
+            yield ResponseReasoningTextDoneEvent(
+                item_id=FAKE_RESPONSES_ID,
+                output_index=0,
+                content_index=0,
+                text=reasoning_item.content[0].text,
+                type="response.reasoning_text.done",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        yield ResponseOutputItemDoneEvent(
+            item=reasoning_item,
+            output_index=0,
+            type="response.output_item.done",
+            sequence_number=sequence_number.get_and_increment(),
+        )
+        state.reasoning_item_done = True
+
+    @classmethod
+    async def handle_stream(
+        cls,
+        response: Response,
+        stream: AsyncStream[ChatCompletionChunk],
+        model: str | None = None,
+        strict_feature_validation: bool = False,
+        preserve_raw_usage: bool = False,
+        raise_on_length_truncation: bool = False,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        """
+        Handle a streaming chat completion response and yield response events.
+
+        Args:
+            response: The initial Response object to populate with streamed data
+            stream: The async stream of chat completion chunks from the model
+            model: The source model that is generating this stream. Used to handle
+                provider-specific stream processing.
+            preserve_raw_usage: Whether to retain the last provider usage payload before
+                converting it to the Responses usage shape.
+            raise_on_length_truncation: Whether to raise ModelBehaviorError when the
+                stream terminates with finish_reason == "length" and no visible output.
+                This is an internal option enabled only by OpenAIChatCompletionsModel:
+                the shared handler also serves LiteLLM and AnyLLM, whose streaming
+                behavior must remain unchanged.
+        """
+        usage: CompletionUsage | None = None
+        raw_usage: dict[str, Any] | None = None
+        state = StreamingState()
+        output_layout = _StreamOutputLayout()
+        sequence_number = SequenceNumber()
+        # Some providers (e.g. Anthropic on Amazon Bedrock via LiteLLM) signal a
+        # safety block only through finish_reason == "content_filter" with an
+        # empty delta and no refusal field. Track it so we can synthesize an
+        # explicit refusal after the stream if nothing else was emitted.
+        # A completion truncated before any visible token (finish_reason ==
+        # "length") has the same shape; track it too so we can surface a model
+        # behavior error instead of collapsing into an empty turn.
+        saw_content_filter = False
+        saw_length = False
+        async for chunk in stream:
+            if not state.started:
+                state.started = True
+                yield ResponseCreatedEvent(
+                    response=response,
+                    type="response.created",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+
+            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
+            # Only update when chunk has usage data (not always in the last chunk)
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                usage = chunk.usage
+                if preserve_raw_usage:
+                    raw_usage = _extract_raw_usage_snapshot(chunk, fallback=chunk.usage)
+
+            if not chunk.choices:
+                continue
+
+            unsupported_choice_indexes = [
+                choice.index for choice in chunk.choices if choice.index != 0
+            ]
+            if len(chunk.choices) > 1 or unsupported_choice_indexes:
+                message = (
+                    "Chat Completions streaming with multiple choices or nonzero choice indexes "
+                    "is not fully supported; only choice index 0 can be processed."
+                )
+                if strict_feature_validation:
+                    raise UserError(message)
+
+                if not state.has_warned_unsupported_choice:
+                    logger.warning(
+                        "%s Ignoring the other choices; enable strict feature validation to "
+                        "raise an error instead.",
+                        message,
+                    )
+                    state.has_warned_unsupported_choice = True
+
+            choice = next((choice for choice in chunk.choices if choice.index == 0), None)
+            if choice is None:
+                continue
+
+            if choice.finish_reason == "content_filter":
+                saw_content_filter = True
+            elif choice.finish_reason == "length":
+                saw_length = True
+
+            if not choice.delta:
+                continue
+
+            # Build provider_data for non-OpenAI Responses API endpoints format
+            if model:
+                state.provider_data["model"] = model
+            elif hasattr(chunk, "model") and chunk.model:
+                state.provider_data["model"] = chunk.model
+
+            if hasattr(chunk, "id") and chunk.id:
+                state.provider_data["response_id"] = chunk.id
+
+            delta = choice.delta
+            choice_logprobs = choice.logprobs
+
+            if getattr(delta, "audio", None):
+                # The sync converter rejects audio output; a silent empty stream would
+                # diverge from that released behavior.
+                raise AgentsException("Audio is not currently supported")
+
+            # Handle thinking blocks from Anthropic (for preserving signatures)
+            has_thinking_block = False
+            if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+                for block in delta.thinking_blocks:
+                    if isinstance(block, dict):
+                        has_thinking_block |= state.accumulate_thinking_block(block)
+
+                if has_thinking_block and not state.reasoning_content_index_and_output:
+                    reasoning_item = ResponseReasoningItem(
+                        id=FAKE_RESPONSES_ID,
+                        summary=[],
+                        type="reasoning",
+                    )
+                    if state.provider_data:
+                        reasoning_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    yield ResponseOutputItemAddedEvent(
+                        item=reasoning_item,
+                        output_index=0,
+                        type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+                if has_thinking_block and state.reasoning_content_index_and_output:
+                    cls._discard_plaintext_reasoning_replay_marker(
+                        state.reasoning_content_index_and_output[1]
+                    )
+
+            # Handle reasoning content for reasoning summaries
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content is not None:
+                if reasoning_content and not state.reasoning_content_index_and_output:
+                    reasoning_item = ResponseReasoningItem(
+                        id=FAKE_RESPONSES_ID,
+                        summary=[],
+                        type="reasoning",
+                    )
+                    if state.provider_data:
+                        reasoning_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    yield ResponseOutputItemAddedEvent(
+                        item=reasoning_item,
+                        output_index=0,
+                        type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                if reasoning_content and state.reasoning_content_index_and_output:
+                    reasoning_item = state.reasoning_content_index_and_output[1]
+                    cls._discard_plaintext_reasoning_replay_marker(reasoning_item)
+                    if state.active_reasoning_summary_index is None:
+                        summary_index = len(reasoning_item.summary)
+                        reasoning_item.summary.append(Summary(text="", type="summary_text"))
+                        state.active_reasoning_summary_index = summary_index
+
+                        yield ResponseReasoningSummaryPartAddedEvent(
+                            item_id=FAKE_RESPONSES_ID,
+                            output_index=0,
+                            summary_index=summary_index,
+                            part=AddedEventPart(text="", type="summary_text"),
+                            type="response.reasoning_summary_part.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+
+                    summary_index = state.active_reasoning_summary_index
+
+                    yield ResponseReasoningSummaryTextDeltaEvent(
+                        delta=reasoning_content,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        summary_index=summary_index,
+                        type="response.reasoning_summary_text.delta",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                    current_content = reasoning_item.summary[summary_index]
+                    updated_text = current_content.text + reasoning_content
+                    new_content = Summary(text=updated_text, type="summary_text")
+                    reasoning_item.summary[summary_index] = new_content
+
+            # Handle reasoning content from 3rd party platforms
+            if hasattr(delta, "reasoning"):
+                reasoning_text = delta.reasoning
+                if not isinstance(reasoning_text, str):
+                    reasoning_text = ""
+                if reasoning_text and not state.reasoning_content_index_and_output:
+                    reasoning_item = ResponseReasoningItem(
+                        id=FAKE_RESPONSES_ID,
+                        summary=[],
+                        content=[Content(text="", type="reasoning_text")],
+                        type="reasoning",
+                    )
+                    reasoning_provider_data = state.provider_data.copy()
+                    reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY] = "reasoning"
+                    reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
+                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    yield ResponseOutputItemAddedEvent(
+                        item=reasoning_item,
+                        output_index=0,
+                        type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                if reasoning_text and state.reasoning_content_index_and_output:
+                    yield ResponseReasoningTextDeltaEvent(
+                        delta=reasoning_text,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        content_index=0,
+                        type="response.reasoning_text.delta",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                    # Create a new summary with updated text
+                    if not state.reasoning_content_index_and_output[1].content:
+                        state.reasoning_content_index_and_output[1].content = [
+                            Content(text="", type="reasoning_text")
+                        ]
+                    current_text = state.reasoning_content_index_and_output[1].content[0]
+                    updated_text = current_text.text + reasoning_text
+                    new_text_content = Content(text=updated_text, type="reasoning_text")
+                    state.reasoning_content_index_and_output[1].content[0] = new_text_content
+
+            if (
+                state.reasoning_content_index_and_output
+                and state.active_reasoning_summary_index is not None
+                and not (hasattr(delta, "reasoning_content") and delta.reasoning_content)
+                and (
+                    delta.content is not None
+                    or (hasattr(delta, "refusal") and delta.refusal)
+                    or bool(delta.tool_calls)
+                )
+            ):
+                for event in cls._finish_reasoning_summary_part(state, sequence_number):
+                    yield event
+
+            # Handle regular content
+            if delta.content is not None and not (
+                not state.text_content_index_and_output and delta.content == ""
+            ):
+                # An empty leading content delta ("") is dropped rather than
+                # opening a text content part: materializing an empty part would
+                # add a spurious ResponseOutputText to response.completed. Bedrock
+                # content-filter turns emit exactly this "" warm-up chunk before
+                # the terminal content_filter, so suppressing it here keeps the
+                # synthesized refusal (below) at content index 0 in both the
+                # streamed events and the completed response. Empty deltas after a
+                # text part has already opened keep their existing behavior.
+                if not state.text_content_index_and_output:
+                    content_index = 0
+                    if state.refusal_content_index_and_output:
+                        content_index += 1
+
+                    state.text_content_index_and_output = (
+                        content_index,
+                        ResponseOutputText(
+                            text="",
+                            type="output_text",
+                            annotations=[],
+                            logprobs=[],
+                        ),
+                    )
+                    # A refusal part already opened this assistant message, so only the new
+                    # content part is announced here. Re-announcing the message would emit a
+                    # second response.output_item.added for an item that is already open and
+                    # is closed by a single response.output_item.done.
+                    if content_index == 0:
+                        # Start a new assistant message stream
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify consumers of the start of a new output message
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+                    yield ResponseContentPartAddedEvent(
+                        content_index=state.text_content_index_and_output[0],
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=output_layout.assistant_message_output_index(state),
+                        part=ResponseOutputText(
+                            text="",
+                            type="output_text",
+                            annotations=[],
+                            logprobs=[],
+                        ),
+                        type="response.content_part.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+                delta_logprobs = (
+                    ChatCmplHelpers.convert_logprobs_for_text_delta(
+                        choice_logprobs.content if choice_logprobs is not None else None
+                    )
+                    or []
+                )
+                output_logprobs = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    choice_logprobs.content if choice_logprobs is not None else None
+                )
+                # Emit the delta for this segment of content
+                yield ResponseTextDeltaEvent(
+                    content_index=state.text_content_index_and_output[0],
+                    delta=delta.content,
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=output_layout.assistant_message_output_index(state),
+                    type="response.output_text.delta",
+                    sequence_number=sequence_number.get_and_increment(),
+                    logprobs=delta_logprobs,
+                )
+                # Accumulate the text into the response part
+                state.text_content_index_and_output[1].text += delta.content
+                if output_logprobs:
+                    existing_logprobs = state.text_content_index_and_output[1].logprobs
+                    if existing_logprobs is None:
+                        state.text_content_index_and_output[1].logprobs = output_logprobs
+                    else:
+                        # Extend in place to avoid rebuilding the full accumulated list on
+                        # every content delta, which would be O(n^2) over a long stream.
+                        existing_logprobs.extend(output_logprobs)
+
+            # Handle url citations. These can arrive on the delta carrying the cited text
+            # or on a later one, so this sits outside the content branch above.
+            if state.text_content_index_and_output:
+                state.text_content_index_and_output[1].annotations.extend(
+                    ChatCmplHelpers.convert_url_citations(getattr(delta, "annotations", None))
+                )
+
+            # Handle refusals (model declines to answer)
+            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
+            if hasattr(delta, "refusal") and delta.refusal:
+                if not state.refusal_content_index_and_output:
+                    refusal_index = 0
+                    if state.text_content_index_and_output:
+                        refusal_index += 1
+
+                    state.refusal_content_index_and_output = (
+                        refusal_index,
+                        ResponseOutputRefusal(refusal="", type="refusal"),
+                    )
+                    # A text part already opened this assistant message, so only the new
+                    # content part is announced here. Re-announcing the message would emit a
+                    # second response.output_item.added for an item that is already open and
+                    # is closed by a single response.output_item.done.
+                    if refusal_index == 0:
+                        # Start a new assistant message if one doesn't exist yet (in-progress)
+                        assistant_item = ResponseOutputMessage(
+                            id=FAKE_RESPONSES_ID,
+                            content=[],
+                            role="assistant",
+                            type="message",
+                            status="in_progress",
+                        )
+                        if state.provider_data:
+                            assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+                        # Notify downstream that the assistant message is starting
+                        yield ResponseOutputItemAddedEvent(
+                            item=assistant_item,
+                            output_index=output_layout.assistant_message_output_index(state),
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+                    yield ResponseContentPartAddedEvent(
+                        content_index=state.refusal_content_index_and_output[0],
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=output_layout.assistant_message_output_index(state),
+                        part=ResponseOutputRefusal(
+                            refusal="",
+                            type="refusal",
+                        ),
+                        type="response.content_part.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+                # Emit the delta for this segment of refusal
+                yield ResponseRefusalDeltaEvent(
+                    content_index=state.refusal_content_index_and_output[0],
+                    delta=delta.refusal,
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=output_layout.assistant_message_output_index(state),
+                    type="response.refusal.delta",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+                # Accumulate the refusal string in the output part
+                state.refusal_content_index_and_output[1].refusal += delta.refusal
+
+            # Handle tool calls with real-time streaming support
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    if tc_delta.index in state.ignored_tool_call_indexes:
+                        continue
+
+                    if getattr(tc_delta, "type", None) == "custom":
+                        if strict_feature_validation:
+                            raise UserError(
+                                "Custom tool calls are not supported by the Chat Completions "
+                                "converter"
+                            )
+                        state.ignored_tool_call_indexes.add(tc_delta.index)
+                        continue
+
+                    if tc_delta.index not in state.function_calls:
+                        state.function_calls[tc_delta.index] = ResponseFunctionToolCall(
+                            id=FAKE_RESPONSES_ID,
+                            arguments="",
+                            name="",
+                            type="function_call",
+                            call_id="",
+                        )
+                        state.function_call_streaming[tc_delta.index] = False
+
+                    tc_function = tc_delta.function
+
+                    # Accumulate arguments as they come in
+                    state.function_calls[tc_delta.index].arguments += (
+                        tc_function.arguments if tc_function else ""
+                    ) or ""
+
+                    # Set function name directly (it's correct from the first function call chunk)
+                    if tc_function and tc_function.name:
+                        state.function_calls[tc_delta.index].name = tc_function.name
+
+                    if tc_delta.id:
+                        # Clean up litellm's addition of __thought__ suffix to tool_call.id for
+                        # Gemini models. See: https://github.com/BerriAI/litellm/pull/16895
+                        tool_call_id = ChatCmplHelpers.clean_gemini_tool_call_id(tc_delta.id, model)
+
+                        state.function_calls[tc_delta.index].call_id = tool_call_id
+
+                    # Initialize provider_data for this function call from state.provider_data
+                    if not hasattr(state.function_calls[tc_delta.index], "provider_data"):
+                        if state.provider_data:
+                            state.function_calls[
+                                tc_delta.index
+                            ].provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+
+                    # Capture provider_specific_fields data from LiteLLM
+                    if (
+                        hasattr(tc_delta, "provider_specific_fields")
+                        and tc_delta.provider_specific_fields
+                    ):
+                        # Handle Gemini thought_signatures
+                        if model and "gemini" in model.lower():
+                            provider_specific_fields = tc_delta.provider_specific_fields
+                            if isinstance(provider_specific_fields, dict):
+                                thought_sig = provider_specific_fields.get("thought_signature")
+                                if thought_sig:
+                                    # Start with state.provider_data, then add thought_signature
+                                    func_provider_data = (
+                                        state.provider_data.copy() if state.provider_data else {}
+                                    )
+                                    func_provider_data["thought_signature"] = thought_sig
+                                    state.function_calls[
+                                        tc_delta.index
+                                    ].provider_data = func_provider_data  # type: ignore[attr-defined]
+
+                    # Capture extra_content data from Google's chatcmpl endpoint
+                    if hasattr(tc_delta, "extra_content") and tc_delta.extra_content:
+                        extra_content = tc_delta.extra_content
+                        if isinstance(extra_content, dict):
+                            google_fields = extra_content.get("google")
+                            if google_fields and isinstance(google_fields, dict):
+                                thought_sig = google_fields.get("thought_signature")
+                                if thought_sig:
+                                    # Start with state.provider_data, then add thought_signature
+                                    func_provider_data = (
+                                        state.provider_data.copy() if state.provider_data else {}
+                                    )
+                                    func_provider_data["thought_signature"] = thought_sig
+                                    state.function_calls[
+                                        tc_delta.index
+                                    ].provider_data = func_provider_data  # type: ignore[attr-defined]
+
+                    function_call = state.function_calls[tc_delta.index]
+
+                    # Start streaming as soon as we have function name and call_id
+                    if (
+                        not state.function_call_streaming[tc_delta.index]
+                        and function_call.name
+                        and function_call.call_id
+                    ):
+                        output_index = output_layout.function_call_output_index(
+                            state, tc_delta.index
+                        )
+
+                        # Mark this function call as streaming.
+                        state.function_call_streaming[tc_delta.index] = True
+
+                        # Send initial function call added event
+                        yield ResponseOutputItemAddedEvent(
+                            item=cls._function_call_item(
+                                state,
+                                function_call,
+                                arguments="",
+                            ),
+                            output_index=output_index,
+                            type="response.output_item.added",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+
+                    # Stream arguments if we've started streaming this function call
+                    if (
+                        state.function_call_streaming.get(tc_delta.index, False)
+                        and tc_function
+                        and tc_function.arguments
+                    ):
+                        output_index = output_layout.function_call_output_index(
+                            state, tc_delta.index
+                        )
+                        yield ResponseFunctionCallArgumentsDeltaEvent(
+                            delta=tc_function.arguments,
+                            item_id=FAKE_RESPONSES_ID,
+                            output_index=output_index,
+                            type="response.function_call_arguments.delta",
+                            sequence_number=sequence_number.get_and_increment(),
+                        )
+
+        # Content-filter refusal with no emitted output: synthesize a refusal so
+        # the completed response carries a ResponseOutputRefusal rather than an
+        # empty turn. Only when nothing else was produced (text / refusal / tool
+        # calls) — a content_filter that still emitted content is left as-is.
+        if (
+            saw_content_filter
+            and state.text_content_index_and_output is None
+            and state.refusal_content_index_and_output is None
+            and not state.function_calls
+        ):
+            # A content-filtered turn (e.g. Bedrock) can terminate with no
+            # emitted output. Its leading empty "" content delta is suppressed
+            # above so no text part opens, so we announce a fresh assistant
+            # message and place the refusal at content index 0. A reasoning item
+            # is a *separate* output item (it affects the message's output_index,
+            # via assistant_message_output_index, not its content_index) and is
+            # never appended to the assistant message's content — so the refusal,
+            # the sole content part, is at content_index 0 in both the stream and
+            # response.completed regardless of any reasoning item.
+            refusal_index = 0
+            refusal_message = "Response withheld by the provider's content filter."
+            state.refusal_content_index_and_output = (
+                refusal_index,
+                ResponseOutputRefusal(refusal=refusal_message, type="refusal"),
+            )
+            assistant_item = ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                content=[],
+                role="assistant",
+                type="message",
+                status="in_progress",
+            )
+            if state.provider_data:
+                assistant_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            yield ResponseOutputItemAddedEvent(
+                item=assistant_item,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseContentPartAddedEvent(
+                content_index=refusal_index,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                part=ResponseOutputRefusal(refusal="", type="refusal"),
+                type="response.content_part.added",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+            yield ResponseRefusalDeltaEvent(
+                content_index=refusal_index,
+                delta=refusal_message,
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.refusal.delta",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        # A completion truncated before any visible token (finish_reason ==
+        # "length") is a token- or reasoning-budget exhaustion, not a policy
+        # refusal. Surface it as a model behavior error rather than manufacturing
+        # a refusal that would route through model_refusal handlers. This is an
+        # internal behavior enabled only by OpenAIChatCompletionsModel: the
+        # shared handler also serves LiteLLM and AnyLLM, whose streaming behavior
+        # must remain unchanged.
+        if (
+            saw_length
+            and raise_on_length_truncation
+            and state.text_content_index_and_output is None
+            and state.refusal_content_index_and_output is None
+            and not state.function_calls
+        ):
+            # Preserve the request and any reported token usage on the response
+            # so the caller can attach it to the generation span before the
+            # error propagates.
+            if usage is not None:
+                response.usage = cls._build_response_usage(usage)
+            else:
+                _mark_request_completed_without_usage(response)
+            if preserve_raw_usage and raw_usage is not None:
+                _attach_raw_usage_snapshot(response, raw_usage)
+            raise ModelBehaviorError(
+                "Chat Completions stream terminated with finish_reason='length' "
+                "but produced no assistant text, tool call, or refusal."
+            )
+
+        cls._finalize_thinking_blocks(state)
+        for event in cls._finish_reasoning_item(state, sequence_number):
+            yield event
+
+        if state.text_content_index_and_output:
+            # Send end event for this content part
+            yield ResponseContentPartDoneEvent(
+                content_index=state.text_content_index_and_output[0],
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                part=state.text_content_index_and_output[1],
+                type="response.content_part.done",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        if state.refusal_content_index_and_output:
+            # Send end event for this content part
+            yield ResponseContentPartDoneEvent(
+                content_index=state.refusal_content_index_and_output[0],
+                item_id=FAKE_RESPONSES_ID,
+                output_index=output_layout.assistant_message_output_index(state),
+                part=state.refusal_content_index_and_output[1],
+                type="response.content_part.done",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        # Send completion events for function calls
+        for index, function_call in state.function_calls.items():
+            if state.function_call_streaming.get(index, False):
+                # Function call was streamed, just send the completion event
+                output_index = output_layout.function_call_output_index(state, index)
+
+                yield ResponseOutputItemDoneEvent(
+                    item=cls._function_call_item(
+                        state,
+                        function_call,
+                        arguments=function_call.arguments,
+                    ),
+                    output_index=output_index,
+                    type="response.output_item.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+            else:
+                # Function call was not streamed (fallback to old behavior)
+                # This handles edge cases where function name never arrived
+                output_index = output_layout.function_call_output_index(state, index)
+                fallback_func_call_item = cls._function_call_item(
+                    state,
+                    function_call,
+                    arguments=function_call.arguments,
+                )
+
+                # Send all events at once (backward compatibility)
+                yield ResponseOutputItemAddedEvent(
+                    item=fallback_func_call_item,
+                    output_index=output_index,
+                    type="response.output_item.added",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+                yield ResponseFunctionCallArgumentsDeltaEvent(
+                    delta=function_call.arguments,
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=output_index,
+                    type="response.function_call_arguments.delta",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+                yield ResponseOutputItemDoneEvent(
+                    item=fallback_func_call_item,
+                    output_index=output_index,
+                    type="response.output_item.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+
+        # Finally, send the Response completed event
+        outputs: list[ResponseOutputItem] = []
+
+        # include Reasoning item if it exists
+        if state.reasoning_content_index_and_output:
+            reasoning_item = state.reasoning_content_index_and_output[1]
+            outputs.append(reasoning_item)
+
+        outputs.extend(output_layout.function_calls_before_message(state))
+
+        # include text or refusal content if they exist
+        if state.text_content_index_and_output or state.refusal_content_index_and_output:
+            assistant_msg = ResponseOutputMessage(
+                id=FAKE_RESPONSES_ID,
+                content=[],
+                role="assistant",
+                type="message",
+                status="completed",
+            )
+            if state.provider_data:
+                assistant_msg.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
+            # Assemble the parts in the order of the content indexes already announced by
+            # the content_part events. A refusal that opened before any text holds index 0
+            # and the text holds index 1, so appending text first would contradict the
+            # indexes consumers already received.
+            content_parts: list[tuple[int, ResponseOutputText | ResponseOutputRefusal]] = []
+            if state.text_content_index_and_output:
+                content_parts.append(state.text_content_index_and_output)
+            if state.refusal_content_index_and_output:
+                content_parts.append(state.refusal_content_index_and_output)
+            content_parts.sort(key=lambda entry: entry[0])
+            assistant_msg.content.extend(part for _, part in content_parts)
+            outputs.append(assistant_msg)
+
+            # send a ResponseOutputItemDone for the assistant message
+            yield ResponseOutputItemDoneEvent(
+                item=assistant_msg,
+                output_index=output_layout.assistant_message_output_index(state),
+                type="response.output_item.done",
+                sequence_number=sequence_number.get_and_increment(),
+            )
+
+        outputs.extend(output_layout.function_calls_after_message(state))
+
+        final_response = response.model_copy()
+        final_response.output = outputs
+
+        final_response.usage = cls._build_response_usage(usage)
+        if preserve_raw_usage:
+            _attach_raw_usage_snapshot(final_response, raw_usage)
+        if usage is None:
+            # The stream reached a terminal response, so a request was made even though the
+            # provider reported no usage. Record that without inventing a usage payload, so
+            # the raw usage snapshot stays absent and tokens are not reported as real zeros.
+            _mark_request_completed_without_usage(final_response)
+
+        yield ResponseCompletedEvent(
+            response=final_response,
+            type="response.completed",
+            sequence_number=sequence_number.get_and_increment(),
+        )
+
+    @staticmethod
+    def _build_response_usage(usage: CompletionUsage | None) -> ResponseUsage | None:
+        """Convert the streamed provider usage into a Responses usage payload."""
+        if usage is None:
+            return None
+        return ResponseUsage(
+            input_tokens=usage.prompt_tokens or 0,
+            output_tokens=usage.completion_tokens or 0,
+            total_tokens=usage.total_tokens or 0,
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=usage.completion_tokens_details.reasoning_tokens
+                if usage.completion_tokens_details
+                and usage.completion_tokens_details.reasoning_tokens
+                else 0
+            ),
+            input_tokens_details=_make_input_tokens_details(
+                cached_tokens=usage.prompt_tokens_details.cached_tokens
+                if usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens
+                else 0,
+                cache_write_tokens=_cache_write_tokens(usage.prompt_tokens_details),
+            ),
+        )

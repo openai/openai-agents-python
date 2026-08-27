@@ -1,0 +1,2 @@
+# Keep checkouts as LF so scripts and exact-content checks stay stable on Windows.
+* text=auto eol=lf

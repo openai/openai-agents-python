@@ -1,0 +1,313 @@
+import json
+
+import pytest
+from inline_snapshot import snapshot
+
+from agents import Agent, RunConfig, Runner
+from agents.testing import ScriptedModel
+
+from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
+from ..testing_processor import SPAN_PROCESSOR_TESTING, fetch_normalized_spans
+from .helpers import FakeMCPServer
+
+
+@pytest.mark.asyncio
+async def test_mcp_tracing():
+    model = ScriptedModel()
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    agent = Agent(
+        name="test",
+        model=model,
+        mcp_servers=[server],
+        tools=[get_function_tool("non_mcp_tool", "tool_result")],
+    )
+
+    model.extend(
+        [
+            # First turn: a message and tool call
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("test_tool_1", "", call_id="mcp_call_1"),
+            ],
+            # Second turn: text message
+            [get_text_message("done")],
+        ]
+    )
+
+    # First run: should list MCP tools before first and second steps
+    x = Runner.run_streamed(agent, input="first_test")
+    async for _ in x.stream_events():
+        pass
+
+    assert x.final_output == "done"
+    spans = fetch_normalized_spans()
+
+    # Should have a single tool listing, and the function span should have MCP data
+    assert spans == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "mcp_tools",
+                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test",
+                            "handoffs": [],
+                            "tools": ["test_tool_1", "non_mcp_tool"],
+                            "output_type": "str",
+                        },
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "test_tool_1",
+                                    "input": "",
+                                    "output": "{'type': 'text', 'text': 'result_test_tool_1_{}'}",  # noqa: E501
+                                    "mcp_data": {"server": "fake_mcp_server"},
+                                },
+                            },
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    )
+
+    server.add_tool("test_tool_2", {})
+
+    SPAN_PROCESSOR_TESTING.clear()
+
+    model.extend(
+        [
+            # First turn: a message and tool call
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("non_mcp_tool", "", call_id="function_call_1"),
+                get_function_tool_call("test_tool_2", "", call_id="mcp_call_2"),
+            ],
+            # Second turn: text message
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="second_test")
+    spans = fetch_normalized_spans()
+
+    # Should have a single tool listing, and the function span should have MCP data, and the non-mcp
+    # tool function span should not have MCP data
+    assert spans == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "mcp_tools",
+                        "data": {
+                            "server": "fake_mcp_server",
+                            "result": ["test_tool_1", "test_tool_2"],
+                        },
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test",
+                            "handoffs": [],
+                            "tools": ["test_tool_1", "test_tool_2", "non_mcp_tool"],
+                            "output_type": "str",
+                        },
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "non_mcp_tool",
+                                    "input": "",
+                                    "output": "tool_result",
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "test_tool_2",
+                                    "input": "",
+                                    "output": "{'type': 'text', 'text': 'result_test_tool_2_{}'}",  # noqa: E501
+                                    "mcp_data": {"server": "fake_mcp_server"},
+                                },
+                            },
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2"],
+                                },
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    )
+
+    SPAN_PROCESSOR_TESTING.clear()
+
+    # Add more tools to the server
+    server.add_tool("test_tool_3", {})
+
+    model.extend(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_tool_3", "")],
+            # Second turn: text message
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="third_test")
+
+    spans = fetch_normalized_spans()
+
+    # Should have a single tool listing, and the function span should have MCP data, and the non-mcp
+    # tool function span should not have MCP data
+    assert spans == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "mcp_tools",
+                        "data": {
+                            "server": "fake_mcp_server",
+                            "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
+                        },
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test",
+                            "handoffs": [],
+                            "tools": ["test_tool_1", "test_tool_2", "test_tool_3", "non_mcp_tool"],
+                            "output_type": "str",
+                        },
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "test_tool_3",
+                                    "input": "",
+                                    "output": "{'type': 'text', 'text': 'result_test_tool_3_{}'}",  # noqa: E501
+                                    "mcp_data": {"server": "fake_mcp_server"},
+                                },
+                            },
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
+                                },
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
+    model = ScriptedModel()
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+
+    model.extend(
+        [
+            [get_function_tool_call("test_tool_1", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="redaction_test",
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+
+    spans = fetch_normalized_spans()
+    assert spans == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "mcp_tools",
+                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test",
+                            "handoffs": [],
+                            "tools": ["test_tool_1"],
+                            "output_type": "str",
+                        },
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {
+                                    "name": "test_tool_1",
+                                    "mcp_data": {"server": "fake_mcp_server"},
+                                },
+                            },
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trace_include_sensitive_data", [True, False])
+async def test_mcp_tracing_always_hides_url_credentials(
+    trace_include_sensitive_data: bool,
+):
+    model = ScriptedModel()
+    server = FakeMCPServer(
+        server_name=(
+            "streamable_http: https://user:s3cr3t_pw@mcp.example.test:8443/mcp"
+            "?api_key=SECRET_QS_KEY#SECRET_FRAGMENT"
+        )
+    )
+    server.add_tool("search", {})
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+    model.extend(
+        [
+            [get_function_tool_call("search", "")],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="trace_url_credentials",
+        run_config=RunConfig(trace_include_sensitive_data=trace_include_sensitive_data),
+    )
+
+    serialized_spans = json.dumps(fetch_normalized_spans())
+    safe_server_name = "streamable_http: https://mcp.example.test:8443/mcp"
+    assert serialized_spans.count(safe_server_name) == 3
+    for secret in ("user", "s3cr3t_pw", "SECRET_QS_KEY", "SECRET_FRAGMENT"):
+        assert secret not in serialized_spans

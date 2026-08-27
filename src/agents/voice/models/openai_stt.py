@@ -1,0 +1,616 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from time import monotonic
+from typing import Any, cast
+
+from openai import AsyncOpenAI
+
+from ... import _debug
+from ...exceptions import AgentsException, UserError
+from ...logger import logger
+from ...models._openai_websocket import (
+    get_openai_websocket_logger,
+    merge_openai_client_websocket_headers,
+    prepare_openai_client_websocket_base_url,
+    refresh_openai_client_api_key_if_supported,
+)
+from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
+from ...util._error_tracing import get_trace_error
+from ..exceptions import STTWebsocketConnectionError
+from ..imports import np, npt, websockets
+from ..input import AudioInput, StreamedAudioInput
+from ..model import StreamedTranscriptionSession, STTModel, STTModelSettings
+
+EVENT_INACTIVITY_TIMEOUT = 1000  # Timeout for inactivity in event processing
+SESSION_CREATION_TIMEOUT = 10  # Timeout waiting for session.created event
+SESSION_UPDATE_TIMEOUT = 10  # Timeout waiting for session.updated event
+
+DEFAULT_TURN_DETECTION = {"type": "semantic_vad"}
+
+
+@dataclass
+class ErrorSentinel:
+    error: Exception
+
+
+class SessionCompleteSentinel:
+    pass
+
+
+class WebsocketDoneSentinel:
+    pass
+
+
+class _ListenerError(Exception):
+    pass
+
+
+def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> str:
+    return _audio_buffer_to_base64(np.concatenate(audio_data))
+
+
+def _audio_buffer_to_base64(buffer: npt.NDArray[np.int16 | np.float32]) -> str:
+    if buffer.dtype == np.float32:
+        # Convert to int16.
+        buffer = np.clip(buffer, -1.0, 1.0)
+        buffer = (buffer * 32767).astype(np.int16)
+    elif buffer.dtype != np.int16:
+        raise UserError("Buffer must be a numpy array of int16 or float32")
+    return base64.b64encode(buffer.tobytes()).decode("utf-8")
+
+
+def _prepare_websocket_url(client: AsyncOpenAI) -> str:
+    base_url = prepare_openai_client_websocket_base_url(
+        client,
+        context="Streamed STT websocket",
+    )
+    params: dict[str, Any] = dict(base_url.params)
+    params["intent"] = "transcription"
+    path = base_url.path.rstrip("/") + "/realtime"
+    return str(base_url.copy_with(path=path, params=params))
+
+
+def _prepare_websocket_headers(client: AsyncOpenAI) -> dict[str, str]:
+    return merge_openai_client_websocket_headers(
+        client,
+        extra_headers={"OpenAI-Log-Session": "1"},
+    )
+
+
+async def _wait_for_event(
+    event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel],
+    expected_types: list[str],
+    timeout: float,
+):
+    """
+    Wait for an event from event_queue whose type is in expected_types within the specified timeout.
+    """
+    # Wall-clock adjustments can move a deadline forwards or backwards. Timeout
+    # accounting must use a monotonic clock instead.
+    start_time = monotonic()
+    while True:
+        remaining = timeout - (monotonic() - start_time)
+        if remaining <= 0:
+            raise TimeoutError(f"Timeout waiting for event(s): {expected_types}")
+        evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
+        if isinstance(evt, ErrorSentinel):
+            raise _ListenerError("Websocket listener failed") from evt.error
+        evt_type = evt.get("type", "")
+        if evt_type in expected_types:
+            return evt
+        elif evt_type == "error":
+            raise Exception(f"Error event: {evt.get('error')}")
+
+
+class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
+    """A transcription session for OpenAI's STT model."""
+
+    def __init__(
+        self,
+        input: StreamedAudioInput,
+        client: AsyncOpenAI,
+        model: str,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ):
+        self.connected: bool = False
+        self._client = client
+        self._model = model
+        self._settings = settings
+        self._turn_detection = settings.turn_detection or DEFAULT_TURN_DETECTION
+        self._trace_include_sensitive_data = trace_include_sensitive_data
+        self._trace_include_sensitive_audio_data = trace_include_sensitive_audio_data
+
+        self._input_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None] = input.queue
+        self._output_queue: asyncio.Queue[str | ErrorSentinel | SessionCompleteSentinel] = (
+            asyncio.Queue()
+        )
+        self._websocket: websockets.ClientConnection | None = None
+        self._event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel] = (
+            asyncio.Queue()
+        )
+        self._state_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel] = asyncio.Queue()
+        self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
+        self._tracing_span: Span[TranscriptionSpanData] | None = None
+        self._transcription_config: dict[str, Any] | None = None
+
+        # tasks
+        self._listener_task: asyncio.Task[Any] | None = None
+        self._process_events_task: asyncio.Task[Any] | None = None
+        self._stream_audio_task: asyncio.Task[Any] | None = None
+        self._connection_task: asyncio.Task[Any] | None = None
+        self._stored_exception: Exception | None = None
+
+    def _get_transcription_config(self) -> dict[str, Any]:
+        transcription_config: dict[str, Any] = {"model": self._model}
+        if self._settings.languages is not None:
+            transcription_config["languages"] = list(self._settings.languages)
+        elif self._settings.language is not None:
+            if self._model in {"gpt-transcribe", "gpt-live-transcribe"}:
+                transcription_config["languages"] = [self._settings.language]
+            else:
+                transcription_config["language"] = self._settings.language
+        if self._settings.prompt is not None:
+            transcription_config["prompt"] = self._settings.prompt
+        if self._settings.keywords is not None:
+            transcription_config["keywords"] = list(self._settings.keywords)
+        return transcription_config
+
+    def _start_turn(self) -> None:
+        # A listener failure can surface a buffered transcript before session.update completes.
+        # Once configured, every normal turn reuses the exact detached request snapshot.
+        transcription_config = self._transcription_config or self._get_transcription_config()
+        self._tracing_span = transcription_span(
+            model=self._model,
+            model_config={
+                "temperature": self._settings.temperature,
+                "language": transcription_config.get("language"),
+                "languages": transcription_config.get("languages"),
+                "keywords": (
+                    transcription_config.get("keywords")
+                    if self._trace_include_sensitive_data
+                    else None
+                ),
+                "prompt": (
+                    transcription_config.get("prompt")
+                    if self._trace_include_sensitive_data
+                    else None
+                ),
+                "turn_detection": self._turn_detection,
+            },
+        )
+        self._tracing_span.start()
+
+    def _end_turn(self, _transcript: str) -> None:
+        if self._tracing_span is not None:
+            # Only encode audio if tracing is enabled AND buffer is not empty
+            if self._trace_include_sensitive_audio_data and self._turn_audio_buffer:
+                self._tracing_span.span_data.input = _audio_to_base64(self._turn_audio_buffer)
+
+            self._tracing_span.span_data.input_format = "pcm"
+
+            if self._trace_include_sensitive_data:
+                self._tracing_span.span_data.output = _transcript
+
+            self._tracing_span.finish()
+            self._turn_audio_buffer = []
+            self._tracing_span = None
+
+    async def _event_listener(self) -> None:
+        assert self._websocket is not None, "Websocket not initialized"
+
+        try:
+            async for message in self._websocket:
+                event = json.loads(message)
+
+                if event.get("type") == "error":
+                    raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
+
+                if event.get("type") in [
+                    "session.updated",
+                    "transcription_session.updated",
+                    "session.created",
+                    "transcription_session.created",
+                ]:
+                    await self._state_queue.put(event)
+
+                await self._event_queue.put(event)
+        except Exception as e:
+            error = ErrorSentinel(e)
+            await self._event_queue.put(error)
+            await self._state_queue.put(error)
+        finally:
+            await self._event_queue.put(WebsocketDoneSentinel())
+
+    async def _configure_session(self) -> None:
+        assert self._websocket is not None, "Websocket not initialized"
+        transcription_config = self._get_transcription_config()
+        session_update = json.dumps(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "transcription": transcription_config,
+                            "turn_detection": self._turn_detection,
+                        }
+                    },
+                },
+            }
+        )
+        self._transcription_config = transcription_config
+
+        await self._websocket.send(session_update)
+
+    async def _setup_connection(self, ws: websockets.ClientConnection) -> None:
+        self._websocket = ws
+        self._listener_task = asyncio.create_task(self._event_listener())
+
+        try:
+            event = await _wait_for_event(
+                self._state_queue,
+                ["session.created", "transcription_session.created"],
+                SESSION_CREATION_TIMEOUT,
+            )
+        except _ListenerError:
+            raise
+        except TimeoutError as e:
+            wrapped_err = STTWebsocketConnectionError(
+                "Timeout waiting for transcription_session.created event"
+            )
+            await self._output_queue.put(ErrorSentinel(wrapped_err))
+            raise wrapped_err from e
+        except Exception as e:
+            await self._output_queue.put(ErrorSentinel(e))
+            raise
+
+        await self._configure_session()
+
+        try:
+            event = await _wait_for_event(
+                self._state_queue,
+                ["session.updated", "transcription_session.updated"],
+                SESSION_UPDATE_TIMEOUT,
+            )
+            if _debug.DONT_LOG_MODEL_DATA:
+                logger.debug("Session updated")
+            else:
+                logger.debug("Session updated: %s", event)
+        except _ListenerError:
+            raise
+        except TimeoutError as e:
+            wrapped_err = STTWebsocketConnectionError(
+                "Timeout waiting for transcription_session.updated event"
+            )
+            await self._output_queue.put(ErrorSentinel(wrapped_err))
+            raise wrapped_err from e
+        except Exception as e:
+            await self._output_queue.put(ErrorSentinel(e))
+            raise
+
+    async def _handle_events(self) -> None:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    self._event_queue.get(), timeout=EVENT_INACTIVITY_TIMEOUT
+                )
+                if isinstance(event, WebsocketDoneSentinel):
+                    # processed all events and websocket is done
+                    break
+                if isinstance(event, ErrorSentinel):
+                    raise STTWebsocketConnectionError("Error parsing events") from event.error
+
+                event_type = event.get("type", "unknown")
+                if event_type in [
+                    "input_audio_transcription_completed",  # legacy
+                    "conversation.item.input_audio_transcription.completed",
+                ]:
+                    transcript = cast(str, event.get("transcript", ""))
+                    if len(transcript) > 0:
+                        self._end_turn(transcript)
+                        self._start_turn()
+                        await self._output_queue.put(transcript)
+                await asyncio.sleep(0)  # yield control
+            except asyncio.TimeoutError:
+                # No new events for a while. Assume the session is done.
+                break
+            except Exception as e:
+                await self._output_queue.put(ErrorSentinel(e))
+                raise
+        await self._output_queue.put(SessionCompleteSentinel())
+
+    async def _stream_audio(
+        self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None]
+    ) -> None:
+        assert self._websocket is not None, "Websocket not initialized"
+        self._start_turn()
+        while True:
+            buffer = await audio_queue.get()
+            if buffer is None:
+                break
+
+            if self._trace_include_sensitive_audio_data:
+                # The buffer is only read back to populate the span input, so retaining it
+                # when audio tracing is off would hold a whole turn of PCM for nothing.
+                self._turn_audio_buffer.append(buffer)
+            try:
+                await self._websocket.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": _audio_buffer_to_base64(buffer),
+                        }
+                    )
+                )
+            except websockets.ConnectionClosed:
+                break
+            except Exception as e:
+                await self._output_queue.put(ErrorSentinel(e))
+                raise
+
+            await asyncio.sleep(0)  # yield control
+
+    async def _process_websocket_connection(self) -> None:
+        try:
+            await refresh_openai_client_api_key_if_supported(self._client)
+            async with websockets.connect(
+                _prepare_websocket_url(self._client),
+                additional_headers=_prepare_websocket_headers(self._client),
+                logger=get_openai_websocket_logger(),
+            ) as ws:
+                await self._setup_connection(ws)
+                self._process_events_task = asyncio.create_task(self._handle_events())
+                self._stream_audio_task = asyncio.create_task(self._stream_audio(self._input_queue))
+                self.connected = True
+                if self._listener_task:
+                    await self._listener_task
+                else:
+                    logger.error("Listener task not initialized")
+                    raise AgentsException("Listener task not initialized")
+        except _ListenerError as e:
+            if self._process_events_task is None:
+                self._process_events_task = asyncio.create_task(self._handle_events())
+            await self._process_events_task
+            raise STTWebsocketConnectionError("Error parsing events") from e.__cause__
+        except Exception as e:
+            await self._output_queue.put(ErrorSentinel(e))
+            raise
+
+    def _check_errors(self) -> None:
+        if (
+            self._connection_task
+            and self._connection_task.done()
+            and not self._connection_task.cancelled()
+        ):
+            exc = self._connection_task.exception()
+            if isinstance(exc, Exception):
+                self._stored_exception = exc
+
+        if (
+            self._process_events_task
+            and self._process_events_task.done()
+            and not self._process_events_task.cancelled()
+        ):
+            exc = self._process_events_task.exception()
+            if isinstance(exc, Exception):
+                self._stored_exception = exc
+
+        if (
+            self._stream_audio_task
+            and self._stream_audio_task.done()
+            and not self._stream_audio_task.cancelled()
+        ):
+            exc = self._stream_audio_task.exception()
+            if isinstance(exc, Exception):
+                self._stored_exception = exc
+
+        if (
+            self._listener_task
+            and self._listener_task.done()
+            and not self._listener_task.cancelled()
+        ):
+            exc = self._listener_task.exception()
+            if isinstance(exc, Exception):
+                self._stored_exception = exc
+
+    async def _cleanup_tasks(self) -> None:
+        owned_tasks = [
+            task
+            for task in (
+                self._listener_task,
+                self._process_events_task,
+                self._stream_audio_task,
+                self._connection_task,
+            )
+            if task is not None and task is not asyncio.current_task()
+        ]
+        for task in owned_tasks:
+            if not task.done():
+                task.cancel()
+
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
+
+    async def transcribe_turns(self) -> AsyncIterator[str]:
+        self._connection_task = asyncio.create_task(self._process_websocket_connection())
+
+        primary_exception: BaseException | None = None
+        try:
+            while True:
+                turn = await self._output_queue.get()
+                if (
+                    turn is None
+                    or isinstance(turn, ErrorSentinel)
+                    or isinstance(turn, SessionCompleteSentinel)
+                ):
+                    self._output_queue.task_done()
+                    break
+                try:
+                    yield turn
+                finally:
+                    self._output_queue.task_done()
+        except BaseException as exc:
+            primary_exception = exc
+            raise
+        finally:
+            cleanup_exception: BaseException | None = None
+            try:
+                await self.close()
+            except BaseException as exc:
+                cleanup_exception = exc
+
+            # Closing drains the owned tasks, so inspect their final outcomes before choosing
+            # between the session error and a secondary cleanup failure.
+            self._check_errors()
+            task_exception = self._stored_exception
+            preserve_primary_exception = primary_exception is not None
+            exception_to_raise: BaseException | None = None
+            if isinstance(primary_exception, asyncio.CancelledError):
+                pass
+            elif isinstance(cleanup_exception, asyncio.CancelledError):
+                exception_to_raise = cleanup_exception
+            elif preserve_primary_exception:
+                pass
+            elif task_exception is not None:
+                exception_to_raise = task_exception
+            elif cleanup_exception is not None:
+                exception_to_raise = cleanup_exception
+
+            cleanup_exception_was_suppressed = (
+                cleanup_exception is not None
+                and not isinstance(cleanup_exception, asyncio.CancelledError)
+                and cleanup_exception is not exception_to_raise
+            )
+            if cleanup_exception_was_suppressed:
+                try:
+                    logger.warning("STT session cleanup failed while preserving another exception")
+                except Exception:
+                    # Logging must not replace the selected exception.
+                    pass
+
+            if exception_to_raise is not None:
+                raise exception_to_raise
+
+    async def close(self) -> None:
+        try:
+            if self._websocket:
+                await self._websocket.close()
+        finally:
+            try:
+                await self._cleanup_tasks()
+            finally:
+                self._end_turn("")
+
+
+class OpenAISTTModel(STTModel):
+    """A speech-to-text model for OpenAI."""
+
+    def __init__(
+        self,
+        model: str,
+        openai_client: AsyncOpenAI,
+    ):
+        """Create a new OpenAI speech-to-text model.
+
+        Args:
+            model: The name of the model to use.
+            openai_client: The OpenAI client to use.
+        """
+        self.model = model
+        self._client = openai_client
+
+    @property
+    def model_name(self) -> str:
+        return self.model
+
+    def _non_null_or_not_given(self, value: Any) -> Any:
+        return value if value is not None else None  # NOT_GIVEN
+
+    async def transcribe(
+        self,
+        input: AudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> str:
+        """Transcribe an audio input.
+
+        Args:
+            input: The audio input to transcribe.
+            settings: The settings to use for the transcription.
+
+        Returns:
+            The transcribed text.
+        """
+        with transcription_span(
+            model=self.model,
+            input=input.to_base64() if trace_include_sensitive_audio_data else "",
+            input_format="pcm",
+            model_config={
+                "temperature": self._non_null_or_not_given(settings.temperature),
+                "language": self._non_null_or_not_given(settings.language),
+                "prompt": (
+                    self._non_null_or_not_given(settings.prompt)
+                    if trace_include_sensitive_data
+                    else None
+                ),
+            },
+        ) as span:
+            try:
+                response = await self._client.audio.transcriptions.create(
+                    model=self.model,
+                    file=input.to_audio_file(),
+                    prompt=self._non_null_or_not_given(settings.prompt),
+                    language=self._non_null_or_not_given(settings.language),
+                    temperature=self._non_null_or_not_given(settings.temperature),
+                )
+                if trace_include_sensitive_data:
+                    span.span_data.output = response.text
+                return response.text
+            except Exception as e:
+                span.span_data.output = ""
+                span.set_error(
+                    SpanError(
+                        message=get_trace_error(
+                            trace_include_sensitive_data=trace_include_sensitive_data,
+                            error_message=str(e),
+                        ),
+                        data={},
+                    )
+                )
+                raise
+
+    async def create_session(
+        self,
+        input: StreamedAudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> StreamedTranscriptionSession:
+        """Create a new transcription session.
+
+        Args:
+            input: The audio input to transcribe.
+            settings: The settings to use for the transcription.
+            trace_include_sensitive_data: Whether to include sensitive data in traces.
+            trace_include_sensitive_audio_data: Whether to include sensitive audio data in traces.
+
+        Returns:
+            A new transcription session.
+        """
+        return OpenAISTTTranscriptionSession(
+            input,
+            self._client,
+            self.model,
+            settings,
+            trace_include_sensitive_data,
+            trace_include_sensitive_audio_data,
+        )
