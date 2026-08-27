@@ -78,17 +78,20 @@ class _FakeResponse:
 
 
 class _FakeStreamContent:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
+    def __init__(self, data: bytes | list[bytes]) -> None:
+        self._chunks = [data] if isinstance(data, bytes) else data
 
     async def iter_any(self) -> Any:
-        yield self._data
+        for chunk in self._chunks:
+            yield chunk
 
 
 class _FakeSSEResponse:
-    def __init__(self, status: int, sse_body: bytes) -> None:
+    def __init__(
+        self, status: int, sse_body: bytes, sse_chunks: list[bytes] | None = None
+    ) -> None:
         self.status = status
-        self.content = _FakeStreamContent(sse_body)
+        self.content = _FakeStreamContent(sse_body if sse_chunks is None else sse_chunks)
 
     async def json(self, *, content_type: str | None = None) -> Any:
         _ = content_type
@@ -671,6 +674,28 @@ async def test_cloudflare_exec_decodes_sse_output() -> None:
     assert result.stdout == b"hello\n"
     assert result.stderr == b"warn"
     assert result.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_exec_handles_utf8_split_across_sse_chunks() -> None:
+    body = 'event: error\ndata: {"error":"失败"}\n\n'.encode()
+    split = body.index("失败".encode()) + 1
+    sess = _make_session(
+        fake_http=_FakeHttp(
+            {
+                "POST /exec": _FakeSSEResponse(
+                    status=200,
+                    sse_body=b"",
+                    sse_chunks=[body[:split], body[split:]],
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ExecTransportError) as exc_info:
+        await sess._exec_internal("echo", "hello", timeout=5.0)
+
+    assert str(exc_info.value.__cause__) == "失败"
 
 
 @pytest.mark.asyncio
@@ -2131,6 +2156,16 @@ def test_sse_line_decoder_delivers_a_cr_terminated_line_immediately() -> None:
     assert decoder.decode("data: a\r") == ["data: a"]
     # The LF is the second half of that CRLF, not a blank line, so it yields nothing.
     assert decoder.decode("\n") == []
+    assert decoder.flush() == []
+
+
+def test_sse_line_decoder_handles_utf8_split_across_byte_chunks() -> None:
+    decoder = _SSELineDecoder()
+    stream = "data: 失败\n\n".encode()
+    split = stream.index("失败".encode()) + 1
+
+    assert decoder.decode(stream[:split]) == []
+    assert decoder.decode(stream[split:]) == ["data: 失败", ""]
     assert decoder.flush() == []
 
 
