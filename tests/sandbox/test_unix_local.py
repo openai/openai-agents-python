@@ -46,14 +46,21 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
 
+@pytest.mark.parametrize(
+    "leader_waits",
+    [pytest.param(True, id="leader-waits"), pytest.param(False, id="leader-exits")],
+)
 @pytest.mark.asyncio
-async def test_unix_local_exec_cancellation_terminates_process_group(tmp_path: Path) -> None:
+async def test_unix_local_exec_cancellation_terminates_process_group(
+    tmp_path: Path, leader_waits: bool
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     pid_file = workspace / "pids"
+    final_command = 'wait "$child"' if leader_waits else "exit 0"
     command = (
         f'sleep 30 & child=$!; printf \'%s %s\' "$$" "$child" > {shlex.quote(str(pid_file))}; '
-        'wait "$child"'
+        f"{final_command}"
     )
     session = UnixLocalSandboxSession(
         state=UnixLocalSandboxSessionState(
@@ -72,16 +79,22 @@ async def test_unix_local_exec_cancellation_terminates_process_group(tmp_path: P
         assert pid_file.exists()
         shell_pid, child_pid = (int(value) for value in pid_file.read_text().split())
 
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1)
-
         def is_alive(pid: int) -> bool:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return False
             return True
+
+        if not leader_waits:
+            # Give the shell time to exit while the background child keeps the
+            # subprocess pipes open. This exercises cleanup after the leader's
+            # return code has already been set.
+            await asyncio.sleep(0.1)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
 
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline and (is_alive(shell_pid) or is_alive(child_pid)):

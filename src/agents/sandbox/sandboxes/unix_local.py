@@ -103,9 +103,8 @@ logger = logging.getLogger(__name__)
 
 
 async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is None:
-        with suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
+    with suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
     await proc.communicate()
 
 
