@@ -905,7 +905,7 @@ agent = Agent(
 
 参考资料：
 
--   [Codex 工具 API 参考](ref/extensions/experimental/codex/codex_tool.md)
--   [ThreadOptions 参考](ref/extensions/experimental/codex/thread_options.md)
--   [TurnOptions 参考](ref/extensions/experimental/codex/turn_options.md)
+-   [Codex 工具 API 参考](../ref/extensions/experimental/codex/codex_tool.md)
+-   [ThreadOptions 参考](../ref/extensions/experimental/codex/thread_options.md)
+-   [TurnOptions 参考](../ref/extensions/experimental/codex/turn_options.md)
 -   有关完整的可运行代码示例，请参阅 `examples/tools/codex.py` 和 `examples/tools/codex_same_thread.py`。

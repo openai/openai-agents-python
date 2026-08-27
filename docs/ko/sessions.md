@@ -455,6 +455,6 @@ if __name__ == "__main__":
 
 -   [`Session`][agents.memory.Session] - 프로토콜 인터페이스
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 구현
--   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 구현
+-   [`OpenAIConversationsSession`](../ref/memory/openai_conversations_session.md) - OpenAI Conversations API 구현
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 기반 구현
 -   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - TTL이 포함된 암호화 세션 래퍼

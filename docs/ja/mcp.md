@@ -367,7 +367,7 @@ async with MCPServerStdio(
 
 ## 5. MCP サーバーマネージャー {#5-mcp-server-manager}
 
-複数の MCP サーバーがある場合は、`MCPServerManager` を使用して事前に接続し、正常に接続されたサーバーのみをエージェントに公開します。コンストラクターのオプションと再接続の動作については、[MCPServerManager API リファレンス](ref/mcp/manager.md)を参照してください。
+複数の MCP サーバーがある場合は、`MCPServerManager` を使用して事前に接続し、正常に接続されたサーバーのみをエージェントに公開します。コンストラクターのオプションと再接続の動作については、[MCPServerManager API リファレンス](../ref/mcp/manager.md)を参照してください。
 
 ```python
 from agents import Agent, Runner

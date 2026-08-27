@@ -368,7 +368,7 @@ async with MCPServerStdio(
 
 ## 5. MCP 서버 관리자 {#5-mcp-server-manager}
 
-MCP 서버가 여러 개라면 `MCPServerManager`을 사용하여 미리 연결하고, 연결에 성공한 서버만 에이전트에 노출하세요. 생성자 옵션과 재연결 동작은 [MCPServerManager API 레퍼런스](ref/mcp/manager.md)를 참고하세요.
+MCP 서버가 여러 개라면 `MCPServerManager`을 사용하여 미리 연결하고, 연결에 성공한 서버만 에이전트에 노출하세요. 생성자 옵션과 재연결 동작은 [MCPServerManager API 레퍼런스](../ref/mcp/manager.md)를 참고하세요.
 
 ```python
 from agents import Agent, Runner
