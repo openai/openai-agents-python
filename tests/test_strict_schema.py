@@ -709,6 +709,29 @@ def test_resolve_ref_rejects_non_integer_json_pointer_array_index():
         resolve_ref(root=root, ref="#/allOf/x")
 
 
+@pytest.mark.parametrize(
+    "index_token",
+    [
+        "\u0660",  # Arabic-Indic digit zero
+        "\u0661",  # Arabic-Indic digit one
+        "\uff10",  # Full-width digit zero
+        "\uff11",  # Full-width digit one
+        "0\u0661",  # Mixed ASCII and Arabic-Indic digits
+        "1\uff10",  # Mixed ASCII and full-width digits
+    ],
+)
+def test_resolve_ref_rejects_non_ascii_json_pointer_array_index_tokens(index_token):
+    root = {
+        "allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "integer"}}},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="Invalid JSON Pointer array index"):
+        resolve_ref(root=root, ref=f"#/allOf/{index_token}")
+
+
 def test_ensure_strict_json_schema_inlines_ref_to_allof_member():
     schema = {
         "type": "object",

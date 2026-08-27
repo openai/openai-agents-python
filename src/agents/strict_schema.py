@@ -425,7 +425,12 @@ def _json_pointer_child(container: object, token: str, *, ref: str) -> object:
     if is_dict(container):
         return container[token]
     if is_list(container):
-        if not token.isdigit() or (len(token) > 1 and token.startswith("0")):
+        # RFC 6901 array indexes use JSON decimal digits (ASCII 0-9 only).
+        if (
+            not token
+            or not all("0" <= char <= "9" for char in token)
+            or (len(token) > 1 and token.startswith("0"))
+        ):
             raise ValueError(f"Invalid JSON Pointer array index {token!r} while resolving {ref}")
         index = int(token)
         if index >= len(container):
