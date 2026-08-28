@@ -135,6 +135,7 @@ from .run_internal.run_steps import (
 from .run_internal.session_persistence import (
     _session_get_items,
     admit_pending_input,
+    capture_session_ownership_token,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -161,6 +162,9 @@ from .tracing.config import include_task_and_turn_spans
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
 from .util import _error_tracing
+
+if TYPE_CHECKING:
+    from .memory.openai_responses_compaction_session import _SessionOwnershipToken
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
@@ -607,6 +611,12 @@ class AgentRunner:
         # Track the most recent input batch we persisted so conversation-lock retries can rewind
         # exactly those items (and not the full history).
         last_saved_input_snapshot_for_rewind: list[TResponseInputItem] | None = None
+        # Ownership of the session history this run builds its request input
+        # from; captured right before the history read and threaded through
+        # every persist so compaction boundaries record only when no other
+        # writer interleaved. Resumed runs never read the session for their
+        # request input, so they carry no token and record no boundaries.
+        session_ownership_token: _SessionOwnershipToken | None = None
 
         if is_resumed_state and run_state is not None:
             (
@@ -671,6 +681,9 @@ class AgentRunner:
                 original_input_for_state = raw_input
                 session_input_items_for_persistence = []
             else:
+                session_ownership_token = await capture_session_ownership_token(
+                    session, wrapper=context_wrapper
+                )
                 (
                     prepared_input,
                     session_input_items_for_persistence,
@@ -952,6 +965,7 @@ class AgentRunner:
                         run_state,
                         store=store_setting,
                         wrapper=context_wrapper,
+                        ownership_token=session_ownership_token,
                     )
                     session_input_items_for_persistence = []
             except BaseException:
@@ -1009,6 +1023,7 @@ class AgentRunner:
                                     run_state,
                                     store=store_setting,
                                     wrapper=context_wrapper,
+                                    ownership_token=session_ownership_token,
                                 )
                             )
                             raise
@@ -1060,6 +1075,7 @@ class AgentRunner:
                             run_state,
                             store=store_setting,
                             wrapper=context_wrapper,
+                            ownership_token=session_ownership_token,
                         )
                         session_input_items_for_persistence = []
                     if run_state is not None and run_state._current_step is not None:
@@ -1320,6 +1336,7 @@ class AgentRunner:
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
+                                            ownership_token=session_ownership_token,
                                         )
                                     except BaseException as persistence_error:
                                         raise _safe_redacted_persistence_error(
@@ -1352,6 +1369,7 @@ class AgentRunner:
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
+                                            ownership_token=session_ownership_token,
                                         )
                                     raise
 
@@ -1371,6 +1389,7 @@ class AgentRunner:
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
+                                    ownership_token=session_ownership_token,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
@@ -1444,6 +1463,7 @@ class AgentRunner:
                                 server_conversation_tracker=server_conversation_tracker,
                                 store=store_setting,
                                 wrapper=context_wrapper,
+                                ownership_token=session_ownership_token,
                             )
                             generated_items.extend(admission_items)
                             session_items.extend(admission_items)
@@ -1523,6 +1543,7 @@ class AgentRunner:
                                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                                     store=store_setting,
                                     wrapper=context_wrapper,
+                                    ownership_token=session_ownership_token,
                                 )
                             )
                             if not items:
@@ -1656,6 +1677,7 @@ class AgentRunner:
                                         run_state,
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        ownership_token=session_ownership_token,
                                     )
                                 )
                                 raise
@@ -1717,6 +1739,7 @@ class AgentRunner:
                                             run_state,
                                             store=store_setting,
                                             wrapper=context_wrapper,
+                                            ownership_token=session_ownership_token,
                                         )
                                     )
                                     raise
@@ -1869,6 +1892,7 @@ class AgentRunner:
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        ownership_token=session_ownership_token,
                                     )
 
                     # After the first resumed turn, treat subsequent turns as fresh
@@ -1947,6 +1971,7 @@ class AgentRunner:
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        ownership_token=session_ownership_token,
                                     )
                                 except BaseException as persistence_error:
                                     raise _safe_redacted_persistence_error(
@@ -1979,6 +2004,7 @@ class AgentRunner:
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        ownership_token=session_ownership_token,
                                     )
                                 raise
 
@@ -1998,6 +2024,7 @@ class AgentRunner:
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                                 wrapper=context_wrapper,
+                                ownership_token=session_ownership_token,
                             )
 
                             # Ensure starting_input is not None and not RunState
@@ -2056,6 +2083,7 @@ class AgentRunner:
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                         wrapper=context_wrapper,
+                                        ownership_token=session_ownership_token,
                                     )
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response
@@ -2118,6 +2146,7 @@ class AgentRunner:
                                 response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                                 wrapper=context_wrapper,
+                                ownership_token=session_ownership_token,
                             )
                             continue
                         else:

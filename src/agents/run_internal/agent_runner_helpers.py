@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses.response_usage import OutputTokensDetails
 
@@ -44,6 +44,9 @@ from .run_steps import (
 from .session_persistence import save_result_to_session, save_resumed_turn_items
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
+
+if TYPE_CHECKING:
+    from ..memory.openai_responses_compaction_session import _SessionOwnershipToken
 
 __all__ = [
     "apply_resumed_conversation_settings",
@@ -535,6 +538,7 @@ async def save_turn_items_if_needed(
     response_id: str | None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> None:
     """Persist turn items when persistence is enabled and guardrails allow it."""
     if not session_persistence_enabled:
@@ -551,6 +555,7 @@ async def save_turn_items_if_needed(
         response_id=response_id,
         store=store,
         wrapper=wrapper,
+        ownership_token=ownership_token,
     )
 
 
@@ -565,6 +570,7 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
     if not session_persistence_enabled or not items:
@@ -572,6 +578,9 @@ async def save_final_turn_items_after_guardrails(
     if input_guardrails_triggered(input_guardrail_results):
         return 0
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
+        # The reconciling path may append behind an earlier partial persist, so
+        # no count read there can prove what this response covers; it carries
+        # no ownership token and records no boundary.
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
             items=items,
@@ -591,6 +600,7 @@ async def save_final_turn_items_after_guardrails(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        ownership_token=ownership_token,
     )
 
 

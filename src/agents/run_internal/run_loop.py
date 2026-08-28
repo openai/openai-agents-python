@@ -10,7 +10,7 @@ import dataclasses as _dc
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from functools import partial
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import uuid4
 
 from openai.types.responses import (
@@ -173,6 +173,7 @@ from .run_steps import (
 from .session_persistence import (
     _session_get_items,
     admit_pending_input,
+    capture_session_ownership_token,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -225,6 +226,9 @@ from .turn_resolution import (
     resolve_interrupted_turn,
     run_final_output_hooks,
 )
+
+if TYPE_CHECKING:
+    from ..memory.openai_responses_compaction_session import _SessionOwnershipToken
 
 __all__ = [
     "extract_tool_call_id",
@@ -418,6 +422,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -433,6 +438,7 @@ async def _save_stream_items(
         response_id=response_id,
         store=store,
         wrapper=streamed_result.context_wrapper,
+        ownership_token=ownership_token,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -794,6 +800,7 @@ async def _persist_stream_input_if_needed(
     session: Session | None,
     server_conversation_tracker: OpenAIServerConversationTracker | None,
     context_wrapper: RunContextWrapper[TContext],
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> None:
     if (
         streamed_result._stream_input_persisted
@@ -817,6 +824,7 @@ async def _persist_stream_input_if_needed(
             [],
             streamed_result._state,
             wrapper=context_wrapper,
+            ownership_token=ownership_token,
         )
     streamed_result._stream_input_persisted = True
 
@@ -1075,6 +1083,12 @@ async def start_streaming(
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         prepared_input: str | list[TResponseInputItem]
+        # Ownership of the session history this run builds its request input
+        # from; captured right before the history read and threaded through
+        # every persist so compaction boundaries record only when no other
+        # writer interleaved. Resumed runs never read the session for their
+        # request input, so they carry no token and record no boundaries.
+        session_ownership_token: _SessionOwnershipToken | None = None
         if is_resumed_state and run_state is not None:
             prepared_input = normalize_resumed_input(starting_input)
             (
@@ -1094,6 +1108,10 @@ async def start_streaming(
             streamed_result._stream_input_persisted = True
         else:
             server_manages_conversation = server_conversation_tracker is not None
+            if not server_manages_conversation:
+                session_ownership_token = await capture_session_ownership_token(
+                    session, wrapper=context_wrapper
+                )
             prepared_input, session_items_snapshot = await prepare_input_with_session(
                 starting_input,
                 session,
@@ -1138,6 +1156,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=True,
                 store=store_setting,
+                ownership_token=session_ownership_token,
             )
 
         async def _save_stream_items_without_count(
@@ -1152,6 +1171,7 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
+                ownership_token=session_ownership_token,
             )
 
         async def _save_max_turns_items(
@@ -1172,6 +1192,7 @@ async def start_streaming(
                 reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
                 store=store_setting,
                 wrapper=streamed_result.context_wrapper,
+                ownership_token=session_ownership_token,
             )
             streamed_result._current_turn_persisted_item_count += saved_count
     except BaseException:
@@ -1235,6 +1256,7 @@ async def start_streaming(
                                     run_config.model_settings
                                 ).store,
                                 wrapper=context_wrapper,
+                                ownership_token=session_ownership_token,
                             )
                         )
                         raise InputGuardrailTripwireTriggered(result)
@@ -1519,6 +1541,7 @@ async def start_streaming(
                     server_conversation_tracker=server_conversation_tracker,
                     store=store_setting,
                     wrapper=context_wrapper,
+                    ownership_token=session_ownership_token,
                 )
                 streamed_result._model_input_items.extend(admission_items)
                 streamed_result.new_items.extend(admission_items)
@@ -1595,6 +1618,7 @@ async def start_streaming(
                     session=session,
                     server_conversation_tracker=server_conversation_tracker,
                     context_wrapper=context_wrapper,
+                    ownership_token=session_ownership_token,
                 )
 
                 validated_output = validate_handler_final_output(
@@ -1696,6 +1720,7 @@ async def start_streaming(
                                         run_config.model_settings
                                     ).store,
                                     wrapper=context_wrapper,
+                                    ownership_token=session_ownership_token,
                                 )
                             )
                             raise InputGuardrailTripwireTriggered(result)
@@ -1791,6 +1816,7 @@ async def start_streaming(
                         on_response_accepted=_commit_pending_server_response,
                         on_response_hooks_started=_mark_response_hooks_started,
                         run_state=run_state,
+                        ownership_token=session_ownership_token,
                     )
                 finally:
                     if current_turn_span is not None:
@@ -2062,6 +2088,7 @@ async def run_single_turn_streamed(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -2197,6 +2224,7 @@ async def run_single_turn_streamed(
         session=session,
         server_conversation_tracker=server_conversation_tracker,
         context_wrapper=context_wrapper,
+        ownership_token=ownership_token,
     )
 
     previous_response_id = (

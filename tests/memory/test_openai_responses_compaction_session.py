@@ -36,9 +36,25 @@ from agents.run_internal.items import (
     TOOL_CALL_SESSION_TITLE_KEY,
 )
 from agents.run_internal.session_persistence import save_result_to_session
-from agents.testing import ScriptedModel
+from agents.testing import ModelStep, ScriptedModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
+
+
+async def persist_response_batch(
+    session: OpenAIResponsesCompactionSession,
+    items: list[TResponseInputItem],
+    response_id: str,
+) -> None:
+    """Persist a batch the way the runner does on a clean turn.
+
+    Ownership is captured at the request input read and nothing interleaves
+    before the persist, so the boundary hook records the response's coverage.
+    """
+    ownership_token = await session._capture_ownership_token()
+    await session._add_items_for_response(
+        items, response_id=response_id, ownership_token=ownership_token
+    )
 
 
 class TestIsOpenAIModelName:
@@ -1498,6 +1514,45 @@ class TestOpenAIResponsesCompactionSession:
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
 
     @pytest.mark.asyncio
+    async def test_streamed_run_records_boundary_and_compacts(self) -> None:
+        """The streamed path threads ownership so boundaries record and compaction lands."""
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "compacted"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="stream-clean",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: True,
+        )
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("ok")], response_id="resp_stream")]
+        )
+        worker = Agent(name="stream_worker", model=model)
+
+        result = Runner.run_streamed(worker, "hello", session=session)
+        async for _ in result.stream_events():
+            pass
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert mock_client.responses.compact.call_args.kwargs["previous_response_id"] == (
+            "resp_stream"
+        )
+        # The boundary recorded through the streamed persists and was
+        # translated onto the replaced history; the snapshot fallback never
+        # records, so this proves the ownership token reached the hook.
+        assert session._response_boundaries_ever_recorded is True
+        assert session._response_boundaries == {"resp_stream": 1}
+        items = await session.get_items()
+        assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+    @pytest.mark.asyncio
     async def test_compaction_skips_when_tool_outputs_present(self) -> None:
         underlying = SimpleListSession()
         mock_client = MagicMock()
@@ -2184,6 +2239,7 @@ class TestCompactionConcurrentMutations:
 
         session.run_compaction = paused_run_compaction  # type: ignore[method-assign]
 
+        token_a = await session._capture_ownership_token()
         save_a = asyncio.create_task(
             save_result_to_session(
                 session,
@@ -2191,17 +2247,22 @@ class TestCompactionConcurrentMutations:
                 [cast(RunItem, StubMessageRunItem(a_turn))],
                 None,
                 response_id="resp_a",
+                ownership_token=token_a,
             )
         )
         await run_a_compaction_requested.wait()
         # Run A's batch is persisted and paired with its boundary, but its
-        # compaction has not snapshotted yet. Run B's turn lands now.
+        # compaction has not snapshotted yet. Run B's turn lands now; B read
+        # the session after A's batch was stored, so B's ownership holds and
+        # its boundary records too.
+        token_b = await session._capture_ownership_token()
         await save_result_to_session(
             session,
             [],
             [cast(RunItem, StubMessageRunItem(b_turn))],
             None,
             response_id="resp_b",
+            ownership_token=token_b,
         )
         assert await underlying.get_items() == [a_turn, b_turn]
 
@@ -2214,6 +2275,226 @@ class TestCompactionConcurrentMutations:
         assert mock_client.responses.compact.call_args.kwargs["previous_response_id"] == "resp_a"
         assert await underlying.get_items() == [compacted_item, b_turn]
         assert await session.get_items() == [compacted_item, b_turn]
+
+    @pytest.mark.asyncio
+    async def test_turn_interleaved_during_request_survives_compaction(self) -> None:
+        """A turn persisted while another run's request is in flight must survive.
+
+        Ordering under test: run A reads the session and its request goes
+        out, run B completes a full turn against the same session while A
+        waits, and A's batch persists after B's. The stored history now
+        holds B's turn below the point where A's batch lands, but the
+        server side history through A's response cannot contain a turn
+        written after A's request was sent, so a boundary taken from the
+        count at persist time would let A's replacement delete B's turn.
+        A must record nothing, and its compaction must skip before the
+        billed call, leaving both turns stored.
+        """
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "through a"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="interleaved-runs",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp_a",
+        )
+
+        request_a_in_flight = asyncio.Event()
+        release_request_a = asyncio.Event()
+
+        async def hold_request_a(call: Any) -> ModelStep:
+            request_a_in_flight.set()
+            await release_request_a.wait()
+            return ModelStep(output=[get_text_message("reply a")], response_id="resp_a")
+
+        worker_a = Agent(
+            name="worker_a",
+            model=ScriptedModel(steps=[ModelStep.respond(hold_request_a)]),
+        )
+        worker_b = Agent(
+            name="worker_b",
+            model=ScriptedModel(
+                steps=[ModelStep(output=[get_text_message("reply b")], response_id="resp_b")]
+            ),
+        )
+
+        run_a = asyncio.create_task(Runner.run(worker_a, "hello a", session=session))
+        await request_a_in_flight.wait()
+        # B's full turn, input and reply, lands while A's request is in flight.
+        await Runner.run(worker_b, "hello b", session=session)
+        release_request_a.set()
+        await run_a
+
+        stored_text = str(await underlying.get_items())
+        # B's turn must still be stored; deleting it is the data loss.
+        assert "hello b" in stored_text
+        assert "reply b" in stored_text
+        assert "hello a" in stored_text
+        assert "reply a" in stored_text
+        # A's compaction skipped before the billed call instead of replacing
+        # history it does not cover.
+        mock_client.responses.compact.assert_not_called()
+        assert "resp_a" not in session._response_boundaries
+        # B read the session after A's input was stored and nothing
+        # interleaved before B's persist, so B's boundary recorded: A's
+        # input, B's input, and B's reply.
+        assert session._response_boundaries == {"resp_b": 3}
+
+    @pytest.mark.asyncio
+    async def test_interleaved_write_before_persist_records_no_boundary(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A batch persisted after an interleaved write must record no boundary.
+
+        Ordering under test: run A captures ownership when it reads the
+        session for its request input, run B's turn persists through the
+        boundary hook while A's request is in flight, and A's batch then
+        persists. A's ownership no longer matches the store, so the hook
+        appends A's batch without recording, and A's compaction skips
+        through the ever recorded gate before the billed call instead of
+        deleting B's turn.
+        """
+        a_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        b_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+
+        underlying = SimpleListSession(history=[])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="interleaved-persist",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        token_a = await session._capture_ownership_token()
+        # B's turn lands through the hook while A's request is in flight.
+        await persist_response_batch(session, [b_turn], "resp_b")
+        await session._add_items_for_response(
+            [a_turn], response_id="resp_a", ownership_token=token_a
+        )
+
+        assert "resp_a" not in session._response_boundaries
+        assert session._response_boundaries == {"resp_b": 1}
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        assert "Skipped compaction for resp_a" in caplog.text
+        mock_client.responses.compact.assert_not_awaited()
+        assert await underlying.get_items() == [b_turn, a_turn]
+        assert await session.get_items() == [b_turn, a_turn]
+
+    @pytest.mark.asyncio
+    async def test_destructive_interleave_invalidates_ownership(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A destructive rewrite between capture and persist must void ownership.
+
+        Ordering under test: a first response records cleanly so the ever
+        recorded gate is armed, run A captures ownership, then a pop and a
+        fresh append rewrite the store back to the captured count before
+        A's batch persists. The count alone cannot see that rewrite, but
+        the generation can, so nothing records and A's compaction skips
+        before the billed call.
+        """
+        seed_one = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "seed 1"}
+        )
+        seed_two = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "seed 2"}
+        )
+        replacement_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "replacement"}
+        )
+        a_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+
+        underlying = SimpleListSession(history=[])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="destructive-interleave",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await persist_response_batch(session, [seed_one, seed_two], "resp_seed")
+        token_a = await session._capture_ownership_token()
+        # The pop bumps the generation and drops every recorded boundary;
+        # the append restores the captured count without restoring the
+        # captured history.
+        await session.pop_item()
+        await session.add_items([replacement_turn])
+        await session._add_items_for_response(
+            [a_turn], response_id="resp_a", ownership_token=token_a
+        )
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        assert "Skipped compaction for resp_a" in caplog.text
+        mock_client.responses.compact.assert_not_awaited()
+        assert await underlying.get_items() == [seed_one, replacement_turn, a_turn]
+
+    @pytest.mark.asyncio
+    async def test_clean_persist_with_token_records_and_compacts(self) -> None:
+        """With ownership intact the boundary records and the replacement lands.
+
+        Ordering under test: ownership is captured, the batch persists with
+        no interleaved write, and a later turn lands past the recorded
+        boundary. The compaction keyed on the response replaces exactly the
+        covered prefix and preserves the later turn as the tail.
+        """
+        turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+        later_turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn later"}
+        )
+        summary = cast(TResponseInputItem, {"type": "compaction", "summary": "through a"})
+
+        underlying = SimpleListSession(history=[])
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [summary]
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="clean-token",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        ownership_token = await session._capture_ownership_token()
+        await session._add_items_for_response(
+            [turn], response_id="resp_a", ownership_token=ownership_token
+        )
+
+        assert session._response_boundaries == {"resp_a": 1}
+        assert ownership_token.count == 1
+
+        await session.add_items([later_turn])
+        await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert mock_client.responses.compact.call_args.kwargs["previous_response_id"] == "resp_a"
+        assert await underlying.get_items() == [summary, later_turn]
+        assert await session.get_items() == [summary, later_turn]
 
     @pytest.mark.asyncio
     async def test_overlapping_compaction_lands_on_translated_boundary(self) -> None:
@@ -2265,8 +2546,8 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([a_turn], response_id="resp_a")
-        await session._add_items_for_response([b_turn], response_id="resp_b")
+        await persist_response_batch(session, [a_turn], "resp_a")
+        await persist_response_batch(session, [b_turn], "resp_b")
 
         compaction_a = asyncio.create_task(
             session.run_compaction({"force": True, "response_id": "resp_a"})
@@ -2346,8 +2627,8 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([b_turn], response_id="resp_b")
-        await session._add_items_for_response([a_turn], response_id="resp_a")
+        await persist_response_batch(session, [b_turn], "resp_b")
+        await persist_response_batch(session, [a_turn], "resp_a")
 
         compaction_a = asyncio.create_task(
             session.run_compaction({"force": True, "response_id": "resp_a"})
@@ -2416,9 +2697,9 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([old_turn], response_id="resp_old")
+        await persist_response_batch(session, [old_turn], "resp_old")
         for index, turn in enumerate(newer_turns):
-            await session._add_items_for_response([turn], response_id=f"resp_new_{index}")
+            await persist_response_batch(session, [turn], f"resp_new_{index}")
         assert "resp_old" not in session._response_boundaries
 
         with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
@@ -2466,7 +2747,7 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([recorded_turn], response_id="resp_recorded")
+        await persist_response_batch(session, [recorded_turn], "resp_recorded")
         await session.clear_session()
         await session.add_items([later_turn])
         assert "resp_recorded" not in session._response_boundaries
@@ -2532,7 +2813,7 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([turn], response_id="resp_a")
+        await persist_response_batch(session, [turn], "resp_a")
 
         # The append landed exactly once and the boundary bookkeeping finished
         # even though every read after the append would have failed.
@@ -2599,8 +2880,8 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([a_turn_one, a_turn_two], response_id="resp_a")
-        await session._add_items_for_response([b_turn], response_id="resp_b")
+        await persist_response_batch(session, [a_turn_one, a_turn_two], "resp_a")
+        await persist_response_batch(session, [b_turn], "resp_b")
         assert session._response_boundaries == {"resp_a": 2, "resp_b": 3}
 
         await session.run_compaction({"force": True, "response_id": "resp_a"})
@@ -2762,7 +3043,7 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response(turns, response_id="resp_a")
+        await persist_response_batch(session, turns, "resp_a")
         generation_before = session._destructive_generation
 
         # The replacement add and the restore add both fail in one outage.
@@ -2776,7 +3057,7 @@ class TestCompactionConcurrentMutations:
         assert session._response_boundaries_ever_recorded is True
 
         # A batch persisted after the failure records its boundary cleanly.
-        await session._add_items_for_response(batch_turns, response_id="resp_b")
+        await persist_response_batch(session, batch_turns, "resp_b")
 
         with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
             await session.run_compaction({"force": True, "response_id": "resp_a"})
@@ -2815,7 +3096,7 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([turn], response_id="resp_a")
+        await persist_response_batch(session, [turn], "resp_a")
         session._response_boundaries["resp_a"] = 99
 
         with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
@@ -2865,7 +3146,7 @@ class TestCompactionConcurrentMutations:
             compaction_mode="previous_response_id",
         )
 
-        await session._add_items_for_response([a_turn_one, a_turn_two], response_id="resp_a")
+        await persist_response_batch(session, [a_turn_one, a_turn_two], "resp_a")
         generation_before = session._destructive_generation
 
         compaction_task = asyncio.create_task(

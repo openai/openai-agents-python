@@ -12,7 +12,7 @@ import inspect
 import json
 from collections import deque
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from .. import _debug
 from ..exceptions import UserError
@@ -63,8 +63,12 @@ from .items import (
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import NextStepInterruption, NextStepRunAgain, ProcessedResponse, SingleStepResult
 
+if TYPE_CHECKING:
+    from ..memory.openai_responses_compaction_session import _SessionOwnershipToken
+
 __all__ = [
     "admit_pending_input",
+    "capture_session_ownership_token",
     "commit_server_pending_input",
     "prepare_input_with_session",
     "persist_session_items_for_guardrail_trip",
@@ -92,6 +96,7 @@ async def admit_pending_input(
     server_conversation_tracker: OpenAIServerConversationTracker | None,
     store: bool | None,
     wrapper: RunContextWrapper[Any],
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> list[RunItem]:
     """Admit staged RunState input into the active conversation ownership boundary.
 
@@ -115,6 +120,7 @@ async def admit_pending_input(
             None,
             store=store,
             wrapper=wrapper,
+            ownership_token=ownership_token,
         )
     if server_conversation_tracker is None:
         run_state.clear_pending_input()
@@ -188,6 +194,33 @@ def commit_server_pending_input(
     return True
 
 
+async def capture_session_ownership_token(
+    session: Session | None,
+    *,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> _SessionOwnershipToken | None:
+    """Capture a run's ownership of the session history it is about to read.
+
+    The runner calls this immediately before reading the session to build a
+    run's request input, and threads the token through that run's persists so
+    the session can tell whether any other writer landed in between. The
+    ordering matters: capturing before the read keeps the token conservative,
+    because a write that slips in between makes the token stale instead of
+    letting it claim items the request input never saw. Plain sessions record
+    no boundaries, so they get no token and keep their behavior unchanged.
+    """
+    if session is None or not is_openai_responses_compaction_aware_session(session):
+        return None
+    capture = getattr(session, "_capture_ownership_token", None)
+    if not callable(capture):
+        return None
+    wrapper = _get_session_wrapper(session, wrapper)
+    return cast(
+        "_SessionOwnershipToken | None",
+        await _call_session_method(capture, wrapper=wrapper),
+    )
+
+
 async def _session_get_items(
     session: Session,
     limit: int | None | object = _SESSION_LIMIT_UNSET,
@@ -208,13 +241,17 @@ async def _session_add_items(
     items: list[TResponseInputItem],
     *,
     response_id: str | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape.
 
     When a response id is supplied and the session is compaction aware, the
     batch is routed through the session's boundary hook so the response id is
-    paired with its exact item count in one locked region.
+    paired with its exact item count in one locked region. The hook records
+    that pairing only when the run's ownership token still matches the store,
+    proving nothing interleaved since the run read the session for its
+    request input.
     """
     wrapper = _get_session_wrapper(session, wrapper)
     add_items_for_response = (
@@ -227,10 +264,15 @@ async def _session_add_items(
             add_items_for_response,
             items,
             response_id=response_id,
+            ownership_token=ownership_token,
             wrapper=wrapper,
         )
         return
     await _call_session_method(session.add_items, items, wrapper=wrapper)
+    if ownership_token is not None:
+        # This run appended the batch itself, so its token keeps pace with the
+        # store; only a write from outside the run may leave the counts apart.
+        ownership_token.advance(len(items))
 
 
 async def _session_pop_item(
@@ -506,6 +548,7 @@ async def persist_session_items_for_guardrail_trip(
     run_state: RunState | None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> list[TResponseInputItem] | None:
     """
     Persist input items when a guardrail tripwire is triggered.
@@ -527,6 +570,7 @@ async def persist_session_items_for_guardrail_trip(
         run_state,
         store=store,
         wrapper=wrapper,
+        ownership_token=ownership_token,
     )
     return updated_session_input_items
 
@@ -574,6 +618,7 @@ async def save_result_to_session(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     resumed_write_state: RunState | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -686,11 +731,19 @@ async def save_result_to_session(
         )
     else:
         # Persisting this response's batch is the only moment its response id
-        # and its exact local item boundary coincide, so pass the id along and
-        # let the boundary hook record the pairing. A later previous_response_id
-        # compaction preserves everything past the recorded boundary, including
-        # turns other runs append before that compaction takes its own snapshot.
-        await _session_add_items(session, items_to_save, response_id=response_id, wrapper=wrapper)
+        # and its exact local item boundary coincide, so pass the id along with
+        # the run's ownership token and let the boundary hook record the
+        # pairing when nothing interleaved since the run read the session for
+        # its request input. A later previous_response_id compaction preserves
+        # everything past the recorded boundary, including turns other runs
+        # append before that compaction takes its own snapshot.
+        await _session_add_items(
+            session,
+            items_to_save,
+            response_id=response_id,
+            ownership_token=ownership_token,
+            wrapper=wrapper,
+        )
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -787,9 +840,10 @@ async def resume_pending_session_write(
     or backend identity contract. A changed tail is not repaired or searched for similar items.
 
     When a response_id is supplied and this call performs the append itself, the batch is
-    persisted through the compaction boundary hook so the response id is paired with its
-    item count. The serialized pending write carries no response id, so resumes from a
-    restored RunState leave it unset and record no boundary.
+    persisted through the compaction boundary hook. Resumed writes carry no ownership
+    token, because the resumed run never read the session to build its request input, so
+    the hook appends the batch without recording a boundary and a compaction keyed on
+    the response skips instead of guessing at its coverage.
     """
     pending = run_state._pending_session_write
     if pending is None:
@@ -834,11 +888,11 @@ async def resume_pending_session_write(
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             items_to_append = copy.deepcopy(pending["items"])
-            # Only the branch that appends can record a boundary: the hook pairs
-            # the response id with the item count in one locked region. When an
-            # earlier attempt already committed the batch, other writers may
-            # have appended since, so any count read now could claim their
-            # items for this response; no boundary is recorded in that case.
+            # The append goes through the boundary hook, but with no ownership
+            # token it records nothing: a resumed run never read the session to
+            # build its request input, so no count read here can prove what the
+            # response covers, and other writers may have appended since an
+            # earlier attempt.
             await _session_add_items(
                 session, items_to_append, response_id=response_id, wrapper=wrapper
             )

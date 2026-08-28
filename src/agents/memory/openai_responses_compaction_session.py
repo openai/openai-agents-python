@@ -35,6 +35,33 @@ _MAX_RECORDED_RESPONSE_BOUNDARIES = 50
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
 
+class _SessionOwnershipToken:
+    """One run's claim over the stored history it built its request from.
+
+    The runner captures a token under the mutation lock when it reads the
+    session to build a run's request input, before that read, and threads it
+    through the run's persists. ``count`` starts at the underlying item count
+    at capture time and advances by exactly the items the same run appends;
+    ``generation`` pins the destructive generation seen at capture. Any
+    history rewrite, including a compaction replacement this run itself
+    triggered, bumps the generation and retires the token for good: the
+    rewritten store may hold interleaved items the run's requests never saw,
+    so later persists of the run record nothing and their compactions skip.
+    The token lives only for the run that captured it and is never stored on
+    the session, so restored or resumed runs start without one.
+    """
+
+    __slots__ = ("count", "generation")
+
+    def __init__(self, count: int, generation: int) -> None:
+        self.count = count
+        self.generation = generation
+
+    def advance(self, item_count: int) -> None:
+        """Count a batch this run appended itself."""
+        self.count += item_count
+
+
 def select_compaction_candidate_items(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
@@ -143,10 +170,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_id: str | None = None
         # Authoritative record of what previous_response_id compaction covers.
         # Each response id maps to the exact local item count at the moment its
-        # batch was persisted, recorded under the mutation lock. Such a
-        # compaction covers the server side history through that response only,
-        # so the replacement must preserve every local item past the recorded
-        # boundary, not past a snapshot taken later. clear_session and pop_item
+        # batch was persisted, recorded under the mutation lock, and only when
+        # the persisting run's ownership token proves no other writer touched
+        # the store between the run's request input read and the persist. Such
+        # a compaction covers the server side history through that response
+        # only, so the replacement must preserve every local item past the
+        # recorded boundary, not past a snapshot taken later. clear_session and pop_item
         # drop recorded boundaries outright, and a successful replacement
         # translates boundaries at or past the rewritten prefix onto the new
         # history and drops the rest, so a stale count can never be read from
@@ -556,16 +585,35 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             await self._add_items_locked(items)
 
+    async def _capture_ownership_token(self) -> _SessionOwnershipToken:
+        """Capture the store state a run is about to build its request from.
+
+        The runner calls this immediately before it reads the session for a
+        run's request input. Capturing before the read keeps the token
+        conservative: a write that lands between the capture and the read can
+        only make the token stale, never let it claim an item the request
+        input missed.
+        """
+        async with self._mutation_lock:
+            count = len(await self._get_all_underlying_session_items())
+            return _SessionOwnershipToken(count=count, generation=self._destructive_generation)
+
     async def _add_items_for_response(
-        self, items: list[TResponseInputItem], *, response_id: str
+        self,
+        items: list[TResponseInputItem],
+        *,
+        response_id: str,
+        ownership_token: _SessionOwnershipToken | None = None,
     ) -> None:
         """Append a response's persisted batch and record its compaction boundary.
 
         The runner calls this instead of add_items when the batch belongs to a
         specific response. Appending and recording in one locked region keeps
         the pairing exact: no other writer can slip items in between the batch
-        and the count recorded for it. See _response_boundaries for how the
-        recorded boundary is consumed.
+        and the count recorded for it. The boundary records only when the
+        caller's ownership token still matches the store; without a token, or
+        with a stale one, the batch is appended and nothing is recorded. See
+        _response_boundaries for how the recorded boundary is consumed.
 
         The count that seeds the boundary is read before the append. The lock
         excludes every other writer for the whole region, so that count plus
@@ -578,8 +626,31 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         recorded flag stays untouched, and a retry begins clean.
         """
         async with self._mutation_lock:
-            boundary = len(await self._get_all_underlying_session_items()) + len(items)
+            count_before_append = len(await self._get_all_underlying_session_items())
+            # The token decides whether this response may own the whole prefix.
+            # Appends by any other writer leave the underlying count above the
+            # token's, because the token advances only for this run's own
+            # batches, and every destructive rewrite bumps the generation. Both
+            # matching therefore means the store holds exactly the history this
+            # run's request input was built from plus this run's own persisted
+            # batches, all of which the server side history through this
+            # response contains, so count plus the batch length is the true
+            # coverage boundary. On a mismatch some interleaved write sits
+            # below where this batch lands and the server side history cannot
+            # contain it; a recorded count would let the replacement delete it,
+            # so the batch is appended with nothing recorded and a compaction
+            # keyed on this response skips through the ever recorded gate
+            # before the billed call.
+            owns_prefix = (
+                ownership_token is not None
+                and ownership_token.generation == self._destructive_generation
+                and ownership_token.count == count_before_append
+            )
             await self._add_items_locked(items)
+            if ownership_token is None or not owns_prefix:
+                return
+            ownership_token.advance(len(items))
+            boundary = count_before_append + len(items)
             # Pop before reinserting so a recorded id moves to the newest slot;
             # the eviction loop below removes oldest first by insertion order.
             self._response_boundaries.pop(response_id, None)
