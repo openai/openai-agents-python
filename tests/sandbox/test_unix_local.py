@@ -50,6 +50,19 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
 
 
+async def _wait_for_integer_file(path: Path, count: int) -> tuple[int, ...]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            values = tuple(int(value) for value in path.read_text().split())
+        except (FileNotFoundError, ValueError):
+            values = ()
+        if len(values) == count:
+            return values
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"did not publish {count} integers to {path}")
+
+
 @pytest.mark.parametrize(
     "leader_waits",
     [pytest.param(True, id="leader-waits"), pytest.param(False, id="leader-exits")],
@@ -77,11 +90,7 @@ async def test_unix_local_exec_cancellation_terminates_process_group(
     shell_pid: int | None = None
     child_pid: int | None = None
     try:
-        deadline = time.monotonic() + 5
-        while not pid_file.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        assert pid_file.exists()
-        shell_pid, child_pid = (int(value) for value in pid_file.read_text().split())
+        shell_pid, child_pid = await _wait_for_integer_file(pid_file, 2)
 
         def is_alive(pid: int) -> bool:
             try:
@@ -152,17 +161,9 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
         return True
 
     try:
-        deadline = time.monotonic() + 5
-        while not pid_file.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        assert pid_file.exists()
-        shell_pid, _background_pid = (int(value) for value in pid_file.read_text().split())
+        shell_pid, _background_pid = await _wait_for_integer_file(pid_file, 2)
 
-        deadline = time.monotonic() + 5
-        while not escaped_pid_file.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        assert escaped_pid_file.exists()
-        escaped_pid = int(escaped_pid_file.read_text())
+        (escaped_pid,) = await _wait_for_integer_file(escaped_pid_file, 1)
 
         task.cancel()
         done, _ = await asyncio.wait({task}, timeout=2)
@@ -182,6 +183,48 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicate_started = asyncio.Event()
+    wait_called = asyncio.Event()
+    transport_closed = False
+
+    class _Transport:
+        def close(self) -> None:
+            nonlocal transport_closed
+            transport_closed = True
+
+    class _Process:
+        pid = 123
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            communicate_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        async def wait(self) -> int:
+            wait_called.set()
+            return -signal.SIGKILL
+
+    monkeypatch.setattr(unix_local_module.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(unix_local_module, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.01)
+
+    process = cast(asyncio.subprocess.Process, _Process())
+    task = asyncio.create_task(unix_local_module._terminate_process_group_and_reap(process))
+    await communicate_started.wait()
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    await asyncio.wait_for(task, timeout=1)
+    assert wait_called.is_set()
+    assert transport_closed
 
 
 @pytest.mark.asyncio

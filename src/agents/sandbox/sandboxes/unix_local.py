@@ -104,7 +104,7 @@ logger = logging.getLogger(__name__)
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
-async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
+async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Process) -> None:
     with suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
     try:
@@ -120,6 +120,18 @@ async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) ->
         transport = getattr(proc, "_transport", None)
         if transport is not None:
             transport.close()
+
+
+async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
+    # Keep process cleanup in an owned task so a second cancellation cannot
+    # interrupt the drain, direct-child reap, or transport close.
+    cleanup_task = asyncio.create_task(_terminate_process_group_and_reap_process(proc))
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    cleanup_task.result()
 
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
