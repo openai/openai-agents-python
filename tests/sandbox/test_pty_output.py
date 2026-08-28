@@ -5,7 +5,10 @@ from collections import deque
 
 import pytest
 
-from agents.sandbox.session.pty_output import collect_pty_output
+from agents.sandbox.session.pty_output import (
+    _incomplete_utf8_suffix_length,
+    collect_pty_output,
+)
 
 
 @pytest.mark.asyncio
@@ -137,3 +140,66 @@ async def test_collect_pty_output_replaces_bytes_that_cannot_start_a_character(
     # Replaced in this window rather than withheld from an interactive prompt forever.
     assert output.decode("utf-8") == "prompt\ufffd"
     assert not output_chunks
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"abc", 0),
+        (b"a\xc3", 1),
+        (b"a\xc3\xa9", 0),
+        (b"a\xe2", 1),
+        (b"a\xe2\x82", 2),
+        (b"a\xe2\x82\xac", 0),
+        (b"a\xf0", 1),
+        (b"a\xf0\x9f", 2),
+        (b"a\xf0\x9f\x98", 3),
+        (b"a\xf0\x9f\x98\x80", 0),
+        (b"a\xc0", 0),
+        (b"a\xc1", 0),
+        (b"a\xf5", 0),
+        (b"a\xff", 0),
+        (b"a\x80", 0),
+        (b"\x80\x80\x80\x80", 0),
+    ],
+)
+def test_incomplete_utf8_suffix_length(data: bytes, expected: int) -> None:
+    """Every split position of every sequence length, plus bytes that can never complete."""
+    assert _incomplete_utf8_suffix_length(data) == expected
+
+
+@pytest.mark.parametrize("split", [1, 2])
+@pytest.mark.asyncio
+async def test_collect_pty_output_holds_three_byte_character_split_at_any_point(
+    split: int,
+) -> None:
+    """A three-byte character must survive a window boundary after one or two bytes."""
+    text = "a\u20acb"
+    raw = text.encode("utf-8")
+    boundary = 1 + split  # after "a" plus part of the euro sign
+
+    output_chunks: deque[bytes] = deque([raw[:boundary]])
+    output_lock = asyncio.Lock()
+    output_notify = asyncio.Event()
+    producer_done = False
+
+    async def window() -> bytes:
+        output_notify.set()
+        collected, _ = await collect_pty_output(
+            output_chunks=output_chunks,
+            output_lock=output_lock,
+            output_notify=output_notify,
+            is_done=lambda: producer_done,
+            yield_time_ms=1,
+            max_output_tokens=None,
+        )
+        return collected
+
+    first = await window()
+    assert first == b"a"
+
+    output_chunks.append(raw[boundary:])
+    producer_done = True
+    second = await window()
+
+    assert (first + second).decode("utf-8") == text

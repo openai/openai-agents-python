@@ -10,10 +10,15 @@ from .pty_types import truncate_text_by_tokens
 
 def _incomplete_utf8_suffix_length(data: bytes | bytearray) -> int:
     """Return how many trailing bytes start a UTF-8 sequence that is not finished yet."""
-    for back in range(1, min(3, len(data)) + 1):
+    # A sequence is at most four bytes, so the lead byte is within four of the end.
+    for back in range(1, min(4, len(data)) + 1):
         byte = data[-back]
         if byte < 0x80:
+            # ASCII cannot be part of a multi-byte sequence, so nothing is pending.
             return 0
+        if byte < 0xC0:
+            # Continuation byte. Keep walking back to find the lead byte it belongs to.
+            continue
         # Only real lead bytes can still be completed. 0xC0, 0xC1 and 0xF5 to 0xFF never
         # start a valid sequence, so carrying them would withhold a byte that no later
         # output can finish and would suppress the replacement character forever.
@@ -26,6 +31,7 @@ def _incomplete_utf8_suffix_length(data: bytes | bytearray) -> int:
         else:
             return 0
         return back if back < needed else 0
+    # Four trailing bytes with no lead byte cannot be completed either.
     return 0
 
 
