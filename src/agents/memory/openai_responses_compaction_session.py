@@ -52,14 +52,16 @@ class _SessionOwnershipToken:
 
     A token can also be voided outright through ``invalidate``. The runner
     calls it when the run's request input provably stops covering the whole
-    stored history: a windowed read left the oldest items out, a session
-    input callback rebuilt the input, a call_model_input_filter rewrote the
-    request, a handoff input filter rewrote the accumulated history mid
-    run, or handoff history nesting collapsed it into a rendered transcript. Counts cannot describe what the server saw in any of these cases,
-    so a voided token never records. Every persist that carries a token, in
-    whatever state, marks the session as boundary managed, which makes every
-    compaction keyed on the run's responses skip before the billed call
-    whenever nothing was recorded for them.
+    stored history: the request history read returned a different number of
+    items than the token captured, a session input callback rebuilt the
+    input, a call_model_input_filter rewrote the request, a handoff input
+    filter rewrote the accumulated history mid run, or handoff history
+    nesting collapsed it into a rendered transcript. Counts cannot describe
+    what the server saw in any of these cases, so a voided token never
+    records. Every persist that carries a token, in whatever state, marks the
+    session as boundary managed, which makes every compaction keyed on the
+    run's responses skip before the billed call whenever nothing was recorded
+    for them.
     """
 
     __slots__ = ("count", "generation", "invalidated")

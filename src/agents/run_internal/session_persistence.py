@@ -405,12 +405,12 @@ async def prepare_input_with_session(
 
     ``ownership_token`` is the token the runner captured for this read. The
     preparation below is where the run's request input can silently stop
-    covering the stored history: a resolved ``limit`` windows the history read,
-    and a ``session_input_callback`` rebuilds the input outright. Both cases
-    void the token here, at the site where the coverage is lost, so the run's
-    persists record no compaction boundary and its previous_response_id
-    compactions skip instead of letting a replacement delete prefix items the
-    server never saw.
+    covering the stored history: the history read can return a different
+    number of items than the token counted, and a ``session_input_callback``
+    rebuilds the input outright. Both cases void the token here, at the site
+    where the coverage is lost, so the run's persists record no compaction
+    boundary and its previous_response_id compactions skip instead of letting
+    a replacement delete prefix items the server never saw.
     """
 
     if session is None:
@@ -426,19 +426,19 @@ async def prepare_input_with_session(
             limit=resolved_settings.limit,
             wrapper=wrapper,
         )
-        if ownership_token is not None and len(history) != ownership_token.count:
-            # The windowed read returned something other than the exact items
-            # the token was captured over, so the request input either leaves
-            # out the oldest stored items or was built over an interleaved
-            # write; either way no recorded count could describe what the
-            # server saw. Void the token so this run records no boundaries.
-            # When the counts match, the window held the entire store at
-            # capture time, and the token's generation and count checks at
-            # persist still prove nothing changed in between, so recording
-            # stays exactly as sound as an unwindowed read.
-            ownership_token.invalidate()
     else:
         history = await _session_get_items(session, wrapper=wrapper)
+    if ownership_token is not None and len(history) != ownership_token.count:
+        # The read that feeds the request returned a different number of items
+        # than the token counted in the store, so the request either leaves
+        # stored items out or was built over an interleaved write, and no
+        # recorded count could describe what the server saw. Asking instead
+        # whether a limit resolved here would miss one configured on a wrapped
+        # session, whose settings this decorator never exposes, and any other
+        # backend that windows its own reads. The raw read is compared, before
+        # normalization and dedupe legitimately merge items; a window that
+        # admits the whole store still matches it and still records.
+        ownership_token.invalidate()
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history

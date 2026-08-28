@@ -3388,8 +3388,9 @@ class TestCompactionConcurrentMutations:
 class TestPartialRequestInputCompaction:
     """Runs whose request input skips stored history must not record boundaries.
 
-    A resolved session limit windows the history read, a session input
-    callback rebuilds the prepared input outright, a call_model_input_filter
+    A session limit windows the history read, whether it resolves at the
+    wrapper or only inside the wrapped backend, a session input callback
+    rebuilds the prepared input outright, a call_model_input_filter
     rewrites any request before it goes out, a handoff input filter rewrites
     the accumulated history mid run, and nested handoff history folds it
     into a rendered transcript. In every case the request carries less than
@@ -3540,6 +3541,75 @@ class TestPartialRequestInputCompaction:
         assert session._response_boundaries_ever_recorded is True
         mock_client.responses.compact.assert_not_called()
         assert "Skipped compaction for resp_sess" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_wrapped_session_limit_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A limit carried by the wrapped backend must fire the guard too.
+
+        Nothing above the backend knows about this window. The decorator
+        inherits ``session_settings = None`` rather than proxying the wrapped
+        session's setting, and the run sets no limit either, so the resolved
+        settings look unlimited while the backend still applies its own limit
+        to the unlimited read and returns only the newest turns. The request
+        input therefore omits the oldest stored turns with no limit visible
+        anywhere and no concurrency involved, and a boundary recorded over
+        the full store would let the previous_response_id replacement delete
+        the omitted prefix. The token is voided because the read came back
+        shorter than the count it captured, so nothing records, the gate
+        arms, the compaction skips before the billed call, and every stored
+        item survives.
+        """
+
+        class WrappedLimitSession(SimpleListSession):
+            """Mirror a backend whose own settings window an unlimited read."""
+
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.session_settings = SessionSettings(limit=2)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                if limit is None and self.session_settings is not None:
+                    limit = self.session_settings.limit
+                return await super().get_items(limit)
+
+        prior_turns = self._prior_turns()
+        underlying = WrappedLimitSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "wrapped-limit")
+        # The window is invisible from the wrapper, which is what made the
+        # earlier check on the resolved limit miss this case.
+        assert session.session_settings is None
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("wrapped reply")], response_id="resp_wrap")]
+        )
+        worker = Agent(name="wrapped_limit_worker", model=model)
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(worker, "wrapped question", session=session)
+
+        # The backend really windowed the request: the oldest turns were left
+        # out of it, so the server side history cannot contain them.
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" not in request_text
+        assert "recent question" in request_text
+        assert "wrapped question" in request_text
+
+        # The full history survived, including the prefix the server never
+        # saw; deleting it is the data loss under test. Read past the
+        # backend's own window so the whole store is inspected.
+        stored = await underlying.get_items(limit=100)
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "wrapped question" in stored_text
+        assert "wrapped reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_wrap" in caplog.text
 
     @pytest.mark.asyncio
     async def test_filtering_input_callback_records_nothing_and_compaction_skips(
