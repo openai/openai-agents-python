@@ -554,6 +554,38 @@ def test_var_keyword_scalar_annotation():
     assert func(*args, **kwargs) == 5
 
 
+def test_var_keyword_fixed_length_tuple_annotation_is_rejected():
+    # A fixed-length or empty tuple cannot describe each keyword value, so reject it at
+    # construction instead of silently narrowing every value to that shape -- mirroring the
+    # variadic-positional guard (see #4735).
+    def pair(**kwargs: tuple[int, str]) -> int:
+        return 0
+
+    def empty_tuple(**kwargs: tuple[()]) -> int:
+        return 0
+
+    for func in (pair, empty_tuple):
+        with pytest.raises(UserError) as excinfo:
+            function_schema(func, use_docstring_info=False)
+        assert "use tuple[T, ...] or list[T] instead" in str(excinfo.value)
+
+
+def test_var_keyword_supported_annotations_still_build():
+    # The alternatives named by the rejection message must keep working.
+    def homogeneous_tuple(**kwargs: tuple[int, ...]) -> int:
+        return 0
+
+    def value_list(**kwargs: list[int]) -> int:
+        return 0
+
+    def scalar(**kwargs: int) -> int:
+        return 0
+
+    for func in (homogeneous_tuple, value_list, scalar):
+        fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
+        assert fs.params_json_schema["properties"]["kwargs"]["type"] == "object"
+
+
 def test_schema_with_mapping_raises_strict_mode_error():
     """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
 

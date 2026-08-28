@@ -467,6 +467,22 @@ def function_schema(
             # annotation as the value type -- mirroring the variadic-positional handling above,
             # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
             # set to ``Any`` above, yielding ``dict[str, Any]``.
+            # A fixed-length tuple cannot describe each keyword value, so reject it at
+            # construction instead of silently narrowing every value to that exact shape --
+            # mirroring the variadic-positional guard (see #4735). A bare ``tuple`` is
+            # unparameterized and carries no element type to reject; tuple[()] and other
+            # fixed-length tuples are parameterized, so they raise instead of producing a
+            # schema that cannot describe the call.
+            if get_origin(ann) is tuple:
+                args_of_tuple = get_args(ann)
+                if not (len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis) and hasattr(
+                    ann, "__args__"
+                ):
+                    raise UserError(
+                        f"Variadic parameter **{name} in function {func.__name__} is annotated"
+                        f" with the fixed-length tuple {ann}. A variadic annotation describes"
+                        " each keyword value, so use tuple[T, ...] or list[T] instead."
+                    )
             ann = dict[str, ann]  # type: ignore
 
             fields[name] = (
