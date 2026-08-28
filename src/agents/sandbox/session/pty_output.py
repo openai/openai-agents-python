@@ -54,10 +54,19 @@ async def collect_pty_output(
     # decoder once the provider is done replaces a tail that no later window will finish.
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     text = decoder.decode(output, final=is_done())
-    pending = decoder.getstate()[0]
+    pending = bytes(decoder.getstate()[0])
+
+    # The decoder holds ED A0..BF, which leads a surrogate, even though no third byte can
+    # complete it. Those 32 prefixes are the only thing it ever buffers that cannot become a
+    # character, so handing them back would keep the output hidden for as long as the process
+    # runs. Replace them here instead, the same way the decoder would once it is closed.
+    if len(pending) == 2 and pending[0] == 0xED and pending[1] >= 0xA0:
+        text += pending.decode("utf-8", errors="replace")
+        pending = b""
+
     if pending:
         async with output_lock:
-            output_chunks.appendleft(bytes(pending))
+            output_chunks.appendleft(pending)
 
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count

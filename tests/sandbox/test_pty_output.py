@@ -153,3 +153,41 @@ async def test_collect_pty_output_does_not_hold_back_bytes_that_start_no_charact
 
     assert collected.decode("utf-8").startswith("ok �")
     assert not chunks
+
+
+# ED A0..BF leads a surrogate, so no third byte can complete it. the decoder still buffers
+# these, and they are the only prefixes it buffers that can never become a character
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [0xA0, 0xAF, 0xBF])
+async def test_collect_pty_output_does_not_hold_back_a_surrogate_lead(second: int) -> None:
+    chunks: deque[bytes] = deque([b"ok " + bytes([0xED, second])])
+    lock = asyncio.Lock()
+    notify = asyncio.Event()
+    done = {"value": False}
+
+    collected = await _one_window(chunks, lock, notify, done)
+
+    assert collected.decode("utf-8") == "ok \ufffd\ufffd"
+    assert not chunks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [0x80, 0x9F])
+async def test_collect_pty_output_still_holds_a_valid_lead_below_the_surrogates(
+    second: int,
+) -> None:
+    # ED 80..9F is U+D000..U+D7FF, which is a real character, so it must still be waited for
+    raw = bytes([0xED, second, 0x80])
+    chunks: deque[bytes] = deque([raw[:2]])
+    lock = asyncio.Lock()
+    notify = asyncio.Event()
+    done = {"value": False}
+
+    first = await _one_window(chunks, lock, notify, done)
+    assert first == b""
+
+    chunks.append(raw[2:])
+    done["value"] = True
+    second_window = await _one_window(chunks, lock, notify, done)
+
+    assert (first + second_window).decode("utf-8") == raw.decode("utf-8")
