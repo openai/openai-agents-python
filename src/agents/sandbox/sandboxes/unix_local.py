@@ -141,7 +141,13 @@ async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) ->
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
             continue
-    cleanup_task.result()
+    try:
+        cleanup_task.result()
+    except Exception:
+        logger.debug(
+            "UnixLocal process cleanup failed after cancellation",
+            exc_info=True,
+        )
 
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
