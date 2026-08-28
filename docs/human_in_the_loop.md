@@ -12,7 +12,7 @@ This page focuses on the manual approval flow via `interruptions`. If your app c
 
 Set `needs_approval` to `True` to always require approval or provide an async function that decides per call. The callable receives the run context, parsed tool parameters, and the tool call ID.
 
-Callable approval rules fail closed when the SDK cannot safely inspect the arguments. If the arguments are malformed JSON, are valid JSON but not an object (for example, `null` or a list), or contain non-standard constants such as `NaN`, `Infinity`, or `-Infinity`, the callable is not invoked and the call requires manual approval. This behavior is the same for Runner and Realtime tool calls.
+Callable approval rules fail closed when the SDK cannot safely inspect the arguments. If the arguments are missing, empty, contain only whitespace, are malformed JSON, are valid JSON but not an object (for example, `null` or a list), or contain non-standard constants such as `NaN`, `Infinity`, or `-Infinity`, the callable is not invoked and the call requires manual approval. This behavior is the same for Runner and Realtime tool calls.
 
 ```python
 from agents import Agent

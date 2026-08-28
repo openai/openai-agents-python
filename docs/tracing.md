@@ -101,6 +101,8 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
 
 [`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip this call when the default export latency is acceptable.
 
+Disabling tracing prevents the default provider from creating new traces and spans, but it does not discard data that its processors already buffered. [`flush_traces()`][agents.tracing.flush_traces] continues to flush that buffered data after tracing has been disabled through `set_tracing_disabled(True)` or `OPENAI_AGENTS_DISABLE_TRACING=1`.
+
 ## Higher level traces
 
 Sometimes, you might want multiple calls to `run()` to be part of a single trace. You can do this by wrapping the entire code in a `trace()`.
@@ -144,6 +146,8 @@ The `generation_span()` stores the inputs/outputs of the LLM generation, and `fu
 Similarly, Audio spans include base64-encoded PCM data for input and output audio by default. You can disable capturing this audio data by configuring [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data].
 
 By default, `trace_include_sensitive_data` is `True`. You can set the default without code by exporting the `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` environment variable to `true/1` or `false/0` before running your app.
+
+When `trace_include_sensitive_data` is `False`, Responses model spans omit the request input and response output. For calls to an official OpenAI endpoint, the spans still include the Responses API `response_id` as correlation metadata. The SDK omits that identifier from redacted spans for custom endpoints.
 
 ## Custom tracing processors
 

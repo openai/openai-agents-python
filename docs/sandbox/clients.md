@@ -35,6 +35,25 @@ Unix-local is the easiest way to start developing against a local filesystem. Mo
 
 `SandboxPathGrant.host_path` is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See [Manifest path grants](guide.md#manifest) for details.
 
+### Limit host environment inheritance for Unix-local sessions
+
+By default, `UnixLocalSandboxClient` starts every command environment from the complete host process environment. Set `inherit_host_environment=False` to pass only a conservative allowlist of host variables instead:
+
+```python
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+client = UnixLocalSandboxClient(
+    inherit_host_environment=False,
+    host_environment_allowlist={"PATH", "LANG", "SSL_CERT_FILE"},
+)
+```
+
+When `inherit_host_environment=False` and `host_environment_allowlist` is omitted, the SDK allows `PATH`, `LANG`, `LC_ALL`, `LC_COLLATE`, `LC_CTYPE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`, `TZ`, `TERM`, `TMPDIR`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `UV_PYTHON`, `NO_COLOR`, `FORCE_COLOR`, and `CI`. Pass a custom collection to replace that default allowlist. A custom allowlist requires `inherit_host_environment=False`.
+
+Values from `Manifest.environment` are applied after host filtering and override inherited values. Unix-local commands always receive the workspace root as `HOME`. The inheritance policy belongs to the current client rather than serialized session state, so `create(...)` and `resume(...)` apply the policy of the client that performs that operation.
+
+This option filters inherited environment variables only. Unix-local commands still run as local host processes with local filesystem and network access. Use Docker or a hosted sandbox when the workload requires stronger isolation.
+
 To switch from Unix-local to Docker, keep the agent definition the same and change only the run config:
 
 ```python
@@ -66,6 +85,22 @@ options = DockerSandboxClientOptions(
 ```
 
 The only supported explicit network mode is `"none"`; omit `network_mode` to preserve Docker's default behavior. A network-disabled sandbox cannot expose ports, so combining `network_mode="none"` with a non-empty `exposed_ports` tuple fails during option validation. The setting is stored in sandbox session state and reapplied if the SDK must create a replacement container while resuming that state.
+
+### Label Docker containers
+
+Set `labels` when an application needs to identify or manage the Docker containers created for sandbox sessions:
+
+```python
+options = DockerSandboxClientOptions(
+    image="python:3.14-slim",
+    labels={
+        "com.example.owner": "agents-sdk",
+        "com.example.environment": "development",
+    },
+)
+```
+
+The SDK passes these key-value pairs to Docker when it creates the container and stores them in [`DockerSandboxSessionState`][agents.sandbox.sandboxes.docker.DockerSandboxSessionState]. When a resumed session reconnects to an existing container, the SDK verifies that every persisted label still has the expected value and raises `ValueError` if the labels do not match. When the SDK creates a replacement container from the saved state, it reapplies the persisted labels.
 
 ## Mounts and remote storage
 
