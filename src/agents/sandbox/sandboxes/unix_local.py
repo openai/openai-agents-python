@@ -107,13 +107,20 @@ _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Process) -> None:
     with suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
+    # The process group can contain descendants owned by another user when the
+    # command was launched through sudo. Kill the direct child separately so
+    # that a permission failure for one group member cannot leave the sudo
+    # process running and holding the pipes open.
+    with suppress(OSError):
+        proc.kill()
     try:
         await asyncio.wait_for(proc.communicate(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         # A descendant can escape the process group and keep the output pipes
         # open. The direct child still needs to be reaped, but waiting for the
         # escaped descendant would make cancellation unbounded.
-        await proc.wait()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
     finally:
         # asyncio does not expose a public Process method for closing pipe
         # transports after communicate() is cancelled.
