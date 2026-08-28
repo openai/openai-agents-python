@@ -15,7 +15,7 @@ from openai.types.responses.response_usage import (
 )
 
 import agents._debug as _debug
-from agents import Agent, RunConfig, Runner
+from agents import Agent, HandoffInputData, RunConfig, Runner, handoff
 from agents.items import RunItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionArgs,
@@ -31,13 +31,19 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run import CallModelData, ModelInputData
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
 from agents.run_internal.session_persistence import save_result_to_session
 from agents.testing import ModelStep, ScriptedModel
-from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
+from tests.test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_handoff_tool_call,
+    get_text_message,
+)
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -2346,6 +2352,146 @@ class TestCompactionConcurrentMutations:
         assert session._response_boundaries == {"resp_b": 3}
 
     @pytest.mark.asyncio
+    async def test_streamed_turn_interleaved_during_request_survives_compaction(self) -> None:
+        """A turn persisted while a streamed run's request is in flight must survive.
+
+        The streamed variant of the ordering above: run A streams, run B
+        completes a full turn against the same session while A's request
+        is held open, and A's batch persists after B's. A's ownership went
+        stale, so A records nothing and its compaction skips before the
+        billed call, leaving both turns stored. This pins the ownership
+        threading through the streaming loop's own persist helpers.
+        """
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "through a"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="interleaved-streamed-runs",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp_a",
+        )
+
+        request_a_in_flight = asyncio.Event()
+        release_request_a = asyncio.Event()
+
+        async def hold_request_a(call: Any) -> ModelStep:
+            request_a_in_flight.set()
+            await release_request_a.wait()
+            return ModelStep(output=[get_text_message("reply a")], response_id="resp_a")
+
+        worker_a = Agent(
+            name="worker_a",
+            model=ScriptedModel(steps=[ModelStep.respond(hold_request_a)]),
+        )
+        worker_b = Agent(
+            name="worker_b",
+            model=ScriptedModel(
+                steps=[ModelStep(output=[get_text_message("reply b")], response_id="resp_b")]
+            ),
+        )
+
+        async def stream_run_a() -> None:
+            result = Runner.run_streamed(worker_a, "hello a", session=session)
+            async for _ in result.stream_events():
+                pass
+
+        run_a = asyncio.create_task(stream_run_a())
+        await request_a_in_flight.wait()
+        # B's full turn, input and reply, lands while A's stream is held open.
+        await Runner.run(worker_b, "hello b", session=session)
+        release_request_a.set()
+        await run_a
+
+        stored_text = str(await underlying.get_items())
+        # B's turn must still be stored; deleting it is the data loss.
+        assert "hello b" in stored_text
+        assert "reply b" in stored_text
+        assert "hello a" in stored_text
+        assert "reply a" in stored_text
+        # A's compaction skipped before the billed call instead of replacing
+        # history it does not cover.
+        mock_client.responses.compact.assert_not_called()
+        assert "resp_a" not in session._response_boundaries
+        # B read the session after A's input was stored and nothing
+        # interleaved before B's persist, so B's boundary recorded: A's
+        # input, B's input, and B's reply.
+        assert session._response_boundaries == {"resp_b": 3}
+
+    @pytest.mark.asyncio
+    async def test_first_interleaved_persist_arms_skip_gate(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A first ever persist with stale ownership must arm the skip gate.
+
+        Ordering under test: a fresh wrapper over an empty store, run A's
+        request goes out, and a plain add_items call lands another
+        writer's item while A waits. A's persist records nothing because
+        its ownership went stale, and nothing was ever recorded on this
+        wrapper before, so without the stale persist arming the gate the
+        compaction keyed on A's response would fall through to the
+        snapshot fallback, classify the interleaved item as covered, and
+        delete it in the replacement. The stale token must arm the gate
+        by itself: A's compaction skips before the billed call and every
+        stored item survives. The interleaved write goes through plain
+        add_items with no token, so it neither records nor arms anything
+        on its own.
+        """
+        interleaved_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn b"}
+        )
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "through a"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="first-interleave",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp_a",
+        )
+
+        request_a_in_flight = asyncio.Event()
+        release_request_a = asyncio.Event()
+
+        async def hold_request_a(call: Any) -> ModelStep:
+            request_a_in_flight.set()
+            await release_request_a.wait()
+            return ModelStep(output=[get_text_message("reply a")], response_id="resp_a")
+
+        worker_a = Agent(
+            name="worker_a",
+            model=ScriptedModel(steps=[ModelStep.respond(hold_request_a)]),
+        )
+
+        run_a = asyncio.create_task(Runner.run(worker_a, "hello a", session=session))
+        await request_a_in_flight.wait()
+        await session.add_items([interleaved_item])
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            release_request_a.set()
+            await run_a
+
+        # The interleaved item must still be stored; deleting it is the loss.
+        stored_text = str(await underlying.get_items())
+        assert "turn b" in stored_text
+        assert "hello a" in stored_text
+        assert "reply a" in stored_text
+        # The stale persist recorded nothing but armed the gate, so the
+        # compaction skipped before the billed call instead of reaching the
+        # snapshot fallback.
+        mock_client.responses.compact.assert_not_called()
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        assert "Skipped compaction for resp_a" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_interleaved_write_before_persist_records_no_boundary(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -3171,8 +3317,10 @@ class TestCompactionConcurrentMutations:
 class TestPartialRequestInputCompaction:
     """Runs whose request input skips stored history must not record boundaries.
 
-    A resolved session limit windows the history read, and a session input
-    callback rebuilds the prepared input outright. In both cases the request
+    A resolved session limit windows the history read, a session input
+    callback rebuilds the prepared input outright, a call_model_input_filter
+    rewrites any request before it goes out, and a handoff input filter
+    rewrites the accumulated history mid run. In every case the request
     carries less than the stored history while the count at persist time spans
     all of it, so a recorded boundary would let a previous_response_id
     replacement delete prefix items the server never saw, with no concurrency
@@ -3270,6 +3418,58 @@ class TestPartialRequestInputCompaction:
         assert "Skipped compaction for resp_win" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_session_level_limit_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A truncating limit set on the session itself must fire the guard too.
+
+        The windowed test above configures the limit through RunConfig.
+        Here the session's own session_settings carry it and the run
+        supplies only an empty override, so the resolved settings inherit
+        the session's window through the same resolve() path. The guard
+        keys on the resolved value, not on where it came from: the persist
+        records nothing, the gate arms, and the compaction skips with the
+        full store preserved.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "session-level-limit")
+        session.session_settings = SessionSettings(limit=2)
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("session reply")], response_id="resp_sess")]
+        )
+        worker = Agent(name="session_limit_worker", model=model)
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(
+                worker,
+                "hello again",
+                session=session,
+                run_config=RunConfig(session_settings=SessionSettings()),
+            )
+
+        # The session level limit really windowed the request: the oldest
+        # turns were left out, so the server side history cannot contain
+        # them.
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" not in request_text
+        assert "recent question" in request_text
+        assert "hello again" in request_text
+
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "hello again" in stored_text
+        assert "session reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_sess" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_filtering_input_callback_records_nothing_and_compaction_skips(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -3325,6 +3525,145 @@ class TestPartialRequestInputCompaction:
         assert session._response_boundaries_ever_recorded is True
         mock_client.responses.compact.assert_not_called()
         assert "Skipped compaction for resp_filt" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_call_model_input_filter_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A run whose call_model_input_filter drops history must leave it intact.
+
+        The filter runs on every request, and here it drops the oldest
+        stored turns from the request input, so the server side history
+        through the response never contains them while the count at
+        persist time spans the whole store. On the prior behavior the
+        persist recorded that count and the compaction keyed on the
+        response replaced the prefix, deleting the dropped turns. Invoking
+        the filter now voids the ownership token, unconditionally like the
+        session input callback, so nothing records and the compaction
+        skips with every stored item preserved.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "request-filter")
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("kept reply")], response_id="resp_drop")]
+        )
+        worker = Agent(name="request_filter_worker", model=model)
+
+        def drop_prefix_turns(data: CallModelData[Any]) -> ModelInputData:
+            kept = [
+                item
+                for item in data.model_data.input
+                if "prefix" not in str(item.get("content") if isinstance(item, dict) else item)
+            ]
+            return ModelInputData(input=kept, instructions=data.model_data.instructions)
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(
+                worker,
+                "fresh question",
+                session=session,
+                run_config=RunConfig(call_model_input_filter=drop_prefix_turns),
+            )
+
+        # The filter really ran: the oldest turns were left out of the
+        # request, so the server side history cannot contain them.
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" not in request_text
+        assert "recent question" in request_text
+        assert "fresh question" in request_text
+
+        # The stored history survived, including the turns the filter
+        # dropped from the request; deleting them is the data loss under
+        # test.
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "fresh question" in stored_text
+        assert "kept reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_drop" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_handoff_input_filter_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A handoff filter that rewrites history must void the run's ownership.
+
+        The triage response hands off through a filter that drops the
+        oldest stored turns from the accumulated history, so every request
+        after the handoff omits them while the store keeps all of them.
+        The post handoff persist would otherwise record a count spanning
+        the whole store, and the compaction keyed on that response, forced
+        after the deferral for the handoff output, would replace the
+        prefix and delete the dropped turns. Applying the filter now voids
+        the ownership token, so nothing records and the compaction skips
+        with the store intact.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "handoff-filter")
+
+        def drop_prefix_history(data: HandoffInputData) -> HandoffInputData:
+            history = data.input_history
+            if not isinstance(history, str):
+                history = tuple(
+                    item
+                    for item in history
+                    if "prefix" not in str(item.get("content") if isinstance(item, dict) else item)
+                )
+            return HandoffInputData(
+                input_history=history,
+                pre_handoff_items=data.pre_handoff_items,
+                new_items=data.new_items,
+                run_context=data.run_context,
+            )
+
+        model = ScriptedModel()
+        delegate = Agent(name="delegate", model=model)
+        triage = Agent(
+            name="triage",
+            model=model,
+            handoffs=[handoff(delegate, input_filter=drop_prefix_history)],
+        )
+        model.extend(
+            [
+                ModelStep(output=[get_handoff_tool_call(delegate)], response_id="resp_hand"),
+                ModelStep(output=[get_text_message("delegate reply")], response_id="resp_post"),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(triage, "route this", session=session)
+
+        # The desync is real: the request before the handoff carried the
+        # oldest turns, the request after it did not, and the store kept
+        # them the whole time, so counts at persist time can no longer
+        # describe what the server saw.
+        assert len(model.calls) == 2
+        assert "prefix question" in str(model.calls[0].input)
+        post_handoff_request_text = str(model.calls[1].input)
+        assert "prefix question" not in post_handoff_request_text
+        assert "recent question" in post_handoff_request_text
+
+        # The stored history survived, including the turns the filter
+        # dropped from the post handoff requests; deleting them is the
+        # data loss under test.
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "route this" in stored_text
+        assert "delegate reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_post" in caplog.text
 
     @pytest.mark.asyncio
     async def test_unwindowed_run_still_records_and_replaces(self) -> None:

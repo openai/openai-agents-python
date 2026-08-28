@@ -50,13 +50,16 @@ class _SessionOwnershipToken:
     The token lives only for the run that captured it and is never stored on
     the session, so restored or resumed runs start without one.
 
-    A token can also be voided outright through ``invalidate``. The runner's
-    input preparation calls it when the run's request input provably does not
-    carry the whole stored history: a windowed read left the oldest items out,
-    or a session input callback rebuilt the input. Counts cannot describe what
-    the server saw in either case, so a voided token never records; instead it
-    marks the session as boundary managed at persist, which makes every
-    compaction keyed on the run's responses skip before the billed call.
+    A token can also be voided outright through ``invalidate``. The runner
+    calls it when the run's request input provably stops covering the whole
+    stored history: a windowed read left the oldest items out, a session
+    input callback rebuilt the input, a call_model_input_filter rewrote the
+    request, or a handoff input filter rewrote the accumulated history mid
+    run. Counts cannot describe what the server saw in any of these cases,
+    so a voided token never records. Every persist that carries a token, in
+    whatever state, marks the session as boundary managed, which makes every
+    compaction keyed on the run's responses skip before the billed call
+    whenever nothing was recorded for them.
     """
 
     __slots__ = ("count", "generation", "invalidated")
@@ -194,20 +197,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # history and drops the rest, so a stale count can never be read from
         # the map. An absent entry therefore means the boundary was dropped by
         # one of those paths, evicted past the cap, or never recorded because
-        # the persisting run's request input skipped stored history; once
-        # anything armed the gate, a compaction keyed on an absent id skips
-        # instead of guessing, because the snapshot fallback would claim turns
-        # the server side history through that response never contained. The
-        # fallback stays reserved for sessions no boundary managed persist
+        # the persisting run's request input skipped stored history or some
+        # other writer interleaved before the persist; once anything armed
+        # the gate, a compaction keyed on an absent id skips instead of
+        # guessing, because the snapshot fallback would claim turns the
+        # server side history through that response never contained. The
+        # fallback stays reserved for sessions no token carrying persist
         # ever touched, whose direct callers persist before compacting and
         # own that ordering.
         self._response_boundaries: dict[str, int] = {}
         # True once any response boundary has been recorded on this instance,
-        # and also once any persist arrived with a voided ownership token:
-        # both prove a runner manages this session's boundaries, so an absent
-        # entry must mean skip rather than snapshot fallback. It is never
-        # reset: a compaction keyed on a response recorded before a clear must
-        # still skip after the clear.
+        # and also once any persist arrived carrying an ownership token at
+        # all, whether the token was valid, voided, or stale: a token exists
+        # only inside a runner managed run, so its arrival alone proves a
+        # runner manages this session's boundaries and an absent entry must
+        # mean skip rather than snapshot fallback. Hookless persists never
+        # arm it, which keeps the fallback for direct callers who persist
+        # before compacting and own that ordering. It is never reset: a
+        # compaction keyed on a response recorded before a clear must still
+        # skip after the clear.
         self._response_boundaries_ever_recorded = False
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
@@ -315,10 +323,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     logger.warning(
                         "Skipped compaction for %s (mode=%s): this session manages response "
                         "boundaries but has no entry for this response, because its boundary "
-                        "was invalidated by a history rewrite, evicted, or removed, or the "
-                        "persisting run's request input skipped stored history; the snapshot "
-                        "fallback would claim items the server side history through this "
-                        "response never contained.",
+                        "was invalidated by a history rewrite, evicted, or removed, the "
+                        "persisting run's request input skipped stored history, or another "
+                        "writer interleaved before the persist; the snapshot fallback would "
+                        "claim items the server side history through this response never "
+                        "contained.",
                         response_id,
                         resolved_mode,
                     )
@@ -632,7 +641,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         the pairing exact: no other writer can slip items in between the batch
         and the count recorded for it. The boundary records only when the
         caller's ownership token still matches the store; without a token, or
-        with a stale one, the batch is appended and nothing is recorded. See
+        with a voided or stale one, the batch is appended and nothing is
+        recorded. Any token at all, in whatever state, marks the session as
+        boundary managed, because a token exists only inside a runner managed
+        run; only hookless persists leave that mark alone. See
         _response_boundaries for how the recorded boundary is consumed.
 
         The count that seeds the boundary is read before the append. The lock
@@ -670,17 +682,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             await self._add_items_locked(items)
             if ownership_token is None:
                 return
+            # The token, in whatever state it arrives, proves a runner is
+            # managing this session's boundaries, so arm the gate before the
+            # state checks below: a compaction keyed on any of this run's
+            # responses must skip through an absent entry instead of reaching
+            # the snapshot fallback. Without this, the first ever persist on
+            # a fresh wrapper arriving with a stale token would leave the
+            # gate unarmed, and the fallback would classify an interleaved
+            # item below the batch as covered and let the replacement delete
+            # it. Only hookless persists, which carry no token, leave the
+            # gate alone, preserving the fallback for direct callers.
+            self._response_boundaries_ever_recorded = True
             if ownership_token.invalidated:
                 # The run's request input skipped stored history, so no count
-                # can describe what the server saw; nothing records. The voided
-                # token still proves a runner is managing this session's
-                # boundaries, so arm the gate: a compaction keyed on this
-                # run's responses must skip through the absent entry instead
-                # of reaching the snapshot fallback, which would classify the
-                # skipped prefix as covered and let the replacement delete it.
-                self._response_boundaries_ever_recorded = True
+                # can describe what the server saw; nothing records.
                 return
             if not owns_prefix:
+                # Another writer landed between the run's request input read
+                # and this persist; a recorded count would claim the
+                # interleaved items for this response, so nothing records.
                 return
             ownership_token.advance(len(items))
             boundary = count_before_append + len(items)

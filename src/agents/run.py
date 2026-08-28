@@ -616,9 +616,12 @@ class AgentRunner:
         # every persist so compaction boundaries record only when no other
         # writer interleaved. Resumed runs never read the session for their
         # request input, so they carry no token and record no boundaries.
-        # Input preparation voids the token when a resolved limit truncates
-        # the history read or a session input callback rebuilds the input,
-        # so such runs record no boundaries either.
+        # The token is voided wherever the request provably stops covering
+        # the stored history: a resolved limit truncating the history read,
+        # a session input callback rebuilding the input, a
+        # call_model_input_filter rewriting a request, or a handoff input
+        # filter rewriting the accumulated history. Such runs record no
+        # boundaries either.
         session_ownership_token: _SessionOwnershipToken | None = None
 
         if is_resumed_state and run_state is not None:
@@ -1711,6 +1714,7 @@ class AgentRunner:
                                     on_response_accepted=_commit_pending_server_response,
                                     on_response_hooks_started=_mark_response_hooks_started,
                                     run_state=run_state,
+                                    ownership_token=session_ownership_token,
                                 )
                             )
 
@@ -1787,6 +1791,7 @@ class AgentRunner:
                                 on_response_accepted=_commit_pending_server_response,
                                 on_response_hooks_started=_mark_response_hooks_started,
                                 run_state=run_state,
+                                ownership_token=session_ownership_token,
                             )
                     finally:
                         if current_turn_span is not None:

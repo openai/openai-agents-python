@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..agent import Agent
 from ..agent_output import AgentOutputSchema, AgentOutputSchemaBase
@@ -18,6 +18,9 @@ from ..tool import Tool
 from ..tracing import SpanError
 from ..util import _error_tracing
 from ..util._asyncio_tasks import gather_with_cancel
+
+if TYPE_CHECKING:
+    from ..memory.openai_responses_compaction_session import _SessionOwnershipToken
 
 __all__ = [
     "validate_run_hooks",
@@ -55,13 +58,28 @@ async def maybe_filter_model_input(
     context_wrapper: RunContextWrapper[TContext],
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> ModelInputData:
-    """Apply optional call_model_input_filter to modify model input."""
+    """Apply optional call_model_input_filter to modify model input.
+
+    ``ownership_token`` is the token the runner captured when it read the
+    session for this run's request input. The filter below can drop stored
+    history from the request it returns, so once it is invoked no item count
+    can prove what the server saw. The token is voided here, at the site
+    where the coverage is lost, unconditionally and with no comparison of
+    the filter's output, mirroring the session input callback: the run then
+    records no compaction boundaries and its previous_response_id
+    compactions skip instead of letting a replacement delete prefix items
+    the server never saw.
+    """
     effective_instructions = system_instructions
     effective_input: list[TResponseInputItem] = input_items
 
     if run_config.call_model_input_filter is None:
         return ModelInputData(input=effective_input, instructions=effective_instructions)
+
+    if ownership_token is not None:
+        ownership_token.invalidate()
 
     try:
         model_input = ModelInputData(

@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai.types.responses import (
     ResponseCompactionItem,
@@ -186,6 +186,9 @@ from .tool_planning import (
     _validate_unresolved_function_calls,
 )
 from .turn_preparation import get_handoffs, get_output_schema
+
+if TYPE_CHECKING:
+    from ..memory.openai_responses_compaction_session import _SessionOwnershipToken
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
 
@@ -540,8 +543,18 @@ async def execute_handoffs(
     tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
     handoff_output_committer: Callable[[HandoffOutputItem, Agent[Any]], None] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> SingleStepResult:
-    """Execute a handoff and prepare the next turn for the new agent."""
+    """Execute a handoff and prepare the next turn for the new agent.
+
+    ``ownership_token`` is the running run's claim over the session history
+    its request input was built from. A handoff input filter can rewrite the
+    accumulated history the next requests are built from while the session
+    keeps every persisted turn, so applying one voids the token: later
+    persists then record no compaction boundaries and their compactions skip
+    instead of letting a replacement delete stored items the rewritten
+    requests never carried.
+    """
 
     def nest_history(
         data: HandoffInputData,
@@ -661,6 +674,14 @@ async def execute_handoffs(
             )
 
         if input_filter is not None and handoff_input_data is not None:
+            if ownership_token is not None:
+                # The filter below may drop or rewrite stored turns in the
+                # history the next requests carry, so from here on no item
+                # count can prove what the server saw. Void the token before
+                # invoking it, unconditionally and with no comparison of the
+                # filter's output, mirroring the session input callback and
+                # call_model_input_filter precedents.
+                ownership_token.invalidate()
             filter_name = getattr(input_filter, "__qualname__", repr(input_filter))
             from_agent = getattr(public_agent, "name", public_agent.__class__.__name__)
             to_agent = getattr(new_agent, "name", new_agent.__class__.__name__)
@@ -796,6 +817,7 @@ async def execute_tools_and_side_effects(
     server_manages_conversation: bool = False,
     precomputed_skipped_raw_item_ids: set[int] | None = None,
     run_state: RunState[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -932,6 +954,7 @@ async def execute_tools_and_side_effects(
             server_manages_conversation=server_manages_conversation,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
+            ownership_token=ownership_token,
         )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
@@ -3553,6 +3576,7 @@ async def get_single_step_result_from_response(
     | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
     run_state: RunState[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     try:
@@ -3615,4 +3639,5 @@ async def get_single_step_result_from_response(
         server_manages_conversation=server_manages_conversation,
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
         run_state=run_state,
+        ownership_token=ownership_token,
     )

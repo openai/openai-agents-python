@@ -1088,9 +1088,12 @@ async def start_streaming(
         # every persist so compaction boundaries record only when no other
         # writer interleaved. Resumed runs never read the session for their
         # request input, so they carry no token and record no boundaries.
-        # Input preparation voids the token when a resolved limit truncates
-        # the history read or a session input callback rebuilds the input,
-        # so such runs record no boundaries either.
+        # The token is voided wherever the request provably stops covering
+        # the stored history: a resolved limit truncating the history read,
+        # a session input callback rebuilding the input, a
+        # call_model_input_filter rewriting a request, or a handoff input
+        # filter rewriting the accumulated history. Such runs record no
+        # boundaries either.
         session_ownership_token: _SessionOwnershipToken | None = None
         if is_resumed_state and run_state is not None:
             prepared_input = normalize_resumed_input(starting_input)
@@ -2195,6 +2198,7 @@ async def run_single_turn_streamed(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        ownership_token=ownership_token,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
@@ -2408,6 +2412,7 @@ async def run_single_turn_streamed(
         after_invocation_validation=after_invocation_validation,
         before_side_effects=check_input_guardrails_before_side_effects,
         run_state=run_state,
+        ownership_token=ownership_token,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -2444,6 +2449,7 @@ async def run_single_turn(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -2512,6 +2518,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        ownership_token=ownership_token,
     )
 
     response_accepted = False
@@ -2551,6 +2558,7 @@ async def run_single_turn(
         server_manages_conversation=server_conversation_tracker is not None,
         after_invocation_validation=after_invocation_validation,
         run_state=run_state,
+        ownership_token=ownership_token,
     )
 
 
@@ -2571,6 +2579,7 @@ async def get_new_response(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -2581,6 +2590,7 @@ async def get_new_response(
         context_wrapper=context_wrapper,
         input_items=input,
         system_instructions=system_prompt,
+        ownership_token=ownership_token,
     )
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
