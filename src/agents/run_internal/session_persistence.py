@@ -199,8 +199,17 @@ async def _session_get_items(
     limit: int | None | object = _SESSION_LIMIT_UNSET,
     *,
     wrapper: RunContextWrapper[Any] | None = None,
+    capture_compaction_generation: bool = False,
 ) -> list[TResponseInputItem]:
     """Read session items while preserving the legacy method call shape."""
+    get_with_generation = getattr(session, "_get_items_with_generation", None)
+    if capture_compaction_generation and wrapper is not None and callable(get_with_generation):
+        if limit is _SESSION_LIMIT_UNSET:
+            result, generation = await _call_session_method(get_with_generation)
+        else:
+            result, generation = await _call_session_method(get_with_generation, limit=limit)
+        wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
+        return cast(list[TResponseInputItem], result)
     wrapper = _get_session_wrapper(session, wrapper)
     if limit is _SESSION_LIMIT_UNSET:
         result = await _call_session_method(session.get_items, wrapper=wrapper)
@@ -216,6 +225,16 @@ async def _session_add_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape."""
+    add_with_generation = getattr(session, "_add_items_with_generation", None)
+    if wrapper is not None and callable(add_with_generation):
+        expected_generation = getattr(wrapper, "_session_compaction_generation", None)
+        generation = await _call_session_method(
+            add_with_generation,
+            items,
+            expected_generation=expected_generation,
+        )
+        wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
+        return
     wrapper = _get_session_wrapper(session, wrapper)
     await _call_session_method(session.add_items, items, wrapper=wrapper)
 
@@ -360,9 +379,14 @@ async def prepare_input_with_session(
             session,
             limit=resolved_settings.limit,
             wrapper=wrapper,
+            capture_compaction_generation=True,
         )
     else:
-        history = await _session_get_items(session, wrapper=wrapper)
+        history = await _session_get_items(
+            session,
+            wrapper=wrapper,
+            capture_compaction_generation=True,
+        )
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
@@ -674,9 +698,13 @@ async def save_result_to_session(
                 resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
             ),
         }
-        await resume_pending_session_write(resumed_write_state, session, wrapper=wrapper)
+        await resume_pending_session_write(
+            resumed_write_state,
+            session,
+            wrapper=compaction_wrapper,
+        )
     else:
-        await _session_add_items(session, items_to_save, wrapper=wrapper)
+        await _session_add_items(session, items_to_save, wrapper=compaction_wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -801,7 +829,15 @@ async def resume_pending_session_write(
             append = True
         else:
             expected = before + digests(pending["items"])
-            tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
+            committed_generation: int | None = None
+            get_with_generation = getattr(session, "_get_items_with_generation", None)
+            if wrapper is not None and callable(get_with_generation):
+                tail, committed_generation = await _call_session_method(
+                    get_with_generation,
+                    limit=len(expected),
+                )
+            else:
+                tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
@@ -811,6 +847,8 @@ async def resume_pending_session_write(
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
             append = unchanged
+            if committed and committed_generation is not None and wrapper is not None:
+                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
