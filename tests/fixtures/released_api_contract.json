@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.22.0",
-  "baseline_commit": "fb8fa1ba5c23f7ec61ca20c735999cf81e829a8e",
+  "baseline": "v0.22.1",
+  "baseline_commit": "f1a806ad35071053f5248b38b58b8c0c40f67350",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -7232,6 +7232,70 @@
         }
       ]
     },
+    "OutputGuardrailBlockedMessageArgs": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
+        }
+      ]
+    },
     "OutputGuardrailResult": {
       "dataclass_fields": [
         {
@@ -7980,6 +8044,15 @@
           },
           "init": true,
           "name": "tool_name_collision_policy"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "output_guardrail_blocked_message"
         }
       ],
       "kind": "class",
@@ -8196,6 +8269,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "tool_name_collision_policy"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "output_guardrail_blocked_message"
         }
       ]
     },
@@ -22489,6 +22571,24 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "custom_data_extractor"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_output_guardrails"
         }
       ]
     },
@@ -22857,6 +22957,24 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "retry_backoff_seconds_max"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_output_guardrails"
         }
       ]
     },
@@ -23131,6 +23249,24 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "retry_backoff_seconds_max"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_output_guardrails"
         }
       ]
     },
@@ -23405,6 +23541,24 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "retry_backoff_seconds_max"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_input_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tool_output_guardrails"
         }
       ]
     },
@@ -25346,6 +25500,134 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "expected"
+        }
+      ]
+    },
+    "agents.run.OutputGuardrailBlockedMessageArgs": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
+        }
+      ]
+    },
+    "agents.run_config.OutputGuardrailBlockedMessageArgs": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "run_context"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "default_message"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "guardrail_name"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "run_context"
         }
       ]
     },
@@ -33929,6 +34211,24 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "dependencies"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "inherit_host_environment"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "host_environment_allowlist"
         }
       ]
     },
@@ -34368,6 +34668,24 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "dependencies"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "inherit_host_environment"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "host_environment_allowlist"
         }
       ]
     },
@@ -40828,6 +41146,1335 @@
         }
       ]
     },
+    "agents.voice.AudioInput": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "buffer"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 24000
+          },
+          "init": true,
+          "name": "frame_rate"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 2
+          },
+          "init": true,
+          "name": "sample_width"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 1
+          },
+          "init": true,
+          "name": "channels"
+        }
+      ],
+      "kind": "class",
+      "members": {
+        "to_audio_file": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
+        "to_base64": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "buffer"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 24000
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "frame_rate"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 2
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "sample_width"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 1
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "channels"
+        }
+      ]
+    },
+    "agents.voice.OpenAISTTModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "create_session": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        },
+        "transcribe": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "openai_client"
+        }
+      ]
+    },
+    "agents.voice.OpenAISTTTranscriptionSession": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "transcribe_turns": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "input"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "client"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_audio_data"
+        }
+      ]
+    },
+    "agents.voice.OpenAITTSModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "run": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "text"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "openai_client"
+        }
+      ]
+    },
+    "agents.voice.OpenAIVoiceModelProvider": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "get_stt_model": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_name"
+            }
+          ]
+        },
+        "get_tts_model": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_name"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "api_key"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "base_url"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "openai_client"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "organization"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "project"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "agent_registration"
+        }
+      ]
+    },
+    "agents.voice.STTModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "create_session": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        },
+        "transcribe": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "input"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_data"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "trace_include_sensitive_audio_data"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.STTModelSettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "language"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "temperature"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "turn_detection"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "languages"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "keywords"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "language"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "temperature"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "turn_detection"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "languages"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "keywords"
+        }
+      ]
+    },
+    "agents.voice.STTWebsocketConnectionError": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "message"
+        }
+      ]
+    },
+    "agents.voice.SingleAgentVoiceWorkflow": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "on_start": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        },
+        "run": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "transcription"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "agent"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "callbacks"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "context"
+        }
+      ]
+    },
+    "agents.voice.SingleAgentWorkflowCallbacks": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "on_run": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "workflow"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "transcription"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.StreamedAudioInput": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "add_audio": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "audio"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.StreamedAudioResult": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "stream": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tts_model"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tts_settings"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "voice_pipeline_config"
+        }
+      ]
+    },
+    "agents.voice.StreamedTranscriptionSession": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "close": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "transcribe_turns": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.TTSModel": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "run": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "text"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "settings"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.TTSModelSettings": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "voice"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 120
+          },
+          "init": true,
+          "name": "buffer_size"
+        },
+        {
+          "default": {
+            "identity": "numpy.int16",
+            "kind": "type"
+          },
+          "init": true,
+          "name": "dtype"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "transform_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "You will receive partial sentences. Do not complete the sentence just read out the text."
+          },
+          "init": true,
+          "name": "instructions"
+        },
+        {
+          "default": {
+            "identity": "agents.voice.utils.get_sentence_based_splitter.<locals>.sentence_based_text_splitter",
+            "kind": "callable"
+          },
+          "init": true,
+          "name": "text_splitter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "speed"
+        }
+      ],
+      "kind": "class",
+      "members": {
+        "text_splitter": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "voice"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 120
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "buffer_size"
+        },
+        {
+          "default": {
+            "identity": "numpy.int16",
+            "kind": "type"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "dtype"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "transform_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "You will receive partial sentences. Do not complete the sentence just read out the text."
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "instructions"
+        },
+        {
+          "default": {
+            "identity": "agents.voice.utils.get_sentence_based_splitter.<locals>.sentence_based_text_splitter",
+            "kind": "callable"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "text_splitter"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "speed"
+        }
+      ]
+    },
+    "agents.voice.VoiceModelProvider": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "get_stt_model": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_name"
+            }
+          ]
+        },
+        "get_tts_model": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "model_name"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.VoicePipeline": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "run": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "audio_input"
+            }
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "workflow"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "stt_model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "tts_model"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "config"
+        }
+      ]
+    },
+    "agents.voice.VoicePipelineConfig": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "factory": "agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "model_provider"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": false
+          },
+          "init": true,
+          "name": "tracing_disabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "init": true,
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "init": true,
+          "name": "trace_include_sensitive_audio_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "Voice Agent"
+          },
+          "init": true,
+          "name": "workflow_name"
+        },
+        {
+          "default": {
+            "factory": "agents.tracing.util.gen_group_id",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "group_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "trace_metadata"
+        },
+        {
+          "default": {
+            "factory": "agents.voice.model.STTModelSettings",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "stt_settings"
+        },
+        {
+          "default": {
+            "factory": "agents.voice.model.TTSModelSettings",
+            "kind": "factory"
+          },
+          "init": true,
+          "name": "tts_settings"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "model_provider"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": false
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing_disabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tracing"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.bool",
+            "value": true
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_include_sensitive_audio_data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "Voice Agent"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "workflow_name"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "group_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "trace_metadata"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stt_settings"
+        },
+        {
+          "default": {
+            "kind": "factory"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "tts_settings"
+        }
+      ]
+    },
+    "agents.voice.VoiceStreamEventAudio": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_audio"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "data"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_audio"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "agents.voice.VoiceStreamEventError": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_error"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_error"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "agents.voice.VoiceStreamEventLifecycle": {
+      "dataclass_fields": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "init": true,
+          "name": "event"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_lifecycle"
+          },
+          "init": true,
+          "name": "type"
+        }
+      ],
+      "kind": "class",
+      "members": {},
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "event"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.str",
+            "value": "voice_stream_event_lifecycle"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "type"
+        }
+      ]
+    },
+    "agents.voice.VoiceWorkflowBase": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "on_start": {
+          "binding": "instance",
+          "execution_kind": "async_generator",
+          "parameters": []
+        },
+        "run": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "transcription"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.VoiceWorkflowHelper": {
+      "dataclass_fields": [],
+      "kind": "class",
+      "members": {
+        "stream_text_from": {
+          "binding": "class",
+          "execution_kind": "async_generator",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "result"
+            }
+          ]
+        }
+      },
+      "parameters": []
+    },
+    "agents.voice.get_sentence_based_splitter": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 20
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "min_sentence_length"
+        }
+      ]
+    },
     "agents.voice.testing.STTCall": {
       "dataclass_fields": [
         {
@@ -44160,6 +45807,168 @@
       "canonical_name": "scripted_sandbox_session",
       "module": "agents.testing",
       "name": "scripted_sandbox_session"
+    },
+    {
+      "canonical_module": "agents.voice.input",
+      "canonical_name": "AudioInput",
+      "module": "agents.voice",
+      "name": "AudioInput"
+    },
+    {
+      "canonical_module": "agents.voice.input",
+      "canonical_name": "StreamedAudioInput",
+      "module": "agents.voice",
+      "name": "StreamedAudioInput"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "STTModel",
+      "module": "agents.voice",
+      "name": "STTModel"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "STTModelSettings",
+      "module": "agents.voice",
+      "name": "STTModelSettings"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "TTSCustomVoice",
+      "module": "agents.voice",
+      "name": "TTSCustomVoice"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "TTSModel",
+      "module": "agents.voice",
+      "name": "TTSModel"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "TTSModelSettings",
+      "module": "agents.voice",
+      "name": "TTSModelSettings"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "TTSVoice",
+      "module": "agents.voice",
+      "name": "TTSVoice"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "VoiceModelProvider",
+      "module": "agents.voice",
+      "name": "VoiceModelProvider"
+    },
+    {
+      "canonical_module": "agents.voice.result",
+      "canonical_name": "StreamedAudioResult",
+      "module": "agents.voice",
+      "name": "StreamedAudioResult"
+    },
+    {
+      "canonical_module": "agents.voice.workflow",
+      "canonical_name": "SingleAgentVoiceWorkflow",
+      "module": "agents.voice",
+      "name": "SingleAgentVoiceWorkflow"
+    },
+    {
+      "canonical_module": "agents.voice.models.openai_model_provider",
+      "canonical_name": "OpenAIVoiceModelProvider",
+      "module": "agents.voice",
+      "name": "OpenAIVoiceModelProvider"
+    },
+    {
+      "canonical_module": "agents.voice.models.openai_stt",
+      "canonical_name": "OpenAISTTModel",
+      "module": "agents.voice",
+      "name": "OpenAISTTModel"
+    },
+    {
+      "canonical_module": "agents.voice.models.openai_tts",
+      "canonical_name": "OpenAITTSModel",
+      "module": "agents.voice",
+      "name": "OpenAITTSModel"
+    },
+    {
+      "canonical_module": "agents.voice.events",
+      "canonical_name": "VoiceStreamEventAudio",
+      "module": "agents.voice",
+      "name": "VoiceStreamEventAudio"
+    },
+    {
+      "canonical_module": "agents.voice.events",
+      "canonical_name": "VoiceStreamEventLifecycle",
+      "module": "agents.voice",
+      "name": "VoiceStreamEventLifecycle"
+    },
+    {
+      "canonical_module": "agents.voice.events",
+      "canonical_name": "VoiceStreamEvent",
+      "module": "agents.voice",
+      "name": "VoiceStreamEvent"
+    },
+    {
+      "canonical_module": "agents.voice.events",
+      "canonical_name": "VoiceStreamEventError",
+      "module": "agents.voice",
+      "name": "VoiceStreamEventError"
+    },
+    {
+      "canonical_module": "agents.voice.pipeline",
+      "canonical_name": "VoicePipeline",
+      "module": "agents.voice",
+      "name": "VoicePipeline"
+    },
+    {
+      "canonical_module": "agents.voice.pipeline_config",
+      "canonical_name": "VoicePipelineConfig",
+      "module": "agents.voice",
+      "name": "VoicePipelineConfig"
+    },
+    {
+      "canonical_module": "agents.voice.utils",
+      "canonical_name": "get_sentence_based_splitter",
+      "module": "agents.voice",
+      "name": "get_sentence_based_splitter"
+    },
+    {
+      "canonical_module": "agents.voice.workflow",
+      "canonical_name": "VoiceWorkflowHelper",
+      "module": "agents.voice",
+      "name": "VoiceWorkflowHelper"
+    },
+    {
+      "canonical_module": "agents.voice.workflow",
+      "canonical_name": "VoiceWorkflowBase",
+      "module": "agents.voice",
+      "name": "VoiceWorkflowBase"
+    },
+    {
+      "canonical_module": "agents.voice.workflow",
+      "canonical_name": "SingleAgentWorkflowCallbacks",
+      "module": "agents.voice",
+      "name": "SingleAgentWorkflowCallbacks"
+    },
+    {
+      "canonical_module": "agents.voice.model",
+      "canonical_name": "StreamedTranscriptionSession",
+      "module": "agents.voice",
+      "name": "StreamedTranscriptionSession"
+    },
+    {
+      "canonical_module": "agents.voice.models.openai_stt",
+      "canonical_name": "OpenAISTTTranscriptionSession",
+      "module": "agents.voice",
+      "name": "OpenAISTTTranscriptionSession"
+    },
+    {
+      "canonical_module": "agents.voice.exceptions",
+      "canonical_name": "STTWebsocketConnectionError",
+      "module": "agents.voice",
+      "name": "STTWebsocketConnectionError"
     }
   ],
   "optional_dependency_unsupported_platforms": {
@@ -44175,6 +45984,73 @@
       "platforms": [
         "win32"
       ]
+    }
+  ],
+  "public_class_contracts": [
+    {
+      "abstract_members": [
+        "create_session",
+        "model_name",
+        "transcribe"
+      ],
+      "class_name": "STTModel",
+      "module": "agents.voice.model"
+    },
+    {
+      "abstract_members": [
+        "close",
+        "transcribe_turns"
+      ],
+      "class_name": "StreamedTranscriptionSession",
+      "module": "agents.voice.model"
+    },
+    {
+      "abstract_members": [
+        "model_name",
+        "run"
+      ],
+      "class_name": "TTSModel",
+      "module": "agents.voice.model"
+    },
+    {
+      "abstract_members": [
+        "get_stt_model",
+        "get_tts_model"
+      ],
+      "class_name": "VoiceModelProvider",
+      "module": "agents.voice.model"
+    },
+    {
+      "abstract": false,
+      "class_name": "OpenAIVoiceModelProvider",
+      "module": "agents.voice.models.openai_model_provider"
+    },
+    {
+      "abstract": false,
+      "class_name": "OpenAISTTModel",
+      "module": "agents.voice.models.openai_stt"
+    },
+    {
+      "abstract": false,
+      "class_name": "OpenAISTTTranscriptionSession",
+      "module": "agents.voice.models.openai_stt"
+    },
+    {
+      "abstract": false,
+      "class_name": "OpenAITTSModel",
+      "module": "agents.voice.models.openai_tts"
+    },
+    {
+      "abstract_members": [
+        "run"
+      ],
+      "class_name": "VoiceWorkflowBase",
+      "module": "agents.voice.workflow"
+    },
+    {
+      "abstract": false,
+      "class_name": "SingleAgentVoiceWorkflow",
+      "module": "agents.voice.workflow"
     }
   ],
   "public_modules": [
@@ -44242,7 +46118,21 @@
     "agents.testing",
     "agents.testing.model",
     "agents.testing.sandbox",
-    "agents.voice.testing"
+    "agents.voice.testing",
+    "agents.voice",
+    "agents.voice.events",
+    "agents.voice.exceptions",
+    "agents.voice.imports",
+    "agents.voice.input",
+    "agents.voice.model",
+    "agents.voice.models.openai_model_provider",
+    "agents.voice.models.openai_stt",
+    "agents.voice.models.openai_tts",
+    "agents.voice.pipeline",
+    "agents.voice.pipeline_config",
+    "agents.voice.result",
+    "agents.voice.utils",
+    "agents.voice.workflow"
   ],
   "public_properties": [
     {
@@ -44373,6 +46263,178 @@
         "calls",
         "remaining_steps"
       ]
+    },
+    {
+      "class_name": "STTModel",
+      "module": "agents.voice.model",
+      "names": [
+        "model_name"
+      ]
+    },
+    {
+      "class_name": "TTSModel",
+      "module": "agents.voice.model",
+      "names": [
+        "model_name"
+      ]
+    },
+    {
+      "class_name": "OpenAISTTModel",
+      "module": "agents.voice.models.openai_stt",
+      "names": [
+        "model_name"
+      ]
+    },
+    {
+      "class_name": "OpenAITTSModel",
+      "module": "agents.voice.models.openai_tts",
+      "names": [
+        "model_name"
+      ]
+    },
+    {
+      "class_name": "OpenAIVoiceModelProvider",
+      "module": "agents.voice.models.openai_model_provider",
+      "names": [
+        "agent_registration"
+      ]
+    }
+  ],
+  "public_type_aliases": [
+    {
+      "definition": {
+        "kind": "union",
+        "members": [
+          {
+            "kind": "literal",
+            "values": [
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "alloy"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "ash"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "ballad"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "cedar"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "coral"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "echo"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "fable"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "marin"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "nova"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "onyx"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "sage"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "shimmer"
+              },
+              {
+                "kind": "literal",
+                "type": "builtins.str",
+                "value": "verse"
+              }
+            ]
+          },
+          {
+            "identity": "agents.voice.model.TTSCustomVoice",
+            "kind": "type"
+          }
+        ]
+      },
+      "module": "agents.voice.model",
+      "name": "TTSVoice"
+    },
+    {
+      "definition": {
+        "kind": "union",
+        "members": [
+          {
+            "identity": "agents.voice.events.VoiceStreamEventAudio",
+            "kind": "type"
+          },
+          {
+            "identity": "agents.voice.events.VoiceStreamEventError",
+            "kind": "type"
+          },
+          {
+            "identity": "agents.voice.events.VoiceStreamEventLifecycle",
+            "kind": "type"
+          }
+        ]
+      },
+      "module": "agents.voice.events",
+      "name": "VoiceStreamEvent"
+    },
+    {
+      "definition": {
+        "kind": "callable",
+        "parameters": [
+          {
+            "arguments": [
+              {
+                "kind": "any"
+              }
+            ],
+            "kind": "generic",
+            "origin": "agents.run_config.OutputGuardrailBlockedMessageArgs"
+          }
+        ],
+        "return": {
+          "kind": "union",
+          "members": [
+            {
+              "identity": "builtins.NoneType",
+              "kind": "type"
+            },
+            {
+              "identity": "builtins.str",
+              "kind": "type"
+            }
+          ]
+        }
+      },
+      "module": "agents",
+      "name": "OutputGuardrailBlockedMessageFormatter"
     }
   ],
   "public_typed_dicts": [
@@ -44493,6 +46555,17 @@
         }
       ],
       "module": "agents.realtime.testing"
+    },
+    {
+      "class_name": "TTSCustomVoice",
+      "fields": [
+        {
+          "annotation": "str",
+          "name": "id",
+          "required": true
+        }
+      ],
+      "module": "agents.voice"
     }
   ],
   "required_submodule_exports": {
@@ -44839,6 +46912,8 @@
         "ModelInputData",
         "CallModelData",
         "CallModelInputFilter",
+        "OutputGuardrailBlockedMessageArgs",
+        "OutputGuardrailBlockedMessageFormatter",
         "ToolNameCollisionPolicy",
         "ReasoningItemIdPolicy",
         "ToolExecutionConfig",
@@ -44859,6 +46934,8 @@
         "CallModelData",
         "CallModelInputFilter",
         "ModelInputData",
+        "OutputGuardrailBlockedMessageArgs",
+        "OutputGuardrailBlockedMessageFormatter",
         "ReasoningItemIdPolicy",
         "RunConfig",
         "RunOptions",
@@ -45102,6 +47179,80 @@
         "mcp_tools_span"
       ],
       "optional_bindings": {},
+      "optional_exports": {}
+    },
+    "agents.voice": {
+      "names": [
+        "AudioInput",
+        "StreamedAudioInput",
+        "STTModel",
+        "STTModelSettings",
+        "TTSCustomVoice",
+        "TTSModel",
+        "TTSModelSettings",
+        "TTSVoice",
+        "VoiceModelProvider",
+        "StreamedAudioResult",
+        "SingleAgentVoiceWorkflow",
+        "OpenAIVoiceModelProvider",
+        "OpenAISTTModel",
+        "OpenAITTSModel",
+        "VoiceStreamEventAudio",
+        "VoiceStreamEventError",
+        "VoiceStreamEventLifecycle",
+        "VoiceStreamEvent",
+        "VoicePipeline",
+        "VoicePipelineConfig",
+        "get_sentence_based_splitter",
+        "VoiceWorkflowHelper",
+        "VoiceWorkflowBase",
+        "SingleAgentWorkflowCallbacks",
+        "StreamedTranscriptionSession",
+        "OpenAISTTTranscriptionSession",
+        "STTWebsocketConnectionError"
+      ],
+      "optional_bindings": {
+        "AudioInput": "numpy",
+        "OpenAISTTModel": "numpy",
+        "OpenAISTTTranscriptionSession": "numpy",
+        "OpenAITTSModel": "numpy",
+        "OpenAIVoiceModelProvider": "numpy",
+        "STTModel": "numpy",
+        "STTModelSettings": "numpy",
+        "STTWebsocketConnectionError": "numpy",
+        "SingleAgentVoiceWorkflow": "numpy",
+        "SingleAgentWorkflowCallbacks": "numpy",
+        "StreamedAudioInput": "numpy",
+        "StreamedAudioResult": "numpy",
+        "StreamedTranscriptionSession": "numpy",
+        "TTSCustomVoice": "numpy",
+        "TTSModel": "numpy",
+        "TTSModelSettings": "numpy",
+        "TTSVoice": "numpy",
+        "VoiceModelProvider": "numpy",
+        "VoicePipeline": "numpy",
+        "VoicePipelineConfig": "numpy",
+        "VoiceStreamEvent": "numpy",
+        "VoiceStreamEventAudio": "numpy",
+        "VoiceStreamEventError": "numpy",
+        "VoiceStreamEventLifecycle": "numpy",
+        "VoiceWorkflowBase": "numpy",
+        "VoiceWorkflowHelper": "numpy",
+        "get_sentence_based_splitter": "numpy"
+      },
+      "optional_exports": {}
+    },
+    "agents.voice.imports": {
+      "names": [
+        "np",
+        "npt",
+        "websockets"
+      ],
+      "optional_bindings": {
+        "np": "numpy",
+        "npt": "numpy",
+        "websockets": "numpy"
+      },
       "optional_exports": {}
     },
     "agents.voice.testing": {
@@ -45385,7 +47536,9 @@
     "sandbox",
     "__version__",
     "InputItem",
-    "ModelTimeoutError"
+    "ModelTimeoutError",
+    "OutputGuardrailBlockedMessageArgs",
+    "OutputGuardrailBlockedMessageFormatter"
   ],
   "submodule_export_exclusions": [
     "agents.sandbox.sandboxes"
