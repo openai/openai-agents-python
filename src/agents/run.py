@@ -65,12 +65,12 @@ from .run_internal.agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     build_interruption_result,
-    build_recovered_final_output_result,
     build_resumed_stream_debug_extra,
     ensure_context_wrapper,
     finalize_conversation_tracking,
     get_unsent_tool_call_ids_for_interrupted_state,
     input_guardrails_triggered,
+    reject_unrecoverable_terminal_state,
     resolve_processed_response,
     resolve_resumed_context,
     resolve_trace_settings,
@@ -140,15 +140,11 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
-    record_terminal_checkpoint,
     resume_pending_session_write,
     resumed_turn_items,
-    resumed_write_owner,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
-    settleable_terminal_step,
-    terminal_state_is_unrecoverable,
     update_run_state_after_resume,
 )
 from .run_internal.tool_use_tracker import (
@@ -597,7 +593,6 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
-        resumed_terminal_step: NextStepFinalOutput | None = None
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -641,16 +636,7 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
-            if terminal_state_is_unrecoverable(run_state):
-                # Fail closed before any Session, sandbox, guardrail, model, tool, or hook
-                # work: this run already produced an output that cannot be produced again.
-                raise UserError(
-                    "This RunState accepted a final output that cannot be restored, so the "
-                    "run cannot be resumed. Start a new run instead of retrying this state."
-                )
-            # Capture before reconciling: settling the pending write clears the checkpoint
-            # that proves the output was accepted before the append failed.
-            resumed_terminal_step = settleable_terminal_step(run_state)
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -994,30 +980,6 @@ class AgentRunner:
                             str | list[TResponseInputItem], original_input
                         )
                         run_state = cast(RunState[TContext] | None, run_state)
-                    if run_state is not None and resumed_terminal_step is not None:
-                        # Nothing but the Session append was still owed, and it settled above.
-                        # Finish here so no sandbox, guardrail, model, tool, or hook work runs
-                        # for an output that was already accepted.
-                        logger.debug("Settling an accepted terminal output")
-                        result = build_recovered_final_output_result(
-                            run_state=run_state,
-                            final_output=resumed_terminal_step.output,
-                            result_input=original_input,
-                            session_items=session_items,
-                            model_responses=model_responses,
-                            current_agent=current_agent,
-                            input_guardrail_results=input_guardrail_results,
-                            output_guardrail_results=output_guardrail_results,
-                            tool_input_guardrail_results=tool_input_guardrail_results,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                            tool_use_tracker=tool_use_tracker,
-                            max_turns=max_turns,
-                            current_turn=current_turn,
-                            generated_items=generated_items,
-                        )
-                        run_state._current_step = None
-                        return _finalize_result(result)
                     resuming_turn = is_resumed_state
                     all_input_guardrails = (
                         starting_agent.input_guardrails + (run_config.input_guardrails or [])
@@ -1205,7 +1167,7 @@ class AgentRunner:
                             ):
                                 run_state._current_turn_persisted_item_count = (
                                     await save_resumed_turn_items(
-                                        run_state=resumed_write_owner(run_state, session),
+                                        run_state=run_state,
                                         session=session,
                                         items=turn_session_items,
                                         persisted_count=(
@@ -1407,19 +1369,11 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
-                                # Reached only after every output guardrail succeeded, so
-                                # this append is the post-acceptance one.
-                                if (
-                                    record_terminal_checkpoint(
-                                        run_state, session, settle_terminal_output=True
-                                    )
-                                    is not None
-                                ):
-                                    # Publish the results before the append can raise so a settled
-                                    # retry reports the original evidence instead of a new one.
-                                    run_state._output_guardrail_results = list(
-                                        output_guardrail_results
-                                    )
+                                # The output, its guardrails, and its terminal hooks are all
+                                # complete, so from here until the turn is persisted this run owns
+                                # a result no resume can reproduce.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = True
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,
@@ -1429,9 +1383,11 @@ class AgentRunner:
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
-                                    # Reached only after every output guardrail succeeded.
-                                    settle_terminal_output=True,
                                 )
+                                # The append and any post-append maintenance both succeeded,
+                                # so the turn is durable and the state is open again.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = False
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
@@ -2049,6 +2005,8 @@ class AgentRunner:
                                 current_agent,
                                 run_config,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await save_final_turn_items_after_guardrails(
                                 session=session,
                                 run_state=run_state,
@@ -2059,6 +2017,8 @@ class AgentRunner:
                                 store=store_setting,
                                 wrapper=context_wrapper,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (

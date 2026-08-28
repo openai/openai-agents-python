@@ -37,6 +37,7 @@ from agents.run_internal.run_loop import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.tool_guardrails import (
@@ -1221,3 +1222,142 @@ async def test_resumed_handoff_session_append_is_recovered_before_next_model(
     assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
     assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
     assert "pending_session_write" not in result.to_state().to_json()
+
+
+class _TerminalLifecycleHooks(RunHooks[Any]):
+    """Count the agent lifecycle hooks an application can attach its own effects to."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.ends: list[str] = []
+
+    async def on_agent_start(self, context: Any, agent: Agent[Any]) -> None:
+        self.starts += 1
+
+    async def on_agent_end(self, context: Any, agent: Agent[Any], output: Any) -> None:
+        self.ends.append(str(output))
+
+
+async def _terminal_output_session_state(
+    streamed: bool,
+    session: Session | None = None,
+    hooks: RunHooks[Any] | None = None,
+):
+    """Pause on an approval whose tool output becomes the terminal agent output."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = session if session is not None else _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_terminal_session_append_failure_rejects_every_later_resume(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    """An accepted terminal output whose append failed is not resumable, and never replayed."""
+    hooks = _TerminalLifecycleHooks()
+    agent, model, session, state, effects = await _terminal_output_session_state(
+        failing_streamed, hooks=hooks
+    )
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed, hooks=hooks)
+    assert error.value is session.error
+
+    # The output, its guardrails, and its terminal hooks all completed exactly once.
+    assert effects == [7]
+    assert len(model.calls) == 1
+    assert hooks.ends == ["receipt-7"]
+    starts_after_failure = hooks.starts
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    # Every later resume fails closed, including a second one.
+    for _ in range(2):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, state, session, retry_streamed, hooks=hooks)
+        assert len(model.calls) == 1
+        assert effects == [7]
+        assert hooks.starts == starts_after_failure
+        assert hooks.ends == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_unrecoverable_terminal_state_rejects_before_any_resumed_work(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection precedes Session reconciliation and sandbox preparation."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    async def _fail_get_items(*args: Any, **kwargs: Any) -> list[TResponseInputItem]:
+        raise AssertionError("Session reconciliation must not run for a rejected terminal state")
+
+    async def _fail_prepare_agent(*args: Any, **kwargs: Any):
+        raise AssertionError("sandbox preparation must not run for a rejected terminal state")
+
+    monkeypatch.setattr(type(session), "get_items", _fail_get_items)
+    monkeypatch.setattr(SandboxRuntime, "prepare_agent", _fail_prepare_agent)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await _run_session_resume(agent, restored, session, not streamed)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_terminal_marker_is_cleared_once_the_turn_is_persisted(streamed: bool) -> None:
+    """A terminal turn that persists cleanly leaves a normal, unmarked result."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    result = await _run_session_resume(agent, state, session, streamed)
+
+    assert result.final_output == "receipt-7"
+    assert effects == [7]
+    assert "terminal_unrecoverable" not in result.to_state().to_json()
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_rejects_an_older_schema_label() -> None:
+    """The marker is only honored on the schema boundary that introduced it."""
+    agent, _, session, state, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["$schemaVersion"] = "1.16"
+    with pytest.raises(UserError, match="terminal marker is invalid"):
+        await RunState.from_json(agent, payload)

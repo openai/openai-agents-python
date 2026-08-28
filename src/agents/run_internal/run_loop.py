@@ -102,6 +102,7 @@ from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     get_unsent_tool_call_ids_for_interrupted_state,
+    reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
@@ -177,16 +178,12 @@ from .session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
-    record_terminal_checkpoint,
     resume_pending_session_write,
     resumed_turn_items,
-    resumed_write_owner,
     rewind_session_items,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
-    settleable_terminal_step,
-    terminal_state_is_unrecoverable,
     update_run_state_after_resume,
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
@@ -389,7 +386,6 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
-    settle_terminal_output: bool = False,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -398,9 +394,7 @@ async def _save_resumed_stream_items(
     ):
         return
     streamed_result._current_turn_persisted_item_count = await save_resumed_turn_items(
-        run_state=resumed_write_owner(
-            run_state, session, settle_terminal_output=settle_terminal_output
-        ),
+        run_state=run_state,
         session=session,
         items=items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
@@ -502,8 +496,7 @@ async def _finalize_streamed_final_output(
     run_config: RunConfig,
     output: Any,
     context_wrapper: RunContextWrapper[TContext],
-    save_items: Callable[[list[RunItem], str | None, bool | None, bool], Awaitable[None]],
-    session: Session | None,
+    save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
     items: list[RunItem],
     model_response: ModelResponse | None,
     processed_response: ProcessedResponse | None,
@@ -568,7 +561,7 @@ async def _finalize_streamed_final_output(
         )
         if retained_items:
             try:
-                await save_items(retained_items, response_id, store_setting, False)
+                await save_items(retained_items, response_id, store_setting)
             except BaseException as persistence_error:
                 safe_error = _safe_redacted_persistence_error(persistence_error)
                 if (
@@ -593,7 +586,7 @@ async def _finalize_streamed_final_output(
                 agent,
                 run_config,
             )
-            await save_items(final_turn_items, response_id, store_setting, False)
+            await save_items(final_turn_items, response_id, store_setting)
         except BaseException as persistence_error:
             if guardrail_error_is_redacted:
                 safe_persistence_error = _safe_redacted_persistence_error(persistence_error)
@@ -625,17 +618,6 @@ async def _finalize_streamed_final_output(
         raise redacted_persistence_error from None
 
     streamed_result.output_guardrail_results.extend(output_guardrail_results)
-    # Reached only after every output guardrail succeeded, so this append is the
-    # post-acceptance one.
-    if (
-        record_terminal_checkpoint(streamed_result._state, session, settle_terminal_output=True)
-        is not None
-    ):
-        # Publish the results before the append can raise so a settled retry reports the original
-        # evidence instead of evaluating a new one.
-        streamed_result._state._output_guardrail_results = list(
-            streamed_result.output_guardrail_results
-        )
     final_turn_items = _final_turn_items_for_persistence(
         items,
         processed_response,
@@ -647,12 +629,15 @@ async def _finalize_streamed_final_output(
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
     # persisted-item count, make the second one a no-op.
-    # Reached only after every output guardrail succeeded.
+    # The output, its guardrails, and its terminal hooks are all complete, so from here until
+    # the turn is persisted this run owns a result no resume can reproduce.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = True
     if on_persisted_after_guardrails is None:
-        await save_items(final_turn_items, response_id, store_setting, True)
+        await save_items(final_turn_items, response_id, store_setting)
     else:
         try:
-            await save_items(final_turn_items, response_id, store_setting, True)
+            await save_items(final_turn_items, response_id, store_setting)
         except asyncio.CancelledError as persistence_error:
             if streamed_result._cancel_mode == "immediate":
                 raise
@@ -660,6 +645,10 @@ async def _finalize_streamed_final_output(
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
             return
+    # The append and any post-append maintenance both succeeded, so the turn is durable and the
+    # state is open again.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = False
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -942,18 +931,8 @@ async def start_streaming(
             run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
-        resumed_terminal_step: NextStepFinalOutput | None = None
         if is_resumed_state and run_state is not None:
-            if terminal_state_is_unrecoverable(run_state):
-                # Fail closed before any Session, sandbox, guardrail, model, tool, or hook
-                # work: this run already produced an output that cannot be produced again.
-                raise UserError(
-                    "This RunState accepted a final output that cannot be restored, so the "
-                    "run cannot be resumed. Start a new run instead of retrying this state."
-                )
-            # Capture before reconciling: settling the pending write clears the checkpoint
-            # that proves the output was accepted before the append failed.
-            resumed_terminal_step = settleable_terminal_step(run_state)
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             streamed_result._current_turn_persisted_item_count = (
                 run_state._current_turn_persisted_item_count
@@ -1145,10 +1124,7 @@ async def start_streaming(
                 streamed_result._original_input_for_persistence = session_items_snapshot
 
         async def _save_resumed_items(
-            items: list[RunItem],
-            response_id: str | None,
-            store_setting: bool | None,
-            settle_terminal_output: bool = False,
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
         ) -> None:
             await _save_resumed_stream_items(
                 session=session,
@@ -1158,18 +1134,11 @@ async def start_streaming(
                 items=items,
                 response_id=response_id,
                 store=store_setting,
-                settle_terminal_output=settle_terminal_output,
             )
 
         async def _save_stream_items_with_count(
-            items: list[RunItem],
-            response_id: str | None,
-            store_setting: bool | None,
-            settle_terminal_output: bool = False,
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
         ) -> None:
-            # The main loop never records a terminal step on the state, so there is no terminal
-            # append for a later resume to own.
-            del settle_terminal_output
             await _save_stream_items(
                 session=session,
                 server_conversation_tracker=server_conversation_tracker,
@@ -1196,13 +1165,8 @@ async def start_streaming(
             )
 
         async def _save_max_turns_items(
-            items: list[RunItem],
-            response_id: str | None,
-            store_setting: bool | None,
-            settle_terminal_output: bool = False,
+            items: list[RunItem], response_id: str | None, store_setting: bool | None
         ) -> None:
-            # A max-turns handler output is not a resumed terminal append.
-            del settle_terminal_output
             if not await _should_persist_stream_items(
                 session=session,
                 server_conversation_tracker=server_conversation_tracker,
@@ -1236,15 +1200,6 @@ async def start_streaming(
 
     try:
         while True:
-            if run_state is not None and resumed_terminal_step is not None:
-                # Nothing but the Session append was still owed, and it settled above. The
-                # accepted output, its items, and its guardrail results already seeded this
-                # streamed result, so finish before any sandbox, guardrail, or hook work.
-                streamed_result.final_output = resumed_terminal_step.output
-                run_state._current_step = None
-                streamed_result.is_complete = True
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                break
             validate_output_guardrails_with_server_managed_conversation(
                 current_agent,
                 run_config,
@@ -1499,7 +1454,6 @@ async def start_streaming(
                             output=turn_result.next_step.output,
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
-                            session=session,
                             items=list(turn_session_items),
                             model_response=turn_result.model_response,
                             processed_response=(
@@ -1698,7 +1652,6 @@ async def start_streaming(
                     output=validated_output,
                     context_wrapper=context_wrapper,
                     save_items=_save_max_turns_items,
-                    session=session,
                     items=[synthesized_item] if include_in_history else [],
                     model_response=None,
                     processed_response=None,
@@ -1964,7 +1917,6 @@ async def start_streaming(
                         output=turn_result.next_step.output,
                         context_wrapper=context_wrapper,
                         save_items=_save_stream_items_with_count,
-                        session=session,
                         items=turn_session_items,
                         model_response=turn_result.model_response,
                         processed_response=turn_result.processed_response,

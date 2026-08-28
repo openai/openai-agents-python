@@ -146,7 +146,6 @@ if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
     from .run_internal.run_steps import (
-        NextStepFinalOutput,
         NextStepInterruption,
         NextStepRunAgain,
         ProcessedResponse,
@@ -226,8 +225,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes and accepted terminal "
-        "outputs, recoverable or not."
+        "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -845,12 +843,8 @@ class RunState(Generic[TContext, TAgent]):
     _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
     """Results from tool output guardrails applied during the run."""
 
-    _current_step: NextStepInterruption | NextStepRunAgain | NextStepFinalOutput | None = None
-    """Current resumable step, or ``None`` when the state is terminal.
-
-    ``NextStepFinalOutput`` is a settled terminal output whose Session append has not been
-    acknowledged yet, so it resumes by finalizing that output rather than by running the model.
-    """
+    _current_step: NextStepInterruption | NextStepRunAgain | None = None
+    """Current resumable step, or ``None`` when the state is terminal."""
 
     _last_processed_response: ProcessedResponse | None = None
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -881,6 +875,13 @@ class RunState(Generic[TContext, TAgent]):
 
     _session_write_in_progress: bool = field(default=False, repr=False)
     """Live ownership guard; independent serialized copies require caller serialization."""
+
+    _terminal_unrecoverable: bool = field(default=False, repr=False)
+    """Set once a final output, its guardrails, and its terminal hooks have all completed.
+
+    It closes the state for the window where the run owns an accepted result that no resume can
+    reproduce, and it is cleared only once that turn is fully persisted.
+    """
 
     def __init__(
         self,
@@ -924,6 +925,7 @@ class RunState(Generic[TContext, TAgent]):
         self._schema_version = CURRENT_SCHEMA_VERSION
         self._pending_session_write = None
         self._session_write_in_progress = False
+        self._terminal_unrecoverable = False
         from .agent_tool_state import get_agent_tool_state_scope
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
@@ -1913,6 +1915,8 @@ class RunState(Generic[TContext, TAgent]):
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
         if self._pending_session_write is not None:
             result["pending_session_write"] = copy.deepcopy(self._pending_session_write)
+        if self._terminal_unrecoverable:
+            result["terminal_unrecoverable"] = True
         result["trace"] = self._serialize_trace_data(
             include_tracing_api_key=include_tracing_api_key
         )
@@ -1983,15 +1987,7 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current resumable step."""
         # Import at runtime to avoid circular import
-        from .run_internal.run_steps import (
-            NextStepFinalOutput,
-            NextStepInterruption,
-            NextStepRunAgain,
-        )
-        from .run_internal.session_persistence import (
-            TerminalOutputUnrecoverable,
-            settleable_terminal_step,
-        )
+        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
         agent_identity_keys_by_id = (
             _build_agent_identity_keys_by_id(cast(Agent[Any], self._starting_agent))
@@ -2001,22 +1997,6 @@ class RunState(Generic[TContext, TAgent]):
 
         if isinstance(self._current_step, NextStepRunAgain):
             return {"type": "next_step_run_again"}
-
-        if isinstance(self._current_step, NextStepFinalOutput):
-            if isinstance(self._current_step.output, TerminalOutputUnrecoverable):
-                return {
-                    "type": "next_step_final_output",
-                    "data": {"unrecoverable": True},
-                }
-            settleable = settleable_terminal_step(self)
-            if settleable is not None:
-                return {
-                    "type": "next_step_final_output",
-                    "data": {"output": settleable.output},
-                }
-            # A terminal step the checkpoint never recorded carries no resume promise, so there
-            # is nothing durable to write for it.
-            return None
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -4334,22 +4314,6 @@ async def _build_run_state_from_json(
         from .run_internal.run_steps import NextStepRunAgain
 
         state._current_step = NextStepRunAgain()
-    elif current_step_data and current_step_data.get("type") == "next_step_final_output":
-        from .run_internal.run_steps import NextStepFinalOutput
-        from .run_internal.session_persistence import TERMINAL_OUTPUT_UNRECOVERABLE
-
-        terminal_data = current_step_data.get("data", {})
-        terminal_output = terminal_data.get("output")
-        unrecoverable = terminal_data.get("unrecoverable") is True
-        # An older label never wrote this step, so accepting one would grant a snapshot a
-        # resume shortcut the schema it claims does not have.
-        if (schema_major, schema_minor) < (1, 17) or not (
-            unrecoverable or isinstance(terminal_output, str)
-        ):
-            raise validation_error_factory("Run state terminal output step is invalid", UserError)
-        state._current_step = NextStepFinalOutput(
-            output=TERMINAL_OUTPUT_UNRECOVERABLE if unrecoverable else terminal_output
-        )
     elif current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
@@ -4404,18 +4368,11 @@ async def _build_run_state_from_json(
     )
     pending_write = state_json.get("pending_session_write")
     if pending_write is not None:
-        from .run_internal.run_steps import (
-            NextStepFinalOutput,
-            NextStepInterruption,
-            NextStepRunAgain,
-        )
+        from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
         if (
             (schema_major, schema_minor) < (1, 17)
-            or not isinstance(
-                state._current_step,
-                NextStepRunAgain | NextStepInterruption | NextStepFinalOutput,
-            )
+            or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
             or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
             or not isinstance(pending_write.get("session_id"), str)
@@ -4434,6 +4391,13 @@ async def _build_run_state_from_json(
         ):
             raise validation_error_factory("Run state pending Session write is invalid", UserError)
         state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))
+    terminal_unrecoverable = state_json.get("terminal_unrecoverable")
+    if terminal_unrecoverable is not None:
+        # An older label never wrote this marker, so honoring one would let a snapshot claim a
+        # resume boundary the schema it declares does not have.
+        if (schema_major, schema_minor) < (1, 17) or terminal_unrecoverable is not True:
+            raise validation_error_factory("Run state terminal marker is invalid", UserError)
+        state._terminal_unrecoverable = True
     serialized_policy = state_json.get("reasoning_item_id_policy")
     if serialized_policy in {"preserve", "omit"}:
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
@@ -5698,7 +5662,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
-        "Run state terminal output step is invalid",
+        "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "
