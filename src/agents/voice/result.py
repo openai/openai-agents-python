@@ -107,7 +107,8 @@ class StreamedAudioResult:
         np_array = np.frombuffer(combined_buffer, dtype=np.int16)
 
         if output_dtype == np.int16:
-            return np_array
+            # frombuffer aliases the immutable bytes, so copy to keep the emitted array writable.
+            return np_array.copy()
         elif output_dtype == np.float32:
             return (np_array.astype(np.float32) / 32767.0).reshape(-1, 1)
         else:

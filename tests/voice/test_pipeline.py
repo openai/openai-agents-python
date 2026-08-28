@@ -4,7 +4,7 @@ import asyncio
 import gc
 import logging
 import weakref
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from unittest.mock import patch
@@ -30,7 +30,7 @@ try:
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
     )
-    from agents.voice.testing import ScriptedTTSModel
+    from agents.voice.testing import ScriptedTTSModel, TTSResult, pcm16_samples
 
     from .helpers import extract_events
     from .pipeline_test_models import (
@@ -858,6 +858,52 @@ async def test_voicepipeline_run_single_turn() -> None:
         "session_ended",
     ]
     await fake_tts.verify_audio("out_1", audio_chunks[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dtype", [np.int16, np.float32])
+async def test_voicepipeline_transform_data_can_edit_audio_in_place(
+    dtype: npt.DTypeLike,
+) -> None:
+    # transform_data receives every emitted array, so in-place edits must work for each dtype.
+
+    async def run_pipeline(
+        transform: Callable[
+            [npt.NDArray[np.int16 | np.float32]], npt.NDArray[np.int16 | np.float32]
+        ]
+        | None,
+    ) -> list[npt.NDArray[np.int16 | np.float32]]:
+        config = VoicePipelineConfig(
+            tts_settings=TTSModelSettings(
+                buffer_size=1,
+                dtype=dtype,
+                transform_data=transform,
+            )
+        )
+        pipeline = VoicePipeline(
+            workflow=QueuedVoiceWorkflow([["out_1"]]),
+            stt_model=QueuedSTTModel(["first"]),
+            tts_model=ScriptedTTSModel([TTSResult([pcm16_samples([1, 2, 3])])]),
+            config=config,
+        )
+        result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+        chunks: list[npt.NDArray[np.int16 | np.float32]] = []
+        async for event in result.stream():
+            if isinstance(event, VoiceStreamEventAudio) and event.data is not None:
+                chunks.append(event.data)
+        return chunks
+
+    def double_in_place(
+        data: npt.NDArray[np.int16 | np.float32],
+    ) -> npt.NDArray[np.int16 | np.float32]:
+        data *= 2
+        return data
+
+    baseline = await run_pipeline(None)
+    doubled = await run_pipeline(double_in_place)
+
+    assert baseline, "the pipeline emitted no audio, so the comparison below would be vacuous"
+    assert [chunk.tolist() for chunk in doubled] == [(chunk * 2).tolist() for chunk in baseline]
 
 
 @pytest.mark.asyncio
