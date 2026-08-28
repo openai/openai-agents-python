@@ -441,6 +441,14 @@ def function_schema(
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
                     ann = list[ann]  # type: ignore
+                # tuple[()] parameterizes an empty tuple and reports no args, while a bare
+                # typing.Tuple is unparameterized and carries no element type to reject.
+                elif hasattr(ann, "__args__"):
+                    raise UserError(
+                        f"Variadic parameter `*{name}` in function {func.__name__} is annotated"
+                        f" with the fixed-length tuple `{ann}`. A variadic annotation describes"
+                        " each positional argument, so use tuple[T, ...] or list[T] instead."
+                    )
                 else:
                     ann = list[Any]
             else:

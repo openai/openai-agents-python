@@ -462,6 +462,53 @@ def test_var_positional_tuple_annotation():
         fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
 
 
+def _var_positional_fixed_pair(*args: tuple[int, str]) -> int:
+    return len(args)
+
+
+def _var_positional_fixed_single(*args: tuple[int]) -> int:
+    return len(args)
+
+
+def _var_positional_empty_tuple(*args: tuple[()]) -> int:
+    return len(args)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [_var_positional_fixed_pair, _var_positional_fixed_single, _var_positional_empty_tuple],
+)
+def test_var_positional_fixed_length_tuple_annotation_is_rejected(func: Any):
+    # A fixed-length tuple cannot describe every positional argument, so reject it at
+    # construction instead of silently widening each argument to Any. tuple[()] reports no
+    # args yet is still parameterized, so it belongs in this group.
+    with pytest.raises(UserError, match=r"use tuple\[T, \.\.\.\] or list\[T\] instead"):
+        function_schema(func, use_docstring_info=False)
+
+
+def _var_positional_homogeneous_tuple(*args: tuple[int, ...]) -> int:
+    return len(args)
+
+
+def _var_positional_list(*args: list[int]) -> int:
+    return len(args)
+
+
+def _var_positional_scalar(*args: int) -> int:
+    return len(args)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [_var_positional_homogeneous_tuple, _var_positional_list, _var_positional_scalar],
+)
+def test_var_positional_supported_annotations_still_build(func: Any):
+    # The alternatives named by the rejection message must keep working.
+    fs = function_schema(func, use_docstring_info=False)
+
+    assert fs.params_json_schema["properties"]["args"]["type"] == "array"
+
+
 def test_var_keyword_dict_annotation():
     # Case 3:
     # A ``**kwargs: X`` annotation applies to each keyword *value* (PEP 484), so a
