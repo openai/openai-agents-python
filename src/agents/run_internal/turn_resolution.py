@@ -548,12 +548,12 @@ async def execute_handoffs(
     """Execute a handoff and prepare the next turn for the new agent.
 
     ``ownership_token`` is the running run's claim over the session history
-    its request input was built from. A handoff input filter can rewrite the
-    accumulated history the next requests are built from while the session
-    keeps every persisted turn, so applying one voids the token: later
-    persists then record no compaction boundaries and their compactions skip
-    instead of letting a replacement delete stored items the rewritten
-    requests never carried.
+    its request input was built from. A handoff input filter and nested
+    handoff history both rewrite the accumulated history the next requests
+    are built from while the session keeps every persisted turn, so applying
+    either voids the token: later persists then record no compaction
+    boundaries and their compactions skip instead of letting a replacement
+    delete stored items the rewritten requests never carried.
     """
 
     def nest_history(
@@ -731,6 +731,16 @@ async def execute_handoffs(
                 _get_nested_history_owned_items(filtered, source_data=handoff_input_data)
             )
         elif should_nest_history and handoff_input_data is not None:
+            if ownership_token is not None:
+                # Nesting folds the accumulated history the next requests are
+                # built from into a rendered transcript while the session
+                # keeps the original turns, so from here on no item count can
+                # prove what the server saw. Void the token before nesting,
+                # unconditionally and with no comparison of the nested
+                # output, mirroring the input filter branch above: the
+                # default nesting moves every prior item into wrapper text,
+                # and a custom history mapper may drop anything outright.
+                ownership_token.invalidate()
             nested, nested_history_owned_items = nest_history(
                 handoff_input_data,
                 run_config.handoff_history_mapper,

@@ -2980,6 +2980,77 @@ class TestCompactionConcurrentMutations:
         assert await session.get_items() == [summary, later_turn]
 
     @pytest.mark.asyncio
+    async def test_commit_then_failed_append_still_arms_skip_gate(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An append that commits and then raises must still arm the skip gate.
+
+        Ordering under test: a fresh wrapper over an empty store, a run
+        captures ownership, and its persist reaches a backend that stores
+        the batch but raises before acknowledging. The batch is durable
+        while the persist surfaced an error, so nothing was recorded for
+        the response. With the ever recorded arm sitting after the append,
+        the raise skipped it, and the compaction keyed on the response fell
+        through to the snapshot fallback, classified the committed turn as
+        covered, and replaced it with a summary the server side history
+        through that response cannot vouch for. The arm now precedes the
+        append, so every token carrying persist marks the session boundary
+        managed even when the backend commits and then fails: the compaction
+        skips before the billed call and the committed turn survives. Arming
+        first is strictly conservative, costing at most a skip when the
+        append never committed at all.
+        """
+        turn = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "turn a"}
+        )
+
+        class CommitThenRaiseSession(SimpleListSession):
+            """Backend that stores the first batch, then fails its acknowledgement."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.failed_once = False
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                await super().add_items(items)
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise RuntimeError("acknowledgement lost after commit")
+
+        underlying = CommitThenRaiseSession()
+        compacted = SimpleNamespace(output=[{"type": "compaction", "summary": "through a"}])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id="commit-then-raise",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        ownership_token = await session._capture_ownership_token()
+        with pytest.raises(RuntimeError, match="acknowledgement lost after commit"):
+            await session._add_items_for_response(
+                [turn], response_id="resp_a", ownership_token=ownership_token
+            )
+
+        # The backend committed the batch even though the persist errored,
+        # and nothing was recorded for the response; only the armed gate
+        # stands between that absent entry and the snapshot fallback.
+        assert await underlying.get_items() == [turn]
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await session.run_compaction({"force": True, "response_id": "resp_a"})
+
+        # The compaction skipped before the billed call and the committed
+        # turn survived instead of being replaced through the fallback.
+        mock_client.responses.compact.assert_not_called()
+        assert await underlying.get_items() == [turn]
+        assert "Skipped compaction for resp_a" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_replacement_translates_boundaries_at_nonzero_shift(self) -> None:
         """Boundary translation must apply the exact shift of the rewrite.
 
@@ -3319,9 +3390,10 @@ class TestPartialRequestInputCompaction:
 
     A resolved session limit windows the history read, a session input
     callback rebuilds the prepared input outright, a call_model_input_filter
-    rewrites any request before it goes out, and a handoff input filter
-    rewrites the accumulated history mid run. In every case the request
-    carries less than the stored history while the count at persist time spans
+    rewrites any request before it goes out, a handoff input filter rewrites
+    the accumulated history mid run, and nested handoff history folds it
+    into a rendered transcript. In every case the request carries less than
+    the stored history while the count at persist time spans
     all of it, so a recorded boundary would let a previous_response_id
     replacement delete prefix items the server never saw, with no concurrency
     involved. Such runs must record nothing and their compactions must skip
@@ -3664,6 +3736,79 @@ class TestPartialRequestInputCompaction:
         assert session._response_boundaries_ever_recorded is True
         mock_client.responses.compact.assert_not_called()
         assert "Skipped compaction for resp_post" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_nested_handoff_history_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nested handoff history must void the run's ownership like a filter.
+
+        The triage response hands off with nest_handoff_history enabled, so
+        the accumulated history is folded into one synthesized message that
+        renders the stored turns as wrapped transcript text. The traced
+        desync: the pre handoff request carried the stored turns as items,
+        the post handoff request carried none of them as items, only the
+        rendering, while the session kept every original turn because
+        session_step_items deliberately preserves the lossless history. The
+        count at persist time still spans the whole store, so on the prior
+        behavior the persist recorded a boundary for the post handoff
+        response and the compaction keyed on it, forced after the deferral
+        for the handoff output, replaced the lossless stored items with a
+        compaction of the rendering; summarized tool items survive only as
+        text and a custom handoff_history_mapper may drop anything outright.
+        Applying the nesting now voids the ownership token, unconditionally
+        like the input filter branch, so nothing records and the compaction
+        skips with the store intact.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "nested-handoff")
+
+        model = ScriptedModel()
+        delegate = Agent(name="delegate", model=model)
+        triage = Agent(name="triage", model=model, handoffs=[handoff(delegate)])
+        model.extend(
+            [
+                ModelStep(output=[get_handoff_tool_call(delegate)], response_id="resp_hand"),
+                ModelStep(output=[get_text_message("nested reply")], response_id="resp_nest"),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(
+                triage,
+                "route this",
+                session=session,
+                run_config=RunConfig(nest_handoff_history=True),
+            )
+
+        # The desync is real: the request before the handoff carried the
+        # stored turns as items, the request after it carried exactly one
+        # synthesized message rendering them as wrapped transcript text, so
+        # counts at persist time can no longer describe item for item what
+        # the server saw.
+        assert len(model.calls) == 2
+        assert "prefix question" in str(model.calls[0].input)
+        post_request_items = model.calls[1].input
+        assert isinstance(post_request_items, list)
+        assert len(post_request_items) == 1
+        rendered_history = str(post_request_items[0])
+        assert "<CONVERSATION HISTORY>" in rendered_history
+        assert "prefix question" in rendered_history
+
+        # The stored history survived as real items, including everything
+        # the post handoff request only rendered as text; replacing it with
+        # a compaction of that rendering is the data loss under test.
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "route this" in stored_text
+        assert "nested reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_nest" in caplog.text
 
     @pytest.mark.asyncio
     async def test_unwindowed_run_still_records_and_replaces(self) -> None:

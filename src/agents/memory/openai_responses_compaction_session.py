@@ -54,8 +54,8 @@ class _SessionOwnershipToken:
     calls it when the run's request input provably stops covering the whole
     stored history: a windowed read left the oldest items out, a session
     input callback rebuilt the input, a call_model_input_filter rewrote the
-    request, or a handoff input filter rewrote the accumulated history mid
-    run. Counts cannot describe what the server saw in any of these cases,
+    request, a handoff input filter rewrote the accumulated history mid
+    run, or handoff history nesting collapsed it into a rendered transcript. Counts cannot describe what the server saw in any of these cases,
     so a voided token never records. Every persist that carries a token, in
     whatever state, marks the session as boundary managed, which makes every
     compaction keyed on the run's responses skip before the billed call
@@ -656,6 +656,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         retrying the turn would persist it again. When the read itself fails,
         the append has not started, so no boundary is recorded, the ever
         recorded flag stays untouched, and a retry begins clean.
+
+        The ever recorded arm also precedes the append: the backend can
+        commit the batch and still raise before acknowledging, and a batch it
+        committed for a token carrying persist must leave the session
+        boundary managed, or a compaction keyed on one of the run's responses
+        would reach the snapshot fallback through the unarmed gate and claim
+        items the server side history never contained. Arming first is
+        strictly conservative; when the append never committed it costs at
+        most a skipped compaction.
         """
         async with self._mutation_lock:
             count_before_append = len(await self._get_all_underlying_session_items())
@@ -679,20 +688,24 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 and ownership_token.generation == self._destructive_generation
                 and ownership_token.count == count_before_append
             )
+            if ownership_token is not None:
+                # The token, in whatever state it arrives, proves a runner is
+                # managing this session's boundaries, so arm the gate before
+                # the append and before the state checks below: a compaction
+                # keyed on any of this run's responses must skip through an
+                # absent entry instead of reaching the snapshot fallback.
+                # Arming after the append would leave the gate unarmed when
+                # the backend commits the batch and then raises before
+                # acknowledging, and the fallback would classify the
+                # committed items as covered and let the replacement delete
+                # them; the same unarmed gate would follow the first ever
+                # persist on a fresh wrapper arriving with a stale token.
+                # Only hookless persists, which carry no token, leave the
+                # gate alone, preserving the fallback for direct callers.
+                self._response_boundaries_ever_recorded = True
             await self._add_items_locked(items)
             if ownership_token is None:
                 return
-            # The token, in whatever state it arrives, proves a runner is
-            # managing this session's boundaries, so arm the gate before the
-            # state checks below: a compaction keyed on any of this run's
-            # responses must skip through an absent entry instead of reaching
-            # the snapshot fallback. Without this, the first ever persist on
-            # a fresh wrapper arriving with a stale token would leave the
-            # gate unarmed, and the fallback would classify an interleaved
-            # item below the batch as covered and let the replacement delete
-            # it. Only hookless persists, which carry no token, leave the
-            # gate alone, preserving the fallback for direct callers.
-            self._response_boundaries_ever_recorded = True
             if ownership_token.invalidated:
                 # The run's request input skipped stored history, so no count
                 # can describe what the server saw; nothing records.
@@ -708,7 +721,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # the eviction loop below removes oldest first by insertion order.
             self._response_boundaries.pop(response_id, None)
             self._response_boundaries[response_id] = boundary
-            self._response_boundaries_ever_recorded = True
             while len(self._response_boundaries) > _MAX_RECORDED_RESPONSE_BOUNDARIES:
                 del self._response_boundaries[next(iter(self._response_boundaries))]
 
