@@ -53,7 +53,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
-from ....sandbox.session.pty_output import collect_pty_output
+from ....sandbox.session.pty_output import collect_pty_output, decode_pty_window
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1251,6 +1251,17 @@ class E2BSandboxSession(BaseSandboxSession):
         live_process_id: int | None = process_id
 
         if exit_code is not None:
+            # collect_pty_output may have handed a partial character back to the deque while
+            # this looked like it was still running. nothing is going to drain it now, so close
+            # it here rather than let it leave with the entry
+            leftover = bytearray()
+            async with entry.output_lock:
+                while entry.output_chunks:
+                    leftover.extend(entry.output_chunks.popleft())
+            if leftover:
+                tail, _ = decode_pty_window(leftover, is_final=True)
+                output += tail.encode("utf-8", errors="replace")
+
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

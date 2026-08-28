@@ -1731,6 +1731,32 @@ async def test_cloudflare_pty_exec_start_opens_websocket_and_sends_command() -> 
 
 
 @pytest.mark.asyncio
+async def test_cloudflare_pty_finalize_flushes_a_partial_character_left_in_the_deque() -> None:
+    fake_ws = _FakeWebSocket()
+    sess = _make_session(fake_http=_FakeHttp())
+    process_id = await _register_pty_entry(sess, ws=fake_ws, tty=True)
+    entry = sess._pty_processes[process_id]
+
+    # collect_pty_output handed the first byte of a two byte character back while the stream
+    # still looked open. the close lands before the finalizer looks, so nothing will drain it
+    async with entry.output_lock:
+        entry.output_chunks.append("\u00e9".encode()[:1])
+    entry.exit_code = 0
+    entry.output_closed.set()
+
+    update = await sess._finalize_pty_update(
+        process_id=process_id,
+        entry=entry,
+        output=b"hi ",
+        original_token_count=None,
+    )
+
+    assert update.process_id is None
+    assert update.output.decode("utf-8") == "hi \ufffd"
+    assert not entry.output_chunks
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_pty_write_stdin_sends_input_and_collects_output() -> None:
     fake_ws = _FakeWebSocket()
     sess = _make_session(fake_http=_FakeHttp())

@@ -59,7 +59,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     with_ephemeral_mounts_removed,
 )
-from ....sandbox.session.pty_output import collect_pty_output
+from ....sandbox.session.pty_output import collect_pty_output, decode_pty_window
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1054,6 +1054,17 @@ class CloudflareSandboxSession(BaseSandboxSession):
         exit_code = entry.exit_code if entry.output_closed.is_set() else None
         live_process_id: int | None = process_id
         if entry.output_closed.is_set():
+            # collect_pty_output may have handed a partial character back to the deque while
+            # this looked like it was still running. nothing is going to drain it now, so close
+            # it here rather than let it leave with the entry
+            leftover = bytearray()
+            async with entry.output_lock:
+                while entry.output_chunks:
+                    leftover.extend(entry.output_chunks.popleft())
+            if leftover:
+                tail, _ = decode_pty_window(leftover, is_final=True)
+                output += tail.encode("utf-8", errors="replace")
+
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
