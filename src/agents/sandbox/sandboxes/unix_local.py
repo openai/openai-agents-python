@@ -110,9 +110,12 @@ async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Pro
     # The process group can contain descendants owned by another user when the
     # command was launched through sudo. Kill the direct child separately so
     # that a permission failure for one group member cannot leave the sudo
-    # process running and holding the pipes open.
-    with suppress(OSError):
-        proc.kill()
+    # process running and holding the pipes open. Only signal it while asyncio
+    # still reports the tracked child as running; otherwise its PID may have
+    # been reused by an unrelated process after the leader exited.
+    if proc.returncode is None:
+        with suppress(OSError):
+            proc.kill()
     try:
         await asyncio.wait_for(proc.communicate(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:

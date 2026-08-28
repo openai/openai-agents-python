@@ -200,6 +200,7 @@ async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
 
     class _Process:
         pid = 123
+        returncode = None
         _transport = _Transport()
 
         async def communicate(self) -> tuple[bytes, bytes]:
@@ -246,6 +247,7 @@ async def test_unix_local_exec_cleanup_kills_direct_child_when_group_signal_fail
 
     class _Process:
         pid = 123
+        returncode = None
         _transport = _Transport()
 
         async def communicate(self) -> tuple[bytes, bytes]:
@@ -278,6 +280,54 @@ async def test_unix_local_exec_cleanup_kills_direct_child_when_group_signal_fail
 
 
 @pytest.mark.asyncio
+async def test_unix_local_exec_cleanup_does_not_kill_exited_direct_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicate_started = asyncio.Event()
+    wait_called = asyncio.Event()
+    direct_kill_called = False
+    transport_closed = False
+
+    class _Transport:
+        def close(self) -> None:
+            nonlocal transport_closed
+            transport_closed = True
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            communicate_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            nonlocal direct_kill_called
+            direct_kill_called = True
+
+        async def wait(self) -> int:
+            wait_called.set()
+            return self.returncode
+
+    def _deny_group_signal(*_args: object) -> None:
+        raise PermissionError("not allowed to signal a group member")
+
+    monkeypatch.setattr(unix_local_module.os, "killpg", _deny_group_signal)
+    monkeypatch.setattr(unix_local_module, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.01)
+
+    process = cast(asyncio.subprocess.Process, _Process())
+    task = asyncio.create_task(unix_local_module._terminate_process_group_and_reap(process))
+    await communicate_started.wait()
+
+    await asyncio.wait_for(task, timeout=1)
+    assert not direct_kill_called
+    assert wait_called.is_set()
+    assert transport_closed
+
+
+@pytest.mark.asyncio
 async def test_unix_local_exec_cleanup_bounds_unreapable_direct_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -292,6 +342,7 @@ async def test_unix_local_exec_cleanup_bounds_unreapable_direct_child(
 
     class _Process:
         pid = 123
+        returncode = None
         _transport = _Transport()
 
         async def communicate(self) -> tuple[bytes, bytes]:
