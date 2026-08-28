@@ -4444,6 +4444,59 @@ async def test_modal_pty_start_and_write_stdin(
     await session.pty_terminate_all()
 
 
+@pytest.mark.asyncio
+async def test_modal_pty_finalize_flushes_a_partial_character_when_the_process_has_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.poll = _with_aio(lambda: 0)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-finalize"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    # the collector polled while the process was still running, so it held the first byte of a
+    # two byte character back. by the time the finalizer polls, the process has gone and the
+    # entry is about to be dropped
+    entry = modal_module._ModalPtyProcessEntry(process=sandbox.process, tty=True)
+    entry.pending_output = "\u00e9".encode()[:1]
+    session._pty_processes[7] = entry
+
+    update = await session._finalize_pty_update(
+        process_id=7,
+        entry=entry,
+        output=b"hi ",
+        original_token_count=None,
+    )
+
+    assert update.exit_code == 0
+    assert update.process_id is None
+    # replaced rather than vanishing with the entry
+    assert update.output.decode("utf-8") == "hi \ufffd"
+    assert entry.pending_output == b""
+
+
+@pytest.mark.asyncio
 async def test_modal_pty_output_keeps_a_character_split_across_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

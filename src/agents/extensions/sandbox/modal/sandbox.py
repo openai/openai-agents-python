@@ -1119,6 +1119,14 @@ class ModalSandboxSession(BaseSandboxSession):
         exit_code = await self._peek_exit_code(entry.process)
         live_process_id: int | None = process_id
         if exit_code is not None:
+            # The collector polled before this and may have seen the process still running, so
+            # it kept a partial character back for a window that is never going to come. Close
+            # it here, otherwise those bytes go out with the entry and the output loses them.
+            if entry.pending_output:
+                tail, _ = decode_pty_window(entry.pending_output, is_final=True)
+                entry.pending_output = b""
+                output += tail.encode("utf-8", errors="replace")
+
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
