@@ -176,6 +176,7 @@ async def test_multi_turn_no_handoffs():
                                     "name": "foo",
                                     "input": '{"a": "b"}',
                                     "output": "tool_result",
+                                    "tool_call_id": "2",
                                 },
                             },
                             {
@@ -255,6 +256,7 @@ async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
                                         "Please try again with valid JSON. Error: Expecting "
                                         "value: line 1 column 1 (char 0)"
                                     ),
+                                    "tool_call_id": "2",
                                 },
                             },
                             {"type": "generation"},
@@ -326,6 +328,7 @@ async def test_multiple_handoff_doesnt_error():
                                     "name": "some_function",
                                     "input": '{"a": "b"}',
                                     "output": "result",
+                                    "tool_call_id": "2",
                                 },
                             },
                             {"type": "generation"},
@@ -465,6 +468,7 @@ async def test_handoffs_lead_to_correct_agent_spans():
                                     "name": "some_function",
                                     "input": '{"a": "b"}',
                                     "output": "result",
+                                    "tool_call_id": "tool_1",
                                 },
                             },
                             {"type": "generation"},
@@ -494,6 +498,7 @@ async def test_handoffs_lead_to_correct_agent_spans():
                                     "name": "some_function",
                                     "input": '{"a": "b"}',
                                     "output": "result",
+                                    "tool_call_id": "tool_2",
                                 },
                             },
                             {"type": "generation"},
@@ -563,12 +568,22 @@ async def test_max_turns_exceeded():
                             {"type": "generation"},
                             {
                                 "type": "function",
-                                "data": {"name": "foo", "input": "", "output": "result"},
+                                "data": {
+                                    "name": "foo",
+                                    "input": "",
+                                    "output": "result",
+                                    "tool_call_id": "tool_1",
+                                },
                             },
                             {"type": "generation"},
                             {
                                 "type": "function",
-                                "data": {"name": "foo", "input": "", "output": "result"},
+                                "data": {
+                                    "name": "foo",
+                                    "input": "",
+                                    "output": "result",
+                                    "tool_call_id": "tool_2",
+                                },
                             },
                         ],
                     }

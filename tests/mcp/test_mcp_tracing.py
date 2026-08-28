@@ -69,6 +69,7 @@ async def test_mcp_tracing():
                                     "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_1_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
+                                    "tool_call_id": "mcp_call_1",
                                 },
                             },
                             {
@@ -131,6 +132,7 @@ async def test_mcp_tracing():
                                     "name": "non_mcp_tool",
                                     "input": "",
                                     "output": "tool_result",
+                                    "tool_call_id": "function_call_1",
                                 },
                             },
                             {
@@ -140,6 +142,7 @@ async def test_mcp_tracing():
                                     "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_2_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
+                                    "tool_call_id": "mcp_call_2",
                                 },
                             },
                             {
@@ -204,6 +207,7 @@ async def test_mcp_tracing():
                                     "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_3_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
+                                    "tool_call_id": "2",
                                 },
                             },
                             {
@@ -265,6 +269,7 @@ async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
                                 "data": {
                                     "name": "test_tool_1",
                                     "mcp_data": {"server": "fake_mcp_server"},
+                                    "tool_call_id": "2",
                                 },
                             },
                             {
