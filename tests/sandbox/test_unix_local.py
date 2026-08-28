@@ -231,7 +231,6 @@ async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
     assert transport_closed
 
 
-
 @pytest.mark.asyncio
 async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
