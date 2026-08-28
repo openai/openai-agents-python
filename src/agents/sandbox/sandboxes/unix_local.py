@@ -141,6 +141,8 @@ async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) ->
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
             continue
+        except Exception:
+            break
     try:
         cleanup_task.result()
     except Exception:
