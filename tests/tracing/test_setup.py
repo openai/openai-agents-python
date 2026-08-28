@@ -41,6 +41,14 @@ class _BootstrapProvider:
         self.shutdown_calls += 1
 
 
+@pytest.fixture(autouse=True)
+def reset_atexit_shutdown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing_setup, "_ATEXIT_SHUTDOWN_STARTED", False)
+    monkeypatch.setattr(tracing_setup, "_SDK_DEFAULT_PROVIDER", None)
+    monkeypatch.setattr(tracing_setup, "_SDK_DEFAULT_PROCESSOR", None)
+    monkeypatch.setattr(tracing_processors, "_DEFAULT_STACK_ATEXIT_SHUTDOWN", False)
+
+
 def test_shutdown_global_trace_provider_calls_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _DummyProvider()
     monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)

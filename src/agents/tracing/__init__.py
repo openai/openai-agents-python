@@ -19,9 +19,9 @@ from .create import (
     turn_span,
 )
 from .processor_interface import TracingProcessor
-from .processors import default_exporter
+from .processors import _set_default_exporter_api_key, default_exporter as default_exporter
 from .provider import TraceProvider
-from .setup import get_trace_provider, set_trace_provider
+from .setup import get_trace_provider, replace_trace_processors, set_trace_provider
 from .span_data import (
     AgentSpanData,
     CustomSpanData,
@@ -102,7 +102,7 @@ def set_trace_processors(processors: list[TracingProcessor]) -> None:
     """
     Set the list of trace processors. This will replace the current list of processors.
     """
-    get_trace_provider().set_processors(processors)
+    replace_trace_processors(processors)
 
 
 def set_tracing_disabled(disabled: bool) -> None:
@@ -116,7 +116,7 @@ def set_tracing_export_api_key(api_key: str) -> None:
     """
     Set the OpenAI API key for the backend exporter.
     """
-    default_exporter().set_api_key(api_key)
+    _set_default_exporter_api_key(api_key)
 
 
 def flush_traces() -> None:

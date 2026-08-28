@@ -12,7 +12,14 @@ import httpx2
 import pytest
 
 import agents._debug as _debug
-from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing import (
+    flush_traces,
+    get_trace_provider,
+    processors as tracing_processors,
+    set_trace_processors,
+    set_tracing_export_api_key,
+    setup as tracing_setup,
+)
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
@@ -610,6 +617,471 @@ def test_batch_trace_processor_shutdown_without_timeout_preserves_export_retries
     assert wait_for_retry.call_count == 2
 
     exporter.close()
+
+
+def _reset_default_tracing_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing_processors, "_global_exporter", None)
+    monkeypatch.setattr(tracing_processors, "_global_processor", None)
+    monkeypatch.setattr(tracing_processors, "_global_exporter_attached", False)
+    monkeypatch.setattr(tracing_processors, "_DEFAULT_STACK_ATEXIT_SHUTDOWN", False)
+    monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", None)
+    monkeypatch.setattr(tracing_setup, "_DEFAULT_PROCESSOR", None)
+    monkeypatch.setattr(tracing_setup, "_SDK_DEFAULT_PROVIDER", None)
+    monkeypatch.setattr(tracing_setup, "_SDK_DEFAULT_PROCESSOR", None)
+    monkeypatch.setattr(tracing_setup, "_ATEXIT_SHUTDOWN_STARTED", False)
+    monkeypatch.setattr(tracing_setup, "_SHUTDOWN_HANDLER_REGISTERED", True)
+
+
+def _wait_for_close(mock_client: MagicMock, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while mock_client.return_value.close.call_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert mock_client.return_value.close.call_count > 0
+
+
+@patch("httpx2.Client")
+def test_default_exporter_closes_once_after_no_timeout_shutdown(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    exporter = tracing_processors.default_exporter()
+    processor = tracing_processors.default_processor()
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=None)
+    processor.shutdown(timeout=None)
+
+    mock_client.return_value.close.assert_called_once()
+    replacement = tracing_processors.default_exporter()
+    assert replacement is not exporter
+    replacement.close()
+
+
+@patch("httpx2.Client")
+def test_timed_default_shutdown_does_not_close_under_surviving_export(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    exporter = tracing_processors.default_exporter()
+    processor = tracing_processors.default_processor()
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    def blocked_export(_items: list[Trace | Span[Any]]) -> None:
+        export_started.set()
+        assert release_export.wait(timeout=2.0)
+
+    monkeypatch.setattr(exporter, "export", blocked_export)
+    processor._export_trigger_size = 1
+    processor.on_span_end(get_span(processor))
+    assert export_started.wait(timeout=2.0)
+
+    processor.shutdown(timeout=0.01)
+    mock_client.return_value.close.assert_not_called()
+
+    release_export.set()
+    assert processor._worker_thread is not None
+    processor._worker_thread.join(timeout=2.0)
+    assert not processor._worker_thread.is_alive()
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_shutdown_waits_for_callback_admission_before_closing(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    processor = tracing_processors.default_processor()
+    put_started = threading.Event()
+    release_put = threading.Event()
+    original_put = processor._queue.put_nowait
+
+    def blocked_put(item: Trace | Span[Any]) -> None:
+        put_started.set()
+        assert release_put.wait(timeout=2.0)
+        original_put(item)
+
+    monkeypatch.setattr(processor._queue, "put_nowait", blocked_put)
+    callback_thread = threading.Thread(target=processor.on_span_end, args=(get_span(processor),))
+    callback_thread.start()
+    assert put_started.wait(timeout=2.0)
+
+    shutdown_thread = threading.Thread(target=processor.shutdown, kwargs={"timeout": None})
+    shutdown_thread.start()
+    time.sleep(0.05)
+    assert shutdown_thread.is_alive()
+    mock_client.return_value.close.assert_not_called()
+
+    release_put.set()
+    callback_thread.join(timeout=2.0)
+    shutdown_thread.join(timeout=2.0)
+    assert not callback_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_shutdown_leaves_caller_injected_exporter_open(mock_client):
+    exporter = BackendSpanExporter(api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter)
+
+    processor.shutdown(timeout=None)
+
+    mock_client.return_value.close.assert_not_called()
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_repeated_shutdown_does_not_drain_after_owned_worker_closed(mock_client) -> None:
+    exporter = BackendSpanExporter(api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter, schedule_delay=30.0, _owns_exporter=True)
+    processor.on_span_end(get_span(processor))
+
+    processor.shutdown(timeout=0.0)
+    assert processor._worker_thread is not None
+    processor._worker_thread.join(timeout=2.0)
+    processor.shutdown(timeout=None)
+
+    mock_client.return_value.post.assert_not_called()
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_set_trace_processors_retires_removed_owned_default(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    exporter = tracing_processors.default_exporter()
+    provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    custom_processor = MagicMock()
+    custom_processor.__eq__.return_value = True
+
+    set_trace_processors([custom_processor])
+
+    assert len(provider._multi_processor._processors) == 1
+    assert provider._multi_processor._processors[0] is custom_processor
+    assert tracing_setup._DEFAULT_PROCESSOR is None
+    _wait_for_close(mock_client)
+    mock_client.return_value.close.assert_called_once()
+    assert tracing_processors.default_exporter() is not exporter
+
+
+@patch("httpx2.Client")
+def test_set_trace_processors_drains_queued_default_before_retiring(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    response = MagicMock()
+    response.status_code = 200
+    mock_client.return_value.post.return_value = response
+    exporter = tracing_processors.default_exporter()
+    exporter.set_api_key("test_key")
+    processor = tracing_processors.default_processor()
+    tracing_setup.get_trace_provider()
+    processor._queue.put_nowait(get_span(processor))
+
+    set_trace_processors([MagicMock()])
+
+    _wait_for_close(mock_client)
+    mock_client.return_value.post.assert_called_once()
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_direct_provider_set_processors_retires_owned_default(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    custom_processor = MagicMock()
+
+    provider.set_processors([custom_processor])
+
+    assert provider._multi_processor._processors == (custom_processor,)
+    assert tracing_setup._DEFAULT_PROCESSOR is None
+    _wait_for_close(mock_client)
+    mock_client.return_value.close.assert_called_once()
+
+
+def test_direct_provider_set_processors_without_default_does_not_wait_for_callback():
+    provider = DefaultTraceProvider()
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    blocking_processor = MagicMock()
+    replacement_processor = MagicMock()
+
+    def block_callback(_span: Span[Any]) -> None:
+        callback_started.set()
+        assert release_callback.wait(timeout=2.0)
+
+    blocking_processor.on_span_end.side_effect = block_callback
+    provider.set_processors([blocking_processor])
+    callback_thread = threading.Thread(
+        target=provider._multi_processor.on_span_end,
+        args=(get_span(blocking_processor),),
+    )
+    callback_thread.start()
+    assert callback_started.wait(timeout=2.0)
+
+    replacement_thread = threading.Thread(
+        target=provider.set_processors,
+        args=([replacement_processor],),
+    )
+    replacement_thread.start()
+    replacement_thread.join(timeout=2.0)
+    assert not replacement_thread.is_alive()
+
+    release_callback.set()
+    callback_thread.join(timeout=2.0)
+    assert not callback_thread.is_alive()
+    assert provider._multi_processor._processors == (replacement_processor,)
+
+
+@patch("httpx2.Client")
+def test_atexit_does_not_close_detached_exporter_under_live_worker(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    retired_client = MagicMock()
+    replacement_client = MagicMock()
+    mock_client.side_effect = [retired_client, replacement_client]
+    exporter = tracing_processors.default_exporter()
+    processor = tracing_processors.default_processor()
+    tracing_setup.get_trace_provider()
+    export_started = threading.Event()
+    release_export = threading.Event()
+
+    def blocked_export(_items: list[Trace | Span[Any]]) -> None:
+        export_started.set()
+        assert release_export.wait(timeout=2.0)
+
+    monkeypatch.setattr(exporter, "export", blocked_export)
+    processor._export_trigger_size = 1
+    processor.on_span_end(get_span(processor))
+    assert export_started.wait(timeout=2.0)
+
+    replacement_thread = threading.Thread(target=set_trace_processors, args=([MagicMock()],))
+    replacement_thread.start()
+    replacement_thread.join(timeout=2.0)
+    assert not replacement_thread.is_alive()
+    retired_client.close.assert_not_called()
+
+    atexit_thread = threading.Thread(target=tracing_setup._shutdown_global_trace_provider)
+    atexit_thread.start()
+    time.sleep(0.05)
+    assert atexit_thread.is_alive()
+    retired_client.close.assert_not_called()
+
+    release_export.set()
+    atexit_thread.join(timeout=2.0)
+    assert not atexit_thread.is_alive()
+    assert processor._worker_thread is not None
+    processor._worker_thread.join(timeout=2.0)
+    retired_client.close.assert_called_once()
+    replacement_client.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_supported_recovery_keeps_provider_state_and_exporter_configuration(
+    mock_client, monkeypatch
+):
+    _reset_default_tracing_stack(monkeypatch)
+    exporter = tracing_processors.default_exporter()
+    exporter.set_api_key("trace-only-key")
+    exporter._organization = "org_123"
+    exporter._project = "proj_123"
+    exporter.endpoint = "https://example.test/traces"
+    exporter.max_retries = 7
+    exporter.base_delay = 0.25
+    exporter.max_delay = 2.5
+    provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    custom_processor = MagicMock()
+    provider.register_processor(custom_processor)
+    provider.set_disabled(True)
+    stale_processor = tracing_setup._DEFAULT_PROCESSOR
+
+    provider.shutdown(timeout=None)
+    recovered = tracing_setup.get_trace_provider()
+
+    assert recovered is provider
+    assert provider._manual_disabled is True
+    assert custom_processor in provider._multi_processor._processors
+    assert tracing_setup._DEFAULT_PROCESSOR is not stale_processor
+    replacement = tracing_processors.default_exporter()
+    assert replacement is not exporter
+    assert replacement._api_key == "trace-only-key"
+    assert replacement._organization == "org_123"
+    assert replacement._project == "proj_123"
+    assert replacement.endpoint == "https://example.test/traces"
+    assert replacement.max_retries == 7
+    assert replacement.base_delay == 0.25
+    assert replacement.max_delay == 2.5
+    assert mock_client.return_value.close.call_count == 1
+    replacement.close()
+
+
+@patch("httpx2.Client")
+def test_closed_default_exporter_recovers_registered_default_processor(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    exporter = tracing_processors.default_exporter()
+    stale_processor = tracing_setup._DEFAULT_PROCESSOR
+
+    exporter.close()
+    replacement = tracing_processors.default_exporter()
+    recovered = tracing_setup.get_trace_provider()
+
+    assert recovered is provider
+    assert replacement is not exporter
+    assert tracing_setup._DEFAULT_PROCESSOR is not stale_processor
+    assert provider._multi_processor._processors == (tracing_setup._DEFAULT_PROCESSOR,)
+    assert tracing_setup._DEFAULT_PROCESSOR is tracing_processors.default_processor()
+    replacement.close()
+
+
+@patch("httpx2.Client")
+def test_set_tracing_export_api_key_updates_recovered_default(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    provider.shutdown(timeout=None)
+
+    set_tracing_export_api_key("replacement-key")
+
+    assert tracing_processors.default_exporter()._api_key == "replacement-key"
+    tracing_processors.default_exporter().close()
+
+
+@patch("httpx2.Client")
+def test_set_trace_provider_retires_previous_owned_default(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    tracing_setup.get_trace_provider()
+    custom_provider = MagicMock()
+
+    tracing_setup.set_trace_provider(custom_provider)
+
+    assert tracing_setup.GLOBAL_TRACE_PROVIDER is custom_provider
+    assert tracing_setup._DEFAULT_PROCESSOR is None
+    _wait_for_close(mock_client)
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_set_trace_provider_drains_queued_default_before_retiring(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    response = MagicMock()
+    response.status_code = 200
+    mock_client.return_value.post.return_value = response
+    exporter = tracing_processors.default_exporter()
+    exporter.set_api_key("test_key")
+    processor = tracing_processors.default_processor()
+    tracing_setup.get_trace_provider()
+    processor._queue.put_nowait(get_span(processor))
+
+    tracing_setup.set_trace_provider(MagicMock())
+
+    _wait_for_close(mock_client)
+    mock_client.return_value.post.assert_called_once()
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_reinstalling_sdk_provider_recovers_its_retired_default(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    sdk_provider = tracing_setup.get_trace_provider()
+    stale_processor = tracing_setup._DEFAULT_PROCESSOR
+    custom_provider = MagicMock()
+
+    tracing_setup.set_trace_provider(custom_provider)
+    tracing_setup.set_trace_provider(sdk_provider)
+    recovered = tracing_setup.get_trace_provider()
+
+    assert recovered is sdk_provider
+    assert tracing_setup._DEFAULT_PROCESSOR is not stale_processor
+    assert tracing_setup._DEFAULT_PROCESSOR in sdk_provider._multi_processor._processors
+    _wait_for_close(mock_client)
+    assert mock_client.return_value.close.call_count == 1
+    tracing_processors.default_exporter().close()
+
+
+@patch("httpx2.Client")
+def test_inactive_sdk_provider_replacement_does_not_restore_retired_default(
+    mock_client, monkeypatch
+):
+    _reset_default_tracing_stack(monkeypatch)
+    sdk_provider = cast(DefaultTraceProvider, tracing_setup.get_trace_provider())
+    custom_provider = MagicMock()
+    replacement_processor = MagicMock()
+    replacement_processor.__eq__.return_value = True
+
+    tracing_setup.set_trace_provider(custom_provider)
+    sdk_provider.set_processors([replacement_processor])
+    tracing_setup.set_trace_provider(sdk_provider)
+
+    assert tracing_setup.get_trace_provider() is sdk_provider
+    assert tracing_setup._DEFAULT_PROCESSOR is None
+    assert len(sdk_provider._multi_processor._processors) == 1
+    assert sdk_provider._multi_processor._processors[0] is replacement_processor
+    _wait_for_close(mock_client)
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_atexit_shutdown_does_not_recover_default_tracing(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    provider = tracing_setup.get_trace_provider()
+    processor = tracing_setup._DEFAULT_PROCESSOR
+    exporter = tracing_processors.default_exporter()
+
+    tracing_setup._shutdown_global_trace_provider()
+    retrieved = tracing_setup.get_trace_provider()
+
+    assert retrieved is provider
+    assert tracing_setup._DEFAULT_PROCESSOR is processor
+    assert tracing_setup._ATEXIT_SHUTDOWN_STARTED is True
+    assert tracing_processors.default_exporter() is exporter
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_atexit_before_bootstrap_does_not_create_default_stack(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+
+    tracing_setup._shutdown_global_trace_provider()
+    provider = tracing_setup.get_trace_provider()
+
+    assert isinstance(provider, DefaultTraceProvider)
+    assert tracing_setup._DEFAULT_PROCESSOR is None
+    assert tracing_processors._global_processor is None
+    assert tracing_processors._global_exporter is None
+    mock_client.assert_not_called()
+
+
+@patch("httpx2.Client")
+def test_atexit_rejects_direct_default_stack_creation(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    tracing_setup._shutdown_global_trace_provider()
+
+    with pytest.raises(RuntimeError, match="Tracing shutdown has started"):
+        tracing_processors.default_exporter()
+    with pytest.raises(RuntimeError, match="Tracing shutdown has started"):
+        tracing_processors.default_processor()
+
+    mock_client.assert_not_called()
+
+
+@patch("httpx2.Client")
+def test_atexit_closes_exporter_configured_before_bootstrap(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+
+    set_tracing_export_api_key("trace-only-key")
+    exporter = tracing_processors._global_exporter
+    tracing_setup._shutdown_global_trace_provider()
+    tracing_setup._shutdown_global_trace_provider()
+
+    assert exporter is not None
+    assert exporter.is_shut_down is True
+    assert tracing_processors._global_processor is None
+    assert tracing_setup.GLOBAL_TRACE_PROVIDER is None
+    mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx2.Client")
+def test_atexit_closes_unattached_exporter_with_custom_provider(mock_client, monkeypatch):
+    _reset_default_tracing_stack(monkeypatch)
+    set_tracing_export_api_key("trace-only-key")
+    custom_provider = MagicMock()
+    tracing_setup.set_trace_provider(custom_provider)
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    custom_provider.shutdown.assert_called_once()
+    mock_client.return_value.close.assert_called_once()
 
 
 @pytest.mark.serial

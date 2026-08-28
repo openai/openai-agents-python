@@ -85,6 +85,8 @@ class BackendSpanExporter(TracingExporter):
         self.base_delay = base_delay
         self.max_delay = max_delay
         self._shutdown_event = threading.Event()
+        self._close_lock = threading.Lock()
+        self._closed = False
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
@@ -530,8 +532,17 @@ class BackendSpanExporter(TracingExporter):
             return sanitized_list
         return self._UNSERIALIZABLE
 
+    @property
+    def is_shut_down(self) -> bool:
+        """Whether shutdown or close made this exporter terminal."""
+        return self._shutdown_event.is_set() or self._closed
+
     def close(self):
-        """Close the underlying HTTP client."""
+        """Close the underlying HTTP client exactly once."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         self._client.close()
 
     def _request_shutdown(self) -> None:
@@ -552,6 +563,8 @@ class BatchTraceProcessor(TracingProcessor):
         max_batch_size: int = 128,
         schedule_delay: float = 5.0,
         export_trigger_ratio: float = 0.7,
+        *,
+        _owns_exporter: bool = False,
     ):
         """
         Args:
@@ -563,6 +576,7 @@ class BatchTraceProcessor(TracingProcessor):
             export_trigger_ratio: The ratio of the queue size at which we will trigger an export.
         """
         self._exporter = exporter
+        self._owns_exporter = _owns_exporter
         self._queue: queue.Queue[Trace | Span[Any]] = queue.Queue(maxsize=max_queue_size)
         self._max_queue_size = max_queue_size
         self._max_batch_size = max_batch_size
@@ -581,27 +595,27 @@ class BatchTraceProcessor(TracingProcessor):
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
 
-    def _ensure_thread_started(self) -> None:
-        # Fast path without holding the lock
-        if self._worker_thread and self._worker_thread.is_alive():
-            return
-
-        # Double-checked locking to avoid starting multiple threads
+    def _begin_shutdown(self) -> threading.Thread | None:
+        """Close admission and return the worker that owns any accepted work."""
         with self._thread_start_lock:
-            if self._worker_thread and self._worker_thread.is_alive():
-                return
+            self._shutdown_event.set()
+            return self._worker_thread
 
-            self._worker_thread = threading.Thread(target=self._run, daemon=True)
-            self._worker_thread.start()
+    def _enqueue(self, item: Trace | Span[Any], full_message: str) -> None:
+        """Publish work atomically with lazy worker creation and shutdown admission."""
+        with self._thread_start_lock:
+            if self._shutdown_event.is_set():
+                return
+            if not self._worker_thread or not self._worker_thread.is_alive():
+                self._worker_thread = threading.Thread(target=self._run, daemon=True)
+                self._worker_thread.start()
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                logger.warning(full_message)
 
     def on_trace_start(self, trace: Trace) -> None:
-        # Ensure the background worker is running before we enqueue anything.
-        self._ensure_thread_started()
-
-        try:
-            self._queue.put_nowait(trace)
-        except queue.Full:
-            logger.warning("Queue is full, dropping trace.")
+        self._enqueue(trace, "Queue is full, dropping trace.")
 
     def on_trace_end(self, trace: Trace) -> None:
         # We send traces via on_trace_start, so we don't need to do anything here.
@@ -612,19 +626,21 @@ class BatchTraceProcessor(TracingProcessor):
         pass
 
     def on_span_end(self, span: Span[Any]) -> None:
-        # Ensure the background worker is running before we enqueue anything.
-        self._ensure_thread_started()
+        self._enqueue(span, "Queue is full, dropping span.")
 
-        try:
-            self._queue.put_nowait(span)
-        except queue.Full:
-            logger.warning("Queue is full, dropping span.")
+    @property
+    def is_shut_down(self) -> bool:
+        """Whether shutdown has started. Shutdown is terminal for this processor."""
+        exporter_is_shut_down = getattr(self._exporter, "is_shut_down", False)
+        return self._shutdown_event.is_set() or (
+            self._owns_exporter and exporter_is_shut_down is True
+        )
 
     def shutdown(self, timeout: float | None = None):
         """
         Called when the application stops. We signal our thread to stop, then join it.
         """
-        self._shutdown_event.set()
+        worker_thread = self._begin_shutdown()
         if timeout is not None:
             request_exporter_shutdown = getattr(self._exporter, "_request_shutdown", None)
             if callable(request_exporter_shutdown):
@@ -634,38 +650,63 @@ class BatchTraceProcessor(TracingProcessor):
         self._shutdown_deadline = deadline
 
         # Only join if we ever started the background thread; otherwise flush synchronously.
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=timeout)
-            if self._worker_thread.is_alive():
-                logger.warning(
-                    "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
-                )
+        if worker_thread is not None:
+            if worker_thread.is_alive():
+                worker_thread.join(timeout=timeout)
+                if worker_thread.is_alive():
+                    logger.warning(
+                        "[non-fatal] Tracing: shutdown timeout reached; dropping queued traces."
+                    )
+                    return
         else:
             # No background thread: process any remaining items synchronously.
             self._export_batches(deadline=deadline)
+
+        self._close_owned_exporter()
 
     def force_flush(self):
         """
         Forces an immediate flush of all queued spans.
         """
-        self._export_batches()
+        if not self._shutdown_event.is_set():
+            self._export_batches()
 
     def _run(self):
-        while not self._shutdown_event.is_set():
-            current_time = time.monotonic()
-            queue_size = self._queue.qsize()
+        try:
+            while not self._shutdown_event.is_set():
+                current_time = time.monotonic()
+                queue_size = self._queue.qsize()
 
-            # If it's time for a scheduled flush or queue is above the trigger threshold
-            if current_time >= self._next_export_time or queue_size >= self._export_trigger_size:
-                self._export_batches()
-                # Reset the next scheduled flush time
-                self._next_export_time = time.monotonic() + self._schedule_delay
-            else:
-                # Sleep a short interval so we don't busy-wait.
-                time.sleep(0.2)
+                # If it's time for a scheduled flush or queue is above the trigger threshold
+                if (
+                    current_time >= self._next_export_time
+                    or queue_size >= self._export_trigger_size
+                ):
+                    self._export_batches()
+                    # Reset the next scheduled flush time
+                    self._next_export_time = time.monotonic() + self._schedule_delay
+                else:
+                    # Sleep a short interval so we don't busy-wait.
+                    time.sleep(0.2)
 
-        # Final drain after shutdown
-        self._export_batches(deadline=self._shutdown_deadline)
+            # Final drain after shutdown
+            self._export_batches(deadline=self._shutdown_deadline)
+        finally:
+            self._close_owned_exporter()
+
+    def _close_owned_exporter(self) -> None:
+        """Close only the exporter owned by the module-created default processor."""
+        if not self._owns_exporter:
+            return
+        close = getattr(self._exporter, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                logger, "[non-fatal] Tracing: error closing exporter on shutdown", exc
+            )
 
     def _export_batches(self, deadline: float | None = None):
         """Drains the queue and exports in batches of up to `max_batch_size` until the queue
@@ -722,42 +763,171 @@ class BatchTraceProcessor(TracingProcessor):
 _global_exporter: BackendSpanExporter | None = None
 _global_processor: BatchTraceProcessor | None = None
 _global_lock = threading.Lock()
+_DEFAULT_STACK_ATEXIT_SHUTDOWN = False
+_global_exporter_attached = False
+_retirement_lock = threading.Lock()
+_retiring_default_processors: dict[BatchTraceProcessor, threading.Thread] = {}
+
+
+def _begin_default_stack_atexit_shutdown() -> None:
+    """Prevent a later atexit callback from rebuilding terminal defaults."""
+    global _DEFAULT_STACK_ATEXIT_SHUTDOWN
+
+    with _global_lock:
+        _DEFAULT_STACK_ATEXIT_SHUTDOWN = True
+
+
+def _close_unattached_default_exporter() -> None:
+    """Close a configured default exporter that never gained an owning processor."""
+    with _global_lock:
+        if _global_processor is not None or _global_exporter_attached:
+            return
+        exporter = _global_exporter
+
+    if exporter is not None:
+        try:
+            exporter.close()
+        except Exception as exc:
+            log_model_and_tool_action_error(
+                logger, "[non-fatal] Tracing: error closing unattached exporter", exc
+            )
+
+
+def _wait_for_retiring_default_processors(timeout: float | None) -> None:
+    """Give detached SDK defaults the same bounded atexit drain window."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with _retirement_lock:
+        threads = tuple(_retiring_default_processors.values())
+
+    for thread in threads:
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if remaining is not None and remaining <= 0:
+            return
+        thread.join(timeout=remaining)
+
+
+def _replacement_exporter(exporter: BackendSpanExporter) -> BackendSpanExporter:
+    """Create a live default exporter with the prior default exporter's configuration."""
+    return BackendSpanExporter(
+        api_key=exporter._api_key,
+        organization=exporter._organization,
+        project=exporter._project,
+        endpoint=exporter.endpoint,
+        max_retries=exporter.max_retries,
+        base_delay=exporter.base_delay,
+        max_delay=exporter.max_delay,
+    )
+
+
+def _replace_shut_down_defaults() -> None:
+    """Replace terminal cached defaults while retaining their configured values.
+
+    Callers must hold the default-stack lock.
+    """
+    global _global_exporter
+    global _global_processor
+    global _global_exporter_attached
+
+    processor = _global_processor
+    exporter = _global_exporter
+    if processor is not None and processor.is_shut_down:
+        if not processor._shutdown_event.is_set():
+            processor.shutdown(timeout=0.0)
+        _global_processor = None
+        if exporter is not None:
+            _global_exporter = _replacement_exporter(exporter)
+            _global_exporter_attached = False
+        return
+    if exporter is not None and exporter.is_shut_down:
+        if processor is not None:
+            processor.shutdown(timeout=0.0)
+        _global_exporter = _replacement_exporter(exporter)
+        _global_processor = None
+        _global_exporter_attached = False
 
 
 def default_exporter() -> BackendSpanExporter:
     """The default exporter, which exports traces and spans to the backend in batches."""
     global _global_exporter
 
-    exporter = _global_exporter
-    if exporter is not None:
-        return exporter
+    with _global_lock:
+        if _DEFAULT_STACK_ATEXIT_SHUTDOWN and _global_exporter is None:
+            raise RuntimeError("Tracing shutdown has started; default exporter is unavailable.")
+        if not _DEFAULT_STACK_ATEXIT_SHUTDOWN:
+            _replace_shut_down_defaults()
+        if _global_exporter is None:
+            _global_exporter = BackendSpanExporter()
+        return _global_exporter
+
+
+def _set_default_exporter_api_key(api_key: str) -> None:
+    """Update the active default exporter atomically with terminal replacement."""
+    global _global_exporter
 
     with _global_lock:
-        exporter = _global_exporter
-        if exporter is None:
-            exporter = BackendSpanExporter()
-            _global_exporter = exporter
-
-    return exporter
+        if _DEFAULT_STACK_ATEXIT_SHUTDOWN:
+            return
+        _replace_shut_down_defaults()
+        if _global_exporter is None:
+            _global_exporter = BackendSpanExporter()
+        _global_exporter.set_api_key(api_key)
 
 
 def default_processor() -> BatchTraceProcessor:
     """The default processor, which exports traces and spans to the backend in batches."""
     global _global_exporter
     global _global_processor
-
-    processor = _global_processor
-    if processor is not None:
-        return processor
+    global _global_exporter_attached
 
     with _global_lock:
-        processor = _global_processor
-        if processor is None:
-            exporter = _global_exporter
-            if exporter is None:
-                exporter = BackendSpanExporter()
-                _global_exporter = exporter
-            processor = BatchTraceProcessor(exporter)
-            _global_processor = processor
+        if _DEFAULT_STACK_ATEXIT_SHUTDOWN and _global_processor is None:
+            raise RuntimeError("Tracing shutdown has started; default processor is unavailable.")
+        if not _DEFAULT_STACK_ATEXIT_SHUTDOWN:
+            _replace_shut_down_defaults()
+        if _global_processor is None:
+            if _global_exporter is None:
+                _global_exporter = BackendSpanExporter()
+            _global_processor = BatchTraceProcessor(_global_exporter, _owns_exporter=True)
+            _global_exporter_attached = True
+        return _global_processor
 
-    return processor
+
+def _detach_owned_default_processor(processor: TracingProcessor) -> None:
+    """Publish a fresh cache and close admission on the retired default."""
+    global _global_exporter
+    global _global_processor
+    global _global_exporter_attached
+
+    if not isinstance(processor, BatchTraceProcessor) or not processor._owns_exporter:
+        return
+
+    with _global_lock:
+        if _global_processor is processor:
+            exporter = _global_exporter
+            _global_processor = None
+            if exporter is processor._exporter:
+                _global_exporter = _replacement_exporter(exporter)
+            _global_exporter_attached = False
+        processor._begin_shutdown()
+
+
+def _retire_owned_default_processor(processor: TracingProcessor) -> None:
+    """Drain an SDK-owned default asynchronously without delaying reconfiguration."""
+    if not isinstance(processor, BatchTraceProcessor) or not processor._owns_exporter:
+        return
+
+    _detach_owned_default_processor(processor)
+
+    def retire() -> None:
+        try:
+            processor.shutdown(timeout=None)
+        finally:
+            with _retirement_lock:
+                _retiring_default_processors.pop(processor, None)
+
+    thread = threading.Thread(target=retire, daemon=True)
+    with _retirement_lock:
+        if processor in _retiring_default_processors:
+            return
+        _retiring_default_processors[processor] = thread
+        thread.start()
