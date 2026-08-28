@@ -25,6 +25,8 @@ from agents.tracing.span_data import AgentSpanData
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace, TraceImpl
 
+from .testing_processor import SpanProcessorForTests
+
 
 def get_span(processor: TracingProcessor) -> SpanImpl[AgentSpanData]:
     """Create a minimal agent span for testing processors."""
@@ -1439,8 +1441,10 @@ def test_default_pair_is_replaced_after_shutdown(restore_tracing_defaults):
     assert not second_processor.is_shut_down
 
 
-def test_default_pair_is_replaced_when_only_the_processor_shut_down(restore_tracing_defaults):
-    """A no-timeout shutdown never signals the exporter, but the pair is still terminal."""
+def test_only_the_processor_is_replaced_when_the_exporter_is_still_live(
+    restore_tracing_defaults,
+):
+    """A no-timeout shutdown never signals the exporter, so it is kept rather than leaked."""
     tracing_processors = restore_tracing_defaults
 
     first_processor = tracing_processors.default_processor()
@@ -1448,10 +1452,10 @@ def test_default_pair_is_replaced_when_only_the_processor_shut_down(restore_trac
 
     first_processor.shutdown()
     assert not first_exporter.is_shut_down
-    first_exporter.close()
 
-    assert tracing_processors.default_exporter() is not first_exporter
+    assert tracing_processors.default_exporter() is first_exporter
     assert tracing_processors.default_processor() is not first_processor
+    assert tracing_processors.default_processor()._exporter is first_exporter
 
 
 def test_default_pair_is_stable_while_live(restore_tracing_defaults):
@@ -1513,31 +1517,73 @@ def test_fresh_default_exporter_still_retries_transient_failures(restore_tracing
         assert mock_client.return_value.post.call_count == 3  # max_retries counts attempts
 
 
-def test_shut_down_provider_reinitializes_with_the_fresh_pair(restore_tracing_defaults):
-    """A stale provider must not keep exporting through the shut-down pair."""
+def test_recovery_preserves_everything_configured_on_the_stack(restore_tracing_defaults):
+    """Recovering from a shutdown must restore the configured stack, not a default one."""
     tracing_processors = restore_tracing_defaults
 
-    first_provider = tracing_setup.get_trace_provider()
-    first_processor = tracing_processors.default_processor()
+    provider = tracing_setup.get_trace_provider()
     first_exporter = tracing_processors.default_exporter()
-    assert tracing_setup._DEFAULT_PROCESSOR is first_processor
+    first_processor = tracing_processors.default_processor()
 
-    first_provider.shutdown(timeout=1.0)
+    set_tracing_export_api_key("trace_only_key")
+    first_exporter._organization = "org_x"
+    first_exporter._project = "proj_x"
+    first_exporter.endpoint = "https://example.test/ingest"
+    first_exporter.max_retries = 7
+    first_exporter.base_delay = 2.5
+    first_exporter.max_delay = 40.0
+    cast(Any, provider).set_disabled(True)
+    mine = SpanProcessorForTests()
+    provider.register_processor(mine)
+
+    provider.shutdown(timeout=1.0)
     first_exporter.close()
 
-    # Reconfiguring must land on the exporter the live provider actually exports through.
-    set_tracing_export_api_key("fresh_key")
+    recovered = tracing_setup.get_trace_provider()
 
-    second_provider = tracing_setup.get_trace_provider()
-    assert second_provider is not first_provider
+    # The provider itself is kept, so nothing configured on it is lost.
+    assert recovered is provider
+    assert cast(Any, recovered)._manual_disabled is True
+    registered = cast(Any, recovered)._multi_processor._processors
+    assert mine in registered
 
-    registered = cast(Any, second_provider)._multi_processor._processors
-    assert len(registered) == 1
-    assert registered[0] is tracing_processors.default_processor()
-    assert registered[0] is not first_processor
-    assert registered[0]._exporter is tracing_processors.default_exporter()
-    assert registered[0]._exporter is not first_exporter
-    assert registered[0]._exporter.api_key == "fresh_key"
+    # Only the dead default processor is swapped, in place, keeping registration order.
+    fresh = tracing_processors.default_processor()
+    assert registered == (fresh, mine)
+    assert fresh is not first_processor
+    assert not fresh.is_shut_down
+
+    # The replacement exporter carries every configured value forward.
+    exporter = fresh._exporter
+    assert exporter is tracing_processors.default_exporter()
+    assert exporter is not first_exporter
+    assert not exporter.is_shut_down
+    assert exporter.api_key == "trace_only_key"
+    assert exporter.organization == "org_x"
+    assert exporter.project == "proj_x"
+    assert exporter.endpoint == "https://example.test/ingest"
+    assert (exporter.max_retries, exporter.base_delay, exporter.max_delay) == (7, 2.5, 40.0)
+
+
+def test_recovery_reuses_the_exporter_a_no_timeout_shutdown_left_alive(
+    restore_tracing_defaults,
+):
+    """No timeout means no shutdown signal on the exporter, so it is kept, not replaced."""
+    tracing_processors = restore_tracing_defaults
+
+    provider = tracing_setup.get_trace_provider()
+    exporter = tracing_processors.default_exporter()
+    first_processor = tracing_processors.default_processor()
+
+    provider.shutdown()
+    assert not exporter.is_shut_down
+
+    tracing_setup.get_trace_provider()
+    fresh = tracing_processors.default_processor()
+
+    assert fresh is not first_processor
+    assert tracing_processors.default_exporter() is exporter
+    assert fresh._exporter is exporter
 
 
 def test_live_provider_is_not_replaced(restore_tracing_defaults):
@@ -1546,7 +1592,7 @@ def test_live_provider_is_not_replaced(restore_tracing_defaults):
     assert tracing_setup.get_trace_provider() is provider
 
 
-def test_caller_supplied_provider_is_never_replaced(restore_tracing_defaults):
+def test_caller_supplied_provider_is_never_recovered(restore_tracing_defaults):
     """`set_trace_provider` hands the lifecycle to the caller, shut down or not."""
     provider = DefaultTraceProvider()
     processor = BatchTraceProcessor(exporter=BackendSpanExporter(api_key="test_key"))
@@ -1557,6 +1603,26 @@ def test_caller_supplied_provider_is_never_replaced(restore_tracing_defaults):
     processor._exporter.close()
 
     assert tracing_setup.get_trace_provider() is provider
+    assert cast(Any, provider)._multi_processor._processors == (processor,)
+
+
+def test_set_trace_processors_opt_out_survives_recovery(restore_tracing_defaults):
+    """Dropping the default processor is the caller's choice; recovery must not undo it."""
+    tracing_processors = restore_tracing_defaults
+
+    provider = tracing_setup.get_trace_provider()
+    stale = tracing_processors.default_processor()
+    mine = SpanProcessorForTests()
+    provider.set_processors([mine])
+
+    provider.shutdown(timeout=1.0)
+    tracing_processors.default_exporter().close()
+
+    recovered = tracing_setup.get_trace_provider()
+
+    assert recovered is provider
+    assert cast(Any, recovered)._multi_processor._processors == (mine,)
+    assert stale not in cast(Any, recovered)._multi_processor._processors
 
 
 def test_atexit_shutdown_does_not_resurrect_the_stack(restore_tracing_defaults):

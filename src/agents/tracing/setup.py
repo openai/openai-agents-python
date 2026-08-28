@@ -21,17 +21,39 @@ _DEFAULT_PROCESSOR: TracingProcessor | None = None
 _ATEXIT_SHUTDOWN_STARTED = False
 
 
-def _default_stack_is_terminal() -> bool:
-    """Whether the bootstrapped provider's default processor has been shut down.
+def _default_processor_is_terminal() -> bool:
+    """Whether the default processor we bootstrapped has been shut down.
 
-    Shutdown is terminal for the whole default stack -- provider, processor and exporter
-    alike -- so the next use re-initializes instead of feeding spans to a processor that
-    will never drain them again, or applying a freshly configured API key to an exporter
-    nothing exports through.
+    Shutdown is terminal for it, so the next use recovers instead of feeding spans to a
+    processor that will never drain them again, or applying a freshly configured API key
+    to an exporter nothing exports through.
     """
     if _ATEXIT_SHUTDOWN_STARTED:
         return False
     return getattr(_DEFAULT_PROCESSOR, "is_shut_down", False) is True
+
+
+def _recover_default_processor(provider: TraceProvider) -> None:
+    """Swap the shut-down default processor for a live one, in place.
+
+    Only that one processor is replaced. Rebuilding the provider instead would silently
+    discard everything the caller configured on it -- `set_tracing_disabled`, and every
+    processor added through `add_trace_processor` -- none of which shutdown invalidated.
+
+    Callers must hold `_GLOBAL_TRACE_PROVIDER_LOCK`.
+    """
+    global _DEFAULT_PROCESSOR
+
+    from .processors import default_processor
+    from .provider import DefaultTraceProvider
+
+    stale = _DEFAULT_PROCESSOR
+    fresh = default_processor()
+    if fresh is stale:
+        return
+    if stale is not None and isinstance(provider, DefaultTraceProvider):
+        provider._replace_processor(stale, fresh)
+    _DEFAULT_PROCESSOR = fresh
 
 
 def _shutdown_global_trace_provider() -> None:
@@ -73,12 +95,12 @@ def get_trace_provider() -> TraceProvider:
     global _DEFAULT_PROCESSOR
 
     provider = GLOBAL_TRACE_PROVIDER
-    if provider is not None and not _default_stack_is_terminal():
+    if provider is not None and not _default_processor_is_terminal():
         return provider
 
     with _GLOBAL_TRACE_PROVIDER_LOCK:
         provider = GLOBAL_TRACE_PROVIDER
-        if provider is None or _default_stack_is_terminal():
+        if provider is None:
             from .processors import default_processor
             from .provider import DefaultTraceProvider
 
@@ -87,6 +109,8 @@ def get_trace_provider() -> TraceProvider:
             provider.register_processor(processor)
             GLOBAL_TRACE_PROVIDER = provider
             _DEFAULT_PROCESSOR = processor
+        elif _default_processor_is_terminal():
+            _recover_default_processor(provider)
 
         if not _SHUTDOWN_HANDLER_REGISTERED:
             atexit.register(_shutdown_global_trace_provider)

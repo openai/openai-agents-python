@@ -114,6 +114,16 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         with self._lock:
             self._processors = tuple(processors)
 
+    def _replace_processor(self, old: TracingProcessor, new: TracingProcessor) -> None:
+        """Swap one registered processor for another, keeping registration order.
+
+        Lets a shut-down default processor be recovered without rebuilding the provider,
+        which would discard every other processor registered on it. A no-op when `old` is
+        no longer registered, which is what `set_trace_processors` leaves behind.
+        """
+        with self._lock:
+            self._processors = tuple(new if p is old else p for p in self._processors)
+
     def on_trace_start(self, trace: Trace) -> None:
         """
         Called when a trace is started.
@@ -316,6 +326,10 @@ class DefaultTraceProvider(TraceProvider):
         Set the list of processors. This will replace the current list of processors.
         """
         self._multi_processor.set_processors(processors)
+
+    def _replace_processor(self, old: TracingProcessor, new: TracingProcessor) -> None:
+        """Swap one registered processor for another, keeping registration order."""
+        self._multi_processor._replace_processor(old, new)
 
     def get_current_trace(self) -> Trace | None:
         """

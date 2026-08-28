@@ -739,23 +739,45 @@ _global_processor: BatchTraceProcessor | None = None
 _global_lock = threading.Lock()
 
 
-def _discard_shut_down_defaults() -> None:
-    """Drop the cached defaults once shutdown has made them terminal.
+def _replacement_exporter(exporter: BackendSpanExporter) -> BackendSpanExporter:
+    """A live exporter configured exactly like the shut-down one it replaces.
 
-    Shutdown is terminal, and the processor owns the exporter it was handed, so the pair
-    goes down together. Handing the shut-down exporter to a new processor would look like
-    it worked while silently abandoning every retry backoff -- the first 5xx drops the
-    batch instead of retrying -- so a later tracing initialization gets a fresh pair.
+    Everything a caller can configure -- the API key set through
+    `set_tracing_export_api_key`, the organization and project, the endpoint, and the
+    retry schedule -- is carried forward, so recovering from a shutdown restores the
+    configured exporter rather than one derived from the environment alone.
+    """
+    return BackendSpanExporter(
+        api_key=exporter._api_key,
+        organization=exporter._organization,
+        project=exporter._project,
+        endpoint=exporter.endpoint,
+        max_retries=exporter.max_retries,
+        base_delay=exporter.base_delay,
+        max_delay=exporter.max_delay,
+    )
 
-    Callers must hold ``_global_lock``.
+
+def _replace_shut_down_defaults() -> None:
+    """Swap out whichever cached default shutdown has made terminal.
+
+    An exporter's shutdown signal -- the one that abandons retry backoff -- is never
+    cleared, so exporting through it again looks like it worked while dropping every
+    batch that hits a transient failure. Replace it, carrying its configuration over.
+    The processor it belonged to goes with it, since it exports through the dead one.
+
+    A shutdown with no timeout never signals the exporter, so only the processor is
+    terminal there and the live exporter is kept and reused.
+
+    Callers must hold `_global_lock`.
     """
     global _global_exporter
     global _global_processor
 
-    if (_global_exporter is not None and _global_exporter.is_shut_down) or (
-        _global_processor is not None and _global_processor.is_shut_down
-    ):
-        _global_exporter = None
+    if _global_exporter is not None and _global_exporter.is_shut_down:
+        _global_exporter = _replacement_exporter(_global_exporter)
+        _global_processor = None
+    elif _global_processor is not None and _global_processor.is_shut_down:
         _global_processor = None
 
 
@@ -764,7 +786,7 @@ def default_exporter() -> BackendSpanExporter:
     global _global_exporter
 
     with _global_lock:
-        _discard_shut_down_defaults()
+        _replace_shut_down_defaults()
         if _global_exporter is None:
             _global_exporter = BackendSpanExporter()
         return _global_exporter
@@ -776,7 +798,7 @@ def default_processor() -> BatchTraceProcessor:
     global _global_processor
 
     with _global_lock:
-        _discard_shut_down_defaults()
+        _replace_shut_down_defaults()
         if _global_processor is None:
             if _global_exporter is None:
                 _global_exporter = BackendSpanExporter()
