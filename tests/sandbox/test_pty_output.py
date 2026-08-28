@@ -133,3 +133,23 @@ async def test_collect_pty_output_leaves_complete_multibyte_output_alone() -> No
     )
 
     assert collected.decode("utf-8") == "héllo"
+
+
+# a lead byte that no character can start with, an overlong form, a value past the
+# end of the range, a lone continuation byte, and half of a surrogate pair
+@pytest.mark.asyncio
+@pytest.mark.parametrize("garbage", [b"\xff", b"\xc0", b"\xc1", b"\xf5", b"\x80", b"\xed\xa0\x80"])
+async def test_collect_pty_output_does_not_hold_back_bytes_that_start_no_character(
+    garbage: bytes,
+) -> None:
+    # the process is still running, but these bytes will never be completed by a later
+    # window, so holding them would hide the output until it exits
+    chunks: deque[bytes] = deque([b"ok " + garbage])
+    lock = asyncio.Lock()
+    notify = asyncio.Event()
+    done = {"value": False}
+
+    collected = await _one_window(chunks, lock, notify, done)
+
+    assert collected.decode("utf-8").startswith("ok �")
+    assert not chunks

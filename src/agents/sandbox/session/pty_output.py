@@ -1,31 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import time
 from collections import deque
 from collections.abc import Callable
 
 from .pty_types import truncate_text_by_tokens
-
-
-def _incomplete_utf8_suffix_len(data: bytes | bytearray) -> int:
-    """Length of a trailing UTF-8 sequence that is still waiting for its remaining bytes.
-
-    Returns 0 when the buffer does not end mid character.
-    """
-    for back in range(1, min(4, len(data)) + 1):
-        byte = data[-back]
-        if byte < 0x80:
-            return 0
-        if byte >= 0xC0:
-            if byte < 0xE0:
-                expected = 2
-            elif byte < 0xF0:
-                expected = 3
-            else:
-                expected = 4
-            return back if back < expected else 0
-    return 0
 
 
 async def collect_pty_output(
@@ -65,18 +46,18 @@ async def collect_pty_output(
             break
         output_notify.clear()
 
-    # PTY output is collected in repeated windows over one persistent deque, so a
-    # character whose bytes straddle a window boundary would be replaced twice and
-    # lost. Hand the incomplete tail back for the next window to finish. Once the
-    # provider is done there is no next window, so the bytes are genuinely invalid.
-    if not is_done():
-        held_back = _incomplete_utf8_suffix_len(output)
-        if held_back:
-            tail = bytes(output[-held_back:])
-            del output[-held_back:]
-            async with output_lock:
-                output_chunks.appendleft(tail)
+    # Output is collected in repeated windows over one persistent deque, so a character
+    # whose bytes straddle a window boundary used to be replaced twice and lost. An
+    # incremental decoder keeps that trailing partial sequence instead of replacing it,
+    # and it is handed back for the next window to finish. Bytes that cannot begin a
+    # character are not held, they are replaced straight away as before. Completing the
+    # decoder once the provider is done replaces a tail that no later window will finish.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text = decoder.decode(output, final=is_done())
+    pending = decoder.getstate()[0]
+    if pending:
+        async with output_lock:
+            output_chunks.appendleft(bytes(pending))
 
-    text = output.decode("utf-8", errors="replace")
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count
