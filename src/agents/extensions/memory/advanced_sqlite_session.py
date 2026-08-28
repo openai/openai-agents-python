@@ -148,9 +148,19 @@ class AdvancedSQLiteSession(SQLiteSession):
         ``pop_item`` or ``delete_branch``, because the orphan cleanup treats every
         untracked row as debris from a failed write.
 
-        Adoption only runs when the session has no structure rows at all, which is
-        the unambiguous signature of an upgraded database: once any structure row
-        exists, an untracked message really is an orphan and stays sweepable.
+        Adoption only runs when the session has no structure rows at all: once any
+        structure row exists, an untracked message really is an orphan and stays
+        sweepable.
+
+        A structureless session with message rows is treated as an upgrade rather
+        than as debris from a failed write. Since #3349, add_items writes messages
+        and structure in one transaction, so a failed write cannot leave such rows;
+        producing them requires a pre-#3349 SDK failing on the session's first-ever
+        write with no successful write afterwards. In that residual case adoption
+        surfaces a few items the model generated for this same session — recoverable
+        with pop_item — whereas requiring positive proof of plain-SQLiteSession
+        origin is impossible (the plain session leaves no marker) and would keep
+        destroying every genuinely upgraded conversation.
         """
         with closing(conn.cursor()) as cursor:
             cursor.execute(
