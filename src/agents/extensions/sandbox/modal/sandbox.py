@@ -23,6 +23,7 @@ import os
 import shlex
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     _terminate_ambiguous_mount_session,
 )
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -72,7 +74,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -489,6 +490,12 @@ class _ModalPtyProcessEntry:
     stderr_iter: AsyncIterator[object] | None = None
     stdout_read_task: asyncio.Task[object] | None = None
     stderr_read_task: asyncio.Task[object] | None = None
+    stdout_closed: bool = False
+    stderr_closed: bool = False
+    output_chunks: deque[bytes] = field(default_factory=deque)
+    output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class ModalSandboxSession(BaseSandboxSession):
@@ -907,7 +914,7 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -917,6 +924,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -940,7 +948,7 @@ class ModalSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -953,6 +961,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -981,38 +990,69 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        chunks = bytearray()
-
-        while True:
-            stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
-            stderr_chunk = await self._read_modal_stream(entry=entry, stream_name="stderr")
+    ) -> tuple[bytes, int | None, bool]:
+        async def poll_output(
+            *,
+            deadline: float | None,
+            allow_new_read: bool,
+            check_exit: bool,
+        ) -> None:
+            chunks: list[bytes] = []
+            stdout_chunk = await self._read_modal_stream(
+                entry=entry,
+                stream_name="stdout",
+                allow_new_read=allow_new_read,
+            )
+            stderr_chunk = await self._read_modal_stream(
+                entry=entry,
+                stream_name="stderr",
+                allow_new_read=allow_new_read,
+            )
             if stdout_chunk:
-                chunks.extend(stdout_chunk)
+                chunks.append(stdout_chunk)
             if stderr_chunk:
-                chunks.extend(stderr_chunk)
+                chunks.append(stderr_chunk)
 
-            if time.monotonic() >= deadline:
-                break
+            if (
+                check_exit
+                and deadline is not None
+                and time.monotonic() < deadline
+                and await self._peek_exit_code(entry.process) is not None
+            ):
+                chunks.append(await self._drain_modal_stream(entry=entry, stream_name="stdout"))
+                chunks.append(await self._drain_modal_stream(entry=entry, stream_name="stderr"))
+                if entry.stdout_closed and entry.stderr_closed:
+                    entry.output_closed.set()
 
-            exit_code = await self._peek_exit_code(entry.process)
-            if exit_code is not None:
-                stdout_chunks = await self._drain_modal_stream(entry=entry, stream_name="stdout")
-                stderr_chunks = await self._drain_modal_stream(entry=entry, stream_name="stderr")
-                chunks.extend(stdout_chunks)
-                chunks.extend(stderr_chunks)
-                break
+            if chunks:
+                async with entry.output_lock:
+                    entry.output_chunks.extend(chunk for chunk in chunks if chunk)
+                entry.output_notify.set()
 
-            if not stdout_chunk and not stderr_chunk:
-                remaining_s = deadline - time.monotonic()
-                if remaining_s <= 0:
-                    break
-                await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
+        async def wait_for_output(remaining_s: float) -> None:
+            await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
-        text = chunks.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+        async def settle_output() -> None:
+            # The deadline path may only collect already-started reads. Checking
+            # process status here would add a slow provider RPC after the caller's
+            # requested yield window has already elapsed.
+            await poll_output(deadline=None, allow_new_read=False, check_exit=False)
+
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+            poll_output=lambda deadline: poll_output(
+                deadline=deadline,
+                allow_new_read=True,
+                check_exit=True,
+            ),
+            settle_output=settle_output,
+            wait_for_output=wait_for_output,
+        )
 
     async def _drain_modal_stream(
         self,
@@ -1026,6 +1066,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 entry=entry,
                 stream_name=stream_name,
                 await_pending=True,
+                settle_after_exit=True,
             )
             if not chunk:
                 break
@@ -1038,13 +1079,23 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         stream_name: Literal["stdout", "stderr"],
         await_pending: bool = False,
+        allow_new_read: bool = True,
+        settle_after_exit: bool = False,
     ) -> bytes:
         stream = entry.process.stdout if stream_name == "stdout" else entry.process.stderr
+        closed_attr = "stdout_closed" if stream_name == "stdout" else "stderr_closed"
+        if getattr(entry, closed_attr):
+            return b""
         if stream is None:
+            setattr(entry, closed_attr, True)
             return b""
 
         iter_attr = "stdout_iter" if stream_name == "stdout" else "stderr_iter"
         task_attr = "stdout_read_task" if stream_name == "stdout" else "stderr_read_task"
+        task = getattr(entry, task_attr)
+        if task is None and not allow_new_read:
+            return b""
+
         stream_iter = getattr(entry, iter_attr)
         if stream_iter is None:
             aiter_method = getattr(stream, "__aiter__", None)
@@ -1056,7 +1107,6 @@ class ModalSandboxSession(BaseSandboxSession):
                 else:
                     setattr(entry, iter_attr, stream_iter)
 
-        task = getattr(entry, task_attr)
         if task is None and stream_iter is not None:
             task = asyncio.create_task(stream_iter.__anext__())
             setattr(entry, task_attr, task)
@@ -1072,9 +1122,12 @@ class ModalSandboxSession(BaseSandboxSession):
                 value = task.result()
             except StopAsyncIteration:
                 setattr(entry, iter_attr, None)
+                setattr(entry, closed_attr, True)
                 return b""
             except Exception:
                 setattr(entry, iter_attr, None)
+                if settle_after_exit:
+                    setattr(entry, closed_attr, True)
                 return b""
 
             return self._coerce_modal_stream_chunk(value)
@@ -1086,11 +1139,18 @@ class ModalSandboxSession(BaseSandboxSession):
         try:
             value = await self._call_modal(read, 16_384, call_timeout=0.2)
         except TypeError:
+            if settle_after_exit:
+                setattr(entry, closed_attr, True)
             return b""
         except Exception:
+            if settle_after_exit:
+                setattr(entry, closed_attr, True)
             return b""
 
-        return self._coerce_modal_stream_chunk(value)
+        chunk = self._coerce_modal_stream_chunk(value)
+        if not chunk and settle_after_exit:
+            setattr(entry, closed_attr, True)
+        return chunk
 
     def _coerce_modal_stream_chunk(self, value: object) -> bytes:
         if value is None:
@@ -1110,8 +1170,9 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = await self._peek_exit_code(entry.process)
+        exit_code = await self._peek_exit_code(entry.process) if output_closed else None
         live_process_id: int | None = process_id
         if exit_code is not None:
             async with self._pty_lock:
@@ -1134,8 +1195,7 @@ class ModalSandboxSession(BaseSandboxSession):
 
         meta: list[tuple[int, float, bool]] = []
         for process_id, entry in self._pty_processes.items():
-            exit_code = await self._peek_exit_code(entry.process)
-            meta.append((process_id, entry.last_used, exit_code is not None))
+            meta.append((process_id, entry.last_used, entry.output_closed.is_set()))
         process_id_to_prune = process_id_to_prune_from_meta(meta)
         if process_id_to_prune is None:
             return None

@@ -387,6 +387,7 @@ class _DaytonaPtySessionEntry:
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     last_used: float = field(default_factory=time.monotonic)
     done: bool = False
     exit_code: int | None = None
@@ -755,7 +756,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -765,6 +766,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def _run_pty_waiter(self, entry: _DaytonaPtySessionEntry) -> None:
@@ -777,6 +779,10 @@ class DaytonaSandboxSession(BaseSandboxSession):
             pass
         finally:
             entry.done = True
+            # AsyncPtyHandle.wait() completes only after its WebSocket reader exits.
+            # That reader awaits every async on_data callback before it can finish,
+            # so this is Daytona's authoritative output-stream close boundary.
+            entry.output_closed.set()
             entry.output_notify.set()
 
     async def _run_session_reader(
@@ -804,8 +810,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
                     entry.done = True
             except Exception:
                 pass
-            if not logs_failed:
+            # Once the log callback stream has returned, or has failed after the
+            # provider reports a final exit code, this worker is the only output
+            # producer and no later callback can append bytes.
+            if not logs_failed or entry.exit_code is not None:
                 entry.done = True
+                entry.output_closed.set()
             entry.output_notify.set()
 
     async def pty_write_stdin(
@@ -832,7 +842,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -845,6 +855,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def _finalize_pty_update(
@@ -854,11 +865,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
         entry: _DaytonaPtySessionEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = entry.exit_code if entry.done else None
+        exit_code = entry.exit_code if output_closed else None
         live_process_id: int | None = process_id
 
-        if entry.done:
+        if output_closed:
             async with self._pty_lock:
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -887,12 +899,13 @@ class DaytonaSandboxSession(BaseSandboxSession):
         entry: _DaytonaPtySessionEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, bool]:
         return await collect_pty_output(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
             output_notify=entry.output_notify,
-            is_done=lambda: entry.done,
+            is_done=entry.output_closed.is_set,
+            should_return=lambda: entry.done,
             yield_time_ms=yield_time_ms,
             max_output_tokens=max_output_tokens,
         )
@@ -901,7 +914,8 @@ class DaytonaSandboxSession(BaseSandboxSession):
         if len(self._pty_sessions) < PTY_PROCESSES_MAX:
             return None
         meta: list[tuple[int, float, bool]] = [
-            (pid, entry.last_used, entry.done) for pid, entry in self._pty_sessions.items()
+            (pid, entry.last_used, entry.output_closed.is_set())
+            for pid, entry in self._pty_sessions.items()
         ]
         pid = process_id_to_prune_from_meta(meta)
         if pid is None:

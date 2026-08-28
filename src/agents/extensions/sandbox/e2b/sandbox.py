@@ -53,6 +53,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -61,7 +62,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -687,6 +687,7 @@ class _E2BPtyProcessEntry:
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     last_used: float = field(default_factory=time.monotonic)
     exit_code: int | None = None
     wait_task: asyncio.Task[None] | None = None
@@ -1050,7 +1051,7 @@ class E2BSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -1060,6 +1061,7 @@ class E2BSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -1087,7 +1089,7 @@ class E2BSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -1100,6 +1102,7 @@ class E2BSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -1211,37 +1214,16 @@ class E2BSandboxSession(BaseSandboxSession):
         entry: _E2BPtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if time.monotonic() >= deadline:
-                break
-
-            if self._entry_exit_code(entry) is not None:
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+    ) -> tuple[bytes, int | None, bool]:
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            should_return=lambda: self._entry_exit_code(entry) is not None,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _run_pty_waiter(self, entry: _E2BPtyProcessEntry) -> None:
         try:
@@ -1259,6 +1241,12 @@ class E2BSandboxSession(BaseSandboxSession):
                 except (TypeError, ValueError):
                     pass
         finally:
+            # E2B delivers output through async callbacks that append under this lock.
+            # Wait behind callbacks already appending terminal bytes before publishing
+            # the close signal that authorizes collector settlement and PTY removal.
+            async with entry.output_lock:
+                pass
+            entry.output_closed.set()
             entry.output_notify.set()
 
     async def _finalize_pty_update(
@@ -1268,8 +1256,9 @@ class E2BSandboxSession(BaseSandboxSession):
         entry: _E2BPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = self._entry_exit_code(entry)
+        exit_code = self._entry_exit_code(entry) if output_closed else None
         live_process_id: int | None = process_id
 
         if exit_code is not None:
@@ -1292,7 +1281,7 @@ class E2BSandboxSession(BaseSandboxSession):
             return None
 
         meta: list[tuple[int, float, bool]] = [
-            (process_id, entry.last_used, self._entry_exit_code(entry) is not None)
+            (process_id, entry.last_used, entry.output_closed.is_set())
             for process_id, entry in self._pty_processes.items()
         ]
         process_id = process_id_to_prune_from_meta(meta)
