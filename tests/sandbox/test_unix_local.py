@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import shlex
 import signal
+import sys
+import tarfile
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -105,6 +109,79 @@ async def test_unix_local_exec_cancellation_terminates_process_group(
         if shell_pid is not None:
             with suppress(ProcessLookupError):
                 os.killpg(shell_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The regression needs the test runner's Python to call setsid. Darwin's
+    # filesystem profile cannot necessarily read that interpreter, while the
+    # cancellation behavior under test is platform-independent Unix logic.
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pid_file = workspace / "pids"
+    escaped_pid_file = workspace / "escaped-pid"
+    escaped_code = (
+        "import os, time; "
+        f"os.setsid(); open({str(escaped_pid_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    escaped_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(escaped_code)}"
+    command = (
+        f'{escaped_command} & child=$!; printf \'%s %s\' "$$" "$child" > '
+        f'{shlex.quote(str(pid_file))}; wait "$child"'
+    )
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    task = asyncio.create_task(session._exec_internal("sh", "-c", command))
+    shell_pid: int | None = None
+    escaped_pid: int | None = None
+
+    def is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert pid_file.exists()
+        shell_pid, _background_pid = (int(value) for value in pid_file.read_text().split())
+
+        deadline = time.monotonic() + 5
+        while not escaped_pid_file.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert escaped_pid_file.exists()
+        escaped_pid = int(escaped_pid_file.read_text())
+
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=2)
+        assert task in done, "cancellation waited for a descendant outside the process group"
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+
+        assert not is_alive(shell_pid)
+        assert is_alive(escaped_pid)
+    finally:
+        if shell_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(shell_pid, signal.SIGKILL)
+        if escaped_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(escaped_pid, signal.SIGKILL)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -529,3 +606,48 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+@pytest.mark.asyncio
+async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled hydrate must not leave a worker writing into the workspace.
+
+    `restore_snapshot_into_workspace_on_resume` closes the archive stream in a `finally` as
+    soon as its await returns, so if cancellation propagated while the extractor was still
+    running it would read a closed stream and write into a workspace resume then clears.
+    """
+    workspace = tmp_path / "workspace"
+    session = _RecordingUnixLocalSession(workspace)
+
+    started = threading.Event()
+    events: list[str] = []
+
+    def _slow_extract(tar: object, **kwargs: object) -> None:
+        _ = tar, kwargs
+        events.append("extract-start")
+        started.set()
+        time.sleep(0.2)
+        events.append("extract-end")
+
+    monkeypatch.setattr(unix_local_module, "safe_extract_tarfile", _slow_extract)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w"):
+        pass
+    buf.seek(0)
+
+    task = asyncio.create_task(session.hydrate_workspace(buf))
+    while not started.is_set():
+        await asyncio.sleep(0.005)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The worker finished before the caller observed cancellation, so the archive stream and
+    # the workspace root are only released once nothing is still writing to them.
+    assert events == ["extract-start", "extract-end"]
+    assert not buf.closed

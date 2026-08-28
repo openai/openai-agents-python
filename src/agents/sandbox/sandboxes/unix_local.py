@@ -62,6 +62,7 @@ from ..session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ..session.workspace_payloads import coerce_write_payload
 from ..snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ..types import ExecResult, ExposedPortEndpoint, Permissions, User
+from ..util.blocking_io import run_blocking_workspace_io
 from ..util.tar_utils import (
     UnsafeTarMemberError,
     safe_extract_tarfile,
@@ -100,12 +101,25 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
 async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
     with suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
-    await proc.communicate()
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        # A descendant can escape the process group and keep the output pipes
+        # open. The direct child still needs to be reaped, but waiting for the
+        # escaped descendant would make cancellation unbounded.
+        await proc.wait()
+    finally:
+        # asyncio does not expose a public Process method for closing pipe
+        # transports after communicate() is cancelled.
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
 
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
@@ -971,7 +985,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         try:
             if normalized.is_dir() and not normalized.is_symlink():
                 if recursive:
-                    shutil.rmtree(normalized)
+                    await run_blocking_workspace_io(shutil.rmtree, normalized)
                 else:
                     normalized.rmdir()
             else:
@@ -1092,7 +1106,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         skip = self._persist_workspace_skip_relpaths()
         buf = io.BytesIO()
-        try:
+
+        def _archive_workspace() -> None:
             with tarfile.open(fileobj=buf, mode="w") as tar:
                 tar.add(
                     root,
@@ -1107,6 +1122,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                         else ti
                     ),
                 )
+
+        try:
+            await run_blocking_workspace_io(_archive_workspace)
         except (tarfile.TarError, OSError) as e:
             raise WorkspaceArchiveReadError(path=root, cause=e) from e
 
@@ -1115,7 +1133,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
-        try:
+
+        def _extract_workspace() -> None:
             root.mkdir(parents=True, exist_ok=True)
             with tarfile.open(fileobj=data, mode="r:*") as tar:
                 safe_extract_tarfile(
@@ -1123,6 +1142,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     root=root,
                     allow_external_symlink_targets=False,
                 )
+
+        try:
+            await run_blocking_workspace_io(_extract_workspace)
         except UnsafeTarMemberError as e:
             raise WorkspaceArchiveWriteError(
                 path=root, context={"reason": e.reason, "member": e.member}, cause=e

@@ -9,10 +9,10 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner, function_tool, handoff
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
-from agents.decorators import tool
+from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
 from agents.exceptions import UserError
 from agents.items import (
     MessageOutputItem,
@@ -38,6 +38,12 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import RunState
 from agents.testing import ScriptedModel
+from agents.tool import Tool
+from agents.tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    ToolOutputGuardrailData,
+)
 from agents.usage import Usage
 from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import (
@@ -88,12 +94,16 @@ class _LostAckSQLiteSession(SQLiteSession):
 
 
 async def _run_session_resume(
-    agent: Agent[Any], value: str | RunState[Any], session: Session | None, streamed: bool
+    agent: Agent[Any],
+    value: str | RunState[Any],
+    session: Session | None,
+    streamed: bool,
+    hooks: RunHooks[Any] | None = None,
 ):
     config = RunConfig(tracing_disabled=True)
     if not streamed:
-        return await Runner.run(agent, value, session=session, run_config=config)
-    result = Runner.run_streamed(agent, value, session=session, run_config=config)
+        return await Runner.run(agent, value, session=session, run_config=config, hooks=hooks)
+    result = Runner.run_streamed(agent, value, session=session, run_config=config, hooks=hooks)
     async for _ in result.stream_events():
         pass
     return result
@@ -1049,3 +1059,165 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+
+async def _approved_handoff_session_state(streamed: bool):
+    """Pause on an approval-gated call that shares its response with a handoff."""
+    effects: list[int] = []
+    guardrail_calls: list[str] = []
+    hook_calls: list[str] = []
+    handoff_calls: list[str] = []
+
+    class CountingHooks(RunHooks[Any]):
+        async def on_tool_start(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+        ) -> None:
+            hook_calls.append("tool-start")
+
+        async def on_tool_end(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            tool: Tool,
+            result: object,
+        ) -> None:
+            hook_calls.append("tool-end")
+
+    @tool_input_guardrail
+    def record_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        guardrail_calls.append("input")
+        return ToolGuardrailFunctionOutput.allow(output_info="input-checked")
+
+    @tool_output_guardrail
+    def record_output(_data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        guardrail_calls.append("output")
+        return ToolGuardrailFunctionOutput.allow(output_info="output-checked")
+
+    @tool(
+        needs_approval=True,
+        tool_input_guardrails=[record_input],
+        tool_output_guardrails=[record_output],
+    )
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("charge", '{"amount":7}', call_id="charge-1"),
+                get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1"),
+            ],
+            [get_text_message("done")],
+            [get_text_message("fresh")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    route = handoff(delegate, on_handoff=lambda _context: handoff_calls.append("handoff"))
+    agent = Agent(name="triage", model=model, tools=[charge], handoffs=[route])
+    hooks = CountingHooks()
+    session = _FailingResumeSession()
+    paused = await _run_session_resume(
+        agent,
+        "charge 7 then hand off",
+        session,
+        streamed,
+        hooks,
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects, guardrail_calls, hook_calls, handoff_calls, hooks
+
+
+def _call_pair(items: list[TResponseInputItem], call_id: str) -> list[str]:
+    return [
+        str(item.get("type"))
+        for item in items
+        if isinstance(item, dict) and item.get("call_id") == call_id
+    ]
+
+
+def _guardrail_output_info(state: RunState[Any]) -> tuple[list[Any], list[Any]]:
+    return (
+        [item.output.output_info for item in state._tool_input_guardrail_results],
+        [item.output.output_info for item in state._tool_output_guardrail_results],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_resumed_handoff_session_append_is_recovered_before_next_model(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    (
+        agent,
+        model,
+        session,
+        state,
+        effects,
+        guardrail_calls,
+        hook_calls,
+        handoff_calls,
+        hooks,
+    ) = await _approved_handoff_session_state(failing_streamed)
+    session.failure = failure
+    if failing_streamed:
+        failed_result = Runner.run_streamed(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+            hooks=hooks,
+        )
+        with pytest.raises(RuntimeError) as error:
+            async for _ in failed_result.stream_events():
+                pass
+        state = failed_result.to_state()
+    else:
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, False, hooks)
+    assert error.value is session.error
+    assert effects == [7]
+    assert guardrail_calls == ["input", "output"]
+    assert hook_calls == ["tool-start", "tool-end"]
+    assert handoff_calls == ["handoff"]
+    assert len(model.calls) == 1
+    assert _guardrail_output_info(state) == (["input-checked"], ["output-checked"])
+    failed_payload = state.to_json()
+    pending_write = cast(dict[str, Any], failed_payload["pending_session_write"])
+    pending_items = cast(list[TResponseInputItem], pending_write["items"])
+    assert _call_pair(pending_items, "charge-1") == ["function_call_output"]
+    assert _call_pair(pending_items, "handoff-1") == ["function_call_output"]
+    if round_trip:
+        state = await RunState.from_json(agent, failed_payload)
+        assert _guardrail_output_info(state) == (["input-checked"], ["output-checked"])
+    assert state._current_agent is not None and state._current_agent.name == "delegate"
+
+    result = await _run_session_resume(agent, state, session, retry_streamed, hooks)
+    assert result.final_output == "done"
+    assert result.last_agent.name == "delegate"
+    assert effects == [7]
+    assert guardrail_calls == ["input", "output"]
+    assert hook_calls == ["tool-start", "tool-end"]
+    assert handoff_calls == ["handoff"]
+    assert [item.output.output_info for item in result.tool_input_guardrail_results] == [
+        "input-checked"
+    ]
+    assert [item.output.output_info for item in result.tool_output_guardrail_results] == [
+        "output-checked"
+    ]
+    assert len(model.calls) == 2
+    expected_pair = ["function_call", "function_call_output"]
+    stored = await session.get_items()
+    assert _call_pair(stored, "charge-1") == expected_pair
+    assert _call_pair(stored, "handoff-1") == expected_pair
+    assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
+    assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
+    assert "pending_session_write" not in result.to_state().to_json()

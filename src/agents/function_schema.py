@@ -13,7 +13,7 @@ from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untype
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
-from .exceptions import UserError
+from .exceptions import ModelBehaviorError, UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
@@ -47,6 +47,11 @@ class FuncSchema:
         """
         Converts validated data from the Pydantic model into (args, kwargs), suitable for calling
         the original function.
+
+        Raises:
+            ModelBehaviorError: If the ``**kwargs`` payload carries a key that names one of the
+                function's own keyword-bindable parameters. The schema allows it, but no Python
+                call expresses it.
         """
         positional_args: list[Any] = []
         keyword_args: dict[str, Any] = {}
@@ -69,7 +74,9 @@ class FuncSchema:
                 seen_var_positional = True
             elif param.kind == param.VAR_KEYWORD:
                 # e.g. **kwargs handling
-                keyword_args.update(value or {})
+                var_keyword_values = value or {}
+                self._raise_on_var_keyword_collisions(name, var_keyword_values)
+                keyword_args.update(var_keyword_values)
             elif param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
                 # Before *args, add to positional args. After *args, add to keyword args.
                 if not seen_var_positional:
@@ -80,6 +87,37 @@ class FuncSchema:
                 # For KEYWORD_ONLY parameters, always use keyword args.
                 keyword_args[name] = value
         return positional_args, keyword_args
+
+    def _raise_on_var_keyword_collisions(
+        self, var_keyword_name: str, var_keyword_values: dict[str, Any]
+    ) -> None:
+        """Reject ``**kwargs`` keys that name a parameter the call already binds by name.
+
+        ``**kwargs`` is splatted last, so such a key either replaces the value the model
+        supplied for that parameter -- and Pydantic validated -- or makes the call fail with
+        "got multiple values for argument". Neither is what the schema promised, so treat it
+        as model misbehavior and say which keys clashed.
+
+        Positional-only parameters and ``*args`` are deliberately not reserved: for
+        ``def f(a, /, **kw)``, the call ``f(1, a=2)`` is legal and routes ``a=2`` into ``kw``.
+        The names below only ever reveal the tool's own signature, which the model already
+        has, so they are safe to name even when tool data is redacted.
+        """
+        reserved_names = {
+            name
+            for name, param in self.signature.parameters.items()
+            if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+        }
+        conflicts = sorted(reserved_names.intersection(var_keyword_values))
+        if not conflicts:
+            return
+
+        conflict_list = ", ".join(repr(conflict) for conflict in conflicts)
+        raise ModelBehaviorError(
+            f"Invalid arguments for tool {self.name}: {conflict_list} "
+            f"{'is' if len(conflicts) == 1 else 'are'} both a named parameter and a key in "
+            f"'{var_keyword_name}'. Pass each argument once, as a named parameter."
+        )
 
 
 @dataclass
@@ -416,17 +454,12 @@ def function_schema(
             )
 
         elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling
-            if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
-                dict_args = get_args(ann)
-                if len(dict_args) == 2:
-                    ann = dict[dict_args[0], dict_args[1]]  # type: ignore
-                else:
-                    ann = dict[str, Any]
-            else:
-                # e.g. def foo(**kwargs: int) -> Dict[str, int]
-                ann = dict[str, ann]  # type: ignore
+            # **kwargs handling: a ``**kwargs: X`` annotation applies to each keyword *value*
+            # (PEP 484), so the collected container is always ``dict[str, X]``. Preserve the full
+            # annotation as the value type -- mirroring the variadic-positional handling above,
+            # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
+            # set to ``Any`` above, yielding ``dict[str, Any]``.
+            ann = dict[str, ann]  # type: ignore
 
             fields[name] = (
                 ann,
