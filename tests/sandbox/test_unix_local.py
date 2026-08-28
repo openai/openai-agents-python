@@ -284,18 +284,24 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
         )
     )
     task = asyncio.create_task(session._exec_internal("sh", "-c", "sleep 30"))
-    await asyncio.wait_for(communicate_started.wait(), timeout=1)
+    try:
+        await asyncio.wait_for(communicate_started.wait(), timeout=1)
 
-    task.cancel()
-    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
-    task.cancel()
-    cleanup_release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
+        task.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        task.cancel()
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
 
-    assert communicate_calls == 2
-    assert cleanup_started.is_set()
-    assert transport_closed
+        assert communicate_calls == 2
+        assert cleanup_started.is_set()
+        assert transport_closed
+    finally:
+        cleanup_release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
