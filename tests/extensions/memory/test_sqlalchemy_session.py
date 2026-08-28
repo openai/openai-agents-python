@@ -17,7 +17,8 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import event, insert, select, text, update
+from sqlalchemy import create_mock_engine, event, insert, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -33,6 +34,53 @@ pytestmark = pytest.mark.asyncio
 
 # Use in-memory SQLite for tests
 DB_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@pytest.mark.parametrize("dialect_url", ["mysql://", "mariadb://"])
+async def test_schema_create_all_compiles_for_mysql_family(dialect_url: str):
+    """MySQL-family schema creation includes both tables and the session-time index."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+    tables = (session._sessions, session._messages)
+    statements: list[str] = []
+
+    def record(statement: Any, *args: Any, **kwargs: Any) -> None:
+        statements.append(str(statement.compile(dialect=engine.dialect)))
+
+    engine = create_mock_engine(dialect_url, record)
+
+    try:
+        session._metadata.create_all(engine)
+        for table in tables:
+            assert table.c.session_id.type.compile(dialect=engine.dialect) == "VARCHAR(190)"
+    finally:
+        await session.engine.dispose()
+
+    assert any("CREATE TABLE agent_sessions" in statement for statement in statements)
+    messages_ddl = next(
+        statement for statement in statements if "CREATE TABLE agent_messages" in statement
+    )
+    assert (
+        "FOREIGN KEY(session_id) REFERENCES agent_sessions (session_id) ON DELETE CASCADE"
+        in messages_ddl
+    )
+    assert any(
+        "CREATE INDEX idx_agent_messages_session_time "
+        "ON agent_messages (session_id, created_at)" in statement
+        for statement in statements
+    )
+
+
+async def test_schema_keeps_unbounded_session_ids_for_sqlite_and_postgresql():
+    """SQLite and PostgreSQL retain the pre-existing unbounded string type."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+
+    try:
+        for table in (session._sessions, session._messages):
+            session_id_type = table.c.session_id.type
+            assert session_id_type.compile(dialect=postgresql.dialect()) == "VARCHAR"
+            assert session_id_type.compile(dialect=sqlite.dialect()) == "VARCHAR"
+    finally:
+        await session.engine.dispose()
 
 
 def _make_message_item(item_id: str, text_value: str) -> TResponseInputItem:

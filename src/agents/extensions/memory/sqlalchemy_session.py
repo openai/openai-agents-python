@@ -62,6 +62,14 @@ from ...memory.sqlite_session import _await_mutation
 
 _T = TypeVar("_T")
 
+# MySQL-family dialects require a bounded VARCHAR for indexed string columns.
+_MYSQL_SESSION_ID_MAX_LENGTH = 190
+_SESSION_ID_TYPE = String().with_variant(
+    String(_MYSQL_SESSION_ID_MAX_LENGTH),
+    "mysql",
+    "mariadb",
+)
+
 
 class SQLAlchemySession(SessionABC):
     """SQLAlchemy implementation of [`Session`][agents.memory.session.Session]."""
@@ -163,7 +171,8 @@ class SQLAlchemySession(SessionABC):
                 'mysql+aiomysql://', or 'sqlite+aiosqlite://').
             create_tables (bool, optional): Whether to automatically create the required
                 tables and indexes. Defaults to False for production use. Set to True for
-                development and testing when migrations aren't used.
+                development and testing when migrations aren't used. Automatically created
+                MySQL and MariaDB schemas store session IDs in VARCHAR(190) columns.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
@@ -189,7 +198,7 @@ class SQLAlchemySession(SessionABC):
         self._sessions = Table(
             sessions_table,
             self._metadata,
-            Column("session_id", String, primary_key=True),
+            Column("session_id", _SESSION_ID_TYPE, primary_key=True),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
@@ -211,7 +220,7 @@ class SQLAlchemySession(SessionABC):
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column(
                 "session_id",
-                String,
+                _SESSION_ID_TYPE,
                 ForeignKey(f"{sessions_table}.session_id", ondelete="CASCADE"),
                 nullable=False,
             ),
