@@ -1536,7 +1536,7 @@ def test_recovery_preserves_everything_configured_on_the_stack(restore_tracing_d
     mine = SpanProcessorForTests()
     provider.register_processor(mine)
 
-    provider.shutdown(timeout=1.0)
+    cast(Any, provider).shutdown(timeout=1.0)
     first_exporter.close()
 
     recovered = tracing_setup.get_trace_provider()
@@ -1615,7 +1615,7 @@ def test_set_trace_processors_opt_out_survives_recovery(restore_tracing_defaults
     mine = SpanProcessorForTests()
     provider.set_processors([mine])
 
-    provider.shutdown(timeout=1.0)
+    cast(Any, provider).shutdown(timeout=1.0)
     tracing_processors.default_exporter().close()
 
     recovered = tracing_setup.get_trace_provider()
