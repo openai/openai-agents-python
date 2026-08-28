@@ -239,6 +239,7 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
     workspace.mkdir()
     communicate_started = asyncio.Event()
     cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
     transport_closed = False
     communicate_calls = 0
 
@@ -259,6 +260,7 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
                 communicate_started.set()
                 await asyncio.Event().wait()
             cleanup_started.set()
+            await cleanup_release.wait()
             raise RuntimeError("synthetic cleanup failure")
 
         def kill(self) -> None:
@@ -285,6 +287,9 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
     await asyncio.wait_for(communicate_started.wait(), timeout=1)
 
     task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    task.cancel()
+    cleanup_release.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
 
