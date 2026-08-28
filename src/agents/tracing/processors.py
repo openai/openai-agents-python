@@ -534,6 +534,16 @@ class BackendSpanExporter(TracingExporter):
         """Close the underlying HTTP client."""
         self._client.close()
 
+    @property
+    def is_shut_down(self) -> bool:
+        """Whether this exporter has been shut down.
+
+        Shutdown is terminal. The signal that abandons retry backoff is never cleared, so a
+        shut-down exporter gives up on the first transient failure instead of retrying. Reuse
+        one and every batch that hits a 5xx is dropped; build a fresh exporter instead.
+        """
+        return self._shutdown_event.is_set()
+
     def _request_shutdown(self) -> None:
         self._shutdown_event.set()
 
@@ -619,6 +629,11 @@ class BatchTraceProcessor(TracingProcessor):
             self._queue.put_nowait(span)
         except queue.Full:
             logger.warning("Queue is full, dropping span.")
+
+    @property
+    def is_shut_down(self) -> bool:
+        """Whether ``shutdown`` has been called. Terminal: a shut-down processor stays down."""
+        return self._shutdown_event.is_set()
 
     def shutdown(self, timeout: float | None = None):
         """
@@ -724,21 +739,35 @@ _global_processor: BatchTraceProcessor | None = None
 _global_lock = threading.Lock()
 
 
+def _discard_shut_down_defaults() -> None:
+    """Drop the cached defaults once shutdown has made them terminal.
+
+    Shutdown is terminal, and the processor owns the exporter it was handed, so the pair
+    goes down together. Handing the shut-down exporter to a new processor would look like
+    it worked while silently abandoning every retry backoff -- the first 5xx drops the
+    batch instead of retrying -- so a later tracing initialization gets a fresh pair.
+
+    Callers must hold ``_global_lock``.
+    """
+    global _global_exporter
+    global _global_processor
+
+    if (_global_exporter is not None and _global_exporter.is_shut_down) or (
+        _global_processor is not None and _global_processor.is_shut_down
+    ):
+        _global_exporter = None
+        _global_processor = None
+
+
 def default_exporter() -> BackendSpanExporter:
     """The default exporter, which exports traces and spans to the backend in batches."""
     global _global_exporter
 
-    exporter = _global_exporter
-    if exporter is not None:
-        return exporter
-
     with _global_lock:
-        exporter = _global_exporter
-        if exporter is None:
-            exporter = BackendSpanExporter()
-            _global_exporter = exporter
-
-    return exporter
+        _discard_shut_down_defaults()
+        if _global_exporter is None:
+            _global_exporter = BackendSpanExporter()
+        return _global_exporter
 
 
 def default_processor() -> BatchTraceProcessor:
@@ -746,18 +775,10 @@ def default_processor() -> BatchTraceProcessor:
     global _global_exporter
     global _global_processor
 
-    processor = _global_processor
-    if processor is not None:
-        return processor
-
     with _global_lock:
-        processor = _global_processor
-        if processor is None:
-            exporter = _global_exporter
-            if exporter is None:
-                exporter = BackendSpanExporter()
-                _global_exporter = exporter
-            processor = BatchTraceProcessor(exporter)
-            _global_processor = processor
-
-    return processor
+        _discard_shut_down_defaults()
+        if _global_processor is None:
+            if _global_exporter is None:
+                _global_exporter = BackendSpanExporter()
+            _global_processor = BatchTraceProcessor(_global_exporter)
+        return _global_processor

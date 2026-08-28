@@ -1354,3 +1354,143 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+@pytest.fixture
+def restore_tracing_defaults():
+    """Isolate the module-level default exporter/processor around a test."""
+    from agents.tracing import processors as tracing_processors
+
+    saved = (tracing_processors._global_exporter, tracing_processors._global_processor)
+    tracing_processors._global_exporter = None
+    tracing_processors._global_processor = None
+    try:
+        yield tracing_processors
+    finally:
+        exporter = tracing_processors._global_exporter
+        if exporter is not None:
+            exporter.close()
+        (
+            tracing_processors._global_exporter,
+            tracing_processors._global_processor,
+        ) = saved
+
+
+def test_shut_down_flags_are_terminal():
+    exporter = BackendSpanExporter(api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter)
+
+    assert not exporter.is_shut_down
+    assert not processor.is_shut_down
+
+    processor.shutdown(timeout=1.0)
+
+    assert processor.is_shut_down
+    assert exporter.is_shut_down
+    exporter.close()
+
+
+def test_shutdown_without_timeout_leaves_the_exporter_usable():
+    """No timeout means no retry-abandoning signal, so only the processor goes down."""
+    exporter = BackendSpanExporter(api_key="test_key")
+    processor = BatchTraceProcessor(exporter=exporter)
+
+    processor.shutdown()
+
+    assert processor.is_shut_down
+    assert not exporter.is_shut_down
+    exporter.close()
+
+
+def test_default_pair_is_replaced_after_shutdown(restore_tracing_defaults):
+    tracing_processors = restore_tracing_defaults
+
+    first_processor = tracing_processors.default_processor()
+    first_exporter = tracing_processors.default_exporter()
+    assert first_processor._exporter is first_exporter
+
+    first_processor.shutdown(timeout=1.0)
+    first_exporter.close()
+
+    second_exporter = tracing_processors.default_exporter()
+    second_processor = tracing_processors.default_processor()
+
+    assert second_exporter is not first_exporter
+    assert second_processor is not first_processor
+    assert second_processor._exporter is second_exporter
+    assert not second_exporter.is_shut_down
+    assert not second_processor.is_shut_down
+
+
+def test_default_pair_is_replaced_when_only_the_processor_shut_down(restore_tracing_defaults):
+    """A no-timeout shutdown never signals the exporter, but the pair is still terminal."""
+    tracing_processors = restore_tracing_defaults
+
+    first_processor = tracing_processors.default_processor()
+    first_exporter = tracing_processors.default_exporter()
+
+    first_processor.shutdown()
+    assert not first_exporter.is_shut_down
+    first_exporter.close()
+
+    assert tracing_processors.default_exporter() is not first_exporter
+    assert tracing_processors.default_processor() is not first_processor
+
+
+def test_default_pair_is_stable_while_live(restore_tracing_defaults):
+    tracing_processors = restore_tracing_defaults
+
+    assert tracing_processors.default_exporter() is tracing_processors.default_exporter()
+    assert tracing_processors.default_processor() is tracing_processors.default_processor()
+
+
+def test_default_exporter_does_not_build_a_processor(restore_tracing_defaults):
+    """Keep the processor lazy: asking for the exporter must not create threading primitives."""
+    tracing_processors = restore_tracing_defaults
+
+    tracing_processors.default_exporter()
+
+    assert tracing_processors._global_processor is None
+
+
+def test_fresh_default_exporter_still_retries_transient_failures(restore_tracing_defaults):
+    """Regression for #4683: a reused exporter used to give up on the first 5xx forever."""
+    tracing_processors = restore_tracing_defaults
+
+    with patch("httpx2.Client") as mock_client:
+        response = MagicMock()
+        response.status_code = 504
+        mock_client.return_value.post.return_value = response
+
+        exporter = tracing_processors.default_exporter()
+        exporter.set_api_key("test_key")
+        exporter.max_retries = 3
+        exporter.base_delay = 0.0001
+        exporter.max_delay = 0.0002
+
+        first = tracing_processors.default_processor()
+        first.shutdown(timeout=1.0)
+
+        # A later tracing initialization gets a fresh pair, not the shut-down one.
+        second_exporter = tracing_processors.default_exporter()
+        second_exporter.set_api_key("test_key")
+        second_exporter.max_retries = 3
+        second_exporter.base_delay = 0.0001
+        second_exporter.max_delay = 0.0002
+        second = tracing_processors.default_processor()
+
+        assert second_exporter is not exporter
+        assert second is not first
+
+        # The shut-down exporter is the broken one: it abandons backoff on the first 5xx.
+        mock_client.return_value.post.reset_mock()
+        stale = BatchTraceProcessor(exporter=exporter)
+        stale._queue.put_nowait(get_span(stale))
+        stale.force_flush()
+        assert mock_client.return_value.post.call_count == 1
+
+        # The fresh one still retries.
+        mock_client.return_value.post.reset_mock()
+        second._queue.put_nowait(get_span(second))
+        second.force_flush()
+        assert mock_client.return_value.post.call_count == 3  # max_retries counts attempts
