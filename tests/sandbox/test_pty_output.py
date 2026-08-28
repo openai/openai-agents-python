@@ -113,3 +113,27 @@ async def test_collect_pty_output_replaces_partial_utf8_once_the_producer_is_don
 
     assert output.decode("utf-8") == "ok\ufffd"
     assert not output_chunks
+
+
+@pytest.mark.parametrize("lead", [b"\xc0", b"\xc1", b"\xf5", b"\xff"])
+@pytest.mark.asyncio
+async def test_collect_pty_output_replaces_bytes_that_cannot_start_a_character(
+    lead: bytes,
+) -> None:
+    """Only real lead bytes may be carried; others can never be completed by later output."""
+    output_chunks: deque[bytes] = deque([b"prompt" + lead])
+    output_notify = asyncio.Event()
+    output_notify.set()
+
+    output, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=output_notify,
+        is_done=lambda: False,
+        yield_time_ms=1,
+        max_output_tokens=None,
+    )
+
+    # Replaced in this window rather than withheld from an interactive prompt forever.
+    assert output.decode("utf-8") == "prompt\ufffd"
+    assert not output_chunks

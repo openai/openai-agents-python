@@ -14,14 +14,18 @@ def _incomplete_utf8_suffix_length(data: bytes | bytearray) -> int:
         byte = data[-back]
         if byte < 0x80:
             return 0
-        if byte >= 0xC0:
-            if byte >= 0xF0:
-                needed = 4
-            elif byte >= 0xE0:
-                needed = 3
-            else:
-                needed = 2
-            return back if back < needed else 0
+        # Only real lead bytes can still be completed. 0xC0, 0xC1 and 0xF5 to 0xFF never
+        # start a valid sequence, so carrying them would withhold a byte that no later
+        # output can finish and would suppress the replacement character forever.
+        if 0xC2 <= byte <= 0xDF:
+            needed = 2
+        elif 0xE0 <= byte <= 0xEF:
+            needed = 3
+        elif 0xF0 <= byte <= 0xF4:
+            needed = 4
+        else:
+            return 0
+        return back if back < needed else 0
     return 0
 
 
