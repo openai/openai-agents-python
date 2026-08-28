@@ -231,6 +231,69 @@ async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
     assert transport_closed
 
 
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    communicate_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    transport_closed = False
+    communicate_calls = 0
+
+    class _Transport:
+        def close(self) -> None:
+            nonlocal transport_closed
+            transport_closed = True
+
+    class _Process:
+        pid = 123
+        returncode = None
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            nonlocal communicate_calls
+            communicate_calls += 1
+            if communicate_calls == 1:
+                communicate_started.set()
+                await asyncio.Event().wait()
+            cleanup_started.set()
+            raise RuntimeError("synthetic cleanup failure")
+
+        def kill(self) -> None:
+            pass
+
+    process = _Process()
+
+    async def _create_process(*_args: object, **_kwargs: object) -> _Process:
+        return process
+
+    monkeypatch.setattr(
+        unix_local_module.asyncio,
+        "create_subprocess_exec",
+        _create_process,
+    )
+    monkeypatch.setattr(unix_local_module.os, "killpg", lambda *_args: None)
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+    task = asyncio.create_task(session._exec_internal("sh", "-c", "sleep 30"))
+    await asyncio.wait_for(communicate_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert communicate_calls == 2
+    assert cleanup_started.is_set()
+    assert transport_closed
+
+
 @pytest.mark.asyncio
 async def test_unix_local_exec_cleanup_kills_direct_child_when_group_signal_fails(
     monkeypatch: pytest.MonkeyPatch,
