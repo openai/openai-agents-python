@@ -8,6 +8,26 @@ from collections.abc import Callable
 from .pty_types import truncate_text_by_tokens
 
 
+def _incomplete_utf8_suffix_len(data: bytes | bytearray) -> int:
+    """Length of a trailing UTF-8 sequence that is still waiting for its remaining bytes.
+
+    Returns 0 when the buffer does not end mid character.
+    """
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte < 0x80:
+            return 0
+        if byte >= 0xC0:
+            if byte < 0xE0:
+                expected = 2
+            elif byte < 0xF0:
+                expected = 3
+            else:
+                expected = 4
+            return back if back < expected else 0
+    return 0
+
+
 async def collect_pty_output(
     *,
     output_chunks: deque[bytes],
@@ -44,6 +64,18 @@ async def collect_pty_output(
         except asyncio.TimeoutError:
             break
         output_notify.clear()
+
+    # PTY output is collected in repeated windows over one persistent deque, so a
+    # character whose bytes straddle a window boundary would be replaced twice and
+    # lost. Hand the incomplete tail back for the next window to finish. Once the
+    # provider is done there is no next window, so the bytes are genuinely invalid.
+    if not is_done():
+        held_back = _incomplete_utf8_suffix_len(output)
+        if held_back:
+            tail = bytes(output[-held_back:])
+            del output[-held_back:]
+            async with output_lock:
+                output_chunks.appendleft(tail)
 
     text = output.decode("utf-8", errors="replace")
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
