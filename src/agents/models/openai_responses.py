@@ -710,6 +710,12 @@ class OpenAIResponsesModel(Model):
                                 # Record before yielding the terminal event because consumers may
                                 # close the generator immediately after receiving it.
                                 span_response.span_data.usage = model_usage_to_span_usage(usage)
+                            if tracing.include_data():
+                                # Same reason as usage: a consumer that stops at the terminal
+                                # event closes the generator and never reaches the post-loop
+                                # assignment, so record the model I/O before yielding.
+                                span_response.span_data.response = chunk.response
+                                span_response.span_data.input = input
                         elif chunk_type in {
                             "response.failed",
                             "response.incomplete",

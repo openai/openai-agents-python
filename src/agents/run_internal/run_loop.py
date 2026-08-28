@@ -1460,15 +1460,24 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        if run_state is not None:
+                            # `_accumulate_tool_guardrail_results` already folded this turn's
+                            # results in; publish them before the fallible append.
+                            run_state._tool_input_guardrail_results = list(
+                                accepted_tool_input_guardrail_results
+                            )
+                            run_state._tool_output_guardrail_results = list(
+                                accepted_tool_output_guardrail_results
+                            )
+                        current_agent = turn_result.next_step.new_agent
+                        if run_state is not None:
+                            run_state._current_agent = current_agent
+                        _publish_streamed_result_agent(streamed_result, current_agent)
                         await _save_resumed_items(
                             list(turn_session_items),
                             turn_result.model_response.response_id,
                             store_setting,
                         )
-                        current_agent = turn_result.next_step.new_agent
-                        if run_state is not None:
-                            run_state._current_agent = current_agent
-                        _publish_streamed_result_agent(streamed_result, current_agent)
                         if current_span is not None:
                             current_span.finish(reset_current=True)
                         current_span = None
@@ -1476,7 +1485,6 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
-                        run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
                             streamed_result
                         ):

@@ -62,7 +62,7 @@ from .items import (
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import (
-    NextStepFinalOutput,
+    NextStepHandoff,
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
@@ -81,10 +81,6 @@ __all__ = [
     "save_result_to_session",
     "save_resumed_turn_items",
     "resume_pending_session_write",
-    "record_terminal_checkpoint",
-    "resumed_write_owner",
-    "settleable_terminal_step",
-    "terminal_state_is_unrecoverable",
     "update_run_state_after_resume",
     "rewind_session_items",
     "wait_for_session_cleanup",
@@ -551,7 +547,13 @@ def update_run_state_after_resume(
     run_state._generated_items = generated_items
     if session_items is not None:
         run_state._session_items = list(session_items)
-    run_state._current_step = turn_result.next_step  # type: ignore[assignment]
+    next_step = turn_result.next_step
+    if isinstance(next_step, NextStepHandoff):
+        # The target agent is already committed, so the rest of the turn is an ordinary
+        # "run again". Normalizing here, before the fallible Session append, lets the existing
+        # pending-write checkpoint carry the handoff batch without a new persisted step type.
+        next_step = NextStepRunAgain()
+    run_state._current_step = next_step  # type: ignore[assignment]
 
 
 async def save_result_to_session(
@@ -724,124 +726,6 @@ async def save_result_to_session(
     return saved_run_items_count
 
 
-class TerminalOutputUnrecoverable:
-    """Marker for a terminal output accepted before a Session append that cannot be restored.
-
-    The value itself is never persisted, so a state carrying this marker is resumable only in
-    the sense that it can be rejected: the run already produced its output and already ran its
-    terminal hooks, and neither can be reproduced without repeating them.
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<terminal output unrecoverable>"
-
-    def __copy__(self) -> TerminalOutputUnrecoverable:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> TerminalOutputUnrecoverable:
-        return self
-
-
-TERMINAL_OUTPUT_UNRECOVERABLE = TerminalOutputUnrecoverable()
-
-
-def _terminal_output_is_restorable(output: Any, session: Session | None) -> bool:
-    """Return whether an accepted terminal output can be settled on a later resume.
-
-    Two things have to survive to the next resume for that to be safe:
-
-    - the output itself. Only a plain string round-trips through the RunState codec unchanged;
-      richer values fall back to ``json.dumps(..., default=str)`` and would change type.
-    - the rest of the batch's persistence. A compaction-aware Session also records a deferred
-      compaction, which the checkpoint does not carry and the replay would skip.
-    """
-    if type(output) is not str:
-        return False
-    return not is_openai_responses_compaction_aware_session(session)
-
-
-def record_terminal_checkpoint(
-    run_state: RunState[Any, Any] | None,
-    session: Session | None,
-    *,
-    settle_terminal_output: bool,
-) -> RunState[Any, Any] | None:
-    """Record how an accepted terminal output may be resumed, and return the state that owns it.
-
-    Every post-acceptance terminal append gets a checkpoint, so no accepted output can be
-    silently replayed by a later resume. What differs is what the checkpoint promises: a
-    restorable output is kept so the resume can settle it, and anything else is replaced by
-    ``TERMINAL_OUTPUT_UNRECOVERABLE`` so the resume fails closed instead.
-
-    ``settle_terminal_output`` says every output guardrail completed. Only the successful
-    finalize path can state that, so callers opt in rather than it being inferred from the step:
-    a guardrail that raised must surface on the next resume, not be checkpointed over.
-
-    The step is replaced rather than mutated because the live run still holds the same
-    ``NextStepFinalOutput`` for the result it is building.
-    """
-    if not settle_terminal_output or run_state is None:
-        return None
-    step = run_state._current_step
-    if not isinstance(step, NextStepFinalOutput):
-        return None
-    if _terminal_output_is_restorable(step.output, session):
-        run_state._current_step = NextStepFinalOutput(output=step.output)
-    else:
-        run_state._current_step = NextStepFinalOutput(output=TERMINAL_OUTPUT_UNRECOVERABLE)
-    return run_state
-
-
-def settleable_terminal_step(run_state: RunState[Any, Any] | None) -> NextStepFinalOutput | None:
-    """Return the accepted terminal step a resumed run may settle without another model call.
-
-    The step is only settleable while the append it is waiting on is still outstanding. The
-    pending write is that record, and only ``record_terminal_checkpoint`` arms it, so its
-    presence is what proves the output was accepted. Reconciling clears it, so callers capture
-    this before settling it.
-    """
-    if run_state is None or run_state._pending_session_write is None:
-        return None
-    step = run_state._current_step
-    if not isinstance(step, NextStepFinalOutput) or type(step.output) is not str:
-        return None
-    return step
-
-
-def terminal_state_is_unrecoverable(run_state: RunState[Any, Any] | None) -> bool:
-    """Return whether this state accepted a terminal output that can no longer be produced.
-
-    Unlike a settleable step this does not depend on the pending write. Settling the append
-    repairs history but cannot bring the output back, so the state stays closed to resumes.
-    """
-    step = run_state._current_step if run_state is not None else None
-    return isinstance(step, NextStepFinalOutput) and isinstance(
-        step.output, TerminalOutputUnrecoverable
-    )
-
-
-def resumed_write_owner(
-    run_state: RunState[Any, Any] | None,
-    session: Session | None,
-    *,
-    settle_terminal_output: bool = False,
-) -> RunState[Any, Any] | None:
-    """Return the state that owns a resumed write, so a failed append settles on the next resume.
-
-    A run-again or interruption step always owns its write. A terminal step owns its write once
-    ``record_terminal_checkpoint`` has recorded how that output may be resumed.
-    """
-    if run_state is None:
-        return None
-    if isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption):
-        return run_state
-    return record_terminal_checkpoint(
-        run_state, session, settle_terminal_output=settle_terminal_output
-    )
-
-
 async def save_resumed_turn_items(
     *,
     session: Session | None,
@@ -853,11 +737,7 @@ async def save_resumed_turn_items(
     wrapper: RunContextWrapper[Any] | None = None,
     run_state: RunState | None = None,
 ) -> int:
-    """Persist resumed turn items and return the updated persisted count.
-
-    ``run_state`` is the state that owns this write, as resolved by ``resumed_write_owner``,
-    or ``None`` when the batch is not checkpointed.
-    """
+    """Persist resumed turn items and return the updated persisted count."""
     if session is None or not items:
         return persisted_count
     saved_count = await save_result_to_session(
@@ -869,7 +749,12 @@ async def save_resumed_turn_items(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
-        resumed_write_state=run_state,
+        resumed_write_state=(
+            run_state
+            if run_state is not None
+            and isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+            else None
+        ),
     )
     return persisted_count + saved_count
 

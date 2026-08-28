@@ -8,7 +8,7 @@ from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
 
 from agents import RunContextWrapper, function_tool
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.function_schema import function_schema, generate_func_documentation
 
 
@@ -462,10 +462,58 @@ def test_var_positional_tuple_annotation():
         fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
 
 
+def _var_positional_fixed_pair(*args: tuple[int, str]) -> int:
+    return len(args)
+
+
+def _var_positional_fixed_single(*args: tuple[int]) -> int:
+    return len(args)
+
+
+def _var_positional_empty_tuple(*args: tuple[()]) -> int:
+    return len(args)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [_var_positional_fixed_pair, _var_positional_fixed_single, _var_positional_empty_tuple],
+)
+def test_var_positional_fixed_length_tuple_annotation_is_rejected(func: Any):
+    # A fixed-length tuple cannot describe every positional argument, so reject it at
+    # construction instead of silently widening each argument to Any. tuple[()] reports no
+    # args yet is still parameterized, so it belongs in this group.
+    with pytest.raises(UserError, match=r"use tuple\[T, \.\.\.\] or list\[T\] instead"):
+        function_schema(func, use_docstring_info=False)
+
+
+def _var_positional_homogeneous_tuple(*args: tuple[int, ...]) -> int:
+    return len(args)
+
+
+def _var_positional_list(*args: list[int]) -> int:
+    return len(args)
+
+
+def _var_positional_scalar(*args: int) -> int:
+    return len(args)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [_var_positional_homogeneous_tuple, _var_positional_list, _var_positional_scalar],
+)
+def test_var_positional_supported_annotations_still_build(func: Any):
+    # The alternatives named by the rejection message must keep working.
+    fs = function_schema(func, use_docstring_info=False)
+
+    assert fs.params_json_schema["properties"]["args"]["type"] == "array"
+
+
 def test_var_keyword_dict_annotation():
     # Case 3:
-    # When a function has a var-keyword parameter annotated with a dict type,
-    # function_schema() should convert it into a field with type Dict[<key>, <value>].
+    # A ``**kwargs: X`` annotation applies to each keyword *value* (PEP 484), so a
+    # ``**kwargs: dict[str, int]`` parameter collects into ``dict[str, dict[str, int]]`` --
+    # mirroring the variadic-positional handling in test_var_positional_tuple_annotation.
     def func(**kwargs: dict[str, int]):
         return kwargs
 
@@ -473,9 +521,37 @@ def test_var_keyword_dict_annotation():
 
     properties = fs.params_json_schema.get("properties", {})
     # The name of the field is "kwargs", and it's a JSON object i.e. a dict.
-    assert properties.get("kwargs").get("type") == "object"
-    # The values in the dict are integers.
-    assert properties.get("kwargs").get("additionalProperties").get("type") == "integer"
+    kwargs_schema = properties.get("kwargs", {})
+    assert kwargs_schema.get("type") == "object"
+    # Each keyword value is itself a dict[str, int].
+    value_schema = kwargs_schema.get("additionalProperties", {})
+    assert value_schema.get("type") == "object"
+    assert value_schema.get("additionalProperties", {}).get("type") == "integer"
+
+    # A correctly-shaped input round-trips back to the original call.
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"a": {"x": 1}, "b": {"y": 2}}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == {"a": {"x": 1}, "b": {"y": 2}}
+
+    # A flat mapping of ints no longer matches the declared value type.
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"kwargs": {"a": 1, "b": 2}})
+
+
+def test_var_keyword_scalar_annotation():
+    # A ``**kwargs: int`` parameter collects each keyword value as an int: ``dict[str, int]``.
+    def func(**kwargs: int) -> int:
+        return sum(kwargs.values())
+
+    fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
+
+    kwargs_schema = fs.params_json_schema.get("properties", {}).get("kwargs", {})
+    assert kwargs_schema.get("type") == "object"
+    assert kwargs_schema.get("additionalProperties", {}).get("type") == "integer"
+
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"a": 2, "b": 3}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == 5
 
 
 def test_schema_with_mapping_raises_strict_mode_error():
@@ -1183,3 +1259,94 @@ def test_default_equality_is_not_used_for_sentinel_comparison(
     parsed = fs.params_pydantic_model(x=1)
     args, kwargs = fs.to_call_args(parsed)
     assert isinstance((args + list(kwargs.values()))[-1], default_type)
+
+
+def _kwargs_keyword_only(*, opt: int = 1, **kw: Any) -> tuple[int, dict[str, Any]]:
+    return opt, kw
+
+
+def _kwargs_positional_or_keyword(x: int, *rest: int, **kw: Any) -> tuple[int, tuple[int, ...]]:
+    return x, rest
+
+
+def _kwargs_after_var_positional(*rest: int, y: int = 0, **kw: Any) -> tuple[int, int]:
+    return y, len(rest)
+
+
+def _kwargs_with_context(ctx: RunContextWrapper[str], n: int, **kw: Any) -> int:
+    return n
+
+
+@pytest.mark.parametrize(
+    ("func", "payload", "conflict"),
+    [
+        pytest.param(
+            _kwargs_keyword_only,
+            {"opt": 5, "kw": {"opt": 9}},
+            "'opt'",
+            id="keyword-only",
+        ),
+        pytest.param(
+            _kwargs_positional_or_keyword,
+            {"x": 1, "rest": [2, 3], "kw": {"x": 99}},
+            "'x'",
+            id="positional-or-keyword",
+        ),
+        pytest.param(
+            _kwargs_after_var_positional,
+            {"rest": [1], "y": 2, "kw": {"y": 3}},
+            "'y'",
+            id="keyword-only-after-var-positional",
+        ),
+        pytest.param(
+            _kwargs_with_context,
+            {"n": 1, "kw": {"ctx": 9}},
+            "'ctx'",
+            id="context-parameter",
+        ),
+    ],
+)
+def test_to_call_args_rejects_kwargs_keys_that_collide_with_named_params(
+    func: Callable[..., Any], payload: dict[str, Any], conflict: str
+) -> None:
+    """A **kwargs key naming a keyword-bindable parameter is not a callable combination.
+
+    Splatting it would either replace the validated value for that parameter or make the
+    call fail with "got multiple values for argument", so it is reported to the model.
+    """
+    fs = function_schema(func, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**payload)
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        fs.to_call_args(parsed)
+
+    assert conflict in str(exc_info.value)
+    assert fs.name in str(exc_info.value)
+
+
+def _kwargs_positional_only(a: int, /, **kw: Any) -> tuple[int, dict[str, Any]]:
+    return a, kw
+
+
+def _kwargs_var_positional_name(*rest: int, **kw: Any) -> tuple[tuple[int, ...], dict[str, Any]]:
+    return rest, kw
+
+
+def test_to_call_args_allows_kwargs_key_matching_positional_only_param() -> None:
+    """``f(1, a=2)`` is legal for ``def f(a, /, **kw)``: the key belongs to ``**kw``."""
+    fs = function_schema(_kwargs_positional_only, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**{"a": 1, "kw": {"a": 2}})
+
+    args, kwargs_dict = fs.to_call_args(parsed)
+
+    assert _kwargs_positional_only(*args, **kwargs_dict) == (1, {"a": 2})
+
+
+def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
+    """``*args`` binds no name, so a key of the same name belongs to ``**kw``."""
+    fs = function_schema(_kwargs_var_positional_name, strict_json_schema=False)
+    parsed = fs.params_pydantic_model(**{"rest": [1], "kw": {"rest": 5}})
+
+    args, kwargs_dict = fs.to_call_args(parsed)
+
+    assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})

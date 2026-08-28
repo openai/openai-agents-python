@@ -222,8 +222,8 @@ class _SSELineDecoder:
         self._buf = b""
         self._skip_leading_lf = False
 
-    def decode(self, text: str) -> list[str]:
-        data = text.encode("utf-8")
+    def decode(self, text: str | bytes) -> list[str]:
+        data = text.encode("utf-8") if isinstance(text, str) else text
         if self._skip_leading_lf and data:
             # The previous chunk ended on a CR, which already terminated its line. A LF
             # opening this chunk is the second half of that CRLF, so consume it instead of
@@ -895,8 +895,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
                 async for chunk in resp.content.iter_any():
                     raw_stream.extend(chunk)
-                    text = chunk.decode("utf-8")
-                    for line in line_decoder.decode(text):
+                    for line in line_decoder.decode(chunk):
                         event = sse_decoder.decode(line)
                         if event is None:
                             continue

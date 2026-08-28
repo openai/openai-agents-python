@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
 TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
+PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "publish.yml"
 DAPR_REDIS_TEST = ROOT / "integration_tests" / "containers" / "test_dapr_redis.py"
 EXAMPLE_RUNNER = ROOT / ".github" / "scripts" / "run_examples.sh"
 EXAMPLE_SUITE = ROOT / "examples" / "run_examples.py"
@@ -28,8 +29,8 @@ def _make_recipes() -> dict[str, str]:
     return recipes
 
 
-def _workflow_job(name: str) -> str:
-    workflow = TESTS_WORKFLOW.read_text(encoding="utf-8")
+def _workflow_job(name: str, path: Path = TESTS_WORKFLOW) -> str:
+    workflow = path.read_text(encoding="utf-8")
     job_pattern = rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-z0-9-]+:\n|\Z)"
     match = re.search(job_pattern, workflow)
     assert match is not None
@@ -166,3 +167,46 @@ def test_prospective_contract_preparation_removes_api_key_before_uv() -> None:
 
     assert recipe.startswith("@unset OPENAI_API_KEY; \\\n")
     assert recipe.index("unset OPENAI_API_KEY") < recipe.index("uv run")
+
+
+def test_release_build_validates_before_executing_candidate_code() -> None:
+    build = _workflow_job("build", PUBLISH_WORKFLOW)
+
+    assert "contents: read" in build
+    assert "id-token:" not in build
+    assert "environment:" not in build
+    assert "ref: refs/heads/main\n          path: control" in build
+    assert "ref: ${{ github.sha }}\n          path: release-source" in build
+    assert build.count("persist-credentials: false") == 2
+    assert "fetch-depth: 0" in build
+    validation = build.index("python -I control/.github/scripts/verify_release.py")
+    assert validation < build.index("run: make sync") < build.index("run: uv build")
+    assert ' --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"' in build
+    assert "enable-cache: false" in build
+
+
+def test_pypi_job_only_publishes_the_build_artifact() -> None:
+    workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    publish = _workflow_job("publish", PUBLISH_WORKFLOW)
+
+    assert "permissions: {}" in workflow
+    assert workflow.count("id-token: write") == 1
+    assert "needs: build" in publish
+    assert "name: pypi" in publish
+    assert "id-token: write" in publish
+    assert "run:" not in publish
+    actions = re.findall(r"uses: ([^\s]+)", publish)
+    assert len(actions) == 2
+    assert actions[0].startswith("actions/download-artifact@")
+    assert actions[1].startswith("pypa/gh-action-pypi-publish@")
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in actions)
+    assert "artifact-ids: ${{ needs.build.outputs.artifact-id }}" in publish
+    assert "artifact-id: ${{ steps.upload.outputs.artifact-id }}" in _workflow_job(
+        "build", PUBLISH_WORKFLOW
+    )
+    assert "path: dist/" in publish
+    assert "merge-multiple: true" in publish
+
+
+def test_release_tagging_is_manual() -> None:
+    assert not (ROOT / ".github/workflows/release-tag.yml").exists()

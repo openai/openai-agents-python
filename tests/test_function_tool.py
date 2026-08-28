@@ -1435,3 +1435,26 @@ def test_function_tool_timeout_error_function_must_be_callable() -> None:
             on_invoke_tool=_noop_on_invoke_tool,
             timeout_error_function=cast(Any, "not-callable"),
         )
+
+
+def kwargs_collision_function(x: int, *rest: int, **kw: Any) -> str:
+    return f"x={x} rest={rest} kw={kw}"
+
+
+@pytest.mark.asyncio
+async def test_kwargs_key_colliding_with_param_is_reported_as_model_behavior_error():
+    """The collision reaches the model as feedback, not as an unhandled TypeError.
+
+    ``kw={"x": 99}`` used to splat into the call as ``f(1, 2, 3, x=99)``, which raised
+    ``TypeError: got multiple values for argument 'x'`` from inside the tool call.
+    """
+    tool = function_tool(kwargs_collision_function, strict_mode=False, failure_error_function=None)
+    arguments = '{"x": 1, "rest": [2, 3], "kw": {"x": 99}}'
+
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments),
+            arguments,
+        )
+
+    assert "'x'" in str(exc_info.value)

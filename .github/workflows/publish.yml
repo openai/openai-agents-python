@@ -5,33 +5,84 @@ on:
     types:
       - published
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    environment:
-      name: pypi
-      url: https://pypi.org/p/openai-agents
+  build:
     permissions:
-      id-token: write # Important for trusted publishing to PyPI
+      contents: read
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: fake-for-tests
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
     steps:
-      - name: Checkout repository
+      # Tag rules and environment protection remain the release authorization boundary.
+      - name: Checkout release validator from main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Python for release validation
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+      - name: Validate release provenance
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: >-
+          python -I control/.github/scripts/verify_release.py
+          --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
       - name: Setup uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
+          enable-cache: false
           python-version: "3.14"
       - name: Install dependencies
+        working-directory: release-source
+        env:
+          OPENAI_API_KEY: fake-for-tests
         run: make sync
       - name: Build package
+        working-directory: release-source
         run: uv build
+      - name: Store distributions
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-distributions-${{ github.run_attempt }}
+          path: release-source/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    environment:
+      name: pypi
+      url: https://pypi.org/p/openai-agents
+    permissions:
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist/
+          merge-multiple: true
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
