@@ -1261,7 +1261,7 @@ class DockerSandboxSession(BaseSandboxSession):
         entry: _DockerPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         if entry.output_closed.is_set() and entry.exit_code is None:
             await self._refresh_pty_exit_code(entry)

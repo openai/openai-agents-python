@@ -1050,7 +1050,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = entry.exit_code if entry.output_closed.is_set() else None
         live_process_id: int | None = process_id

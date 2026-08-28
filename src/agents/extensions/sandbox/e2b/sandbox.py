@@ -1248,7 +1248,7 @@ class E2BSandboxSession(BaseSandboxSession):
         entry: _E2BPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = self._entry_exit_code(entry)
         live_process_id: int | None = process_id

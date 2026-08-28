@@ -1117,7 +1117,7 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = await self._peek_exit_code(entry.process)
         live_process_id: int | None = process_id

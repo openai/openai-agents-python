@@ -5,7 +5,11 @@ from collections import deque
 
 import pytest
 
-from agents.sandbox.session.pty_output import collect_pty_output
+from agents.sandbox.session.pty_output import (
+    close_pty_tail,
+    collect_pty_output,
+    flush_pty_tail,
+)
 
 
 @pytest.mark.asyncio
@@ -191,3 +195,58 @@ async def test_collect_pty_output_still_holds_a_valid_lead_below_the_surrogates(
     second_window = await _one_window(chunks, lock, notify, done)
 
     assert (first + second_window).decode("utf-8") == raw.decode("utf-8")
+
+
+def test_close_pty_tail_replaces_the_leftover_and_leaves_a_clean_session_alone() -> None:
+    finished, count = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=b"hi ",
+        original_token_count=None,
+        max_output_tokens=None,
+    )
+    assert finished.decode("utf-8") == "hi \ufffd"
+
+    unchanged, same = close_pty_tail(
+        leftover=b"",
+        output=b"hi ",
+        original_token_count=count,
+        max_output_tokens=None,
+    )
+    assert unchanged == b"hi "
+    assert same == count
+
+
+def test_close_pty_tail_applies_the_token_cap_to_what_it_adds() -> None:
+    # the window already truncated to the cap, so the tail cannot be appended past it
+    capped, _ = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=b"",
+        original_token_count=None,
+        max_output_tokens=0,
+    )
+    uncapped, _ = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=b"",
+        original_token_count=None,
+        max_output_tokens=None,
+    )
+
+    assert uncapped.decode("utf-8") == "\ufffd"
+    assert len(capped) <= len(uncapped)
+
+
+@pytest.mark.asyncio
+async def test_flush_pty_tail_drains_what_the_session_still_holds() -> None:
+    chunks: deque[bytes] = deque(["\u00e9".encode()[:1]])
+    lock = asyncio.Lock()
+
+    flushed, _ = await flush_pty_tail(
+        output_chunks=chunks,
+        output_lock=lock,
+        output=b"hi ",
+        original_token_count=None,
+        max_output_tokens=None,
+    )
+
+    assert flushed.decode("utf-8") == "hi \ufffd"
+    assert not chunks

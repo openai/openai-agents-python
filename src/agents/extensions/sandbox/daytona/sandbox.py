@@ -856,7 +856,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         entry: _DaytonaPtySessionEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = entry.exit_code if entry.done else None
         live_process_id: int | None = process_id

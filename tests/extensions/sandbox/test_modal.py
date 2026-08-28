@@ -4445,6 +4445,63 @@ async def test_modal_pty_start_and_write_stdin(
 
 
 @pytest.mark.asyncio
+async def test_modal_pty_collection_keeps_its_tail_when_the_call_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _NeverEndingStream:
+        def __aiter__(self) -> _NeverEndingStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _NeverEndingStream()
+            self.stderr = _NeverEndingStream()
+            self.poll = _with_aio(lambda: None)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-cancel"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    entry = modal_module._ModalPtyProcessEntry(process=sandbox.process, tty=True)
+    held = "\u00e9".encode()[:1]
+    entry.pending_output = held
+
+    task = asyncio.create_task(
+        session._collect_pty_output(entry=entry, yield_time_ms=60_000, max_output_tokens=None)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # the process is still registered, so the next call has to find the lead byte still there
+    assert entry.pending_output == held
+
+
+@pytest.mark.asyncio
 async def test_modal_pty_finalize_flushes_a_partial_character_when_the_process_has_exited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

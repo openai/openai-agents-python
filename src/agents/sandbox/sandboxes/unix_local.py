@@ -552,7 +552,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
-        max_output_tokens: int | None,
+        max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code: int | None = entry.process.returncode
         live_process_id: int | None = process_id
