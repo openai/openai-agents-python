@@ -64,7 +64,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     _terminate_ambiguous_mount_session,
 )
-from ....sandbox.session.pty_output import decode_pty_window
+from ....sandbox.session.pty_output import close_pty_tail, decode_pty_window
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -919,6 +919,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_write_stdin(
@@ -955,6 +956,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -985,9 +987,9 @@ class ModalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
         deadline = time.monotonic() + (yield_time_ms / 1000)
-        # a character split across two windows starts in the tail the last one held back
+        # a character split across two windows starts in the tail the last one held back. the
+        # field is left alone until the decode below commits, so a cancelled call keeps it
         chunks = bytearray(entry.pending_output)
-        entry.pending_output = b""
 
         while True:
             stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
@@ -1115,17 +1117,18 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        max_output_tokens: int | None,
     ) -> PtyExecUpdate:
         exit_code = await self._peek_exit_code(entry.process)
         live_process_id: int | None = process_id
         if exit_code is not None:
-            # The collector polled before this and may have seen the process still running, so
-            # it kept a partial character back for a window that is never going to come. Close
-            # it here, otherwise those bytes go out with the entry and the output loses them.
-            if entry.pending_output:
-                tail, _ = decode_pty_window(entry.pending_output, is_final=True)
-                entry.pending_output = b""
-                output += tail.encode("utf-8", errors="replace")
+            output, original_token_count = close_pty_tail(
+                leftover=entry.pending_output,
+                output=output,
+                original_token_count=original_token_count,
+                max_output_tokens=max_output_tokens,
+            )
+            entry.pending_output = b""
 
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)

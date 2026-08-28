@@ -31,6 +31,57 @@ def decode_pty_window(data: bytes | bytearray, *, is_final: bool) -> tuple[str, 
     return text, pending
 
 
+def close_pty_tail(
+    *,
+    leftover: bytes | bytearray,
+    output: bytes,
+    original_token_count: int | None,
+    max_output_tokens: int | None,
+) -> tuple[bytes, int | None]:
+    """Fold a tail a collection window left behind into the output of a finished session.
+
+    A window hands an unfinished character back while the stream still looks open, but each
+    backend decides separately that the process has gone, and it can decide that after the last
+    collection. Whatever is still waiting then has no later window to complete it, so it is
+    replaced here rather than leaving with the session.
+
+    The result is truncated again because the tail is added after the window already applied
+    ``max_output_tokens``, and the returned count covers the text including it.
+    """
+    if not leftover:
+        return output, original_token_count
+
+    tail, _ = decode_pty_window(leftover, is_final=True)
+    if not tail:
+        return output, original_token_count
+
+    text = output.decode("utf-8", errors="replace") + tail
+    truncated, recounted = truncate_text_by_tokens(text, max_output_tokens)
+    return truncated.encode("utf-8", errors="replace"), recounted
+
+
+async def flush_pty_tail(
+    *,
+    output_chunks: deque[bytes],
+    output_lock: asyncio.Lock,
+    output: bytes,
+    original_token_count: int | None,
+    max_output_tokens: int | None,
+) -> tuple[bytes, int | None]:
+    """Drain what a session still holds and close it with :func:`close_pty_tail`."""
+    leftover = bytearray()
+    async with output_lock:
+        while output_chunks:
+            leftover.extend(output_chunks.popleft())
+
+    return close_pty_tail(
+        leftover=leftover,
+        output=output,
+        original_token_count=original_token_count,
+        max_output_tokens=max_output_tokens,
+    )
+
+
 async def collect_pty_output(
     *,
     output_chunks: deque[bytes],

@@ -48,7 +48,7 @@ from ..session import SandboxSession, SandboxSessionState
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
-from ..session.pty_output import collect_pty_output
+from ..session.pty_output import collect_pty_output, flush_pty_tail
 from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -410,6 +410,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_write_stdin(
@@ -455,6 +456,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -550,11 +552,19 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        max_output_tokens: int | None,
     ) -> PtyExecUpdate:
         exit_code: int | None = entry.process.returncode
         live_process_id: int | None = process_id
 
         if exit_code is not None:
+            output, original_token_count = await flush_pty_tail(
+                output_chunks=entry.output_chunks,
+                output_lock=entry.output_lock,
+                output=output,
+                original_token_count=original_token_count,
+                max_output_tokens=max_output_tokens,
+            )
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

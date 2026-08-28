@@ -46,7 +46,7 @@ from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
-from ....sandbox.session.pty_output import collect_pty_output
+from ....sandbox.session.pty_output import collect_pty_output, flush_pty_tail
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -866,6 +866,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_write_stdin(
@@ -903,6 +904,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -981,11 +983,19 @@ class BlaxelSandboxSession(BaseSandboxSession):
         entry: _BlaxelPtySessionEntry,
         output: bytes,
         original_token_count: int | None,
+        max_output_tokens: int | None,
     ) -> PtyExecUpdate:
         exit_code = entry.exit_code if entry.done else None
         live_process_id: int | None = process_id
 
         if entry.done:
+            output, original_token_count = await flush_pty_tail(
+                output_chunks=entry.output_chunks,
+                output_lock=entry.output_lock,
+                output=output,
+                original_token_count=original_token_count,
+                max_output_tokens=max_output_tokens,
+            )
             async with self._pty_lock:
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

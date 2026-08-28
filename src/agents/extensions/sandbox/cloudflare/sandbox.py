@@ -59,7 +59,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     with_ephemeral_mounts_removed,
 )
-from ....sandbox.session.pty_output import collect_pty_output, decode_pty_window
+from ....sandbox.session.pty_output import collect_pty_output, flush_pty_tail
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1050,20 +1050,18 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        max_output_tokens: int | None,
     ) -> PtyExecUpdate:
         exit_code = entry.exit_code if entry.output_closed.is_set() else None
         live_process_id: int | None = process_id
         if entry.output_closed.is_set():
-            # collect_pty_output may have handed a partial character back to the deque while
-            # this looked like it was still running. nothing is going to drain it now, so close
-            # it here rather than let it leave with the entry
-            leftover = bytearray()
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    leftover.extend(entry.output_chunks.popleft())
-            if leftover:
-                tail, _ = decode_pty_window(leftover, is_final=True)
-                output += tail.encode("utf-8", errors="replace")
+            output, original_token_count = await flush_pty_tail(
+                output_chunks=entry.output_chunks,
+                output_lock=entry.output_lock,
+                output=output,
+                original_token_count=original_token_count,
+                max_output_tokens=max_output_tokens,
+            )
 
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
@@ -1222,6 +1220,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_write_stdin(
@@ -1259,6 +1258,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_terminate_all(self) -> None:
