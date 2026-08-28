@@ -12,7 +12,12 @@ import httpx2
 import pytest
 
 import agents._debug as _debug
-from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing import (
+    flush_traces,
+    get_trace_provider,
+    set_tracing_export_api_key,
+    setup as tracing_setup,
+)
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
@@ -1358,12 +1363,21 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
 
 @pytest.fixture
 def restore_tracing_defaults():
-    """Isolate the module-level default exporter/processor around a test."""
+    """Isolate the module-level default exporter/processor/provider around a test."""
     from agents.tracing import processors as tracing_processors
 
-    saved = (tracing_processors._global_exporter, tracing_processors._global_processor)
+    saved = (
+        tracing_processors._global_exporter,
+        tracing_processors._global_processor,
+        tracing_setup.GLOBAL_TRACE_PROVIDER,
+        tracing_setup._DEFAULT_PROCESSOR,
+        tracing_setup._ATEXIT_SHUTDOWN_STARTED,
+    )
     tracing_processors._global_exporter = None
     tracing_processors._global_processor = None
+    tracing_setup.GLOBAL_TRACE_PROVIDER = None
+    tracing_setup._DEFAULT_PROCESSOR = None
+    tracing_setup._ATEXIT_SHUTDOWN_STARTED = False
     try:
         yield tracing_processors
     finally:
@@ -1373,6 +1387,9 @@ def restore_tracing_defaults():
         (
             tracing_processors._global_exporter,
             tracing_processors._global_processor,
+            tracing_setup.GLOBAL_TRACE_PROVIDER,
+            tracing_setup._DEFAULT_PROCESSOR,
+            tracing_setup._ATEXIT_SHUTDOWN_STARTED,
         ) = saved
 
 
@@ -1494,3 +1511,63 @@ def test_fresh_default_exporter_still_retries_transient_failures(restore_tracing
         second._queue.put_nowait(get_span(second))
         second.force_flush()
         assert mock_client.return_value.post.call_count == 3  # max_retries counts attempts
+
+
+def test_shut_down_provider_reinitializes_with_the_fresh_pair(restore_tracing_defaults):
+    """A stale provider must not keep exporting through the shut-down pair."""
+    tracing_processors = restore_tracing_defaults
+
+    first_provider = tracing_setup.get_trace_provider()
+    first_processor = tracing_processors.default_processor()
+    first_exporter = tracing_processors.default_exporter()
+    assert tracing_setup._DEFAULT_PROCESSOR is first_processor
+
+    first_provider.shutdown(timeout=1.0)
+    first_exporter.close()
+
+    # Reconfiguring must land on the exporter the live provider actually exports through.
+    set_tracing_export_api_key("fresh_key")
+
+    second_provider = tracing_setup.get_trace_provider()
+    assert second_provider is not first_provider
+
+    registered = cast(Any, second_provider)._multi_processor._processors
+    assert len(registered) == 1
+    assert registered[0] is tracing_processors.default_processor()
+    assert registered[0] is not first_processor
+    assert registered[0]._exporter is tracing_processors.default_exporter()
+    assert registered[0]._exporter is not first_exporter
+    assert registered[0]._exporter.api_key == "fresh_key"
+
+
+def test_live_provider_is_not_replaced(restore_tracing_defaults):
+    provider = tracing_setup.get_trace_provider()
+
+    assert tracing_setup.get_trace_provider() is provider
+
+
+def test_caller_supplied_provider_is_never_replaced(restore_tracing_defaults):
+    """`set_trace_provider` hands the lifecycle to the caller, shut down or not."""
+    provider = DefaultTraceProvider()
+    processor = BatchTraceProcessor(exporter=BackendSpanExporter(api_key="test_key"))
+    provider.set_processors([processor])
+    tracing_setup.set_trace_provider(provider)
+
+    provider.shutdown(timeout=1.0)
+    processor._exporter.close()
+
+    assert tracing_setup.get_trace_provider() is provider
+
+
+def test_atexit_shutdown_does_not_resurrect_the_stack(restore_tracing_defaults):
+    """Teardown must not build a fresh exporter and HTTP client on the way out."""
+    tracing_processors = restore_tracing_defaults
+
+    provider = tracing_setup.get_trace_provider()
+    exporter = tracing_processors.default_exporter()
+
+    tracing_setup._shutdown_global_trace_provider()
+
+    assert tracing_setup._ATEXIT_SHUTDOWN_STARTED
+    assert tracing_setup.get_trace_provider() is provider
+    assert tracing_processors._global_exporter is exporter
