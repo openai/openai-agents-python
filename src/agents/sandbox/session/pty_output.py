@@ -9,6 +9,28 @@ from collections.abc import Callable
 from .pty_types import truncate_text_by_tokens
 
 
+def decode_pty_window(data: bytes | bytearray, *, is_final: bool) -> tuple[str, bytes]:
+    """Decode one collection window, and return what has to wait for the next one.
+
+    PTY output arrives in repeated windows, so decoding each one with ``errors="replace"``
+    destroys any character whose bytes straddle a boundary. The returned bytes are the tail
+    the caller has to put back in front of the next window.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text = decoder.decode(data, final=is_final)
+    pending = bytes(decoder.getstate()[0])
+
+    # The decoder holds ED A0..BF, which leads a surrogate, even though no third byte can
+    # complete it. Those 32 prefixes are the only thing it ever buffers that cannot become a
+    # character, so handing them back would keep the output hidden for as long as the process
+    # runs. Replace them here instead, the same way the decoder would once it is closed.
+    if len(pending) == 2 and pending[0] == 0xED and pending[1] >= 0xA0:
+        text += pending.decode("utf-8", errors="replace")
+        pending = b""
+
+    return text, pending
+
+
 async def collect_pty_output(
     *,
     output_chunks: deque[bytes],
@@ -52,18 +74,7 @@ async def collect_pty_output(
     # and it is handed back for the next window to finish. Bytes that cannot begin a
     # character are not held, they are replaced straight away as before. Completing the
     # decoder once the provider is done replaces a tail that no later window will finish.
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    text = decoder.decode(output, final=is_done())
-    pending = bytes(decoder.getstate()[0])
-
-    # The decoder holds ED A0..BF, which leads a surrogate, even though no third byte can
-    # complete it. Those 32 prefixes are the only thing it ever buffers that cannot become a
-    # character, so handing them back would keep the output hidden for as long as the process
-    # runs. Replace them here instead, the same way the decoder would once it is closed.
-    if len(pending) == 2 and pending[0] == 0xED and pending[1] >= 0xA0:
-        text += pending.decode("utf-8", errors="replace")
-        pending = b""
-
+    text, pending = decode_pty_window(output, is_final=is_done())
     if pending:
         async with output_lock:
             output_chunks.appendleft(pending)

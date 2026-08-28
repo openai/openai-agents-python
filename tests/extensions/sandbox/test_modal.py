@@ -4444,6 +4444,99 @@ async def test_modal_pty_start_and_write_stdin(
     await session.pty_terminate_all()
 
 
+async def test_modal_pty_output_keeps_a_character_split_across_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self._chunk_event = asyncio.Event()
+            if self._chunks:
+                self._chunk_event.set()
+            self.read = _with_aio(self._read)
+
+        def __aiter__(self) -> _FakeStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            while not self._chunks:
+                self._chunk_event.clear()
+                await self._chunk_event.wait()
+            chunk = self._chunks.pop(0)
+            if not self._chunks:
+                self._chunk_event.clear()
+            return chunk
+
+        def append(self, chunk: bytes) -> None:
+            self._chunks.append(chunk)
+            self._chunk_event.set()
+
+        def _read(self, size: int | None = None) -> bytes:
+            if size is None:
+                raise AssertionError("PTY polling should not call read() with no size")
+            if self._chunks:
+                return self._chunks.pop(0)
+            return b""
+
+    class _FakeStdin:
+        def __init__(self, stdout: _FakeStream) -> None:
+            self.writes: list[bytes] = []
+            self._stdout = stdout
+            self.write = _with_aio(self._write)
+            self.drain = _with_aio(lambda: None)
+
+        def _write(self, payload: bytes) -> None:
+            self.writes.append(payload)
+            # the rest of the character, plus what follows it
+            self._stdout.append("\u00e9llo".encode()[1:])
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            # ends mid character, the second byte of e acute only arrives in the next window
+            self.stdout = _FakeStream([b"h" + "\u00e9".encode()[:1]])
+            self.stderr = _FakeStream([])
+            self.stdin = _FakeStdin(self.stdout)
+            self.poll = _with_aio(lambda: None)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-split"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.05)
+    assert started.process_id is not None
+
+    updated = await session.pty_write_stdin(
+        session_id=started.process_id,
+        chars="go\n",
+        yield_time_s=0.05,
+    )
+
+    combined = (started.output + updated.output).decode("utf-8")
+    assert combined == "h\u00e9llo"
+    assert "\ufffd" not in combined
+
+    await session.pty_terminate_all()
+
+
 @pytest.mark.asyncio
 async def test_modal_pty_start_drains_all_buffered_output_after_exit(
     monkeypatch: pytest.MonkeyPatch,

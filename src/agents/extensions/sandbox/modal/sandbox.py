@@ -64,6 +64,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     _terminate_ambiguous_mount_session,
 )
+from ....sandbox.session.pty_output import decode_pty_window
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -489,6 +490,7 @@ class _ModalPtyProcessEntry:
     stderr_iter: AsyncIterator[object] | None = None
     stdout_read_task: asyncio.Task[object] | None = None
     stderr_read_task: asyncio.Task[object] | None = None
+    pending_output: bytes = b""
 
 
 class ModalSandboxSession(BaseSandboxSession):
@@ -983,7 +985,9 @@ class ModalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
         deadline = time.monotonic() + (yield_time_ms / 1000)
-        chunks = bytearray()
+        # a character split across two windows starts in the tail the last one held back
+        chunks = bytearray(entry.pending_output)
+        entry.pending_output = b""
 
         while True:
             stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
@@ -1010,7 +1014,8 @@ class ModalSandboxSession(BaseSandboxSession):
                     break
                 await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
-        text = chunks.decode("utf-8", errors="replace")
+        exited = await self._peek_exit_code(entry.process) is not None
+        text, entry.pending_output = decode_pty_window(chunks, is_final=exited)
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count
 
