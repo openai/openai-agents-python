@@ -15,7 +15,7 @@ from openai.types.responses.response_usage import (
 )
 
 import agents._debug as _debug
-from agents import Agent, Runner
+from agents import Agent, RunConfig, Runner
 from agents.items import RunItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionArgs,
@@ -3166,6 +3166,239 @@ class TestCompactionConcurrentMutations:
         assert await underlying.get_items() == [a_turn_one, a_turn_two, poisoned_item]
         assert session._response_boundaries == {"resp_a": 2}
         assert session._destructive_generation == generation_before
+
+
+class TestPartialRequestInputCompaction:
+    """Runs whose request input skips stored history must not record boundaries.
+
+    A resolved session limit windows the history read, and a session input
+    callback rebuilds the prepared input outright. In both cases the request
+    carries less than the stored history while the count at persist time spans
+    all of it, so a recorded boundary would let a previous_response_id
+    replacement delete prefix items the server never saw, with no concurrency
+    involved. Such runs must record nothing and their compactions must skip
+    before the billed call, even on a fresh wrapper instance over a restored
+    store where no boundary was ever recorded.
+    """
+
+    @staticmethod
+    def _prior_turns() -> list[TResponseInputItem]:
+        return [
+            cast(TResponseInputItem, {"role": "user", "content": "prefix question"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "prefix answer"},
+            ),
+            cast(TResponseInputItem, {"role": "user", "content": "recent question"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "recent answer"},
+            ),
+        ]
+
+    @staticmethod
+    def _make_session(
+        underlying: SimpleListSession, session_id: str
+    ) -> tuple[OpenAIResponsesCompactionSession, MagicMock]:
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "window only"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        session = OpenAIResponsesCompactionSession(
+            session_id=session_id,
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: True,
+        )
+        return session, mock_client
+
+    @pytest.mark.asyncio
+    async def test_limit_windowed_run_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A run under a truncating session limit must leave the full history intact.
+
+        The store holds four turns and the run's limit admits only the last
+        two, so the request input never carries the oldest turns. On the
+        prior behavior the persist recorded a boundary spanning the whole
+        store and the compaction keyed on the response replaced the prefix,
+        deleting the turns the server never saw. Now the voided ownership
+        token records nothing, arms the skip gate, and the compaction skips
+        before the billed call with every stored item preserved.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "windowed-limit")
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("windowed reply")], response_id="resp_win")]
+        )
+        worker = Agent(name="windowed_worker", model=model)
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            await Runner.run(
+                worker,
+                "hello there",
+                session=session,
+                run_config=RunConfig(session_settings=SessionSettings(limit=2)),
+            )
+
+        # The request really was windowed: the oldest turns were left out of
+        # it, so the server side history cannot contain them.
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" not in request_text
+        assert "recent question" in request_text
+        assert "hello there" in request_text
+
+        # The full history survived, including the prefix the server never
+        # saw; deleting it is the data loss under test.
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "hello there" in stored_text
+        assert "windowed reply" in stored_text
+
+        # Nothing recorded, and the voided token armed the gate so the
+        # compaction skipped before the billed call even though this wrapper
+        # instance never recorded any boundary.
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_win" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_filtering_input_callback_records_nothing_and_compaction_skips(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A streamed run whose callback drops history must leave it intact.
+
+        The callback keeps only the new turn input, so the request carries
+        none of the four stored turns. On the prior behavior the persist
+        still recorded a boundary spanning the whole store and the
+        compaction replaced it with a summary of the filtered request. Now
+        the token is voided where the callback runs, nothing records, and
+        the compaction skips with the stored history preserved. Running
+        streamed exercises the token threading on the streaming path.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "filtered-callback")
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("filtered reply")], response_id="resp_filt")]
+        )
+        worker = Agent(name="filtered_worker", model=model)
+
+        def keep_only_new_items(
+            history: list[TResponseInputItem], new_items: list[TResponseInputItem]
+        ) -> list[TResponseInputItem]:
+            return list(new_items)
+
+        with caplog.at_level(logging.WARNING, logger="openai-agents.openai.compaction"):
+            result = Runner.run_streamed(
+                worker,
+                "fresh question",
+                session=session,
+                run_config=RunConfig(session_input_callback=keep_only_new_items),
+            )
+            async for _ in result.stream_events():
+                pass
+
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" not in request_text
+        assert "recent question" not in request_text
+        assert "fresh question" in request_text
+
+        # The stored history survived even though none of it went out with
+        # the request; deleting it is the data loss under test.
+        stored = await underlying.get_items()
+        assert stored[: len(prior_turns)] == prior_turns
+        stored_text = str(stored)
+        assert "fresh question" in stored_text
+        assert "filtered reply" in stored_text
+
+        assert session._response_boundaries == {}
+        assert session._response_boundaries_ever_recorded is True
+        mock_client.responses.compact.assert_not_called()
+        assert "Skipped compaction for resp_filt" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_unwindowed_run_still_records_and_replaces(self) -> None:
+        """Without a limit or callback the boundary records and compaction lands.
+
+        This pins the other side of the guard: the same seeded store, the
+        same runner flow, no windowing and no filtering, so the request
+        carried the entire stored history, the persist recorded the exact
+        boundary, and the replacement swapped the covered prefix for the
+        compacted output just as it did before the guard existed.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "unwindowed-control")
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("plain reply")], response_id="resp_plain")]
+        )
+        worker = Agent(name="plain_worker", model=model)
+
+        await Runner.run(worker, "plain question", session=session)
+
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" in request_text
+        assert "plain question" in request_text
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert (
+            mock_client.responses.compact.call_args.kwargs["previous_response_id"] == "resp_plain"
+        )
+        # Four prior items plus the persisted input and reply were covered, so
+        # the replacement left exactly the compacted output, and the boundary
+        # was translated onto the rewritten history.
+        assert await underlying.get_items() == [{"type": "compaction", "summary": "window only"}]
+        assert session._response_boundaries == {"resp_plain": 1}
+
+    @pytest.mark.asyncio
+    async def test_limit_covering_whole_store_still_records_and_replaces(self) -> None:
+        """A limit that admits the entire store keeps recording boundaries.
+
+        The window and the captured count match, so the request input covered
+        every stored item and the boundary stays provable. The persist then
+        records it exactly as an unwindowed run would, and the compaction
+        replaces the covered prefix. Only a limit that actually leaves items
+        out voids the token.
+        """
+        prior_turns = self._prior_turns()
+        underlying = SimpleListSession(history=list(prior_turns))
+        session, mock_client = self._make_session(underlying, "generous-limit")
+
+        model = ScriptedModel(
+            steps=[ModelStep(output=[get_text_message("roomy reply")], response_id="resp_roomy")]
+        )
+        worker = Agent(name="roomy_worker", model=model)
+
+        await Runner.run(
+            worker,
+            "roomy question",
+            session=session,
+            run_config=RunConfig(session_settings=SessionSettings(limit=50)),
+        )
+
+        assert model.last_call is not None
+        request_text = str(model.last_call.input)
+        assert "prefix question" in request_text
+        assert "roomy question" in request_text
+
+        mock_client.responses.compact.assert_awaited_once()
+        assert (
+            mock_client.responses.compact.call_args.kwargs["previous_response_id"] == "resp_roomy"
+        )
+        assert await underlying.get_items() == [{"type": "compaction", "summary": "window only"}]
+        assert session._response_boundaries == {"resp_roomy": 1}
 
 
 class TestTypeGuard:

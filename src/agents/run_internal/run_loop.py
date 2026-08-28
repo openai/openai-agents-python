@@ -1088,6 +1088,9 @@ async def start_streaming(
         # every persist so compaction boundaries record only when no other
         # writer interleaved. Resumed runs never read the session for their
         # request input, so they carry no token and record no boundaries.
+        # Input preparation voids the token when a resolved limit truncates
+        # the history read or a session input callback rebuilds the input,
+        # so such runs record no boundaries either.
         session_ownership_token: _SessionOwnershipToken | None = None
         if is_resumed_state and run_state is not None:
             prepared_input = normalize_resumed_input(starting_input)
@@ -1121,6 +1124,7 @@ async def start_streaming(
                 preserve_dropped_new_items=True,
                 reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                 wrapper=context_wrapper,
+                ownership_token=session_ownership_token,
             )
             streamed_result.input = prepared_input
             streamed_result._original_input = copy_input_items(prepared_input)

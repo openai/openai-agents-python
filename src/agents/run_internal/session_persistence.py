@@ -387,6 +387,7 @@ async def prepare_input_with_session(
     preserve_dropped_new_items: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    ownership_token: _SessionOwnershipToken | None = None,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
     """Prepare model input from session history plus the new turn input.
 
@@ -401,6 +402,15 @@ async def prepare_input_with_session(
     against deep-copied history and new-input lists, first by object identity and then by
     content frequency, so retries and custom merge strategies do not accidentally re-persist
     old history as fresh input.
+
+    ``ownership_token`` is the token the runner captured for this read. The
+    preparation below is where the run's request input can silently stop
+    covering the stored history: a resolved ``limit`` windows the history read,
+    and a ``session_input_callback`` rebuilds the input outright. Both cases
+    void the token here, at the site where the coverage is lost, so the run's
+    persists record no compaction boundary and its previous_response_id
+    compactions skip instead of letting a replacement delete prefix items the
+    server never saw.
     """
 
     if session is None:
@@ -416,6 +426,17 @@ async def prepare_input_with_session(
             limit=resolved_settings.limit,
             wrapper=wrapper,
         )
+        if ownership_token is not None and len(history) != ownership_token.count:
+            # The windowed read returned something other than the exact items
+            # the token was captured over, so the request input either leaves
+            # out the oldest stored items or was built over an interleaved
+            # write; either way no recorded count could describe what the
+            # server saw. Void the token so this run records no boundaries.
+            # When the counts match, the window held the entire store at
+            # capture time, and the token's generation and count checks at
+            # persist still prove nothing changed in between, so recording
+            # stays exactly as sound as an unwindowed read.
+            ownership_token.invalidate()
     else:
         history = await _session_get_items(session, wrapper=wrapper)
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
@@ -454,6 +475,12 @@ async def prepare_input_with_session(
                 f"Invalid `session_input_callback` value: {session_input_callback}. "
                 "Choose between `None` or a custom callable function."
             )
+        if ownership_token is not None:
+            # The callback below rebuilds the request input and may drop,
+            # reorder, or rewrite stored history, so item counts can no longer
+            # prove what the server saw. Void the token before invoking it so
+            # this run records no boundaries and its compactions skip.
+            ownership_token.invalidate()
         history_for_callback = copy.deepcopy(converted_history)
         new_items_for_callback = copy.deepcopy(new_input_list)
         # Keep the original history objects alive so their identities remain valid even if the

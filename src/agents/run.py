@@ -616,6 +616,9 @@ class AgentRunner:
         # every persist so compaction boundaries record only when no other
         # writer interleaved. Resumed runs never read the session for their
         # request input, so they carry no token and record no boundaries.
+        # Input preparation voids the token when a resolved limit truncates
+        # the history read or a session input callback rebuilds the input,
+        # so such runs record no boundaries either.
         session_ownership_token: _SessionOwnershipToken | None = None
 
         if is_resumed_state and run_state is not None:
@@ -694,6 +697,7 @@ class AgentRunner:
                     run_config.session_settings,
                     reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                     wrapper=context_wrapper,
+                    ownership_token=session_ownership_token,
                 )
                 original_input_for_state = prepared_input
 
