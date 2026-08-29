@@ -51,7 +51,7 @@ class Permissions(BaseModel):
             owner=(mode >> 6) & 0b111,
             group=(mode >> 3) & 0b111,
             other=(mode >> 0) & 0b111,
-            directory=bool(mode & stat.S_IFDIR),
+            directory=stat.S_ISDIR(mode),
         )
 
     @classmethod
