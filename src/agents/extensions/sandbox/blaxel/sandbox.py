@@ -997,17 +997,21 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 self._reserved_pty_process_ids.discard(process_id)
             # Draining is destructive and the tail lives on the entry, so the removal has to
             # commit first. Cancelled the other way round, the session stays registered with
-            # its last bytes already gone and a later call cannot get them back.
-            output, original_token_count = await flush_pty_tail(
-                output_chunks=entry.output_chunks,
-                output_lock=entry.output_lock,
-                output=output,
-                source_text=source_text,
-                original_token_count=original_token_count,
-                max_output_tokens=max_output_tokens,
-            )
-            if removed is not None:
-                await self._terminate_pty_entry(removed)
+            # its last bytes already gone and a later call cannot get them back. Once it is out
+            # of the map nothing else can reach it either, pty_terminate_all included, so its
+            # sockets and sessions have to be closed whatever happens to the drain.
+            try:
+                output, original_token_count = await flush_pty_tail(
+                    output_chunks=entry.output_chunks,
+                    output_lock=entry.output_lock,
+                    output=output,
+                    source_text=source_text,
+                    original_token_count=original_token_count,
+                    max_output_tokens=max_output_tokens,
+                )
+            finally:
+                if removed is not None:
+                    await self._terminate_pty_entry(removed)
             live_process_id = None
 
         return PtyExecUpdate(

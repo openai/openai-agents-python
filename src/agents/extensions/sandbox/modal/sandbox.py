@@ -1145,16 +1145,22 @@ class ModalSandboxSession(BaseSandboxSession):
 
             # Reading the tail clears it, so the removal has to commit first. Cancelled the
             # other way round, the session stays registered with its last bytes already gone.
-            output, original_token_count = close_pty_tail(
-                leftover=entry.pending_output,
-                output=output,
-                source_text=source_text,
-                original_token_count=original_token_count,
-                max_output_tokens=max_output_tokens,
-            )
-            entry.pending_output = b""
-            if removed is not None:
-                await self._terminate_pty_entry(removed)
+            # The entry is out of the map now, so nothing else can reach it and
+            # pty_terminate_all cannot clean it up later. Closing the tail happens to be
+            # synchronous here, but its cleanup is settled the same way as the others so an
+            # await added in front of it later cannot start leaking sessions.
+            try:
+                output, original_token_count = close_pty_tail(
+                    leftover=entry.pending_output,
+                    output=output,
+                    source_text=source_text,
+                    original_token_count=original_token_count,
+                    max_output_tokens=max_output_tokens,
+                )
+                entry.pending_output = b""
+            finally:
+                if removed is not None:
+                    await self._terminate_pty_entry(removed)
             live_process_id = None
 
         return PtyExecUpdate(

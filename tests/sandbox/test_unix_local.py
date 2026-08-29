@@ -218,6 +218,54 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 @pytest.mark.review_optional
 class TestUnixLocalPty:
     @pytest.mark.asyncio
+    async def test_finalize_still_cleans_up_when_the_drain_is_cancelled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # once the entry is out of the map, pty_terminate_all can no longer reach it, so a
+        # cancelled drain must not be able to skip its cleanup
+        session = _RecordingUnixLocalSession(tmp_path)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=0, pid=None),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=True)
+        entry.output_closed.set()
+        entry.output_chunks.append(b"x")
+
+        terminated: list[_UnixPtyProcessEntry] = []
+
+        async def record_terminate(target: _UnixPtyProcessEntry) -> None:
+            terminated.append(target)
+
+        session._terminate_pty_entry = record_terminate  # type: ignore[method-assign]
+
+        async with session._pty_lock:
+            session._pty_processes[1] = entry
+            session._reserved_pty_process_ids.add(1)
+
+        # hold the output lock so the drain blocks after the removal has committed
+        await entry.output_lock.acquire()
+        task = asyncio.create_task(
+            session._finalize_pty_update(
+                process_id=1,
+                entry=entry,
+                output=b"",
+                original_token_count=None,
+                source_text="",
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert 1 not in session._pty_processes
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        entry.output_lock.release()
+
+        assert terminated == [entry]
+
+    @pytest.mark.asyncio
     async def test_finalize_does_not_consume_the_tail_before_removal_commits(
         self,
         tmp_path: Path,
