@@ -245,6 +245,7 @@ class TestUnixLocalPty:
 
         def killpg(pid: int, signum: signal.Signals) -> None:
             killpg_calls.append((pid, signum))
+            raise PermissionError("synthetic cleanup failure")
 
         monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(unix_local_module.os, "killpg", killpg)
@@ -255,11 +256,12 @@ class TestUnixLocalPty:
             )
             await process_started.wait()
             await asyncio.sleep(0)
-            task.cancel()
+            task.cancel("startup-cancel")
 
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
+            assert exc_info.value.args == ("startup-cancel",)
             assert killpg_calls == [(1234, signal.SIGKILL)]
             assert session._pty_processes == {}
             assert session._reserved_pty_process_ids == set()

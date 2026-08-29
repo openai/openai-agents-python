@@ -393,6 +393,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 self._pty_processes[process_id] = entry
                 process_count = len(self._pty_processes)
                 registered = True
+        except asyncio.CancelledError as cancellation:
+            if not registered:
+                await _settle_pty_cleanup(
+                    self._terminate_pty_entry(entry),
+                    initial_cancellation=cancellation,
+                )
+            raise
         except BaseException:
             if not registered:
                 await _settle_pty_cleanup(self._terminate_pty_entry(entry))

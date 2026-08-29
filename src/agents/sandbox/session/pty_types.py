@@ -19,25 +19,30 @@ PTY_PROCESS_ID_MIN = 1_000
 PTY_PROCESS_ID_MAX_EXCLUSIVE = 100_000
 
 
-async def _settle_pty_cleanup(cleanup: Awaitable[None]) -> None:
+async def _settle_pty_cleanup(
+    cleanup: Awaitable[None],
+    *,
+    initial_cancellation: asyncio.CancelledError | None = None,
+) -> None:
     cleanup_task = asyncio.ensure_future(cleanup)
     completion = asyncio.create_task(asyncio.wait((cleanup_task,)))
-    caller_cancelled = False
+    cancellation = initial_cancellation
     while not completion.done():
         try:
             await asyncio.shield(completion)
-        except asyncio.CancelledError:
-            caller_cancelled = True
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
 
     completion.result()
     try:
         cleanup_task.result()
     except BaseException:
-        if caller_cancelled:
-            raise asyncio.CancelledError() from None
+        if cancellation is not None:
+            raise cancellation from None
         raise
-    if caller_cancelled:
-        raise asyncio.CancelledError() from None
+    if cancellation is not None:
+        raise cancellation from None
 
 
 @dataclass(frozen=True)

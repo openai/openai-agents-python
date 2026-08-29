@@ -1781,11 +1781,12 @@ class TestPtyExec:
         with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
             task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
             await connect_started.wait()
-            task.cancel()
+            task.cancel("connect-cancel")
 
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
+            assert exc_info.value.args == ("connect-cancel",)
             assert task.cancelled()
 
         assert fake_aiohttp.session is not None
@@ -1831,12 +1832,13 @@ class TestPtyExec:
         with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
             task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
             await cleanup_started.wait()
-            task.cancel()
+            task.cancel("cleanup-cancel")
             allow_cleanup.set()
 
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
+            assert exc_info.value.args == ("cleanup-cancel",)
         assert fake_aiohttp.session is not None
         assert fake_aiohttp.session._closed
         assert session._pty_sessions == {}

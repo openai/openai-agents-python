@@ -842,9 +842,12 @@ class BlaxelSandboxSession(BaseSandboxSession):
             if not registered:
                 await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancellation:
             if not registered:
-                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await _settle_pty_cleanup(
+                    self._terminate_pty_entry(entry),
+                    initial_cancellation=cancellation,
+                )
             raise
         except Exception as e:
             if not registered:
