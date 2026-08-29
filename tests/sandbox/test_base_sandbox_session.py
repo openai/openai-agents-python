@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -52,7 +53,8 @@ async def test_pty_cleanup_completes_before_propagating_cancellation() -> None:
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
     assert completed
-    assert exc_info.value.args == ("cleanup requested",)
+    if sys.version_info >= (3, 11):
+        assert exc_info.value.args == ("cleanup requested",)
 
 
 @pytest.mark.asyncio
@@ -71,7 +73,8 @@ async def test_pty_cleanup_preserves_cancellation_reason() -> None:
 
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
-    assert exc_info.value.args == ("caller stopped cleanup",)
+    if sys.version_info >= (3, 11):
+        assert exc_info.value.args == ("caller stopped cleanup",)
 
 
 @pytest.mark.asyncio

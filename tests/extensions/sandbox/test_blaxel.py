@@ -2001,22 +2001,23 @@ class TestPtyExec:
         session._reserved_pty_process_ids.update({1, 2})
 
         task = asyncio.create_task(session.pty_terminate_all())
-        await close_started.wait()
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=5)
 
-        # Ownership has already left the registry before cleanup finishes.
-        assert session._pty_sessions == {}
-        assert session._reserved_pty_process_ids == set()
+            # Ownership has already left the registry before cleanup finishes.
+            assert session._pty_sessions == {}
+            assert session._reserved_pty_process_ids == set()
 
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()  # Exercise repeated caller cancellation.
-        await asyncio.sleep(0)
-        assert not first_ws._closed
-        assert not second_ws._closed
-
-        release_close.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # Exercise repeated caller cancellation.
+            await asyncio.sleep(0)
+            assert not first_ws._closed
+            assert not second_ws._closed
+        finally:
+            release_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
         assert first_ws._closed and first_http._closed
         assert second_ws._closed and second_http._closed
