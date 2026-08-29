@@ -66,7 +66,9 @@ _T = TypeVar("_T")
 class SQLAlchemySession(SessionABC):
     """SQLAlchemy implementation of [`Session`][agents.memory.session.Session]."""
 
-    _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
+    _table_init_locks: ClassVar[
+        weakref.WeakValueDictionary[tuple[str, str, str], threading.Lock]
+    ] = weakref.WeakValueDictionary()
     _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
     # Keyed on id(engine.sync_engine) so two distinct engines that happen to compare equal
     # never share a cache entry.  A weakref.finalize callback removes the entry when the sync

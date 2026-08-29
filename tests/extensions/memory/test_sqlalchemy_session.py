@@ -4,6 +4,7 @@ import asyncio
 import gc
 import json
 import threading
+import weakref
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -901,6 +902,74 @@ async def test_create_tables_false_does_not_allocate_shared_init_lock(tmp_path):
         assert len(SQLAlchemySession._table_init_locks) == before
     finally:
         await session.engine.dispose()
+
+
+async def test_table_init_registry_releases_collected_sessions(tmp_path):
+    """The registry must not own locks after the last session owner disappears."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lock_registry.db'}")
+    locks = []
+    keys = []
+    try:
+        for index in range(25):
+            sessions_table = f"sessions_{index}"
+            messages_table = f"messages_{index}"
+            session = SQLAlchemySession(
+                f"session_{index}",
+                engine=engine,
+                create_tables=True,
+                sessions_table=sessions_table,
+                messages_table=messages_table,
+            )
+            assert session._init_lock is not None
+            locks.append(weakref.ref(session._init_lock))
+            keys.append(
+                (engine.url.render_as_string(hide_password=True), sessions_table, messages_table)
+            )
+            del session
+
+        gc.collect()
+
+        # The caller's engine can remain alive without retaining discarded sessions' locks.
+        assert all(lock() is None for lock in locks)
+        assert all(key not in SQLAlchemySession._table_init_locks for key in keys)
+    finally:
+        await engine.dispose()
+
+
+async def test_table_init_lock_remains_shared_while_a_session_survives(tmp_path):
+    """Dropping one owner must not let a newcomer bypass a surviving owner's lock."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'surviving_init_lock.db'}"
+    survivor = SQLAlchemySession.from_url("survivor", url=db_url, create_tables=True)
+    peer = SQLAlchemySession.from_url("peer", url=db_url, create_tables=True)
+    peer_engine = peer.engine
+    newcomer = None
+    try:
+        assert survivor._init_lock is not None
+        assert peer._init_lock is survivor._init_lock
+        await peer.engine.dispose()
+        del peer
+        gc.collect()
+
+        assert survivor._init_lock.acquire(blocking=False)
+        try:
+            newcomer = SQLAlchemySession.from_url("newcomer", url=db_url, create_tables=True)
+            assert newcomer._init_lock is not None
+            assert newcomer._init_lock is survivor._init_lock
+            assert not newcomer._init_lock.acquire(blocking=False)
+        finally:
+            survivor._init_lock.release()
+
+        await asyncio.gather(
+            survivor.add_items([{"role": "user", "content": "surviving writer"}]),
+            newcomer.add_items([{"role": "user", "content": "new writer"}]),
+        )
+        assert await survivor.get_items() == [{"role": "user", "content": "surviving writer"}]
+        assert await newcomer.get_items() == [{"role": "user", "content": "new writer"}]
+    finally:
+        await survivor.engine.dispose()
+        await peer_engine.dispose()
+        if newcomer is not None:
+            await newcomer.engine.dispose()
 
 
 async def test_get_items_same_timestamp_consistent_order():
