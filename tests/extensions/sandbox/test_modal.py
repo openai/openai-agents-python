@@ -4445,6 +4445,68 @@ async def test_modal_pty_start_and_write_stdin(
 
 
 @pytest.mark.asyncio
+async def test_modal_pty_collection_keeps_bytes_it_already_read_when_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _OneChunkThenBlocks:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+
+        def __aiter__(self) -> _OneChunkThenBlocks:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if self._chunks:
+                return self._chunks.pop(0)
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            # the continuation arrives, then the call is cancelled at a later await
+            self.stdout = _OneChunkThenBlocks(["\u00e9".encode()[1:]])
+            self.stderr = _OneChunkThenBlocks([])
+            self.poll = _with_aio(lambda: None)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-read-cancel"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    entry = modal_module._ModalPtyProcessEntry(process=sandbox.process, tty=True)
+    entry.pending_output = "\u00e9".encode()[:1]
+
+    task = asyncio.create_task(
+        session._collect_pty_output(entry=entry, yield_time_ms=60_000, max_output_tokens=None)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # the stream item is gone, so both halves have to be on the entry or the character is lost
+    assert entry.pending_output == "\u00e9".encode()
+
+
+@pytest.mark.asyncio
 async def test_modal_pty_collection_keeps_its_tail_when_the_call_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

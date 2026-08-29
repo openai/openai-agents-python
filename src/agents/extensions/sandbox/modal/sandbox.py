@@ -993,32 +993,46 @@ class ModalSandboxSession(BaseSandboxSession):
         # field is left alone until the decode below commits, so a cancelled call keeps it
         chunks = bytearray(entry.pending_output)
 
-        while True:
-            stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
-            stderr_chunk = await self._read_modal_stream(entry=entry, stream_name="stderr")
-            if stdout_chunk:
-                chunks.extend(stdout_chunk)
-            if stderr_chunk:
-                chunks.extend(stderr_chunk)
+        try:
+            while True:
+                stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
+                stderr_chunk = await self._read_modal_stream(entry=entry, stream_name="stderr")
+                if stdout_chunk:
+                    chunks.extend(stdout_chunk)
+                if stderr_chunk:
+                    chunks.extend(stderr_chunk)
 
-            if time.monotonic() >= deadline:
-                break
-
-            exit_code = await self._peek_exit_code(entry.process)
-            if exit_code is not None:
-                stdout_chunks = await self._drain_modal_stream(entry=entry, stream_name="stdout")
-                stderr_chunks = await self._drain_modal_stream(entry=entry, stream_name="stderr")
-                chunks.extend(stdout_chunks)
-                chunks.extend(stderr_chunks)
-                break
-
-            if not stdout_chunk and not stderr_chunk:
-                remaining_s = deadline - time.monotonic()
-                if remaining_s <= 0:
+                if time.monotonic() >= deadline:
                     break
-                await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
-        exited = await self._peek_exit_code(entry.process) is not None
+                exit_code = await self._peek_exit_code(entry.process)
+                if exit_code is not None:
+                    stdout_chunks = await self._drain_modal_stream(
+                        entry=entry, stream_name="stdout"
+                    )
+                    stderr_chunks = await self._drain_modal_stream(
+                        entry=entry, stream_name="stderr"
+                    )
+                    chunks.extend(stdout_chunks)
+                    chunks.extend(stderr_chunks)
+                    break
+
+                if not stdout_chunk and not stderr_chunk:
+                    remaining_s = deadline - time.monotonic()
+                    if remaining_s <= 0:
+                        break
+                    await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
+
+            exited = await self._peek_exit_code(entry.process) is not None
+        except asyncio.CancelledError:
+            # A stream item is gone from the stream once it has been read, so anything already
+            # taken lives only in this buffer. There is no deque to hand it back to, and the
+            # session outlives a cancelled call, so it goes on the entry for the next window.
+            # Left behind, the carried lead byte would pair with whatever arrived after the
+            # continuation this call swallowed.
+            if chunks:
+                entry.pending_output = bytes(chunks)
+            raise
         text, entry.pending_output = decode_pty_window(chunks, is_final=exited)
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count, text
