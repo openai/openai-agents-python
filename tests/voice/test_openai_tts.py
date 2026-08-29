@@ -111,6 +111,37 @@ async def test_openai_tts_custom_voice_and_instructions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["tts-1", "tts-1-hd"])
+async def test_openai_tts_omits_instructions_for_legacy_models(model: str) -> None:
+    """Legacy TTS models do not support the speech instructions parameter."""
+    chunks = [b"legacy"]
+    captured: dict[str, object] = {}
+
+    def fake_create(
+        *,
+        model: str,
+        voice: str,
+        input: str,
+        response_format: str,
+        speed: Any,
+        extra_body: dict[str, Any] | None,
+    ) -> _FakeStreamResponse:
+        captured["model"] = model
+        captured["extra_body"] = extra_body
+        return _FakeStreamResponse(chunks)
+
+    client = _make_fake_openai_client(fake_create)
+    tts_model = OpenAITTSModel(model=model, openai_client=client)  # type: ignore[arg-type]
+    settings = TTSModelSettings(instructions="Unsupported legacy instruction")
+
+    out = [chunk async for chunk in tts_model.run("hello", settings)]
+
+    assert out == chunks
+    assert captured["model"] == model
+    assert captured["extra_body"] is None
+
+
+@pytest.mark.asyncio
 async def test_openai_tts_forwards_speed() -> None:
     """A configured speed is forwarded to the OpenAI speech API."""
     chunks = [b"y"]
