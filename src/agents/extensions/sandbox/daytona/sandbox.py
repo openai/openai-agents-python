@@ -12,6 +12,7 @@ import the package.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import io
 import logging
 import math
@@ -387,6 +388,10 @@ class _DaytonaPtySessionEntry:
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     last_used: float = field(default_factory=time.monotonic)
     done: bool = False
     exit_code: int | None = None
@@ -806,6 +811,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 pass
             if not logs_failed:
                 entry.done = True
+            entry.output_closed.set()
             entry.output_notify.set()
 
     async def pty_write_stdin(
@@ -858,7 +864,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
         exit_code = entry.exit_code if entry.done else None
         live_process_id: int | None = process_id
 
-        if entry.done:
+        if entry.done and entry.output_closed.is_set():
             async with self._pty_lock:
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -892,7 +898,9 @@ class DaytonaSandboxSession(BaseSandboxSession):
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
             output_notify=entry.output_notify,
+            output_decoder=entry.output_decoder,
             is_done=lambda: entry.done,
+            is_output_closed=entry.output_closed.is_set,
             yield_time_ms=yield_time_ms,
             max_output_tokens=max_output_tokens,
         )

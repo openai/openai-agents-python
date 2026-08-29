@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import codecs
 import inspect
 import io
 import json
@@ -686,7 +687,11 @@ class _E2BPtyProcessEntry:
     tty: bool
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     last_used: float = field(default_factory=time.monotonic)
     exit_code: int | None = None
     wait_task: asyncio.Task[None] | None = None
@@ -1239,7 +1244,9 @@ class E2BSandboxSession(BaseSandboxSession):
                 break
             entry.output_notify.clear()
 
-        text = output.decode("utf-8", errors="replace")
+        # E2B may deliver callback output after the process wait completes. Keep the
+        # decoder open so a character split across that boundary is not replaced.
+        text = entry.output_decoder.decode(bytes(output), final=entry.output_closed.is_set())
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count
 
@@ -1259,6 +1266,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 except (TypeError, ValueError):
                     pass
         finally:
+            entry.output_closed.set()
             entry.output_notify.set()
 
     async def _finalize_pty_update(
@@ -1272,7 +1280,7 @@ class E2BSandboxSession(BaseSandboxSession):
         exit_code = self._entry_exit_code(entry)
         live_process_id: int | None = process_id
 
-        if exit_code is not None:
+        if exit_code is not None and entry.output_closed.is_set():
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

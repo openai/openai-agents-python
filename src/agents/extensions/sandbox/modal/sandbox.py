@@ -14,6 +14,7 @@ we import Modal normally so IDEs can resolve and navigate Modal types.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import functools
 import io
 import json
@@ -489,6 +490,12 @@ class _ModalPtyProcessEntry:
     stderr_iter: AsyncIterator[object] | None = None
     stdout_read_task: asyncio.Task[object] | None = None
     stderr_read_task: asyncio.Task[object] | None = None
+    stdout_closed: bool = False
+    stderr_closed: bool = False
+    output_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
 
 
 class ModalSandboxSession(BaseSandboxSession):
@@ -1010,7 +1017,9 @@ class ModalSandboxSession(BaseSandboxSession):
                     break
                 await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
-        text = chunks.decode("utf-8", errors="replace")
+        # Modal can expose process completion before its stream readers have delivered
+        # every buffered byte. Keep decoder state until the entry is discarded.
+        text = entry.output_decoder.decode(bytes(chunks), final=entry.output_closed.is_set())
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count
 
@@ -1041,6 +1050,9 @@ class ModalSandboxSession(BaseSandboxSession):
     ) -> bytes:
         stream = entry.process.stdout if stream_name == "stdout" else entry.process.stderr
         if stream is None:
+            setattr(entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True)
+            if entry.stdout_closed and entry.stderr_closed:
+                entry.output_closed.set()
             return b""
 
         iter_attr = "stdout_iter" if stream_name == "stdout" else "stderr_iter"
@@ -1072,9 +1084,19 @@ class ModalSandboxSession(BaseSandboxSession):
                 value = task.result()
             except StopAsyncIteration:
                 setattr(entry, iter_attr, None)
+                setattr(
+                    entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True
+                )
+                if entry.stdout_closed and entry.stderr_closed:
+                    entry.output_closed.set()
                 return b""
             except Exception:
                 setattr(entry, iter_attr, None)
+                setattr(
+                    entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True
+                )
+                if entry.stdout_closed and entry.stderr_closed:
+                    entry.output_closed.set()
                 return b""
 
             return self._coerce_modal_stream_chunk(value)
@@ -1086,11 +1108,18 @@ class ModalSandboxSession(BaseSandboxSession):
         try:
             value = await self._call_modal(read, 16_384, call_timeout=0.2)
         except TypeError:
+            setattr(entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True)
             return b""
         except Exception:
+            setattr(entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True)
             return b""
 
-        return self._coerce_modal_stream_chunk(value)
+        chunk = self._coerce_modal_stream_chunk(value)
+        if not chunk:
+            setattr(entry, "stdout_closed" if stream_name == "stdout" else "stderr_closed", True)
+            if entry.stdout_closed and entry.stderr_closed:
+                entry.output_closed.set()
+        return chunk
 
     def _coerce_modal_stream_chunk(self, value: object) -> bytes:
         if value is None:
@@ -1113,7 +1142,7 @@ class ModalSandboxSession(BaseSandboxSession):
     ) -> PtyExecUpdate:
         exit_code = await self._peek_exit_code(entry.process)
         live_process_id: int | None = process_id
-        if exit_code is not None:
+        if exit_code is not None and entry.output_closed.is_set():
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

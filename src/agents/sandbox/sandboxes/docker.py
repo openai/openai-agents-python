@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import errno
 import hashlib
 import io
@@ -254,6 +255,9 @@ class _DockerPtyProcessEntry:
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     reader_thread: threading.Thread | None = None
     wait_task: asyncio.Task[None] | None = None
@@ -1247,6 +1251,7 @@ class DockerSandboxSession(BaseSandboxSession):
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
             output_notify=entry.output_notify,
+            output_decoder=entry.output_decoder,
             is_done=entry.output_closed.is_set,
             yield_time_ms=yield_time_ms,
             max_output_tokens=max_output_tokens,

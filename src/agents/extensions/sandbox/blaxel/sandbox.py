@@ -12,6 +12,7 @@ import the package.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import io
 import json
 import logging
@@ -309,6 +310,9 @@ class _BlaxelPtySessionEntry:
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     last_used: float = field(default_factory=time.monotonic)
     done: bool = False
     exit_code: int | None = None
@@ -969,6 +973,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
             output_notify=entry.output_notify,
+            output_decoder=entry.output_decoder,
             is_done=lambda: entry.done,
             yield_time_ms=yield_time_ms,
             max_output_tokens=max_output_tokens,

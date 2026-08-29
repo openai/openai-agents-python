@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from collections import deque
 
 import pytest
@@ -13,6 +14,7 @@ async def test_collect_pty_output_waits_for_notification() -> None:
     output_chunks: deque[bytes] = deque()
     output_lock = asyncio.Lock()
     output_notify = asyncio.Event()
+    output_decoder = codecs.getincrementaldecoder("utf-8")("replace")
     done = False
 
     async def produce_output() -> None:
@@ -28,6 +30,7 @@ async def test_collect_pty_output_waits_for_notification() -> None:
         output_chunks=output_chunks,
         output_lock=output_lock,
         output_notify=output_notify,
+        output_decoder=output_decoder,
         is_done=lambda: done,
         yield_time_ms=500,
         max_output_tokens=None,
@@ -50,6 +53,7 @@ async def test_collect_pty_output_drains_chunks_added_when_done() -> None:
         output_chunks=output_chunks,
         output_lock=asyncio.Lock(),
         output_notify=asyncio.Event(),
+        output_decoder=codecs.getincrementaldecoder("utf-8")("replace"),
         is_done=mark_done,
         yield_time_ms=500,
         max_output_tokens=None,
@@ -57,3 +61,46 @@ async def test_collect_pty_output_drains_chunks_added_when_done() -> None:
 
     assert output == b"before done after done"
     assert original_token_count is None
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_preserves_utf8_across_windows() -> None:
+    output_chunks = deque(["é".encode()[:1]])
+    output_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    first, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=asyncio.Event(),
+        output_decoder=output_decoder,
+        is_done=lambda: False,
+        yield_time_ms=0,
+        max_output_tokens=None,
+    )
+    output_chunks.append("é".encode()[1:])
+    second, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=asyncio.Event(),
+        output_decoder=output_decoder,
+        is_done=lambda: True,
+        yield_time_ms=0,
+        max_output_tokens=None,
+    )
+
+    assert first == b""
+    assert second == "é".encode()
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_keeps_legacy_call_compatible() -> None:
+    output, _ = await collect_pty_output(
+        output_chunks=deque(["é".encode()]),
+        output_lock=asyncio.Lock(),
+        output_notify=asyncio.Event(),
+        is_done=lambda: True,
+        yield_time_ms=0,
+        max_output_tokens=None,
+    )
+
+    assert output == "é".encode()

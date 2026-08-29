@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import io
 import json
 import logging
@@ -386,6 +387,9 @@ class _CloudflarePtyProcessEntry:
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output_notify: asyncio.Event = field(default_factory=asyncio.Event)
     output_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    output_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace")
+    )
     pump_task: asyncio.Task[None] | None = None
     exit_code: int | None = None
 
@@ -1058,7 +1062,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
                 break
             entry.output_notify.clear()
 
-        text = output.decode("utf-8", errors="replace")
+        text = entry.output_decoder.decode(bytes(output), final=entry.output_closed.is_set())
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count
 
