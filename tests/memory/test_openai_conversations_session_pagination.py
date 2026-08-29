@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -37,4 +37,6 @@ async def test_get_items_keeps_large_limit_out_of_provider_page_size() -> None:
     items = await session.get_items(limit=150)
 
     assert captured == {"conversation_id": "conv-1", "order": "desc"}
-    assert [item["id"] for item in items] == [f"item-{index}" for index in range(50, 200)]
+    assert [cast(dict[str, Any], item)["id"] for item in items] == [
+        f"item-{index}" for index in range(50, 200)
+    ]
