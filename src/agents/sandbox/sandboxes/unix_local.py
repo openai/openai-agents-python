@@ -21,12 +21,12 @@ import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 
 from ...logger import log_tool_action_warning
 from .._mount_security import redact_mount_error_data
@@ -102,56 +102,62 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 
 logger = logging.getLogger(__name__)
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
+_PROCESS_GROUP_KEEPER_SCRIPT = """
+import os
+import sys
 
-
-def _keep_process_group_alive(control_fd: int) -> None:
-    """Keep the process-group identity stable without becoming a child of the command."""
-    intermediate_pid = os.fork()
-    if intermediate_pid == 0:
-        try:
-            keeper_pid = os.fork()
-        except BaseException:
-            os._exit(1)
-
-        if keeper_pid == 0:
-            for fd in (0, 1, 2):
-                if fd != control_fd:
-                    with suppress(OSError):
-                        os.close(fd)
-            max_fd = os.sysconf("SC_OPEN_MAX")
-            os.closerange(3, control_fd)
-            os.closerange(control_fd + 1, max_fd)
-            while True:
-                try:
-                    if not os.read(control_fd, 4096):
-                        break
-                except InterruptedError:
-                    continue
-                except OSError:
-                    break
-            os._exit(0)
-
-        # The keeper is now reparented away from the command when this
-        # intermediate process exits. It remains in the command's process
-        # group, while the command cannot observe it with waitpid(-1, ...).
-        os._exit(0)
-
-    while True:
-        try:
-            _, status = os.waitpid(intermediate_pid, 0)
+control_fd = int(sys.argv[1])
+while True:
+    try:
+        if not os.read(control_fd, 4096):
             break
-        except InterruptedError:
-            continue
+    except InterruptedError:
+        continue
+    except OSError:
+        break
+os._exit(0)
+"""
+_SubprocessResultT = TypeVar("_SubprocessResultT")
 
-    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
-        raise ChildProcessError("failed to create the process-group keeper")
 
-    os.close(control_fd)
+def _create_process_group() -> None:
+    os.setpgid(0, 0)
 
 
-async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Process) -> None:
+async def _settle_subprocess_awaitable(
+    awaitable: Awaitable[_SubprocessResultT],
+) -> tuple[_SubprocessResultT, bool]:
+    task = asyncio.ensure_future(awaitable)
+    completion = asyncio.create_task(asyncio.wait((task,)))
+    caller_cancelled = False
+    while not completion.done():
+        try:
+            await asyncio.shield(completion)
+        except asyncio.CancelledError:
+            caller_cancelled = True
+
+    completion.result()
+    try:
+        result = task.result()
+    except BaseException:
+        if caller_cancelled:
+            raise asyncio.CancelledError() from None
+        raise
+    return result, caller_cancelled
+
+
+async def _terminate_process_group_and_reap_process(
+    proc: asyncio.subprocess.Process,
+    *,
+    process_group_id: int | None = None,
+    keeper: asyncio.subprocess.Process | None = None,
+) -> None:
+    group_id = proc.pid if process_group_id is None else process_group_id
     with suppress(OSError):
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(group_id, signal.SIGKILL)
+    if keeper is not None and keeper.returncode is None:
+        with suppress(OSError):
+            keeper.kill()
     # The process group can contain descendants owned by another user when the
     # command was launched through sudo. Kill the direct child separately so
     # that a permission failure for one group member cannot leave the sudo
@@ -175,12 +181,29 @@ async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Pro
         transport = getattr(proc, "_transport", None)
         if transport is not None:
             transport.close()
+    if keeper is not None:
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                keeper.wait(),
+                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+            )
 
 
-async def _terminate_process_group_and_reap(proc: asyncio.subprocess.Process) -> None:
+async def _terminate_process_group_and_reap(
+    proc: asyncio.subprocess.Process,
+    *,
+    process_group_id: int | None = None,
+    keeper: asyncio.subprocess.Process | None = None,
+) -> None:
     # Keep process cleanup in an owned task so a second cancellation cannot
     # interrupt the drain, direct-child reap, or transport close.
-    cleanup_task = asyncio.create_task(_terminate_process_group_and_reap_process(proc))
+    cleanup_task = asyncio.create_task(
+        _terminate_process_group_and_reap_process(
+            proc,
+            process_group_id=process_group_id,
+            keeper=keeper,
+        )
+    )
     while not cleanup_task.done():
         try:
             await asyncio.shield(cleanup_task)
@@ -377,38 +400,97 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         control_read_fd, control_write_fd = os.pipe()
         try:
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *exec_command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=process_cwd,
-                    env=env,
-                    start_new_session=True,
-                    pass_fds=(control_read_fd,),
-                    preexec_fn=lambda: _keep_process_group_alive(control_read_fd),
+                keeper, keeper_cancelled = await _settle_subprocess_awaitable(
+                    asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-c",
+                        _PROCESS_GROUP_KEEPER_SCRIPT,
+                        str(control_read_fd),
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        cwd=process_cwd,
+                        env=env,
+                        pass_fds=(control_read_fd,),
+                        preexec_fn=_create_process_group,
+                    )
                 )
             except BaseException:
                 _close_fd_quietly(control_read_fd)
                 raise
             _close_fd_quietly(control_read_fd)
 
+            if keeper_cancelled:
+                _close_fd_quietly(control_write_fd)
+                await _terminate_process_group_and_reap(
+                    keeper,
+                    process_group_id=keeper.pid,
+                )
+                raise asyncio.CancelledError()
+
+            try:
+                proc, proc_cancelled = await _settle_subprocess_awaitable(
+                    asyncio.create_subprocess_exec(
+                        *exec_command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=process_cwd,
+                        env=env,
+                        start_new_session=False,
+                        preexec_fn=lambda: os.setpgid(0, keeper.pid),
+                    )
+                )
+            except BaseException:
+                _close_fd_quietly(control_write_fd)
+                await _terminate_process_group_and_reap(
+                    keeper,
+                    process_group_id=keeper.pid,
+                )
+                raise
+
+            if proc_cancelled:
+                _close_fd_quietly(control_write_fd)
+                await _terminate_process_group_and_reap(
+                    proc,
+                    process_group_id=keeper.pid,
+                    keeper=keeper,
+                )
+                raise asyncio.CancelledError()
+
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError as e:
-                try:
-                    # process tree cleanup
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except Exception:
-                    pass
+                await _terminate_process_group_and_reap(
+                    proc,
+                    process_group_id=keeper.pid,
+                    keeper=keeper,
+                )
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             except asyncio.CancelledError:
-                await _terminate_process_group_and_reap(proc)
+                await _terminate_process_group_and_reap(
+                    proc,
+                    process_group_id=keeper.pid,
+                    keeper=keeper,
+                )
                 raise
+            except Exception:
+                await _terminate_process_group_and_reap(
+                    proc,
+                    process_group_id=keeper.pid,
+                    keeper=keeper,
+                )
+                raise
+
+            _close_fd_quietly(control_write_fd)
+            _, keeper_cancelled = await _settle_subprocess_awaitable(keeper.wait())
+            if keeper_cancelled:
+                raise asyncio.CancelledError()
         except ExecTimeoutError:
             raise
         except Exception as e:
             raise ExecTransportError(command=command, cause=e) from e
         finally:
+            _close_fd_quietly(control_read_fd)
             _close_fd_quietly(control_write_fd)
 
         return ExecResult(

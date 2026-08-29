@@ -89,8 +89,10 @@ async def test_unix_local_exec_cancellation_terminates_process_group(
     task = asyncio.create_task(session._exec_internal("sh", "-c", command))
     shell_pid: int | None = None
     child_pid: int | None = None
+    process_group_id: int | None = None
     try:
         shell_pid, child_pid = await _wait_for_integer_file(pid_file, 2)
+        process_group_id = os.getpgid(child_pid)
 
         def is_alive(pid: int) -> bool:
             try:
@@ -115,9 +117,9 @@ async def test_unix_local_exec_cancellation_terminates_process_group(
         assert not is_alive(shell_pid)
         assert not is_alive(child_pid)
     finally:
-        if shell_pid is not None:
+        if process_group_id is not None:
             with suppress(ProcessLookupError):
-                os.killpg(shell_pid, signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
@@ -152,6 +154,7 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
     task = asyncio.create_task(session._exec_internal("sh", "-c", command))
     shell_pid: int | None = None
     escaped_pid: int | None = None
+    process_group_id: int | None = None
 
     def is_alive(pid: int) -> bool:
         try:
@@ -162,6 +165,7 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
 
     try:
         shell_pid, _background_pid = await _wait_for_integer_file(pid_file, 2)
+        process_group_id = os.getpgid(shell_pid)
 
         (escaped_pid,) = await _wait_for_integer_file(escaped_pid_file, 1)
 
@@ -174,9 +178,9 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
         assert not is_alive(shell_pid)
         assert is_alive(escaped_pid)
     finally:
-        if shell_pid is not None:
+        if process_group_id is not None:
             with suppress(ProcessLookupError):
-                os.killpg(shell_pid, signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
         if escaped_pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(escaped_pid, signal.SIGKILL)
@@ -195,9 +199,11 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     pid_file = workspace / "pid"
+    process_group_file = workspace / "pgid"
     escaped_pid_file = workspace / "escaped-pid"
     escaped_code = (
         "import os, time; "
+        f"open({str(process_group_file)!r}, 'w').write(str(os.getpgid(0))); "
         f"os.setsid(); open({str(escaped_pid_file)!r}, 'w').write(str(os.getpid())); "
         "time.sleep(30)"
     )
@@ -213,6 +219,7 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
     task = asyncio.create_task(session._exec_internal("sh", "-c", command))
     shell_pid: int | None = None
     escaped_pid: int | None = None
+    process_group_id: int | None = None
 
     def is_alive(pid: int) -> bool:
         try:
@@ -223,11 +230,13 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
 
     try:
         (shell_pid,) = await _wait_for_integer_file(pid_file, 1)
+        (process_group_id,) = await _wait_for_integer_file(process_group_file, 1)
         (escaped_pid,) = await _wait_for_integer_file(escaped_pid_file, 1)
         await asyncio.sleep(0.1)
 
         try:
-            os.killpg(shell_pid, 0)
+            assert process_group_id is not None
+            os.killpg(process_group_id, 0)
         except ProcessLookupError as exc:
             raise AssertionError("process group disappeared before cancellation") from exc
 
@@ -238,9 +247,9 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
             task.result()
         assert is_alive(escaped_pid)
     finally:
-        if shell_pid is not None:
+        if process_group_id is not None:
             with suppress(ProcessLookupError):
-                os.killpg(shell_pid, signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
         if escaped_pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(escaped_pid, signal.SIGKILL)
@@ -285,6 +294,57 @@ async def test_unix_local_exec_does_not_expose_keeper_to_child_waitpid(
 
     assert result.stdout == b"done\n"
     assert result.stderr == b""
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_reaps_process_group_keeper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    keeper_waited = asyncio.Event()
+    subprocess_calls: list[tuple[object, ...]] = []
+
+    class _Process:
+        def __init__(self, pid: int, returncode: int) -> None:
+            self.pid = pid
+            self.returncode = returncode
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"output", b""
+
+        async def wait(self) -> int:
+            if self.pid == 123:
+                keeper_waited.set()
+            return self.returncode
+
+        def kill(self) -> None:
+            raise AssertionError("normal execution should not kill the process group")
+
+    keeper = _Process(pid=123, returncode=0)
+    process = _Process(pid=456, returncode=0)
+
+    async def create_subprocess(*args: object, **kwargs: object) -> _Process:
+        _ = kwargs
+        subprocess_calls.append(args)
+        return keeper if len(subprocess_calls) == 1 else process
+
+    monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    result = await session._exec_internal("echo", "hello")
+
+    assert result.stdout == b"output"
+    assert result.stderr == b""
+    assert result.exit_code == 0
+    assert keeper_waited.is_set()
+    assert len(subprocess_calls) == 2
 
 
 @pytest.mark.asyncio
