@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 
 import pytest
@@ -250,3 +251,44 @@ async def test_flush_pty_tail_drains_what_the_session_still_holds() -> None:
 
     assert flushed.decode("utf-8") == "hi \ufffd"
     assert not chunks
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_keeps_the_tail_when_a_window_is_cancelled() -> None:
+    # the lead byte has already left the deque by the time the window decodes, so this is the
+    # only copy of it. a producer holding the lock must not be able to turn a cancelled call
+    # into a lost character for the session that carries on
+    raw = "\u00e9".encode()
+    chunks: deque[bytes] = deque([raw[:1]])
+    lock = asyncio.Lock()
+    notify = asyncio.Event()
+    done = {"value": False}
+
+    async def window(yield_time_ms: int) -> bytes:
+        notify.set()
+        collected, _ = await collect_pty_output(
+            output_chunks=chunks,
+            output_lock=lock,
+            output_notify=notify,
+            is_done=lambda: done["value"],
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=None,
+        )
+        return collected
+
+    task = asyncio.create_task(window(120))
+    await asyncio.sleep(0.02)
+    assert not chunks
+
+    await lock.acquire()
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    lock.release()
+
+    assert list(chunks) == [raw[:1]]
+
+    chunks.append(raw[1:])
+    done["value"] = True
+    assert (await window(60)).decode("utf-8") == "\u00e9"

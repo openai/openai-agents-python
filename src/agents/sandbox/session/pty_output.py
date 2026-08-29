@@ -127,8 +127,12 @@ async def collect_pty_output(
     # decoder once the provider is done replaces a tail that no later window will finish.
     text, pending = decode_pty_window(output, is_final=is_done())
     if pending:
-        async with output_lock:
-            output_chunks.appendleft(pending)
+        # Deliberately not under ``output_lock``. Those bytes have already left the deque, so
+        # this is the only copy, and awaiting the lock is a cancellation point: a caller
+        # cancelled here would drop the character while the session lives on to read its
+        # continuation. ``appendleft`` is one synchronous call on a deque, so nothing can
+        # interleave with the drain loops the lock exists to protect.
+        output_chunks.appendleft(pending)
 
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count
