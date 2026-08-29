@@ -6,6 +6,7 @@ from openai import AsyncOpenAI, omit
 from ..model import TTSModel, TTSModelSettings
 
 DEFAULT_VOICE: Literal["ash"] = "ash"
+_LEGACY_TTS_MODELS = frozenset({"tts-1", "tts-1-hd"})
 
 
 class OpenAITTSModel(TTSModel):
@@ -39,15 +40,18 @@ class OpenAITTSModel(TTSModel):
         Returns:
             An iterator of audio chunks.
         """
+        extra_body = (
+            None
+            if self.model in _LEGACY_TTS_MODELS
+            else {"instructions": settings.instructions}
+        )
         response = self._client.audio.speech.with_streaming_response.create(
             model=self.model,
             voice=settings.voice or DEFAULT_VOICE,
             input=text,
             response_format="pcm",
             speed=settings.speed if settings.speed is not None else omit,
-            extra_body={
-                "instructions": settings.instructions,
-            },
+            extra_body=extra_body,
         )
 
         async with response as stream:
