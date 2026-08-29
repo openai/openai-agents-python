@@ -217,6 +217,68 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 @pytest.mark.review_optional
 class TestUnixLocalPty:
     @pytest.mark.asyncio
+    async def test_session_is_not_finalized_while_a_pump_still_holds_output(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # the process is reaped before its pump has drained. finalizing on returncode alone
+        # would drop the session and cancel the pump that still holds the rest of a character
+        session = _RecordingUnixLocalSession(tmp_path)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=0, pid=None),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=True)
+        raw = "\u00e9".encode()
+
+        async with session._pty_lock:
+            session._pty_processes[1] = entry
+            session._reserved_pty_process_ids.add(1)
+
+        # a previous window handed the lead byte back, and the continuation is still behind
+        # the pump, so output_closed is not set yet
+        entry.output_chunks.append(raw[:1])
+
+        collected, count, source = await session._collect_pty_output(
+            entry=entry, yield_time_ms=20, max_output_tokens=None
+        )
+        first = await session._finalize_pty_update(
+            process_id=1,
+            entry=entry,
+            output=collected,
+            original_token_count=count,
+            source_text=source,
+        )
+
+        # the session has to stay alive, and the lead byte has to stay queued
+        assert first.process_id == 1
+        assert first.exit_code is None
+        assert first.output == b""
+        assert list(entry.output_chunks) == [raw[:1]]
+        assert 1 in session._pty_processes
+
+        # now the pump delivers the rest and closes
+        async with entry.output_lock:
+            entry.output_chunks.append(raw[1:])
+        entry.output_notify.set()
+        entry.output_closed.set()
+
+        collected, count, source = await session._collect_pty_output(
+            entry=entry, yield_time_ms=20, max_output_tokens=None
+        )
+        final = await session._finalize_pty_update(
+            process_id=1,
+            entry=entry,
+            output=collected,
+            original_token_count=count,
+            source_text=source,
+        )
+
+        assert final.output.decode("utf-8") == "\u00e9"
+        assert final.exit_code == 0
+        assert final.process_id is None
+
+    @pytest.mark.asyncio
     async def test_tty_fd_close_is_owned_without_blocking_termination(
         self,
         tmp_path: Path,
