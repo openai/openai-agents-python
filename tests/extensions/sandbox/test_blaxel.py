@@ -1745,6 +1745,52 @@ class _FakeAiohttp:
 
 
 class TestPtyExec:
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_cancellation_closes_unregistered_http_session(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        connect_started = asyncio.Event()
+
+        class _BlockingSession:
+            def __init__(self) -> None:
+                self._closed = False
+
+            async def ws_connect(self, url: str) -> None:
+                _ = url
+                connect_started.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                self._closed = True
+
+        class _BlockingAiohttp:
+            WSMsgType = _FakeAiohttp.WSMsgType
+
+            def __init__(self) -> None:
+                self.session: _BlockingSession | None = None
+
+            def ClientSession(self) -> _BlockingSession:
+                self.session = _BlockingSession()
+                return self.session
+
+        fake_aiohttp = _BlockingAiohttp()
+        session = _make_session(fake_sandbox)
+
+        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
+            task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
+            await connect_started.wait()
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert fake_aiohttp.session is not None
+        assert fake_aiohttp.session._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
+
     @pytest.mark.parametrize(
         ("messages", "expected_output"),
         [

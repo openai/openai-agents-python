@@ -217,6 +217,84 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 @pytest.mark.review_optional
 class TestUnixLocalPty:
     @pytest.mark.asyncio
+    async def test_pty_start_cancellation_cleans_up_before_registration(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+        process_started = asyncio.Event()
+        killpg_calls: list[tuple[int, signal.Signals]] = []
+
+        class _Process:
+            pid = 1234
+            returncode = None
+            stdout = None
+            stderr = None
+
+            async def wait(self) -> None:
+                return None
+
+        async def create_subprocess(*args: object, **kwargs: object) -> _Process:
+            _ = (args, kwargs)
+            process_started.set()
+            return _Process()
+
+        def killpg(pid: int, signum: signal.Signals) -> None:
+            killpg_calls.append((pid, signum))
+
+        monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+        monkeypatch.setattr(unix_local_module.os, "killpg", killpg)
+        await session._pty_lock.acquire()
+        try:
+            task = asyncio.create_task(
+                session.pty_exec_start("echo", "hello", shell=False, yield_time_s=0.01)
+            )
+            await process_started.wait()
+            await asyncio.sleep(0)
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert killpg_calls == [(1234, signal.SIGKILL)]
+            assert session._pty_processes == {}
+            assert session._reserved_pty_process_ids == set()
+        finally:
+            session._pty_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_tty_start_cancellation_closes_open_file_descriptors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+        close_calls: list[int] = []
+
+        def openpty() -> tuple[int, int]:
+            return 101, 102
+
+        async def create_subprocess(*args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(unix_local_module.os, "openpty", openpty)
+        monkeypatch.setattr(unix_local_module.os, "close", close_calls.append)
+        monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.pty_exec_start("echo", "hello", shell=False, tty=True)
+
+        assert close_calls == [101, 102]
+
+    @pytest.mark.asyncio
     async def test_tty_fd_close_is_owned_without_blocking_termination(
         self,
         tmp_path: Path,

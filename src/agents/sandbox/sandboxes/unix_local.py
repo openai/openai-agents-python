@@ -53,6 +53,7 @@ from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
     PtyExecUpdate,
+    _settle_pty_cleanup,
     allocate_pty_process_id,
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
@@ -354,7 +355,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     env=env,
                     preexec_fn=_preexec,
                 )
-            except Exception:
+            except BaseException:
                 with suppress(OSError):
                     os.close(primary_fd)
                 with suppress(OSError):
@@ -380,15 +381,22 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 asyncio.create_task(self._pump_process_stream(entry, process.stderr)),
             ]
 
-        entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
+        registered = False
+        try:
+            entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
 
-        pruned_entry: _UnixPtyProcessEntry | None = None
-        async with self._pty_lock:
-            process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
-            self._reserved_pty_process_ids.add(process_id)
-            pruned_entry = self._prune_pty_processes_if_needed()
-            self._pty_processes[process_id] = entry
-            process_count = len(self._pty_processes)
+            pruned_entry: _UnixPtyProcessEntry | None = None
+            async with self._pty_lock:
+                process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
+                self._reserved_pty_process_ids.add(process_id)
+                pruned_entry = self._prune_pty_processes_if_needed()
+                self._pty_processes[process_id] = entry
+                process_count = len(self._pty_processes)
+                registered = True
+        except BaseException:
+            if not registered:
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
+            raise
 
         if pruned_entry is not None:
             await self._terminate_pty_entry(pruned_entry)
