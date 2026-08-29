@@ -104,80 +104,257 @@ logger = logging.getLogger(__name__)
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 _PROCESS_GROUP_WRAPPER_SCRIPT = """
 import os
+import select
+import subprocess
 import sys
 
 control_fd = int(sys.argv[1])
-status_fd = int(sys.argv[2])
-command = sys.argv[3:]
+terminate_fd = int(sys.argv[2])
+status_fd = int(sys.argv[3])
+info_fd = int(sys.argv[4])
+target_user = sys.argv[5] or None
+command = sys.argv[6:]
 
-try:
-    child_pid = os.fork()
-except OSError:
-    os._exit(127)
 
-if child_pid == 0:
-    for fd in (control_fd, status_fd):
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-    try:
-        os.execvpe(command[0], command, os.environ)
-    except BaseException:
-        os._exit(127)
-
-while True:
-    try:
-        _, wait_status = os.waitpid(child_pid, 0)
-    except InterruptedError:
-        continue
-    except BaseException:
-        exit_code = 127
-        break
-    else:
-        exit_code = os.waitstatus_to_exitcode(wait_status)
-        break
-
-try:
-    payload = str(exit_code).encode("ascii")
-    while payload:
-        try:
-            written = os.write(status_fd, payload)
-        except InterruptedError:
-            continue
-        except OSError:
-            break
-        if written <= 0:
-            break
-        payload = payload[written:]
-finally:
-    try:
-        os.close(status_fd)
-    except OSError:
-        pass
-
-# Do not keep the parent's output pipes open while waiting for the cancellation
-# control pipe. Any target descendants that inherited them still keep output
-# draining observable to the parent.
-for fd in (1, 2):
+def close_fd(fd):
     try:
         os.close(fd)
     except OSError:
         pass
 
+
+def write_all(fd, payload):
+    while payload:
+        try:
+            written = os.write(fd, payload)
+        except InterruptedError:
+            continue
+        except OSError:
+            return
+        if written <= 0:
+            return
+        payload = payload[written:]
+
+
+def wait_for_eof(fd):
+    while True:
+        try:
+            if not os.read(fd, 4096):
+                return
+        except InterruptedError:
+            continue
+        except OSError:
+            return
+
+
+def kill_as_user(user, args):
+    try:
+        subprocess.run(
+            ["sudo", "-n", "-u", user, "--", "kill", *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=0.25,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def terminate_target(target_pid, group_id, *, can_signal_target):
+    # The direct target may be a sudo monitor while the actual command runs as
+    # another UID. Ask that UID to terminate its process group before falling
+    # back to the supervisor's direct signal.
+    if target_user:
+        kill_as_user(target_user, ["-KILL", f"-{group_id}"])
+        if can_signal_target:
+            kill_as_user(target_user, ["-KILL", str(target_pid)])
+    if can_signal_target:
+        try:
+            os.kill(target_pid, 9)
+        except OSError:
+            pass
+
+
+def wait_for_termination_request(fd):
+    try:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+    except (InterruptedError, OSError):
+        return False, False
+    if not ready:
+        return False, False
+    try:
+        return bool(os.read(fd, 4096)), True
+    except (InterruptedError, OSError):
+        return False, True
+
+
+try:
+    keeper_ready_read_fd, keeper_ready_write_fd = os.pipe()
+    keeper_pid = os.fork()
+except OSError:
+    os._exit(127)
+
+if keeper_pid == 0:
+    for fd in (
+        terminate_fd,
+        status_fd,
+        info_fd,
+        keeper_ready_read_fd,
+    ):
+        close_fd(fd)
+    try:
+        os.setpgid(0, 0)
+        write_all(keeper_ready_write_fd, b"1")
+    except BaseException:
+        close_fd(keeper_ready_write_fd)
+        os._exit(127)
+    close_fd(keeper_ready_write_fd)
+    # Keep only the control fd open while the supervisor waits for the target
+    # and later reaps it. The target owns the output pipe descriptors.
+    close_fd(1)
+    close_fd(2)
+    wait_for_eof(control_fd)
+    os._exit(0)
+
+close_fd(keeper_ready_write_fd)
+try:
+    keeper_ready = os.read(keeper_ready_read_fd, 1)
+except OSError:
+    keeper_ready = b""
+close_fd(keeper_ready_read_fd)
+if keeper_ready != b"1":
+    try:
+        os.waitpid(keeper_pid, 0)
+    except BaseException:
+        pass
+    os._exit(127)
+
+try:
+    target_pid = os.fork()
+except OSError:
+    close_fd(control_fd)
+    close_fd(terminate_fd)
+    try:
+        os.kill(keeper_pid, 9)
+        os.waitpid(keeper_pid, 0)
+    except BaseException:
+        pass
+    os._exit(127)
+
+if target_pid == 0:
+    for fd in (
+        control_fd,
+        terminate_fd,
+        status_fd,
+        info_fd,
+    ):
+        close_fd(fd)
+    try:
+        os.setpgid(0, keeper_pid)
+        os.execvpe(command[0], command, os.environ)
+    except BaseException:
+        os._exit(127)
+
+write_all(info_fd, f"{keeper_pid} {target_pid}".encode("ascii"))
+close_fd(info_fd)
+
+target_exit_code = 127
+termination_requested = False
 while True:
     try:
-        if not os.read(control_fd, 4096):
-            break
+        waited_pid, wait_status = os.waitpid(target_pid, os.WNOHANG)
     except InterruptedError:
         continue
+    except ChildProcessError:
+        waited_pid = target_pid
+        wait_status = 127 << 8
     except OSError:
+        waited_pid = target_pid
+        wait_status = 127 << 8
+
+    if waited_pid == target_pid:
+        target_exit_code = os.waitstatus_to_exitcode(wait_status)
         break
 
-# The parent uses the status pipe for the child's exact exit status. Use a
-# conventional shell-style status for the wrapper's own process status when
-# the command was terminated by a signal.
-wrapper_exit_code = exit_code if exit_code >= 0 else 128 - exit_code
+    requested, request_fd_ready = wait_for_termination_request(terminate_fd)
+    if requested and not termination_requested:
+        terminate_target(target_pid, keeper_pid, can_signal_target=True)
+        termination_requested = True
+    if request_fd_ready and not requested:
+        # EOF without a byte is the normal completion path. The parent closes
+        # this descriptor after collecting the status and output.
+        close_fd(terminate_fd)
+        terminate_fd = -1
+
+write_all(status_fd, str(target_exit_code).encode("ascii"))
+close_fd(status_fd)
+
+# Do not keep the parent's output pipes open while waiting for the cancellation
+# control pipe. Any target descendants that inherited them still keep output
+# draining observable to the parent.
+close_fd(1)
+close_fd(2)
+
+# A cancellation can race with the target's exit. Continue watching the
+# termination pipe after reaping the direct child so a sudo-owned descendant
+# can still be killed by process group, but never reuse the reaped target PID.
+while True:
+    fds = [control_fd]
+    if terminate_fd >= 0:
+        fds.append(terminate_fd)
+    try:
+        ready, _, _ = select.select(fds, [], [], 0.05)
+    except (InterruptedError, OSError):
+        continue
+    if terminate_fd >= 0 and terminate_fd in ready:
+        try:
+            requested = bool(os.read(terminate_fd, 4096))
+        except (InterruptedError, OSError):
+            requested = False
+        if requested and not termination_requested:
+            terminate_target(target_pid, keeper_pid, can_signal_target=False)
+            termination_requested = True
+        if not requested:
+            close_fd(terminate_fd)
+            terminate_fd = -1
+    if control_fd in ready:
+        try:
+            control_data = os.read(control_fd, 4096)
+        except (InterruptedError, OSError):
+            control_data = b""
+        if not control_data:
+            # The parent writes the termination request before closing either
+            # control descriptor. Drain it if both readiness notifications were
+            # delivered in the opposite order.
+            if terminate_fd >= 0:
+                try:
+                    requested = bool(os.read(terminate_fd, 4096))
+                except (InterruptedError, OSError):
+                    requested = False
+                if requested and not termination_requested:
+                    terminate_target(target_pid, keeper_pid, can_signal_target=False)
+                    termination_requested = True
+                close_fd(terminate_fd)
+                terminate_fd = -1
+            break
+
+close_fd(control_fd)
+try:
+    os.waitpid(keeper_pid, 0)
+except InterruptedError:
+    while True:
+        try:
+            os.waitpid(keeper_pid, 0)
+            break
+        except InterruptedError:
+            continue
+except ChildProcessError:
+    pass
+
+# The parent uses the status pipe for the target's exact exit status. Use a
+# conventional shell-style status for the supervisor's own process status.
+wrapper_exit_code = target_exit_code if target_exit_code >= 0 else 128 - target_exit_code
 os._exit(min(wrapper_exit_code, 255))
 """
 _SubprocessResultT = TypeVar("_SubprocessResultT")
@@ -206,7 +383,9 @@ async def _read_process_exit_code(fd: int) -> int:
         try:
             exit_code = int(payload.decode("ascii"))
         except ValueError as error:
-            invalid_status = RuntimeError("process-group wrapper returned an invalid exit status")
+            invalid_status = RuntimeError(
+                "process-group supervisor returned an invalid exit status"
+            )
             invalid_status.__cause__ = error
             result.set_exception(invalid_status)
         else:
@@ -219,6 +398,54 @@ async def _read_process_exit_code(fd: int) -> int:
         return await result
     finally:
         loop.remove_reader(fd)
+
+
+async def _read_process_group_info(fd: int) -> tuple[int, int]:
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[tuple[int, int]] = loop.create_future()
+    payload = bytearray()
+
+    def _read_info() -> None:
+        if result.done():
+            return
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            return
+        except OSError as error:
+            result.set_exception(error)
+            return
+
+        if chunk:
+            payload.extend(chunk)
+            return
+
+        try:
+            values = tuple(int(value) for value in payload.decode("ascii").split())
+            if len(values) != 2 or any(value <= 0 for value in values):
+                raise ValueError("expected positive keeper and target PIDs")
+        except ValueError as error:
+            invalid_info = RuntimeError("process-group supervisor returned invalid process info")
+            invalid_info.__cause__ = error
+            result.set_exception(invalid_info)
+        else:
+            result.set_result(cast(tuple[int, int], values))
+
+    os.set_blocking(fd, False)
+    loop.add_reader(fd, _read_info)
+    try:
+        _read_info()
+        return await result
+    finally:
+        loop.remove_reader(fd)
+
+
+def _sudo_user_from_command(command: Sequence[str]) -> str | None:
+    if len(command) >= 3 and Path(command[0]).name == "sudo" and command[1] == "-u":
+        user = command[2]
+        if user and user != "--":
+            return user
+    return None
 
 
 async def _read_process_stream(stream: asyncio.StreamReader | None) -> bytes:
@@ -259,45 +486,123 @@ async def _settle_subprocess_awaitable(
     return result, caller_cancelled
 
 
+async def _kill_process_as_user(user: str, args: Sequence[str]) -> None:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "-u",
+            user,
+            "--",
+            "kill",
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(process.wait(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    except (OSError, asyncio.TimeoutError):
+        return
+
+
 async def _terminate_process_group_and_reap_process(
     proc: asyncio.subprocess.Process,
     *,
     process_group_id: int | None = None,
+    target_pid: int | None = None,
+    target_user: str | None = None,
+    process_info_task: asyncio.Task[tuple[int, int]] | None = None,
     communication_task: asyncio.Task[tuple[bytes, bytes]] | None = None,
     status_task: asyncio.Task[int] | None = None,
+    control_write_fd: int | None = None,
+    terminate_write_fd: int | None = None,
 ) -> None:
-    group_id = proc.pid if process_group_id is None else process_group_id
-    with suppress(OSError):
-        os.killpg(group_id, signal.SIGKILL)
-    # The process group can contain descendants owned by another user when the
-    # command was launched through sudo. Kill the tracked wrapper separately so
-    # that a permission failure for one group member cannot leave it running and
-    # holding the pipes open. Only signal it while asyncio still reports the
-    # tracked child as running; otherwise its PID may have been reused by an
-    # unrelated process after the leader exited.
-    if proc.returncode is None:
-        with suppress(OSError):
-            proc.kill()
-    try:
-        if communication_task is None:
-            await asyncio.wait_for(proc.communicate(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    cleanup_deadline = asyncio.get_running_loop().time() + _PROCESS_CLEANUP_TIMEOUT_SECONDS
+
+    def _remaining_cleanup_time() -> float:
+        return max(0.0, cleanup_deadline - asyncio.get_running_loop().time())
+
+    if process_info_task is not None:
+        try:
+            if process_info_task.done():
+                discovered_group_id, discovered_target_pid = process_info_task.result()
+            else:
+                discovered_group_id, discovered_target_pid = await asyncio.wait_for(
+                    asyncio.shield(process_info_task),
+                    timeout=_remaining_cleanup_time(),
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
         else:
-            await asyncio.wait_for(
-                asyncio.shield(communication_task),
-                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
-            )
+            if process_group_id is None:
+                process_group_id = discovered_group_id
+            if target_pid is None:
+                target_pid = discovered_target_pid
+
+    group_id = process_group_id
+    if group_id is None and proc.returncode is None:
+        # The supervisor's PID is only a safe fallback while that direct child
+        # is still known to be alive; after it exits, its process group ID may
+        # already belong to an unrelated process.
+        group_id = proc.pid
+    # Keep the keeper alive until after the group signal. Closing control first
+    # would release the only stable owner of this group and allow its ID to be
+    # reused before killpg runs.
+    if group_id is not None:
+        with suppress(OSError):
+            os.killpg(group_id, signal.SIGKILL)
+    # Ask the supervisor to terminate the direct child and, when applicable,
+    # the target-user process group. It remains outside the keeper group so it
+    # can reap the target after the group signal.
+    if terminate_write_fd is not None:
+        with suppress(OSError):
+            os.write(terminate_write_fd, b"1")
+    _close_fd_quietly(control_write_fd)
+    _close_fd_quietly(terminate_write_fd)
+    try:
+        # Let the supervisor reap its target before using the direct-child kill
+        # fallback. This avoids orphaning a zombie in hosts whose PID 1 does
+        # not reap adopted children.
+        await asyncio.wait_for(proc.wait(), timeout=_remaining_cleanup_time())
     except asyncio.TimeoutError:
-        # A descendant can escape the process group and keep the output pipes
-        # open. The direct child still needs to be reaped, but waiting for the
-        # escaped descendant would make cancellation unbounded.
+        # This is only a fallback for a supervisor that could not finish its
+        # own reaping protocol. The target PID is still safe to use while the
+        # supervisor remains unreaped; ask its requested UID as well when the
+        # command was launched through sudo.
+        if target_user is not None and group_id is not None:
+            await _kill_process_as_user(target_user, ("-KILL", f"-{group_id}"))
+        if target_pid is not None and status_task is not None and not status_task.done():
+            with suppress(OSError):
+                os.kill(target_pid, signal.SIGKILL)
+        if proc.returncode is None:
+            with suppress(OSError):
+                proc.kill()
         with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            await asyncio.wait_for(proc.wait(), timeout=_remaining_cleanup_time())
     finally:
-        for task in (communication_task, status_task):
-            if task is not None and not task.done():
+        remaining_cleanup_time = _remaining_cleanup_time()
+        if remaining_cleanup_time > 0:
+            try:
+                if communication_task is None:
+                    await asyncio.wait_for(proc.communicate(), timeout=remaining_cleanup_time)
+                else:
+                    await asyncio.wait_for(
+                        asyncio.shield(communication_task),
+                        timeout=remaining_cleanup_time,
+                    )
+            except (asyncio.TimeoutError, ValueError):
+                # A descendant can escape the process group and keep the output
+                # pipes open. Cancellation must remain bounded in that case.
+                pass
+        for task in (communication_task, status_task, process_info_task):
+            if task is None:
+                continue
+            if not task.done():
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+            with suppress(BaseException):
+                await task
         # asyncio does not expose a public Process method for closing pipe
         # transports after communicate() is cancelled.
         transport = getattr(proc, "_transport", None)
@@ -309,8 +614,13 @@ async def _terminate_process_group_and_reap(
     proc: asyncio.subprocess.Process,
     *,
     process_group_id: int | None = None,
+    target_pid: int | None = None,
+    target_user: str | None = None,
+    process_info_task: asyncio.Task[tuple[int, int]] | None = None,
     communication_task: asyncio.Task[tuple[bytes, bytes]] | None = None,
     status_task: asyncio.Task[int] | None = None,
+    control_write_fd: int | None = None,
+    terminate_write_fd: int | None = None,
 ) -> None:
     # Keep process cleanup in an owned task so a second cancellation cannot
     # interrupt the drain, direct-child reap, or transport close.
@@ -318,8 +628,13 @@ async def _terminate_process_group_and_reap(
         _terminate_process_group_and_reap_process(
             proc,
             process_group_id=process_group_id,
+            target_pid=target_pid,
+            target_user=target_user,
+            process_info_task=process_info_task,
             communication_task=communication_task,
             status_task=status_task,
+            control_write_fd=control_write_fd,
+            terminate_write_fd=terminate_write_fd,
         )
     )
     while not cleanup_task.done():
@@ -510,6 +825,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             workspace_root=workspace_root,
             cwd=cwd,
         )
+        target_user = _sudo_user_from_command(command_parts)
         exec_command = self._confined_exec_command(
             command_parts=command_parts,
             workspace_root=workspace_root,
@@ -518,55 +834,89 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         control_read_fd: int | None = None
         control_write_fd: int | None = None
+        terminate_read_fd: int | None = None
+        terminate_write_fd: int | None = None
         status_read_fd: int | None = None
         status_write_fd: int | None = None
+        info_read_fd: int | None = None
+        info_write_fd: int | None = None
         proc: asyncio.subprocess.Process | None = None
         communication_task: asyncio.Task[tuple[bytes, bytes]] | None = None
         status_task: asyncio.Task[int] | None = None
+        process_info_task: asyncio.Task[tuple[int, int]] | None = None
+        process_group_id: int | None = None
+        target_pid: int | None = None
         target_exit_code: int | None = None
         try:
             control_read_fd, control_write_fd = os.pipe()
+            terminate_read_fd, terminate_write_fd = os.pipe()
             status_read_fd, status_write_fd = os.pipe()
+            info_read_fd, info_write_fd = os.pipe()
             proc, proc_cancelled = await _settle_subprocess_awaitable(
                 asyncio.create_subprocess_exec(
                     sys.executable,
                     "-c",
                     _PROCESS_GROUP_WRAPPER_SCRIPT,
                     str(control_read_fd),
+                    str(terminate_read_fd),
                     str(status_write_fd),
+                    str(info_write_fd),
+                    target_user or "",
                     *exec_command,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=process_cwd,
                     env=env,
-                    pass_fds=(control_read_fd, status_write_fd),
+                    pass_fds=(
+                        control_read_fd,
+                        terminate_read_fd,
+                        status_write_fd,
+                        info_write_fd,
+                    ),
                     start_new_session=True,
                 )
             )
             _close_fd_quietly(control_read_fd)
             control_read_fd = None
+            _close_fd_quietly(terminate_read_fd)
+            terminate_read_fd = None
             _close_fd_quietly(status_write_fd)
             status_write_fd = None
+            _close_fd_quietly(info_write_fd)
+            info_write_fd = None
 
             assert proc is not None
             if proc_cancelled:
-                _close_fd_quietly(control_write_fd)
-                control_write_fd = None
-                _close_fd_quietly(status_read_fd)
-                status_read_fd = None
+                cleanup_control_fd, control_write_fd = control_write_fd, None
+                cleanup_terminate_fd, terminate_write_fd = terminate_write_fd, None
                 await _terminate_process_group_and_reap(
                     proc,
-                    process_group_id=proc.pid,
+                    control_write_fd=cleanup_control_fd,
+                    terminate_write_fd=cleanup_terminate_fd,
                 )
                 raise asyncio.CancelledError()
 
             assert control_write_fd is not None
+            assert terminate_write_fd is not None
             assert status_read_fd is not None
+            assert info_read_fd is not None
             communication_task = asyncio.create_task(_read_process_output(proc))
             status_task = asyncio.create_task(_read_process_exit_code(status_read_fd))
+            process_info_task = asyncio.create_task(_read_process_group_info(info_read_fd))
             deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
             try:
+                info_timeout = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - asyncio.get_running_loop().time())
+                )
+                process_group_id, target_pid = await (
+                    process_info_task
+                    if info_timeout is None
+                    else asyncio.wait_for(asyncio.shield(process_info_task), info_timeout)
+                )
+                process_info_task = None
                 status_timeout = (
                     None
                     if deadline is None
@@ -592,6 +942,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 communication_task = None
                 _close_fd_quietly(control_write_fd)
                 control_write_fd = None
+                _close_fd_quietly(terminate_write_fd)
+                terminate_write_fd = None
                 wait_timeout = (
                     None
                     if deadline is None
@@ -605,33 +957,48 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 if proc_cancelled:
                     raise asyncio.CancelledError()
             except asyncio.TimeoutError as e:
-                _close_fd_quietly(control_write_fd)
-                control_write_fd = None
+                cleanup_control_fd, control_write_fd = control_write_fd, None
+                cleanup_terminate_fd, terminate_write_fd = terminate_write_fd, None
                 await _terminate_process_group_and_reap(
                     proc,
-                    process_group_id=proc.pid,
+                    process_group_id=process_group_id,
+                    target_pid=target_pid,
+                    target_user=target_user,
+                    process_info_task=process_info_task,
                     communication_task=communication_task,
                     status_task=status_task,
+                    control_write_fd=cleanup_control_fd,
+                    terminate_write_fd=cleanup_terminate_fd,
                 )
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             except asyncio.CancelledError:
-                _close_fd_quietly(control_write_fd)
-                control_write_fd = None
+                cleanup_control_fd, control_write_fd = control_write_fd, None
+                cleanup_terminate_fd, terminate_write_fd = terminate_write_fd, None
                 await _terminate_process_group_and_reap(
                     proc,
-                    process_group_id=proc.pid,
+                    process_group_id=process_group_id,
+                    target_pid=target_pid,
+                    target_user=target_user,
+                    process_info_task=process_info_task,
                     communication_task=communication_task,
                     status_task=status_task,
+                    control_write_fd=cleanup_control_fd,
+                    terminate_write_fd=cleanup_terminate_fd,
                 )
                 raise
             except Exception:
-                _close_fd_quietly(control_write_fd)
-                control_write_fd = None
+                cleanup_control_fd, control_write_fd = control_write_fd, None
+                cleanup_terminate_fd, terminate_write_fd = terminate_write_fd, None
                 await _terminate_process_group_and_reap(
                     proc,
-                    process_group_id=proc.pid,
+                    process_group_id=process_group_id,
+                    target_pid=target_pid,
+                    target_user=target_user,
+                    process_info_task=process_info_task,
                     communication_task=communication_task,
                     status_task=status_task,
+                    control_write_fd=cleanup_control_fd,
+                    terminate_write_fd=cleanup_terminate_fd,
                 )
                 raise
         except ExecTimeoutError:
@@ -643,10 +1010,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             control_read_fd = None
             _close_fd_quietly(control_write_fd)
             control_write_fd = None
+            _close_fd_quietly(terminate_write_fd)
+            terminate_write_fd = None
             _close_fd_quietly(status_read_fd)
             status_read_fd = None
             _close_fd_quietly(status_write_fd)
             status_write_fd = None
+            _close_fd_quietly(info_read_fd)
+            info_read_fd = None
+            _close_fd_quietly(info_write_fd)
+            info_write_fd = None
 
         assert target_exit_code is not None
         return ExecResult(stdout=stdout or b"", stderr=stderr or b"", exit_code=target_exit_code)

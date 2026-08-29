@@ -330,6 +330,9 @@ async def test_unix_local_exec_uses_spawn_safe_process_group_wrapper(
     async def read_status(_fd: int) -> int:
         return 0
 
+    async def read_info(_fd: int) -> tuple[int, int]:
+        return 123, 456
+
     async def read_output(_process: object) -> tuple[bytes, bytes]:
         return b"output", b""
 
@@ -342,6 +345,7 @@ async def test_unix_local_exec_uses_spawn_safe_process_group_wrapper(
 
     monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
     monkeypatch.setattr(unix_local_module, "_read_process_exit_code", read_status)
+    monkeypatch.setattr(unix_local_module, "_read_process_group_info", read_info)
     monkeypatch.setattr(unix_local_module, "_read_process_output", read_output)
     monkeypatch.setattr(unix_local_module, "_close_fd_quietly", record_close)
     session = UnixLocalSandboxSession(
@@ -363,8 +367,22 @@ async def test_unix_local_exec_uses_spawn_safe_process_group_wrapper(
         "-c",
         unix_local_module._PROCESS_GROUP_WRAPPER_SCRIPT,
     )
-    assert args[5:] == ("echo", "hello")
+    assert args[8:] == ("echo", "hello")
     assert len(closed_fds) == len(set(closed_fds))
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_user"),
+    [
+        (("sudo", "-u", "sandbox-user", "--", "echo"), "sandbox-user"),
+        (("/usr/bin/sudo", "-u", "sandbox-user", "--", "echo"), "sandbox-user"),
+        (("echo", "sudo", "-u", "sandbox-user"), None),
+    ],
+)
+def test_unix_local_exec_extracts_target_user_only_from_command_prefix(
+    command: tuple[str, ...], expected_user: str | None
+) -> None:
+    assert unix_local_module._sudo_user_from_command(command) == expected_user
 
 
 @pytest.mark.asyncio
@@ -389,8 +407,9 @@ async def test_unix_local_exec_keeps_command_out_of_host_session(
     )
 
     command_session_id, command_process_group_id = (int(value) for value in result.stdout.split())
-    assert command_session_id == command_process_group_id
     assert command_session_id != parent_session_id
+    assert command_process_group_id != parent_session_id
+    assert command_process_group_id != command_session_id
 
 
 @pytest.mark.asyncio
@@ -502,6 +521,9 @@ async def test_unix_local_exec_cancellation_survives_unreapable_output_cleanup(
         await asyncio.Event().wait()
         return 0
 
+    async def _read_info(_fd: int) -> tuple[int, int]:
+        return 123, 456
+
     async def _read_output(_process: object) -> tuple[bytes, bytes]:
         return await process.communicate()
 
@@ -511,6 +533,7 @@ async def test_unix_local_exec_cancellation_survives_unreapable_output_cleanup(
         _create_process,
     )
     monkeypatch.setattr(unix_local_module, "_read_process_exit_code", _read_status)
+    monkeypatch.setattr(unix_local_module, "_read_process_group_info", _read_info)
     monkeypatch.setattr(unix_local_module, "_read_process_output", _read_output)
     monkeypatch.setattr(unix_local_module.os, "killpg", lambda *_args: None)
     monkeypatch.setattr(unix_local_module, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.01)
@@ -580,7 +603,7 @@ async def test_unix_local_exec_cleanup_kills_direct_child_when_group_signal_fail
     await communicate_started.wait()
 
     await asyncio.wait_for(task, timeout=1)
-    assert direct_kill_called
+    assert not direct_kill_called
     assert wait_called.is_set()
     assert transport_closed
 
@@ -672,7 +695,7 @@ async def test_unix_local_exec_cleanup_bounds_unreapable_direct_child(
 
     process = cast(asyncio.subprocess.Process, _Process())
     task = asyncio.create_task(unix_local_module._terminate_process_group_and_reap(process))
-    await communicate_started.wait()
+    await wait_started.wait()
 
     await asyncio.wait_for(task, timeout=1)
     assert wait_started.is_set()
