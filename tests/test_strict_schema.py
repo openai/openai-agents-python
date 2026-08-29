@@ -58,6 +58,29 @@ def test_non_dict_schema_errors():
         ensure_strict_json_schema([])  # type: ignore
 
 
+@pytest.mark.parametrize("keyword", ["not", "contains", "dependentSchemas"])
+def test_prefix_items_is_rejected_under_schema_valued_keywords(keyword: str):
+    nested = {"type": "array", "prefixItems": [{"type": "string"}]}
+    if keyword == "dependentSchemas":
+        schema = {"type": "object", "dependentSchemas": {"value": nested}}
+    else:
+        schema = {"type": "array", keyword: nested}
+
+    with pytest.raises(UserError, match="prefixItems.*strict mode"):
+        ensure_strict_json_schema(schema)
+
+
+def test_literal_prefix_items_in_examples_is_not_treated_as_schema():
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string", "examples": [{"prefixItems": "literal"}]}},
+    }
+
+    result = ensure_strict_json_schema(schema)
+
+    assert result["properties"]["value"]["examples"] == [{"prefixItems": "literal"}]
+
+
 def test_deeply_nested_schema_is_rejected_before_recursive_conversion():
     with pytest.raises(UserError, match="too deeply nested"):
         ensure_strict_json_schema(_nested_object_schema(1_000))

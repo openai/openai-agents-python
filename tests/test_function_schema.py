@@ -509,6 +509,30 @@ def test_var_positional_supported_annotations_still_build(func: Any):
     assert fs.params_json_schema["properties"]["args"]["type"] == "array"
 
 
+def _fixed_tuple_parameter(point: tuple[int, str]) -> tuple[int, str]:
+    return point
+
+
+def test_fixed_tuple_parameter_is_rejected_in_strict_mode():
+    with pytest.raises(UserError, match=r"prefixItems.*strict mode"):
+        function_schema(_fixed_tuple_parameter, use_docstring_info=False)
+
+
+def test_fixed_tuple_parameter_remains_available_without_strict_mode():
+    fs = function_schema(
+        _fixed_tuple_parameter,
+        use_docstring_info=False,
+        strict_json_schema=False,
+    )
+
+    point_schema = fs.params_json_schema["properties"]["point"]
+    assert point_schema["prefixItems"] == [{"type": "integer"}, {"type": "string"}]
+
+    parsed = fs.params_pydantic_model.model_validate({"point": [1, "north"]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert _fixed_tuple_parameter(*args, **kwargs) == (1, "north")
+
+
 def test_var_keyword_dict_annotation():
     # Case 3:
     # A ``**kwargs: X`` annotation applies to each keyword *value* (PEP 484), so a

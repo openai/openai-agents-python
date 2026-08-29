@@ -155,6 +155,25 @@ def test_setting_strict_false_works():
     assert output_wrapper.json_schema() == Foo.model_json_schema()
 
 
+def test_fixed_tuple_output_is_rejected_in_strict_mode():
+    with pytest.raises(UserError, match="output type is not valid") as exc_info:
+        AgentOutputSchema(output_type=tuple[int, str])
+
+    assert isinstance(exc_info.value.__cause__, UserError)
+    assert "prefixItems" in str(exc_info.value.__cause__)
+
+
+def test_fixed_tuple_output_remains_available_without_strict_mode():
+    output_wrapper = AgentOutputSchema(
+        output_type=tuple[int, str],
+        strict_json_schema=False,
+    )
+
+    response_schema = output_wrapper.json_schema()["properties"][_WRAPPER_DICT_KEY]
+    assert response_schema["prefixItems"] == [{"type": "integer"}, {"type": "string"}]
+    assert output_wrapper.validate_json('{"response": [1, "north"]}') == (1, "north")
+
+
 _CUSTOM_OUTPUT_SCHEMA_JSON_SCHEMA = {
     "type": "object",
     "properties": {

@@ -48,6 +48,11 @@ _SCHEMA_DEPTH_ERROR = (
     "JSON schema is too deeply nested to process safely. Simplify or flatten the schema."
 )
 
+_PREFIX_ITEMS_ERROR = (
+    "JSON schema keyword `prefixItems` is not supported in strict mode. Use a homogeneous array "
+    "type such as `list[T]` or `tuple[T, ...]`, or disable strict JSON schema mode."
+)
+
 
 def _validate_json_schema_depth(schema: object) -> None:
     """Reject container nesting that is unsafe for recursive schema processing."""
@@ -69,6 +74,20 @@ def _copy_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Copy a JSON schema only after verifying recursive copying is safe."""
     _validate_json_schema_depth(schema)
     return copy.deepcopy(schema)
+
+
+def _reject_prefix_items(schema: object) -> None:
+    """Reject unsupported ``prefixItems`` wherever it appears in a schema tree."""
+    annotation_keywords = {"const", "default", "description", "enum", "examples", "title"}
+    stack = [schema]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if "prefixItems" in value:
+                raise UserError(_PREFIX_ITEMS_ERROR)
+            stack.extend(child for key, child in value.items() if key not in annotation_keywords)
+        elif isinstance(value, list):
+            stack.extend(value)
 
 
 # Keywords that may legally sit alongside a `$ref` without adding validation constraints.
@@ -121,6 +140,7 @@ def ensure_strict_json_schema(
     that the OpenAI API expects.
     """
     _validate_json_schema_depth(schema)
+    _reject_prefix_items(schema)
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
     budget = _NodeBudget(_MAX_SCHEMA_NODES, reject_open_objects=_reject_open_objects)
