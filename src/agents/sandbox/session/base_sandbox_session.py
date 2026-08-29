@@ -716,17 +716,17 @@ class BaseSandboxSession(abc.ABC):
 
         task = asyncio.create_task(operation, name="agents.pty_cleanup")
         completion = asyncio.create_task(asyncio.wait((task,)))
-        caller_cancelled = False
+        caller_cancellation: asyncio.CancelledError | None = None
         while not completion.done():
             try:
                 await asyncio.shield(completion)
-            except asyncio.CancelledError:
-                caller_cancelled = True
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
 
         completion.result()
         task.result()
-        if caller_cancelled:
-            raise asyncio.CancelledError()
+        if caller_cancellation is not None:
+            raise caller_cancellation
 
     async def pty_exec_start(
         self,
