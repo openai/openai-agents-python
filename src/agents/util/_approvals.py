@@ -24,7 +24,7 @@ def parse_function_tool_arguments(arguments: str | None) -> dict[str, Any] | Non
             arguments,
             parse_constant=_reject_nonstandard_json_constant,
         )
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
