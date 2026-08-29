@@ -961,8 +961,11 @@ class ModalSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+        async def cleanup_all() -> None:
+            for entry in entries:
+                await self._terminate_pty_entry(entry)
+
+        await self._settle_pty_cleanup(cleanup_all())
 
     async def _write_pty_stdin(self, process: ContainerProcess[bytes], payload: bytes) -> None:
         stdin = process.stdin

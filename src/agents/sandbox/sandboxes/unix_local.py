@@ -463,8 +463,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+        async def cleanup_all() -> None:
+            for entry in entries:
+                await self._terminate_pty_entry(entry)
+
+        await self._settle_pty_cleanup(cleanup_all())
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
         if self._host_environment_allowlist is None:

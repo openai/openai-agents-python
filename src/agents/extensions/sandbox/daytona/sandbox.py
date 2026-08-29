@@ -878,8 +878,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
             entries = list(self._pty_sessions.values())
             self._pty_sessions.clear()
             self._reserved_pty_process_ids.clear()
-        for entry in entries:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+
+        async def cleanup_all() -> None:
+            for entry in entries:
+                await self._terminate_pty_entry(entry)
+
+        await self._settle_pty_cleanup(cleanup_all())
 
     async def _collect_pty_output(
         self,

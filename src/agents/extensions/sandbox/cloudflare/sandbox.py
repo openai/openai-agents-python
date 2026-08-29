@@ -1275,8 +1275,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+        async def cleanup_all() -> None:
+            for entry in entries:
+                await self._terminate_pty_entry(entry)
+
+        await self._settle_pty_cleanup(cleanup_all())
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
