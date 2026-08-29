@@ -186,6 +186,70 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
 
 
 @pytest.mark.asyncio
+async def test_unix_local_exec_cancellation_retains_process_group_after_leader_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The process-group keeper must prevent the original group ID from being
+    # reused while cancellation is still able to clean up the group.
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pid_file = workspace / "pid"
+    escaped_pid_file = workspace / "escaped-pid"
+    escaped_code = (
+        "import os, time; "
+        f"os.setsid(); open({str(escaped_pid_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    escaped_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(escaped_code)}"
+    command = f'{escaped_command} & printf "%s" "$$" > {shlex.quote(str(pid_file))}; exit 0'
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    task = asyncio.create_task(session._exec_internal("sh", "-c", command))
+    shell_pid: int | None = None
+    escaped_pid: int | None = None
+
+    def is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    try:
+        (shell_pid,) = await _wait_for_integer_file(pid_file, 1)
+        (escaped_pid,) = await _wait_for_integer_file(escaped_pid_file, 1)
+        await asyncio.sleep(0.1)
+
+        try:
+            os.killpg(shell_pid, 0)
+        except ProcessLookupError as exc:
+            raise AssertionError("process group disappeared before cancellation") from exc
+
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=2)
+        assert task in done, "cancellation waited for a descendant outside the process group"
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+        assert is_alive(escaped_pid)
+    finally:
+        if shell_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(shell_pid, signal.SIGKILL)
+        if escaped_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(escaped_pid, signal.SIGKILL)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

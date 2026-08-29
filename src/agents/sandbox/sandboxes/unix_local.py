@@ -104,6 +104,30 @@ logger = logging.getLogger(__name__)
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
+def _keep_process_group_alive(control_fd: int) -> None:
+    """Keep the spawned process group identity stable until the parent closes control_fd."""
+    keeper_pid = os.fork()
+    if keeper_pid == 0:
+        for fd in (0, 1, 2):
+            if fd != control_fd:
+                with suppress(OSError):
+                    os.close(fd)
+        max_fd = os.sysconf("SC_OPEN_MAX")
+        os.closerange(3, control_fd)
+        os.closerange(control_fd + 1, max_fd)
+        while True:
+            try:
+                if not os.read(control_fd, 4096):
+                    break
+            except InterruptedError:
+                continue
+            except OSError:
+                break
+        os._exit(0)
+
+    os.close(control_fd)
+
+
 async def _terminate_process_group_and_reap_process(proc: asyncio.subprocess.Process) -> None:
     with suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
@@ -329,15 +353,23 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             env=env,
         )
 
+        control_read_fd, control_write_fd = os.pipe()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *exec_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=process_cwd,
-                env=env,
-                start_new_session=True,
-            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *exec_command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=process_cwd,
+                    env=env,
+                    start_new_session=True,
+                    pass_fds=(control_read_fd,),
+                    preexec_fn=lambda: _keep_process_group_alive(control_read_fd),
+                )
+            except BaseException:
+                _close_fd_quietly(control_read_fd)
+                raise
+            _close_fd_quietly(control_read_fd)
 
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -355,6 +387,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             raise
         except Exception as e:
             raise ExecTransportError(command=command, cause=e) from e
+        finally:
+            _close_fd_quietly(control_write_fd)
 
         return ExecResult(
             stdout=stdout or b"", stderr=stderr or b"", exit_code=proc.returncode or 0
