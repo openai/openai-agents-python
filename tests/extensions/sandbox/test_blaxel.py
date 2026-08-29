@@ -1976,6 +1976,53 @@ class TestPtyExec:
         assert ws._closed
 
     @pytest.mark.asyncio
+    async def test_pty_terminate_all_settles_after_registry_clear(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
+
+        session = _make_session(fake_sandbox)
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        class _BlockingCloseWS(_FakeWS):
+            async def close(self) -> None:
+                close_started.set()
+                await release_close.wait()
+                self._closed = True
+
+        first_ws = _BlockingCloseWS()
+        second_ws = _FakeWS()
+        first_http = _FakeHTTPSession(first_ws)
+        second_http = _FakeHTTPSession(second_ws)
+        first = _BlaxelPtySessionEntry("first", first_ws, first_http)
+        second = _BlaxelPtySessionEntry("second", second_ws, second_http)
+        session._pty_sessions.update({1: first, 2: second})
+        session._reserved_pty_process_ids.update({1, 2})
+
+        task = asyncio.create_task(session.pty_terminate_all())
+        await close_started.wait()
+
+        # Ownership has already left the registry before cleanup finishes.
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
+
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()  # Exercise repeated caller cancellation.
+        await asyncio.sleep(0)
+        assert not first_ws._closed
+        assert not second_ws._closed
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert first_ws._closed and first_http._closed
+        assert second_ws._closed and second_http._closed
+        assert session._pty_sessions == {}
+
+    @pytest.mark.asyncio
     async def test_pty_ws_reader_error_message(self, fake_sandbox: _FakeSandboxInstance) -> None:
         from agents.extensions.sandbox.blaxel import sandbox as mod
 
