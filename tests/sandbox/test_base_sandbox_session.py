@@ -55,6 +55,25 @@ async def test_pty_cleanup_completes_before_propagating_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pty_cleanup_preserves_cancellation_reason() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(_session()._settle_pty_cleanup(cleanup()))
+    await started.wait()
+    task.cancel("caller stopped cleanup")
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+    assert exc_info.value.args == ("caller stopped cleanup",)
+
+
+@pytest.mark.asyncio
 async def test_pty_cleanup_preserves_cleanup_exception() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
