@@ -400,7 +400,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -410,6 +410,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -443,7 +444,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -456,6 +457,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -535,7 +537,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, str]:
         return await collect_pty_output(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
@@ -552,9 +554,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        source_text: str = "",
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
-        exit_code: int | None = entry.process.returncode
+        # Collection treats the session as finished on output_closed, which is set only after
+        # the process is reaped and every pump task has drained. Finalizing on returncode
+        # alone removes the session, and terminating it cancels a pump that still holds the
+        # rest of a character, so the two have to agree on what finished means.
+        exit_code: int | None = entry.process.returncode if entry.output_closed.is_set() else None
         live_process_id: int | None = process_id
 
         if exit_code is not None:
@@ -562,6 +569,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 output_chunks=entry.output_chunks,
                 output_lock=entry.output_lock,
                 output=output,
+                source_text=source_text,
                 original_token_count=original_token_count,
                 max_output_tokens=max_output_tokens,
             )

@@ -1748,6 +1748,7 @@ async def test_cloudflare_pty_finalize_flushes_a_partial_character_left_in_the_d
         process_id=process_id,
         entry=entry,
         output=b"hi ",
+        source_text="hi ",
         original_token_count=None,
     )
 

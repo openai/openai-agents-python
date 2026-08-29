@@ -909,7 +909,7 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -919,6 +919,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -943,7 +944,7 @@ class ModalSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -956,6 +957,7 @@ class ModalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -985,7 +987,7 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, str]:
         deadline = time.monotonic() + (yield_time_ms / 1000)
         # a character split across two windows starts in the tail the last one held back. the
         # field is left alone until the decode below commits, so a cancelled call keeps it
@@ -1019,7 +1021,7 @@ class ModalSandboxSession(BaseSandboxSession):
         exited = await self._peek_exit_code(entry.process) is not None
         text, entry.pending_output = decode_pty_window(chunks, is_final=exited)
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+        return truncated_text.encode("utf-8", errors="replace"), original_token_count, text
 
     async def _drain_modal_stream(
         self,
@@ -1117,6 +1119,7 @@ class ModalSandboxSession(BaseSandboxSession):
         entry: _ModalPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        source_text: str = "",
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = await self._peek_exit_code(entry.process)
@@ -1125,6 +1128,7 @@ class ModalSandboxSession(BaseSandboxSession):
             output, original_token_count = close_pty_tail(
                 leftover=entry.pending_output,
                 output=output,
+                source_text=source_text,
                 original_token_count=original_token_count,
                 max_output_tokens=max_output_tokens,
             )

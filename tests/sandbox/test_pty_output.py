@@ -30,7 +30,7 @@ async def test_collect_pty_output_waits_for_notification() -> None:
         output_notify.set()
 
     producer_task = asyncio.create_task(produce_output())
-    output, original_token_count = await collect_pty_output(
+    output, original_token_count, _ = await collect_pty_output(
         output_chunks=output_chunks,
         output_lock=output_lock,
         output_notify=output_notify,
@@ -52,7 +52,7 @@ async def test_collect_pty_output_drains_chunks_added_when_done() -> None:
         output_chunks.append(b" after done")
         return True
 
-    output, original_token_count = await collect_pty_output(
+    output, original_token_count, _ = await collect_pty_output(
         output_chunks=output_chunks,
         output_lock=asyncio.Lock(),
         output_notify=asyncio.Event(),
@@ -72,7 +72,7 @@ async def _one_window(
     done: dict[str, bool],
 ) -> bytes:
     notify.set()
-    collected, _ = await collect_pty_output(
+    collected, _, _ = await collect_pty_output(
         output_chunks=chunks,
         output_lock=lock,
         output_notify=notify,
@@ -112,7 +112,7 @@ async def test_collect_pty_output_replaces_a_truncated_character_once_done() -> 
     # the stream ends mid character, so there is no later window to complete it
     chunks: deque[bytes] = deque([b"hi " + "é".encode()[:1]])
 
-    collected, _ = await collect_pty_output(
+    collected, _, _ = await collect_pty_output(
         output_chunks=chunks,
         output_lock=asyncio.Lock(),
         output_notify=asyncio.Event(),
@@ -129,7 +129,7 @@ async def test_collect_pty_output_replaces_a_truncated_character_once_done() -> 
 async def test_collect_pty_output_leaves_complete_multibyte_output_alone() -> None:
     chunks: deque[bytes] = deque(["héllo".encode()])
 
-    collected, _ = await collect_pty_output(
+    collected, _, _ = await collect_pty_output(
         output_chunks=chunks,
         output_lock=asyncio.Lock(),
         output_notify=asyncio.Event(),
@@ -203,6 +203,7 @@ def test_close_pty_tail_replaces_the_leftover_and_leaves_a_clean_session_alone()
     finished, count = close_pty_tail(
         leftover="\u00e9".encode()[:1],
         output=b"hi ",
+        source_text="hi ",
         original_token_count=None,
         max_output_tokens=None,
     )
@@ -211,6 +212,7 @@ def test_close_pty_tail_replaces_the_leftover_and_leaves_a_clean_session_alone()
     unchanged, same = close_pty_tail(
         leftover=b"",
         output=b"hi ",
+        source_text="hi ",
         original_token_count=count,
         max_output_tokens=None,
     )
@@ -223,12 +225,14 @@ def test_close_pty_tail_applies_the_token_cap_to_what_it_adds() -> None:
     capped, _ = close_pty_tail(
         leftover="\u00e9".encode()[:1],
         output=b"",
+        source_text="",
         original_token_count=None,
         max_output_tokens=0,
     )
     uncapped, _ = close_pty_tail(
         leftover="\u00e9".encode()[:1],
         output=b"",
+        source_text="",
         original_token_count=None,
         max_output_tokens=None,
     )
@@ -246,6 +250,7 @@ async def test_flush_pty_tail_drains_what_the_session_still_holds() -> None:
         output_chunks=chunks,
         output_lock=lock,
         output=b"hi ",
+        source_text="hi ",
         original_token_count=None,
         max_output_tokens=None,
     )
@@ -267,7 +272,7 @@ async def test_collect_pty_output_keeps_the_tail_when_a_window_is_cancelled() ->
 
     async def window(yield_time_ms: int) -> bytes:
         notify.set()
-        collected, _ = await collect_pty_output(
+        collected, _, _ = await collect_pty_output(
             output_chunks=chunks,
             output_lock=lock,
             output_notify=notify,
@@ -308,7 +313,7 @@ async def test_collect_pty_output_puts_a_drained_window_back_when_cancelled() ->
 
     async def window(yield_time_ms: int) -> bytes:
         notify.set()
-        collected, _ = await collect_pty_output(
+        collected, _, _ = await collect_pty_output(
             output_chunks=chunks,
             output_lock=lock,
             output_notify=notify,
@@ -333,21 +338,45 @@ async def test_collect_pty_output_puts_a_drained_window_back_when_cancelled() ->
     assert (await window(60)).decode("utf-8") == "\u00e9"
 
 
-def test_close_pty_tail_leaves_a_window_that_already_hit_the_cap_alone() -> None:
-    # the window truncated, so its output is at the cap and the count describes the source.
-    # folding a tail in here would truncate a second time and recount the shortened display
-    display, count = truncate_text_by_tokens("a" * 100, 10)
+def test_close_pty_tail_keeps_the_last_thing_the_process_said() -> None:
+    # truncation keeps the start and the end, so a tail arriving at the end of a session belongs
+    # in the part that is kept. folding it into the rendered display instead leaves the old
+    # ending in place and hides it
+    source = "A" * 100
+    display, count = truncate_text_by_tokens(source, 10)
     assert count is not None
 
-    output, kept = close_pty_tail(
-        leftover="\u00e9".encode()[:1],
+    output, recounted = close_pty_tail(
+        leftover=b"<<<FINAL-ERROR>>>",
         output=display.encode(),
+        source_text=source,
         original_token_count=count,
         max_output_tokens=10,
     )
 
-    assert output == display.encode()
-    assert kept == count
+    expected, expected_count = truncate_text_by_tokens(source + "<<<FINAL-ERROR>>>", 10)
+    assert output.decode("utf-8") == expected
+    assert recounted == expected_count
+    assert "ERROR>>>" in output.decode("utf-8")
+    assert output != display.encode()
+
+
+def test_close_pty_tail_counts_the_source_and_not_the_shortened_display() -> None:
+    source = "a" * 100
+    display, count = truncate_text_by_tokens(source, 10)
+    assert count is not None
+
+    _, recounted = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=display.encode(),
+        source_text=source,
+        original_token_count=count,
+        max_output_tokens=10,
+    )
+
+    # recounting the display gave fewer tokens here than the window had already measured
+    assert recounted is not None
+    assert recounted >= count
 
 
 def test_close_pty_tail_still_folds_the_tail_into_an_untruncated_window() -> None:
@@ -357,6 +386,7 @@ def test_close_pty_tail_still_folds_the_tail_into_an_untruncated_window() -> Non
     output, recounted = close_pty_tail(
         leftover="\u00e9".encode()[:1],
         output=display.encode(),
+        source_text="hi ",
         original_token_count=count,
         max_output_tokens=10,
     )

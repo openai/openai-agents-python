@@ -856,7 +856,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -866,6 +866,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -891,7 +892,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, source_text = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -904,6 +905,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            source_text=source_text,
             max_output_tokens=max_output_tokens,
         )
 
@@ -966,7 +968,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         entry: _BlaxelPtySessionEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, str]:
         return await collect_pty_output(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
@@ -983,6 +985,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         entry: _BlaxelPtySessionEntry,
         output: bytes,
         original_token_count: int | None,
+        source_text: str = "",
         max_output_tokens: int | None = None,
     ) -> PtyExecUpdate:
         exit_code = entry.exit_code if entry.done else None
@@ -993,6 +996,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 output_chunks=entry.output_chunks,
                 output_lock=entry.output_lock,
                 output=output,
+                source_text=source_text,
                 original_token_count=original_token_count,
                 max_output_tokens=max_output_tokens,
             )

@@ -35,6 +35,7 @@ def close_pty_tail(
     *,
     leftover: bytes | bytearray,
     output: bytes,
+    source_text: str,
     original_token_count: int | None,
     max_output_tokens: int | None,
 ) -> tuple[bytes, int | None]:
@@ -45,11 +46,11 @@ def close_pty_tail(
     collection. Whatever is still waiting then has no later window to complete it, so it is
     replaced here rather than leaving with the session.
 
-    A window that already hit ``max_output_tokens`` is left alone. Its output is at the cap, so
-    the tail sits past it like the rest of what was dropped, and ``original_token_count`` has
-    already told the caller the output is short. Folding it in there would truncate the text a
-    second time and recount the shortened display instead of the source, reporting fewer tokens
-    than the window measured.
+    ``source_text`` is what the window decoded before it applied ``max_output_tokens``. The tail
+    is folded into that and truncated once, rather than appended to a rendered result. Truncation
+    keeps the start and the end of the source, so a tail belongs in the part that is kept: adding
+    it to the display instead would truncate twice, recount the shortened text rather than the
+    source, and leave a stale ending that hides whatever the process said last.
     """
     if not leftover:
         return output, original_token_count
@@ -58,12 +59,7 @@ def close_pty_tail(
     if not tail:
         return output, original_token_count
 
-    if original_token_count is not None:
-        return output, original_token_count
-
-    # Nothing was truncated, so this really is the whole output and the count still fits it.
-    text = output.decode("utf-8", errors="replace") + tail
-    truncated, counted = truncate_text_by_tokens(text, max_output_tokens)
+    truncated, counted = truncate_text_by_tokens(source_text + tail, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), counted
 
 
@@ -72,6 +68,7 @@ async def flush_pty_tail(
     output_chunks: deque[bytes],
     output_lock: asyncio.Lock,
     output: bytes,
+    source_text: str,
     original_token_count: int | None,
     max_output_tokens: int | None,
 ) -> tuple[bytes, int | None]:
@@ -84,6 +81,7 @@ async def flush_pty_tail(
     return close_pty_tail(
         leftover=leftover,
         output=output,
+        source_text=source_text,
         original_token_count=original_token_count,
         max_output_tokens=max_output_tokens,
     )
@@ -97,8 +95,13 @@ async def collect_pty_output(
     is_done: Callable[[], bool],
     yield_time_ms: int,
     max_output_tokens: int | None,
-) -> tuple[bytes, int | None]:
-    """Collect and truncate PTY output until the deadline or provider completion."""
+) -> tuple[bytes, int | None, str]:
+    """Collect and truncate PTY output until the deadline or provider completion.
+
+    Also returns the decoded window before truncation, so that a backend which later finds the
+    session finished can fold a remaining tail into the real source rather than into the
+    rendered result. It is internal, no public field carries it.
+    """
     deadline = time.monotonic() + (yield_time_ms / 1000)
     output = bytearray()
 
@@ -151,4 +154,4 @@ async def collect_pty_output(
         output_chunks.appendleft(pending)
 
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-    return truncated.encode("utf-8", errors="replace"), original_token_count
+    return truncated.encode("utf-8", errors="replace"), original_token_count, text

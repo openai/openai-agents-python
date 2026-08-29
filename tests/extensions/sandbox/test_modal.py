@@ -4543,6 +4543,7 @@ async def test_modal_pty_finalize_flushes_a_partial_character_when_the_process_h
         process_id=7,
         entry=entry,
         output=b"hi ",
+        source_text="hi ",
         original_token_count=None,
     )
 
