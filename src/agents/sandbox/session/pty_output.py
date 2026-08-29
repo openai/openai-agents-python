@@ -45,8 +45,11 @@ def close_pty_tail(
     collection. Whatever is still waiting then has no later window to complete it, so it is
     replaced here rather than leaving with the session.
 
-    The result is truncated again because the tail is added after the window already applied
-    ``max_output_tokens``, and the returned count covers the text including it.
+    A window that already hit ``max_output_tokens`` is left alone. Its output is at the cap, so
+    the tail sits past it like the rest of what was dropped, and ``original_token_count`` has
+    already told the caller the output is short. Folding it in there would truncate the text a
+    second time and recount the shortened display instead of the source, reporting fewer tokens
+    than the window measured.
     """
     if not leftover:
         return output, original_token_count
@@ -55,9 +58,13 @@ def close_pty_tail(
     if not tail:
         return output, original_token_count
 
+    if original_token_count is not None:
+        return output, original_token_count
+
+    # Nothing was truncated, so this really is the whole output and the count still fits it.
     text = output.decode("utf-8", errors="replace") + tail
-    truncated, recounted = truncate_text_by_tokens(text, max_output_tokens)
-    return truncated.encode("utf-8", errors="replace"), recounted
+    truncated, counted = truncate_text_by_tokens(text, max_output_tokens)
+    return truncated.encode("utf-8", errors="replace"), counted
 
 
 async def flush_pty_tail(
@@ -95,29 +102,38 @@ async def collect_pty_output(
     deadline = time.monotonic() + (yield_time_ms / 1000)
     output = bytearray()
 
-    while True:
-        async with output_lock:
-            while output_chunks:
-                output.extend(output_chunks.popleft())
-
-        if time.monotonic() >= deadline:
-            break
-
-        if is_done():
+    try:
+        while True:
             async with output_lock:
                 while output_chunks:
                     output.extend(output_chunks.popleft())
-            break
 
-        remaining_s = deadline - time.monotonic()
-        if remaining_s <= 0:
-            break
+            if time.monotonic() >= deadline:
+                break
 
-        try:
-            await asyncio.wait_for(output_notify.wait(), timeout=remaining_s)
-        except asyncio.TimeoutError:
-            break
-        output_notify.clear()
+            if is_done():
+                async with output_lock:
+                    while output_chunks:
+                        output.extend(output_chunks.popleft())
+                break
+
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+
+            try:
+                await asyncio.wait_for(output_notify.wait(), timeout=remaining_s)
+            except asyncio.TimeoutError:
+                break
+            output_notify.clear()
+    except asyncio.CancelledError:
+        # Everything drained so far lives only in this buffer, and the session outlives a
+        # cancelled call, so put it back before the cancellation goes on. Otherwise the next
+        # window reads a continuation whose lead byte went with the abandoned call and reports
+        # a replacement character for output that did arrive.
+        if output:
+            output_chunks.appendleft(bytes(output))
+        raise
 
     # Output is collected in repeated windows over one persistent deque, so a character
     # whose bytes straddle a window boundary used to be replaced twice and lost. An

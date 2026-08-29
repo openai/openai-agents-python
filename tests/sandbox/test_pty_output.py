@@ -11,6 +11,7 @@ from agents.sandbox.session.pty_output import (
     collect_pty_output,
     flush_pty_tail,
 )
+from agents.sandbox.session.pty_types import truncate_text_by_tokens
 
 
 @pytest.mark.asyncio
@@ -292,3 +293,73 @@ async def test_collect_pty_output_keeps_the_tail_when_a_window_is_cancelled() ->
     chunks.append(raw[1:])
     done["value"] = True
     assert (await window(60)).decode("utf-8") == "\u00e9"
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_puts_a_drained_window_back_when_cancelled() -> None:
+    # the window drains the lead byte a previous one requeued, then the call is cancelled while
+    # it waits. the session lives on, so those bytes have to go back or its next read reports a
+    # replacement character for output that did arrive
+    raw = "\u00e9".encode()
+    chunks: deque[bytes] = deque([raw[:1]])
+    lock = asyncio.Lock()
+    notify = asyncio.Event()
+    done = {"value": False}
+
+    async def window(yield_time_ms: int) -> bytes:
+        notify.set()
+        collected, _ = await collect_pty_output(
+            output_chunks=chunks,
+            output_lock=lock,
+            output_notify=notify,
+            is_done=lambda: done["value"],
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=None,
+        )
+        return collected
+
+    task = asyncio.create_task(window(60_000))
+    await asyncio.sleep(0.05)
+    assert not chunks
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert list(chunks) == [raw[:1]]
+
+    chunks.append(raw[1:])
+    done["value"] = True
+    assert (await window(60)).decode("utf-8") == "\u00e9"
+
+
+def test_close_pty_tail_leaves_a_window_that_already_hit_the_cap_alone() -> None:
+    # the window truncated, so its output is at the cap and the count describes the source.
+    # folding a tail in here would truncate a second time and recount the shortened display
+    display, count = truncate_text_by_tokens("a" * 100, 10)
+    assert count is not None
+
+    output, kept = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=display.encode(),
+        original_token_count=count,
+        max_output_tokens=10,
+    )
+
+    assert output == display.encode()
+    assert kept == count
+
+
+def test_close_pty_tail_still_folds_the_tail_into_an_untruncated_window() -> None:
+    display, count = truncate_text_by_tokens("hi ", 10)
+    assert count is None
+
+    output, recounted = close_pty_tail(
+        leftover="\u00e9".encode()[:1],
+        output=display.encode(),
+        original_token_count=count,
+        max_output_tokens=10,
+    )
+
+    assert output.decode("utf-8") == "hi \ufffd"
+    assert recounted is None
