@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -4991,3 +4992,55 @@ async def test_streamed_span_counts_request_before_terminal_event_close() -> Non
     assert len(spans) == 1
     assert spans[0]["span_data"]["usage"]["requests"] == 1  # type: ignore[index]
     assert spans[0]["span_data"]["usage"]["total_tokens"] == 0  # type: ignore[index]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_type", ["response.failed", "response.incomplete"])
+async def test_fetch_response_non_streaming_terminal_failure_releases_request_lock(
+    terminal_type: str,
+) -> None:
+    """A terminal failure must close the event iterator so it releases the request lock.
+
+    `_iter_websocket_response_events()` owns `_ws_request_lock` and releases it in its
+    `finally`. A bare `async for` that raises from the loop body leaves the generator
+    suspended, so the lock stays held until generator finalization runs.
+    """
+
+    class _TerminalEvent:
+        type = terminal_type
+        response = None
+
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=AsyncOpenAI(api_key="k"))  # type: ignore[arg-type]
+    lock = model._get_ws_request_lock()
+    closed = False
+
+    async def fake_events(create_kwargs: dict[str, Any]) -> AsyncIterator[Any]:
+        nonlocal closed
+        await lock.acquire()
+        try:
+            yield _TerminalEvent()
+            yield _TerminalEvent()  # pragma: no cover - the first event raises
+        finally:
+            closed = True
+            lock.release()
+
+    model._iter_websocket_response_events = fake_events  # type: ignore[assignment, method-assign]
+
+    with pytest.raises(ModelBehaviorError):
+        await model._fetch_response(
+            system_instructions=None,
+            input="hello",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
+
+    # Both must hold before control returns, without waiting on generator finalization.
+    assert closed is True
+    assert lock.locked() is False

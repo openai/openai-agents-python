@@ -5,7 +5,15 @@ import contextlib
 import inspect
 import json
 import weakref
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -1295,18 +1303,24 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
         final_response: Response | None = None
         terminal_event_type: str | None = None
-        async for event in self._iter_websocket_response_events(create_kwargs):
-            event_type = getattr(event, "type", None)
-            if isinstance(event, ResponseCompletedEvent):
-                final_response = event.response
-                terminal_event_type = event.type
-            elif event_type in {"response.incomplete", "response.failed"}:
-                terminal_event_type = cast(str, event_type)
-                terminal_response = getattr(event, "response", None)
-                raise response_terminal_failure_error(
-                    terminal_event_type,
-                    terminal_response if isinstance(terminal_response, Response) else None,
-                )
+        # `async for` alone does not close its iterator when the loop body raises, and this
+        # iterator owns the request lock and releases it in its `finally`. Closing it here
+        # keeps that release in the owning task instead of waiting on generator finalization.
+        async with contextlib.aclosing(
+            self._iter_websocket_response_events(create_kwargs)
+        ) as events:
+            async for event in events:
+                event_type = getattr(event, "type", None)
+                if isinstance(event, ResponseCompletedEvent):
+                    final_response = event.response
+                    terminal_event_type = event.type
+                elif event_type in {"response.incomplete", "response.failed"}:
+                    terminal_event_type = cast(str, event_type)
+                    terminal_response = getattr(event, "response", None)
+                    raise response_terminal_failure_error(
+                        terminal_event_type,
+                        terminal_response if isinstance(terminal_response, Response) else None,
+                    )
 
         if final_response is None:
             terminal_event_hint = (
@@ -1321,7 +1335,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
 
     async def _iter_websocket_response_events(
         self, create_kwargs: dict[str, Any]
-    ) -> AsyncIterator[ResponseStreamEvent]:
+    ) -> AsyncGenerator[ResponseStreamEvent, None]:
         request_timeout = create_kwargs.get("timeout", omit)
         if _is_openai_omitted_value(request_timeout):
             request_timeout = getattr(self._client, "timeout", None)
