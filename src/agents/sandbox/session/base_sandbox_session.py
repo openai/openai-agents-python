@@ -711,6 +711,23 @@ class BaseSandboxSession(abc.ABC):
             raise PtySessionNotFoundError(session_id=session_id)
         return entry
 
+    async def _settle_pty_cleanup(self, operation: Awaitable[None]) -> None:
+        """Complete cleanup after PTY ownership leaves the session registry."""
+
+        task = asyncio.create_task(operation, name="agents.pty_cleanup")
+        completion = asyncio.create_task(asyncio.wait((task,)))
+        caller_cancelled = False
+        while not completion.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                caller_cancelled = True
+
+        completion.result()
+        task.result()
+        if caller_cancelled:
+            raise asyncio.CancelledError()
+
     async def pty_exec_start(
         self,
         *command: str | Path,

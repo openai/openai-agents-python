@@ -847,7 +847,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
         if pruned is not None:
-            await self._terminate_pty_entry(pruned)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(pruned))
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -911,7 +911,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             self._pty_sessions.clear()
             self._reserved_pty_process_ids.clear()
         for entry in entries:
-            await self._terminate_pty_entry(entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
 
     # -- PTY internals -------------------------------------------------------
 
@@ -990,7 +990,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(removed))
             live_process_id = None
 
         return PtyExecUpdate(

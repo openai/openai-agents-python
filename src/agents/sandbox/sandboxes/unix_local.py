@@ -391,7 +391,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             process_count = len(self._pty_processes)
 
         if pruned_entry is not None:
-            await self._terminate_pty_entry(pruned_entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(pruned_entry))
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -464,7 +464,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             self._reserved_pty_process_ids.clear()
 
         for entry in entries:
-            await self._terminate_pty_entry(entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
         if self._host_environment_allowlist is None:
@@ -559,7 +559,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(removed))
             live_process_id = None
 
         return PtyExecUpdate(

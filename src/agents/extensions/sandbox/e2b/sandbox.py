@@ -1041,7 +1041,7 @@ class E2BSandboxSession(BaseSandboxSession):
             )
 
         if pruned_entry is not None:
-            await self._terminate_pty_entry(pruned_entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(pruned_entry))
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -1109,7 +1109,7 @@ class E2BSandboxSession(BaseSandboxSession):
             self._reserved_pty_process_ids.clear()
 
         for entry in entries:
-            await self._terminate_pty_entry(entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
@@ -1277,7 +1277,7 @@ class E2BSandboxSession(BaseSandboxSession):
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(removed))
             live_process_id = None
 
         return PtyExecUpdate(
