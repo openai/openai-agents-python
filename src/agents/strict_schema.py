@@ -36,6 +36,11 @@ _OPEN_OBJECT_ERROR = (
     "to a strict schema without changing its accepted values."
 )
 
+_PREFIX_ITEMS_ERROR = (
+    "JSON schema contains `prefixItems`, which is not supported by strict tool schemas. "
+    "Use a homogeneous tuple (tuple[T, ...]) or list[T] instead."
+)
+
 _UNVALIDATED_REF_ERROR = (
     "JSON schema contains a reference whose target was not validated for strict mode."
 )
@@ -166,6 +171,9 @@ def _ensure_strict_json_schema(
 
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
+
+    if "prefixItems" in json_schema:
+        raise UserError(_PREFIX_ITEMS_ERROR)
 
     # Bound the total number of nodes we expand so a malicious `$ref` fan-out cannot expand
     # exponentially and exhaust CPU and memory.

@@ -486,6 +486,26 @@ def test_var_positional_fixed_length_tuple_annotation_is_rejected(func: Any):
         function_schema(func, use_docstring_info=False)
 
 
+def _fixed_length_tuple_parameter(point: tuple[int, str]) -> str:
+    return repr(point)
+
+
+def test_fixed_length_tuple_parameter_is_rejected_in_strict_mode():
+    with pytest.raises(UserError, match=r"`prefixItems`.*list\[T\]"):
+        function_schema(_fixed_length_tuple_parameter, use_docstring_info=False)
+
+
+def test_fixed_length_tuple_parameter_remains_available_in_non_strict_mode():
+    fs = function_schema(
+        _fixed_length_tuple_parameter,
+        use_docstring_info=False,
+        strict_json_schema=False,
+    )
+
+    point_schema = fs.params_json_schema["properties"]["point"]
+    assert point_schema["prefixItems"] == [{"type": "integer"}, {"type": "string"}]
+
+
 def _var_positional_homogeneous_tuple(*args: tuple[int, ...]) -> int:
     return len(args)
 
