@@ -709,14 +709,17 @@ def git_last_commit_timestamp(path: str) -> int:
 
 def should_translate_based_on_translation(file_path: str) -> bool:
     relative_path = os.path.relpath(file_path, source_dir)
-    ja_path = os.path.join(source_dir, "ja", relative_path)
     en_timestamp = git_last_commit_timestamp(file_path)
     if en_timestamp == 0:
         return True
-    ja_timestamp = git_last_commit_timestamp(ja_path)
-    if ja_timestamp == 0:
-        return True
-    return ja_timestamp < en_timestamp
+    for lang_code in languages:
+        translated_path = os.path.join(source_dir, lang_code, relative_path)
+        if not os.path.exists(translated_path):
+            return True
+        translated_timestamp = git_last_commit_timestamp(translated_path)
+        if translated_timestamp == 0 or translated_timestamp < en_timestamp:
+            return True
+    return False
 
 
 def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
@@ -809,7 +812,10 @@ def main():
         "--mode",
         choices=["only-changes", "full"],
         default="only-changes",
-        help="Translation mode. 'only-changes' translates only when the Japanese file is older than the English source.",
+        help=(
+            "Translation mode. 'only-changes' translates when any configured translation is "
+            "missing or older than the English source."
+        ),
     )
     args = parser.parse_args()
 

@@ -127,3 +127,70 @@ def test_a_heading_with_its_own_attribute_list_is_not_rewritten(translate_docs: 
     translated = "## アルファ {.lead}\n\n## ベータ\n"
 
     assert translate_docs.preserve_heading_anchors(source, translated) == translated
+
+
+@pytest.mark.parametrize("stale_lang", ["ja", "ko", "zh"])
+@pytest.mark.parametrize("stale_timestamp", [0, 99])
+def test_translation_freshness_checks_every_language(
+    translate_docs: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    stale_lang: str,
+    stale_timestamp: int,
+) -> None:
+    source_path = translate_docs.os.path.join("docs", "agents.md")
+    timestamps = {source_path: 100}
+    for lang_code in translate_docs.languages:
+        timestamps[translate_docs.os.path.join("docs", lang_code, "agents.md")] = 100
+    timestamps[translate_docs.os.path.join("docs", stale_lang, "agents.md")] = stale_timestamp
+
+    monkeypatch.setattr(translate_docs.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(
+        translate_docs,
+        "git_last_commit_timestamp",
+        lambda path: timestamps.get(path, 0),
+    )
+
+    assert translate_docs.should_translate_based_on_translation(source_path) is True
+
+
+@pytest.mark.parametrize("missing_lang", ["ja", "ko", "zh"])
+def test_translation_freshness_checks_filesystem_for_deleted_translation(
+    translate_docs: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_lang: str,
+) -> None:
+    source_path = translate_docs.os.path.join("docs", "agents.md")
+    missing_path = translate_docs.os.path.join("docs", missing_lang, "agents.md")
+    timestamps = {source_path: 100}
+    for lang_code in translate_docs.languages:
+        timestamps[translate_docs.os.path.join("docs", lang_code, "agents.md")] = 101
+
+    # Git still reports the deletion commit for a missing tracked file. The filesystem
+    # check must win even though that timestamp is newer than the English source.
+    monkeypatch.setattr(translate_docs.os.path, "exists", lambda path: path != missing_path)
+    monkeypatch.setattr(
+        translate_docs,
+        "git_last_commit_timestamp",
+        lambda path: timestamps.get(path, 0),
+    )
+
+    assert translate_docs.should_translate_based_on_translation(source_path) is True
+
+
+def test_translation_freshness_skips_when_all_languages_are_current(
+    translate_docs: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = translate_docs.os.path.join("docs", "agents.md")
+    timestamps = {source_path: 100}
+    for lang_code in translate_docs.languages:
+        timestamps[translate_docs.os.path.join("docs", lang_code, "agents.md")] = 100
+
+    monkeypatch.setattr(translate_docs.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(
+        translate_docs,
+        "git_last_commit_timestamp",
+        lambda path: timestamps.get(path, 0),
+    )
+
+    assert translate_docs.should_translate_based_on_translation(source_path) is False
