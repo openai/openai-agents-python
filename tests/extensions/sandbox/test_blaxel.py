@@ -1786,6 +1786,8 @@ class TestPtyExec:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
+            assert task.cancelled()
+
         assert fake_aiohttp.session is not None
         assert fake_aiohttp.session._closed
         assert session._pty_sessions == {}
