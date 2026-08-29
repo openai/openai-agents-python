@@ -118,7 +118,7 @@ async def test_unix_local_exec_cancellation_terminates_process_group(
         assert not is_alive(child_pid)
     finally:
         if process_group_id is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.killpg(process_group_id, signal.SIGKILL)
 
 
@@ -179,10 +179,10 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
         assert is_alive(escaped_pid)
     finally:
         if process_group_id is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.killpg(process_group_id, signal.SIGKILL)
         if escaped_pid is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.kill(escaped_pid, signal.SIGKILL)
         if not task.done():
             task.cancel()
@@ -193,7 +193,7 @@ async def test_unix_local_exec_cancellation_does_not_wait_for_escaped_descendant
 async def test_unix_local_exec_cancellation_retains_process_group_after_leader_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The process-group keeper must prevent the original group ID from being
+    # The process-group wrapper must prevent the original group ID from being
     # reused while cancellation is still able to clean up the group.
     monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
     workspace = tmp_path / "workspace"
@@ -248,10 +248,10 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
         assert is_alive(escaped_pid)
     finally:
         if process_group_id is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.killpg(process_group_id, signal.SIGKILL)
         if escaped_pid is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.kill(escaped_pid, signal.SIGKILL)
         if not task.done():
             task.cancel()
@@ -259,11 +259,11 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
 
 
 @pytest.mark.asyncio
-async def test_unix_local_exec_does_not_expose_keeper_to_child_waitpid(
+async def test_unix_local_exec_does_not_expose_wrapper_to_child_waitpid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The keeper must not remain a child of the command. Otherwise a command
-    # that waits for all of its own children can wait forever for the keeper's
+    # The wrapper must not remain a child of the command. Otherwise a command
+    # that waits for all of its own children can wait forever for the wrapper's
     # cancellation control pipe to close.
     monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
     workspace = tmp_path / "workspace"
@@ -297,40 +297,53 @@ async def test_unix_local_exec_does_not_expose_keeper_to_child_waitpid(
 
 
 @pytest.mark.asyncio
-async def test_unix_local_exec_reaps_process_group_keeper(
+async def test_unix_local_exec_uses_spawn_safe_process_group_wrapper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    keeper_waited = asyncio.Event()
     subprocess_calls: list[tuple[object, ...]] = []
+    closed_fds: list[int] = []
 
     class _Process:
-        def __init__(self, pid: int, returncode: int) -> None:
-            self.pid = pid
-            self.returncode = returncode
+        pid = 123
+        returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
             return b"output", b""
 
         async def wait(self) -> int:
-            if self.pid == 123:
-                keeper_waited.set()
             return self.returncode
 
         def kill(self) -> None:
             raise AssertionError("normal execution should not kill the process group")
 
-    keeper = _Process(pid=123, returncode=0)
-    process = _Process(pid=456, returncode=0)
+    process = _Process()
 
     async def create_subprocess(*args: object, **kwargs: object) -> _Process:
-        _ = kwargs
         subprocess_calls.append(args)
-        return keeper if len(subprocess_calls) == 1 else process
+        assert kwargs["start_new_session"] is True
+        assert "preexec_fn" not in kwargs
+        return process
+
+    async def read_status(_fd: int) -> int:
+        return 0
+
+    async def read_output(_process: object) -> tuple[bytes, bytes]:
+        return b"output", b""
+
+    close_fd = unix_local_module._close_fd_quietly
+
+    def record_close(fd: int | None) -> None:
+        if fd is not None:
+            closed_fds.append(fd)
+        close_fd(fd)
 
     monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(unix_local_module, "_read_process_exit_code", read_status)
+    monkeypatch.setattr(unix_local_module, "_read_process_output", read_output)
+    monkeypatch.setattr(unix_local_module, "_close_fd_quietly", record_close)
     session = UnixLocalSandboxSession(
         state=UnixLocalSandboxSessionState(
             manifest=Manifest(root=str(workspace)),
@@ -343,8 +356,60 @@ async def test_unix_local_exec_reaps_process_group_keeper(
     assert result.stdout == b"output"
     assert result.stderr == b""
     assert result.exit_code == 0
-    assert keeper_waited.is_set()
-    assert len(subprocess_calls) == 2
+    assert len(subprocess_calls) == 1
+    args = subprocess_calls[0]
+    assert args[:3] == (
+        sys.executable,
+        "-c",
+        unix_local_module._PROCESS_GROUP_WRAPPER_SCRIPT,
+    )
+    assert args[5:] == ("echo", "hello")
+    assert len(closed_fds) == len(set(closed_fds))
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_keeps_command_out_of_host_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent_session_id = os.getsid(0)
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    result = await session._exec_internal(
+        sys.executable,
+        "-c",
+        "import os; print(os.getsid(0), os.getpgrp())",
+    )
+
+    command_session_id, command_process_group_id = (int(value) for value in result.stdout.split())
+    assert command_session_id == command_process_group_id
+    assert command_session_id != parent_session_id
+
+
+@pytest.mark.asyncio
+async def test_unix_local_exec_preserves_command_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    result = await session._exec_internal(sys.executable, "-c", "raise SystemExit(17)")
+
+    assert result.exit_code == 17
 
 
 @pytest.mark.asyncio
@@ -394,14 +459,13 @@ async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_cleanup_fails(
+async def test_unix_local_exec_cancellation_survives_unreapable_output_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     communicate_started = asyncio.Event()
-    cleanup_started = asyncio.Event()
-    cleanup_release = asyncio.Event()
+    wait_called = asyncio.Event()
     transport_closed = False
     communicate_calls = 0
 
@@ -418,27 +482,38 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
         async def communicate(self) -> tuple[bytes, bytes]:
             nonlocal communicate_calls
             communicate_calls += 1
-            if communicate_calls == 1:
-                communicate_started.set()
-                await asyncio.Event().wait()
-            cleanup_started.set()
-            await cleanup_release.wait()
-            raise RuntimeError("synthetic cleanup failure")
+            communicate_started.set()
+            await asyncio.Event().wait()
+            return b"", b""
 
         def kill(self) -> None:
             pass
+
+        async def wait(self) -> int:
+            wait_called.set()
+            return -signal.SIGKILL
 
     process = _Process()
 
     async def _create_process(*_args: object, **_kwargs: object) -> _Process:
         return process
 
+    async def _read_status(_fd: int) -> int:
+        await asyncio.Event().wait()
+        return 0
+
+    async def _read_output(_process: object) -> tuple[bytes, bytes]:
+        return await process.communicate()
+
     monkeypatch.setattr(
         unix_local_module.asyncio,
         "create_subprocess_exec",
         _create_process,
     )
+    monkeypatch.setattr(unix_local_module, "_read_process_exit_code", _read_status)
+    monkeypatch.setattr(unix_local_module, "_read_process_output", _read_output)
     monkeypatch.setattr(unix_local_module.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(unix_local_module, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.01)
     session = UnixLocalSandboxSession(
         state=UnixLocalSandboxSessionState(
             manifest=Manifest(root=str(workspace)),
@@ -450,17 +525,13 @@ async def test_unix_local_exec_cancellation_preserves_cancelled_error_when_clean
         await asyncio.wait_for(communicate_started.wait(), timeout=1)
 
         task.cancel()
-        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
-        task.cancel()
-        cleanup_release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1)
 
-        assert communicate_calls == 2
-        assert cleanup_started.is_set()
+        assert communicate_calls == 1
+        assert wait_called.is_set()
         assert transport_closed
     finally:
-        cleanup_release.set()
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
