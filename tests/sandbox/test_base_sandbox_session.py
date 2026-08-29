@@ -45,13 +45,14 @@ async def test_pty_cleanup_completes_before_propagating_cancellation() -> None:
 
     task = asyncio.create_task(_session()._settle_pty_cleanup(cleanup()))
     await started.wait()
-    task.cancel()
-    task.cancel()
+    task.cancel("cleanup requested")
+    task.cancel("cleanup requested again")
     release.set()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
     assert completed
+    assert exc_info.value.args == ("cleanup requested",)
 
 
 @pytest.mark.asyncio
