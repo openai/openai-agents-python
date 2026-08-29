@@ -71,3 +71,30 @@ async def test_pty_cleanup_preserves_cleanup_exception() -> None:
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
         await task
+
+
+@pytest.mark.asyncio
+async def test_pty_cleanup_settles_a_sequential_batch() -> None:
+    started: list[int] = []
+    release = asyncio.Event()
+    completed: list[int] = []
+
+    async def cleanup_all() -> None:
+        for entry in (1, 2):
+            started.append(entry)
+            await release.wait()
+            completed.append(entry)
+            release.clear()
+            if entry == 1:
+                release.set()
+
+    task = asyncio.create_task(_session()._settle_pty_cleanup(cleanup_all()))
+    while started != [1]:
+        await asyncio.sleep(0)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert started == [1, 2]
+    assert completed == [1, 2]
