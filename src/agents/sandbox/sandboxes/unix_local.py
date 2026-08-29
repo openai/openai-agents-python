@@ -105,25 +105,46 @@ _PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
 def _keep_process_group_alive(control_fd: int) -> None:
-    """Keep the spawned process group identity stable until the parent closes control_fd."""
-    keeper_pid = os.fork()
-    if keeper_pid == 0:
-        for fd in (0, 1, 2):
-            if fd != control_fd:
-                with suppress(OSError):
-                    os.close(fd)
-        max_fd = os.sysconf("SC_OPEN_MAX")
-        os.closerange(3, control_fd)
-        os.closerange(control_fd + 1, max_fd)
-        while True:
-            try:
-                if not os.read(control_fd, 4096):
+    """Keep the process-group identity stable without becoming a child of the command."""
+    intermediate_pid = os.fork()
+    if intermediate_pid == 0:
+        try:
+            keeper_pid = os.fork()
+        except BaseException:
+            os._exit(1)
+
+        if keeper_pid == 0:
+            for fd in (0, 1, 2):
+                if fd != control_fd:
+                    with suppress(OSError):
+                        os.close(fd)
+            max_fd = os.sysconf("SC_OPEN_MAX")
+            os.closerange(3, control_fd)
+            os.closerange(control_fd + 1, max_fd)
+            while True:
+                try:
+                    if not os.read(control_fd, 4096):
+                        break
+                except InterruptedError:
+                    continue
+                except OSError:
                     break
-            except InterruptedError:
-                continue
-            except OSError:
-                break
+            os._exit(0)
+
+        # The keeper is now reparented away from the command when this
+        # intermediate process exits. It remains in the command's process
+        # group, while the command cannot observe it with waitpid(-1, ...).
         os._exit(0)
+
+    while True:
+        try:
+            _, status = os.waitpid(intermediate_pid, 0)
+            break
+        except InterruptedError:
+            continue
+
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        raise ChildProcessError("failed to create the process-group keeper")
 
     os.close(control_fd)
 

@@ -250,6 +250,44 @@ async def test_unix_local_exec_cancellation_retains_process_group_after_leader_e
 
 
 @pytest.mark.asyncio
+async def test_unix_local_exec_does_not_expose_keeper_to_child_waitpid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The keeper must not remain a child of the command. Otherwise a command
+    # that waits for all of its own children can wait forever for the keeper's
+    # cancellation control pipe to close.
+    monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = (
+        "import os\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    os._exit(0)\n"
+        "while True:\n"
+        "    try:\n"
+        "        os.waitpid(-1, 0)\n"
+        "    except ChildProcessError:\n"
+        "        break\n"
+        "os.write(1, b'done\\n')\n"
+    )
+    session = UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    result = await asyncio.wait_for(
+        session._exec_internal(sys.executable, "-c", command),
+        timeout=1,
+    )
+
+    assert result.stdout == b"done\n"
+    assert result.stderr == b""
+
+
+@pytest.mark.asyncio
 async def test_unix_local_exec_cleanup_survives_repeated_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
