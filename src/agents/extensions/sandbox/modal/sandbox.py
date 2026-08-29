@@ -1139,6 +1139,12 @@ class ModalSandboxSession(BaseSandboxSession):
         exit_code = await self._peek_exit_code(entry.process)
         live_process_id: int | None = process_id
         if exit_code is not None:
+            async with self._pty_lock:
+                removed = self._pty_processes.pop(process_id, None)
+                self._reserved_pty_process_ids.discard(process_id)
+
+            # Reading the tail clears it, so the removal has to commit first. Cancelled the
+            # other way round, the session stays registered with its last bytes already gone.
             output, original_token_count = close_pty_tail(
                 leftover=entry.pending_output,
                 output=output,
@@ -1147,10 +1153,6 @@ class ModalSandboxSession(BaseSandboxSession):
                 max_output_tokens=max_output_tokens,
             )
             entry.pending_output = b""
-
-            async with self._pty_lock:
-                removed = self._pty_processes.pop(process_id, None)
-                self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
                 await self._terminate_pty_entry(removed)
             live_process_id = None

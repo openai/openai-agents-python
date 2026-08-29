@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import signal
 import tarfile
@@ -216,6 +217,48 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 
 @pytest.mark.review_optional
 class TestUnixLocalPty:
+    @pytest.mark.asyncio
+    async def test_finalize_does_not_consume_the_tail_before_removal_commits(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # the drain empties entry owned state, so if a cancelled finalise can get between it
+        # and the removal, the session stays registered with its last bytes already gone
+        session = _RecordingUnixLocalSession(tmp_path)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=0, pid=None),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=True)
+        entry.output_closed.set()
+        raw = "\u00e9".encode()
+        entry.output_chunks.append(raw[:1])
+
+        async with session._pty_lock:
+            session._pty_processes[1] = entry
+            session._reserved_pty_process_ids.add(1)
+
+        # hold the session map so finalisation blocks on it
+        await session._pty_lock.acquire()
+        task = asyncio.create_task(
+            session._finalize_pty_update(
+                process_id=1,
+                entry=entry,
+                output=b"hi ",
+                original_token_count=None,
+                source_text="hi ",
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        session._pty_lock.release()
+
+        # nothing was consumed, so the session can still be finalised properly afterwards
+        assert list(entry.output_chunks) == [raw[:1]]
+        assert 1 in session._pty_processes
+
     @pytest.mark.asyncio
     async def test_session_is_not_finalized_while_a_pump_still_holds_output(
         self,

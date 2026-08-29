@@ -865,6 +865,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
         live_process_id: int | None = process_id
 
         if entry.done:
+            async with self._pty_lock:
+                removed = self._pty_sessions.pop(process_id, None)
+                self._reserved_pty_process_ids.discard(process_id)
+            # Draining is destructive and the tail lives on the entry, so the removal has to
+            # commit first. Cancelled the other way round, the session stays registered with
+            # its last bytes already gone and a later call cannot get them back.
             output, original_token_count = await flush_pty_tail(
                 output_chunks=entry.output_chunks,
                 output_lock=entry.output_lock,
@@ -873,9 +879,6 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 original_token_count=original_token_count,
                 max_output_tokens=max_output_tokens,
             )
-            async with self._pty_lock:
-                removed = self._pty_sessions.pop(process_id, None)
-                self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
                 await self._terminate_pty_entry(removed)
             live_process_id = None
