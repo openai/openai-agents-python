@@ -448,11 +448,18 @@ def _did_start_websocket_response(error: Exception) -> bool:
     return bool(getattr(error, "_openai_agents_ws_response_started", False))
 
 
+def _is_websocket_disconnect_error(error: Exception) -> bool:
+    exc_module = error.__class__.__module__
+    exc_name = error.__class__.__name__
+    # websockets reports a peer closing before a valid HTTP upgrade as InvalidMessage.
+    return exc_module.startswith("websockets") and (
+        exc_name.startswith("ConnectionClosed") or exc_name == "InvalidMessage"
+    )
+
+
 def _is_never_sent_websocket_error(error: Exception) -> bool:
     for candidate in _iter_retry_error_chain(error):
-        if candidate.__class__.__module__.startswith(
-            "websockets"
-        ) and candidate.__class__.__name__.startswith("ConnectionClosed"):
+        if _is_websocket_disconnect_error(candidate):
             if "client closed" not in str(candidate).lower():
                 return True
     return False
@@ -1343,17 +1350,19 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             )
             retry_pre_event_disconnect = _should_retry_pre_event_websocket_disconnect()
             while True:
-                connection = await self._await_websocket_with_timeout(
-                    self._ensure_websocket_connection(
-                        ws_url, request_headers, connect_timeout=request_timeouts.connect
-                    ),
-                    request_timeouts.connect,
-                    "connect",
-                )
+                connection: Any = None
                 received_any_event = False
                 yielded_terminal_event = False
                 sent_request_frame = False
                 try:
+                    connection = await self._await_websocket_with_timeout(
+                        self._ensure_websocket_connection(
+                            ws_url, request_headers, connect_timeout=request_timeouts.connect
+                        ),
+                        request_timeouts.connect,
+                        "connect",
+                    )
+
                     # Once we begin awaiting `send()`, treat the request as potentially
                     # transmitted to avoid replaying it on send/close races.
                     sent_request_frame = True
@@ -1410,11 +1419,15 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                     is_non_terminal_generator_exit = (
                         isinstance(exc, GeneratorExit) and not yielded_terminal_event
                     )
-                    if isinstance(exc, asyncio.CancelledError) or is_non_terminal_generator_exit:
-                        self._force_abort_websocket_connection(connection)
-                        self._clear_websocket_connection_state()
-                    elif not (yielded_terminal_event and isinstance(exc, GeneratorExit)):
-                        await self._drop_websocket_connection()
+                    if connection is not None:
+                        if (
+                            isinstance(exc, asyncio.CancelledError)
+                            or is_non_terminal_generator_exit
+                        ):
+                            self._force_abort_websocket_connection(connection)
+                            self._clear_websocket_connection_state()
+                        elif not (yielded_terminal_event and isinstance(exc, GeneratorExit)):
+                            await self._drop_websocket_connection()
 
                     if (
                         isinstance(exc, Exception)
@@ -1472,9 +1485,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 "Responses websocket connection closed before a terminal response event."
             )
 
-        exc_module = exc.__class__.__module__
-        exc_name = exc.__class__.__name__
-        return exc_module.startswith("websockets") and exc_name.startswith("ConnectionClosed")
+        return _is_websocket_disconnect_error(exc)
 
     def _get_websocket_request_timeouts(self, timeout: Any) -> _WebsocketRequestTimeouts:
         if timeout is None or _is_openai_omitted_value(timeout):
