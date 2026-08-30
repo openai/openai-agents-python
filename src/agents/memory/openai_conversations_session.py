@@ -122,6 +122,10 @@ class OpenAIConversationsSession(SessionABC):
         )
 
     async def pop_item(self) -> TResponseInputItem | None:
+        if self._session_id is None:
+            # Mirrors clear_session: popping from an uninitialized session must not
+            # lazily create a remote conversation.
+            return None
         session_id = await self._get_session_id()
         items = await self.get_items(limit=1)
         if not items:

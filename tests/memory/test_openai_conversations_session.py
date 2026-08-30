@@ -324,6 +324,23 @@ class TestOpenAIConversationsSessionBasicOperations:
             mock_openai_client.conversations.items.delete.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_pop_item_uninitialized_does_not_create_session(self, mock_openai_client):
+        """Test that pop_item on an uninitialized session does not create a remote conversation.
+
+        pop_item is a read-then-delete operation; lazily allocating a conversation
+        for it would leak an empty remote conversation and pin the session to it,
+        like clear_session, which guards the same way.
+        """
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        popped_item = await session.pop_item()
+
+        assert popped_item is None
+        mock_openai_client.conversations.create.assert_not_called()
+        mock_openai_client.conversations.items.delete.assert_not_called()
+        assert session._session_id is None
+
+    @pytest.mark.asyncio
     async def test_clear_session(self, mock_openai_client):
         """Test clearing the entire session."""
         session = OpenAIConversationsSession(
