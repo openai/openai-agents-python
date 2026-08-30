@@ -662,17 +662,32 @@ async def save_result_to_session(
             item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
         ]
 
+    if resumed_write_state is not None and resumed_write_state._pending_session_write is not None:
+        raise UserError("Resolve the pending Session write before saving another batch")
+
+    if pending_input_snapshot is not None:
+        if resumed_write_state is None:
+            raise UserError("Pending input Session writes require a resumable RunState")
+        if len(new_items) != len(pending_input_snapshot) or not all(
+            isinstance(item, InputItem) for item in new_items
+        ):
+            raise UserError("Pending input Session writes must contain only admission items")
+        if resumed_write_state.pending_input[: len(pending_input_snapshot)] != (
+            pending_input_snapshot
+        ):
+            raise UserError("Pending input changed before its Session write could be checkpointed")
+        if len(items_to_save) == 0:
+            resumed_write_state._generated_items.extend(new_items)
+            resumed_write_state._session_items.extend(new_items)
+            del resumed_write_state._pending_input[: len(pending_input_snapshot)]
+            return 0
+
     if len(items_to_save) == 0:
-        if pending_input_snapshot is not None:
-            raise UserError("Cannot checkpoint pending input that has no persistable Session items")
         if run_state is not None:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
     if resumed_write_state is not None:
-        if resumed_write_state._pending_session_write is not None:
-            raise UserError("Resolve the pending Session write before saving another batch")
-
         pending_write: _PendingSessionWrite = {
             "session_id": session.session_id,
             "items": copy.deepcopy(items_to_save),
@@ -683,17 +698,6 @@ async def save_result_to_session(
             ),
         }
         if pending_input_snapshot is not None:
-            if len(new_items) != len(pending_input_snapshot) or not all(
-                isinstance(item, InputItem) for item in new_items
-            ):
-                raise UserError("Pending input Session writes must contain only admission items")
-            if (
-                resumed_write_state.pending_input[: len(pending_input_snapshot)]
-                != pending_input_snapshot
-            ):
-                raise UserError(
-                    "Pending input changed before its Session write could be checkpointed"
-                )
             pending_write["pending_input"] = copy.deepcopy(new_items_as_input)
             resumed_write_state._generated_items.extend(new_items)
             resumed_write_state._session_items.extend(new_items)

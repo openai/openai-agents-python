@@ -864,6 +864,35 @@ async def test_conversations_checkpoint_rejects_corrupted_required_item_id() -> 
 
 
 @pytest.mark.asyncio
+async def test_conversations_admits_unpersistable_pending_input_without_append() -> None:
+    session = _CheckpointOpenAIConversationsSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    session_items_before = list(session.items)
+    reasoning_input = cast(TResponseInputItem, {"type": "reasoning", "summary": []})
+    state.add_input([reasoning_input])
+    model.enqueue([get_text_message("Recovered")])
+
+    result = await Runner.run(
+        agent,
+        state,
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    assert result.final_output == "Recovered"
+    assert state.pending_input == []
+    assert state._pending_session_write is None
+    assert not any(_item_type(item) == "reasoning" for item in session.items)
+    assert session.items[: len(session_items_before)] == session_items_before
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    assert sum(_item_type(item) == "reasoning" for item in model_input) == 1
+    assert sum(_item_type(item) == "reasoning" for item in result.to_input_list()) == 1
+    admitted_items = [item for item in state._generated_items if isinstance(item, InputItem)]
+    assert [item.raw_item for item in admitted_items] == [reasoning_input]
+    assert [item for item in state._session_items if isinstance(item, InputItem)] == admitted_items
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
 async def test_pending_input_assistant_message_round_trip_recovers_exactly_once(
     failure: Literal["before", "after"],
