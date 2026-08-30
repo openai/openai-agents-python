@@ -72,8 +72,8 @@ class PromptUtil:
                 resolved_prompt = await func_result
             else:
                 resolved_prompt = func_result
-            if not isinstance(resolved_prompt, dict):
-                raise UserError("Dynamic prompt function must return a Prompt")
+            if not isinstance(resolved_prompt, dict) or "id" not in resolved_prompt:
+                raise UserError("Dynamic prompt function must return a Prompt with an id")
 
         return {
             "id": resolved_prompt["id"],

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from openai import omit
 
-from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
+from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner, UserError
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.prompts import GenerateDynamicPromptData
@@ -86,6 +86,17 @@ async def test_dynamic_prompt_is_resolved_correctly():
     resolved = await agent.get_prompt(context_wrapper)
 
     assert resolved == {"id": "dyn_prompt", "version": "2", "variables": None}
+
+
+@pytest.mark.asyncio
+async def test_dynamic_prompt_without_id_raises_user_error():
+    def dynamic_prompt_fn(_data):
+        return {}
+
+    agent = Agent(name="test", prompt=dynamic_prompt_fn)
+
+    with pytest.raises(UserError, match="Dynamic prompt function must return a Prompt with an id"):
+        await agent.get_prompt(RunContextWrapper(context=None))
 
 
 @pytest.mark.asyncio
