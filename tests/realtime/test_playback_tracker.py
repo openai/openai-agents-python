@@ -305,3 +305,12 @@ class TestPlaybackTracker:
         playback_tracker.on_play_bytes("item_1", 0, b"\x00" * 4000)
 
         assert playback_tracker.get_state()["elapsed_ms"] == 500.0
+
+    def test_unknown_g711_prefixed_format_uses_pcm_fallback(self):
+        """An unsupported string must not be mistaken for a valid G.711 format."""
+        playback_tracker = RealtimePlaybackTracker()
+        playback_tracker.set_audio_format("g711_custom")
+
+        playback_tracker.on_play_bytes("item_1", 0, b"\x00" * 48000)
+
+        assert playback_tracker.get_state()["elapsed_ms"] == 1000.0
