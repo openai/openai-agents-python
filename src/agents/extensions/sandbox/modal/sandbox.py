@@ -64,6 +64,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     _terminate_ambiguous_mount_session,
 )
+from ....sandbox.session.pty_output import decode_pty_window
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -489,6 +490,8 @@ class _ModalPtyProcessEntry:
     stderr_iter: AsyncIterator[object] | None = None
     stdout_read_task: asyncio.Task[object] | None = None
     stderr_read_task: asyncio.Task[object] | None = None
+    # Trailing incomplete UTF-8 bytes carried over to the next collection window.
+    pty_output_tail: bytes = b""
 
 
 class ModalSandboxSession(BaseSandboxSession):
@@ -983,7 +986,9 @@ class ModalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
         deadline = time.monotonic() + (yield_time_ms / 1000)
-        chunks = bytearray()
+        chunks = bytearray(entry.pty_output_tail)
+        entry.pty_output_tail = b""
+        final = False
 
         while True:
             stdout_chunk = await self._read_modal_stream(entry=entry, stream_name="stdout")
@@ -1002,6 +1007,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 stderr_chunks = await self._drain_modal_stream(entry=entry, stream_name="stderr")
                 chunks.extend(stdout_chunks)
                 chunks.extend(stderr_chunks)
+                final = True
                 break
 
             if not stdout_chunk and not stderr_chunk:
@@ -1010,7 +1016,13 @@ class ModalSandboxSession(BaseSandboxSession):
                     break
                 await asyncio.sleep(min(_PTY_POLL_INTERVAL_S, remaining_s))
 
-        text = chunks.decode("utf-8", errors="replace")
+        # Re-check completion so a process that finished after the deadline
+        # flushes the held tail instead of carrying it on a discarded entry.
+        if not final and await self._peek_exit_code(entry.process) is not None:
+            final = True
+
+        text, leftover = decode_pty_window(bytes(chunks), final=final)
+        entry.pty_output_tail = leftover
         truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
         return truncated_text.encode("utf-8", errors="replace"), original_token_count
 

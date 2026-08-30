@@ -9,6 +9,22 @@ from collections.abc import Callable
 from .pty_types import truncate_text_by_tokens
 
 
+def decode_pty_window(data: bytes, *, final: bool) -> tuple[str, bytes]:
+    """Decode one window of PTY output.
+
+    PTY output is collected in repeated windows over one persistent stream, so a
+    multi-byte character can be split across a window boundary. Decode
+    incrementally: invalid bytes still become U+FFFD immediately (matching
+    ``errors="replace"``), while a genuinely incomplete trailing sequence is
+    returned as ``leftover`` for the caller to prepend to the next window. When
+    ``final`` is set there is no next window, so nothing is held back.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text = decoder.decode(data, final=final)
+    leftover = b"" if final else bytes(decoder.getstate()[0])
+    return text, leftover
+
+
 async def collect_pty_output(
     *,
     output_chunks: deque[bytes],
@@ -53,18 +69,10 @@ async def collect_pty_output(
     # must flush rather than requeue (the requeued entry would be discarded).
     final = final or is_done()
 
-    # A multi-byte character can be split across two collection windows. Decode
-    # incrementally so a genuinely incomplete trailing sequence is buffered and
-    # pushed back for the next window to complete, while invalid bytes still
-    # decode to U+FFFD immediately (matching errors="replace"). When the process
-    # is done the decoder is finalized, flushing any pending bytes.
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    text = decoder.decode(bytes(output), final=final)
-    if not final:
-        buffered = decoder.getstate()[0]
-        if buffered:
-            async with output_lock:
-                output_chunks.appendleft(bytes(buffered))
+    text, leftover = decode_pty_window(bytes(output), final=final)
+    if leftover:
+        async with output_lock:
+            output_chunks.appendleft(leftover)
 
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count

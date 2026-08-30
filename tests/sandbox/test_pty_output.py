@@ -5,7 +5,7 @@ from collections import deque
 
 import pytest
 
-from agents.sandbox.session.pty_output import collect_pty_output
+from agents.sandbox.session.pty_output import collect_pty_output, decode_pty_window
 
 
 @pytest.mark.asyncio
@@ -115,3 +115,24 @@ async def test_collect_pty_output_replaces_invalid_byte_without_withholding() ->
 
     assert out.decode("utf-8") == "ok�"
     assert not output_chunks  # nothing was withheld
+
+
+def test_decode_pty_window_holds_incomplete_and_replaces_invalid() -> None:
+    raw = "wörld".encode()  # b"w\xc3\xb6rld"
+
+    # A genuinely incomplete trailing sequence is returned as leftover.
+    text, leftover = decode_pty_window(raw[:2], final=False)  # b"w\xc3"
+    assert leftover == b"\xc3"
+    text2, leftover2 = decode_pty_window(leftover + raw[2:], final=False)
+    assert text + text2 == "wörld"
+    assert leftover2 == b""
+
+    # An invalid byte becomes U+FFFD immediately, nothing held back.
+    text3, leftover3 = decode_pty_window(b"ok\xc0", final=False)
+    assert text3 == "ok�"
+    assert leftover3 == b""
+
+    # final=True flushes any pending bytes as U+FFFD.
+    text4, leftover4 = decode_pty_window(b"w\xc3", final=True)
+    assert text4 == "w�"
+    assert leftover4 == b""
