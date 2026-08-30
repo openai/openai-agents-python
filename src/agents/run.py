@@ -37,8 +37,14 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import RunHooks
-from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
+from .logger import (
+    log_model_action_warning,
+    log_model_and_tool_action_warning,
+    log_tool_action_warning,
+    logger,
+)
 from .memory import Session
+from .models.interface import ModelProvider
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -541,6 +547,44 @@ class Runner:
         )
 
 
+def _normalize_run_config_for_runner(
+    value: RunConfig | dict[str, Any] | None,
+) -> tuple[RunConfig, bool]:
+    """Normalize a run config and report whether Runner created its model provider."""
+    owns_model_provider = value is None or (
+        isinstance(value, dict) and "model_provider" not in value
+    )
+    run_config = RunConfig() if value is None else _coerce_run_config(value)
+    return run_config, owns_model_provider
+
+
+async def _close_runner_owned_model_provider(model_provider: ModelProvider) -> None:
+    """Finish provider cleanup despite repeated cancellation, then restore cancellation."""
+
+    async def close() -> None:
+        try:
+            await model_provider.aclose()
+        except Exception as error:
+            log_model_action_warning(
+                logger,
+                "Failed to close model provider created for run",
+                error,
+            )
+
+    close_task = asyncio.create_task(close())
+    try:
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                continue
+        if not close_task.cancelled():
+            close_task.result()
+        raise
+
+
 class AgentRunner:
     """
     WARNING: this class is experimental and not part of the public API
@@ -553,18 +597,25 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
+        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         try:
-            return await self._run_impl(starting_agent, input, **kwargs)
-        except BaseException as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _detach_data_redacted_error_traceback(error)
-            redacted_error = error
+            try:
+                return await self._run_impl(starting_agent, input, **kwargs)
+            except BaseException as error:
+                if not _is_error_data_redacted(error):
+                    raise
+                _detach_data_redacted_error_traceback(error)
+                redacted_error = error
+        finally:
+            if owns_model_provider:
+                await _close_runner_owned_model_provider(run_config.model_provider)
 
         self = cast(Any, None)
         starting_agent = cast(Any, None)
         input = cast(Any, None)
+        run_config = cast(Any, None)
         cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
         _detach_data_redacted_error_traceback(redacted_error)
@@ -586,7 +637,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config = cast(RunConfig, run_config)
 
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = (
@@ -2347,7 +2398,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)
@@ -2565,8 +2616,8 @@ class AgentRunner:
             sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
-        streamed_result.run_loop_task = asyncio.create_task(
-            _await_data_redacted_error_boundary(
+        async def run_loop() -> None:
+            await _await_data_redacted_error_boundary(
                 lambda: start_streaming(
                     starting_input=input_for_result,
                     streamed_result=streamed_result,
@@ -2586,7 +2637,13 @@ class AgentRunner:
                     sandbox_runtime=sandbox_runtime,
                 )
             )
-        )
+
+        streamed_result.run_loop_task = asyncio.create_task(run_loop())
+        if owns_model_provider:
+            model_provider = run_config.model_provider
+            streamed_result._ensure_model_provider_cleanup_on_completion(
+                lambda: _close_runner_owned_model_provider(model_provider)
+            )
         if sandbox_runtime.enabled:
             streamed_result.ensure_sandbox_cleanup_on_completion()
         return streamed_result
