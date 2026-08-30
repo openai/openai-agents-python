@@ -986,8 +986,10 @@ class ModalSandboxSession(BaseSandboxSession):
         max_output_tokens: int | None,
     ) -> tuple[bytes, int | None]:
         deadline = time.monotonic() + (yield_time_ms / 1000)
+        # Read the carried-over tail but leave it on the entry until we commit a
+        # decode below, so a cancelled collection keeps it durable rather than
+        # losing those bytes.
         chunks = bytearray(entry.pty_output_tail)
-        entry.pty_output_tail = b""
         final = False
 
         while True:
