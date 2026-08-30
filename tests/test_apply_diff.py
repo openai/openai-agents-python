@@ -261,6 +261,18 @@ def test_apply_diff_with_crlf_input_and_crlf_diff_preserves_crlf() -> None:
     assert apply_diff(input_text, diff) == "line1\r\nupdated\r\nline3\r\n"
 
 
+def test_apply_diff_with_cr_input_and_cr_diff_preserves_cr() -> None:
+    input_text = "line1\rline2\rline3\r"
+    diff = "\r".join(["@@ line1", "-line2", "+updated", " line3"])
+    assert apply_diff(input_text, diff) == "line1\rupdated\rline3\r"
+
+
+def test_apply_diff_with_mixed_lf_and_cr_input_preserves_lf() -> None:
+    input_text = "line1\nline2\rline3\n"
+    diff = "\n".join(["@@ line1", "-line2", "+updated", " line3"])
+    assert apply_diff(input_text, diff) == "line1\nupdated\nline3\n"
+
+
 def test_apply_diff_create_mode_preserves_crlf_newlines() -> None:
     diff = "\r\n".join(["+hello", "+world", "+"])
     assert apply_diff("", diff, mode="create") == "hello\r\nworld\r\n"

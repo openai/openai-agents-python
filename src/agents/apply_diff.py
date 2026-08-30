@@ -66,27 +66,31 @@ def apply_diff(input: str, diff: str, mode: ApplyDiffMode = "default") -> str:
 
 
 def _normalize_diff_lines(diff: str) -> list[str]:
-    lines = [line.rstrip("\r") for line in re.split(r"\r?\n", diff)]
+    lines = re.split(r"\r\n|\r|\n", diff)
     if lines and lines[-1] == "":
         lines.pop()
     return lines
 
 
 def _detect_newline_from_text(text: str) -> str:
-    return "\r\n" if "\r\n" in text else "\n"
+    if "\r\n" in text:
+        return "\r\n"
+    if "\n" in text:
+        return "\n"
+    return "\r" if "\r" in text else "\n"
 
 
 def _detect_newline(input: str, diff: str, mode: ApplyDiffMode) -> str:
     # Create-file diffs don't have an input to infer newline style from.
     # Use the diff's newline style if present, otherwise default to LF.
-    if mode != "create" and "\n" in input:
+    if mode != "create" and ("\n" in input or "\r" in input):
         return _detect_newline_from_text(input)
     return _detect_newline_from_text(diff)
 
 
 def _normalize_text_newlines(text: str) -> str:
-    # Normalize CRLF to LF for parsing/matching. Newline style is restored when emitting.
-    return text.replace("\r\n", "\n")
+    # Normalize line endings to LF for parsing/matching. Newline style is restored when emitting.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _is_done(state: ParserState, prefixes: Sequence[str]) -> bool:
