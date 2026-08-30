@@ -41,6 +41,55 @@ _PREFIX_ITEMS_ERROR = (
     "Use a homogeneous tuple (tuple[T, ...]) or list[T] instead."
 )
 
+_SCHEMA_CHILD_KEYS = frozenset(
+    {
+        "additionalItems",
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_SCHEMA_CHILD_LIST_KEYS = frozenset({"allOf", "anyOf", "oneOf"})
+_SCHEMA_CHILD_MAP_KEYS = frozenset(
+    {"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"}
+)
+
+
+def _reject_prefix_items(schema: object) -> None:
+    """Reject ``prefixItems`` in schema-valued positions without inspecting annotations."""
+    stack = [schema]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if "prefixItems" in value:
+                raise UserError(_PREFIX_ITEMS_ERROR)
+
+            for key in _SCHEMA_CHILD_KEYS:
+                child = value.get(key)
+                if isinstance(child, dict | list):
+                    stack.append(child)
+
+            for key in _SCHEMA_CHILD_LIST_KEYS:
+                children = value.get(key)
+                if isinstance(children, list):
+                    stack.extend(child for child in children if isinstance(child, dict))
+
+            for key in _SCHEMA_CHILD_MAP_KEYS:
+                children = value.get(key)
+                if isinstance(children, dict):
+                    stack.extend(child for child in children.values() if isinstance(child, dict))
+        elif isinstance(value, list):
+            stack.extend(child for child in value if isinstance(child, dict))
+
+
 _UNVALIDATED_REF_ERROR = (
     "JSON schema contains a reference whose target was not validated for strict mode."
 )
@@ -126,6 +175,7 @@ def ensure_strict_json_schema(
     that the OpenAI API expects.
     """
     _validate_json_schema_depth(schema)
+    _reject_prefix_items(schema)
     if schema == {}:
         return copy.deepcopy(_EMPTY_SCHEMA)
     budget = _NodeBudget(_MAX_SCHEMA_NODES, reject_open_objects=_reject_open_objects)
@@ -171,9 +221,6 @@ def _ensure_strict_json_schema(
 
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
-
-    if "prefixItems" in json_schema:
-        raise UserError(_PREFIX_ITEMS_ERROR)
 
     # Bound the total number of nodes we expand so a malicious `$ref` fan-out cannot expand
     # exponentially and exhaust CPU and memory.
