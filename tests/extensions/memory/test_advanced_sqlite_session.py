@@ -1802,6 +1802,71 @@ async def test_get_conversation_turns_with_list_content():
     session.close()
 
 
+async def test_find_turns_by_content_matches_non_ascii_content():
+    """Non-ASCII and JSON-escaped user content must be searchable."""
+    session_id = "find_turns_non_ascii_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    await session.add_items(
+        [
+            {"role": "user", "content": "東京の天気はどうですか"},
+            {"role": "assistant", "content": "晴れです"},
+        ]
+    )
+    await session.add_items(
+        [
+            {"role": "user", "content": "What is the weather in Tokyo?"},
+            {"role": "assistant", "content": "Sunny."},
+        ]
+    )
+    await session.add_items(
+        [
+            {"role": "user", "content": 'Le café est "très" bon'},
+            {"role": "assistant", "content": "Oui."},
+        ]
+    )
+
+    assert [turn["turn"] for turn in await session.find_turns_by_content("東京")] == [1]
+    assert [turn["turn"] for turn in await session.find_turns_by_content("weather")] == [2]
+    assert [turn["turn"] for turn in await session.find_turns_by_content('café est "très"')] == [3]
+    assert await session.find_turns_by_content("大阪") == []
+
+    branch_id = await session.create_branch_from_content("東京", "tokyo_branch")
+    assert branch_id == "tokyo_branch"
+
+    session.close()
+
+
+async def test_find_turns_by_content_treats_like_metacharacters_literally():
+    """% and _ in a search term must match literally, not act as LIKE wildcards."""
+    session_id = "find_turns_like_metachars_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    await session.add_items(
+        [{"role": "user", "content": "進捗は 50% です"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "進捗は 5000 です"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "変数 a_b を確認"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "変数 axb を確認"}, {"role": "assistant", "content": "了解"}]
+    )
+
+    # "50%" must not behave as "50 followed by anything".
+    assert [t["turn"] for t in await session.find_turns_by_content("50%")] == [1]
+    # "a_b" must not behave as "a, any character, b".
+    assert [t["turn"] for t in await session.find_turns_by_content("a_b")] == [3]
+    # A bare "%" is a literal percent sign, so it matches only the turn that has one,
+    # rather than acting as a wildcard and matching every turn.
+    assert [t["turn"] for t in await session.find_turns_by_content("%")] == [1]
+    assert [t["turn"] for t in await session.find_turns_by_content("_")] == [3]
+
+    session.close()
+
+
 async def test_find_turns_by_content_with_list_content():
     """find_turns_by_content returns a string preview for list (multimodal) content."""
     session_id = "find_turns_list_content_test"
