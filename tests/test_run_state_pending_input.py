@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from openai.types.responses.response_computer_tool_call import (
@@ -29,6 +29,21 @@ from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
 
+class _PendingInputWriteFailureSession(SimpleListSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failure: Literal["before", "after"] | None = None
+        self.error = RuntimeError("pending input Session append failed")
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        failure, self.failure = self.failure, None
+        if failure == "before":
+            raise self.error
+        await super().add_items(items)
+        if failure == "after":
+            raise self.error
+
+
 def _item_type(item: TResponseInputItem) -> str | None:
     if not isinstance(item, dict):
         return getattr(item, "type", None)
@@ -46,6 +61,21 @@ def _message_text(item: TResponseInputItem) -> str | None:
             str(part.get("text", ""))
             for part in content
             if isinstance(part, dict) and part.get("type") in {"input_text", "output_text"}
+        )
+    return None
+
+
+def _assistant_message_text(item: TResponseInputItem) -> str | None:
+    if not isinstance(item, dict) or item.get("role") != "assistant":
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "output_text"
         )
     return None
 
@@ -87,6 +117,23 @@ async def _make_after_turn_state(
     assert isinstance(state._current_step, NextStepRunAgain)
     assert calls == ["Paris"]
     return model, agent, state, calls
+
+
+async def _resume_pending_input_state(
+    agent: Agent[Any],
+    state: RunState[Any],
+    session: SimpleListSession,
+    *,
+    streamed: bool,
+) -> Any:
+    run_config = RunConfig(tracing_disabled=True)
+    if not streamed:
+        return await Runner.run(agent, state, session=session, run_config=run_config)
+
+    result = Runner.run_streamed(agent, state, session=session, run_config=run_config)
+    async for _event in result.stream_events():
+        pass
+    return result
 
 
 @pytest.mark.asyncio
@@ -564,6 +611,188 @@ async def test_failed_model_request_with_session_persists_admitted_input_once() 
     model_input = cast(list[TResponseInputItem], model.calls[-1].input)
     assert [_message_text(item) for item in model_input].count("Late input") == 1
     assert [_message_text(item) for item in await session.get_items()].count("Late input") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_pending_input_session_append_recovers_exactly_once(
+    failing_streamed: bool,
+    round_trip: bool,
+    failure: Literal["before", "after"],
+) -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    guardrail_calls = 0
+
+    def inspect_pending_input(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailFunctionOutput(output_info="accepted", tripwire_triggered=False)
+
+    agent.input_guardrails = [InputGuardrail(guardrail_function=inspect_pending_input)]
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    model_calls_before = len(model.calls)
+    persisted_count_before = state._current_turn_persisted_item_count
+    session.failure = failure
+
+    failed_stream_result = None
+    with pytest.raises(RuntimeError, match="pending input Session append failed") as exc_info:
+        if failing_streamed:
+            failed_stream_result = Runner.run_streamed(
+                agent,
+                state,
+                session=session,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+            async for _event in failed_stream_result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                state,
+                session=session,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+
+    assert exc_info.value is session.error
+    if failed_stream_result is not None:
+        state = failed_stream_result.to_state()
+    assert len(model.calls) == model_calls_before
+    assert guardrail_calls == 1
+    assert len(state._input_guardrail_results) == 1
+    assert [_message_text(item) for item in state.pending_input] == ["Late input"]
+    pending_write = state._pending_session_write
+    assert pending_write is not None
+    assert pending_write["persisted_count"] == persisted_count_before
+    assert [_message_text(item) for item in pending_write["pending_input"]] == ["Late input"]
+    admitted_items = [
+        item
+        for item in state._generated_items
+        if isinstance(item, InputItem) and _message_text(item.raw_item) == "Late input"
+    ]
+    assert len(admitted_items) == 1
+    admitted_input_id = admitted_items[0].input_id
+    assert [_message_text(item) for item in await session.get_items()].count("Late input") == (
+        0 if failure == "before" else 1
+    )
+    with pytest.raises(UserError, match="awaiting reconciliation"):
+        state.clear_pending_input()
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    result = await _resume_pending_input_state(
+        agent,
+        state,
+        session,
+        streamed=not failing_streamed,
+    )
+
+    assert result.final_output == "Recovered"
+    assert len(model.calls) == model_calls_before + 1
+    assert guardrail_calls == 1
+    assert len(state._input_guardrail_results) == 1
+    assert state.pending_input == []
+    assert state._pending_session_write is None
+    assert [_message_text(item) for item in await session.get_items()].count("Late input") == 1
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    assert [_message_text(item) for item in model_input].count("Late input") == 1
+    assert [_message_text(item) for item in result.to_input_list()].count("Late input") == 1
+    restored_admission_ids = [
+        item.input_id
+        for item in state._generated_items
+        if isinstance(item, InputItem) and _message_text(item.raw_item) == "Late input"
+    ]
+    assert restored_admission_ids == [admitted_input_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_pending_input_assistant_message_round_trip_recovers_exactly_once(
+    failure: Literal["before", "after"],
+) -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input([{"role": "assistant", "content": "Late assistant"}])
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = failure
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    state = await RunState.from_json(agent, state.to_json())
+    result = await _resume_pending_input_state(agent, state, session, streamed=True)
+
+    assert result.final_output == "Recovered"
+    assert state.pending_input == []
+    assert state._pending_session_write is None
+    assert [_assistant_message_text(item) for item in await session.get_items()].count(
+        "Late assistant"
+    ) == 1
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    assert [_assistant_message_text(item) for item in model_input].count("Late assistant") == 1
+    assert [_assistant_message_text(item) for item in result.to_input_list()].count(
+        "Late assistant"
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_input_reconciliation_consumes_only_its_owned_prefix() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    guarded_batches: list[list[str | None]] = []
+
+    def record_guarded_input(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        guarded_input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        assert isinstance(guarded_input, list)
+        guarded_batches.append([_message_text(item) for item in guarded_input])
+        return GuardrailFunctionOutput(output_info="accepted", tripwire_triggered=False)
+
+    agent.input_guardrails = [InputGuardrail(guardrail_function=record_guarded_input)]
+    state.add_input("First late input")
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "after"
+    failed_result = Runner.run_streamed(
+        agent,
+        state,
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        async for _event in failed_result.stream_events():
+            pass
+
+    state = failed_result.to_state()
+    state.add_input("Second late input")
+    state = await RunState.from_json(agent, state.to_json())
+    result = await _resume_pending_input_state(agent, state, session, streamed=False)
+
+    assert result.final_output == "Recovered"
+    assert guarded_batches == [["First late input"], ["Second late input"]]
+    session_texts = [_message_text(item) for item in await session.get_items()]
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    model_texts = [_message_text(item) for item in model_input]
+    for text in ("First late input", "Second late input"):
+        assert session_texts.count(text) == 1
+        assert model_texts.count(text) == 1
+    assert state.pending_input == []
+    assert state._pending_session_write is None
 
 
 @pytest.mark.asyncio

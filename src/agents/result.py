@@ -119,12 +119,27 @@ def _populate_state_from_result(
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
     state._current_agent = result.last_agent
+    source_state = getattr(result, "_state", None)
+    pending_input_write = (
+        source_state._pending_session_write
+        if isinstance(source_state, RunState)
+        and source_state._pending_session_write is not None
+        and "pending_input" in source_state._pending_session_write
+        else None
+    )
     model_input_items = getattr(result, "_model_input_items", None)
-    if isinstance(model_input_items, list):
+    if pending_input_write is not None:
+        assert isinstance(source_state, RunState)
+        # A streaming Session append can fail before the result lists receive the admission
+        # items. The source state owns the durable checkpoint and its staged occurrences.
+        state._generated_items = list(source_state._generated_items)
+        state._session_items = list(source_state._session_items)
+    elif isinstance(model_input_items, list):
         state._generated_items = list(model_input_items)
+        state._session_items = list(result.new_items)
     else:
         state._generated_items = result.new_items
-    state._session_items = list(result.new_items)
+        state._session_items = list(result.new_items)
     snapshot_refs = _state_snapshot_owned_item_refs(result, state._original_input)
     live_refs = rebase_nested_history_owned_item_refs(
         state._original_input,
@@ -144,7 +159,6 @@ def _populate_state_from_result(
     state._conversation_id = conversation_id
     state._previous_response_id = previous_response_id
     state._auto_previous_response_id = auto_previous_response_id
-    source_state = getattr(result, "_state", None)
     if isinstance(source_state, RunState):
         state._generated_prompt_cache_key = source_state._generated_prompt_cache_key
         state._pending_input = copy.deepcopy(source_state._pending_input)
