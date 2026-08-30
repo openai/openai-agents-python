@@ -15,6 +15,7 @@ import pytest
 
 import agents._debug as _debug
 from agents import trace
+from agents.exceptions import UserError
 from tests.testing_processor import fetch_events, fetch_ordered_spans, fetch_span_errors
 
 try:
@@ -1323,6 +1324,63 @@ async def test_voicepipeline_float32() -> None:
         "session_ended",
     ]
     await fake_tts.verify_audio("out_1", audio_chunks[0], dtype=np.float32)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dtype_spelling", "expected_dtype"),
+    [
+        ("float32", np.float32),
+        ("int16", np.int16),
+        (np.dtype("float32"), np.float32),
+    ],
+    ids=["float32-string", "int16-string", "float32-dtype-instance"],
+)
+async def test_voicepipeline_accepts_numpy_dtype_spellings(
+    dtype_spelling: npt.DTypeLike, expected_dtype: type[np.int16] | type[np.float32]
+) -> None:
+    """Dictionary settings carry ``dtype`` as the spelling NumPy resolves, not the type object."""
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
+    pipeline = VoicePipeline(
+        workflow=workflow,
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={"tts_settings": {"buffer_size": 1, "dtype": dtype_spelling}},
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    events: list[str] = []
+    audio_dtypes: list[np.dtype[Any]] = []
+    async for event in result.stream():
+        if isinstance(event, VoiceStreamEventAudio):
+            assert event.data is not None
+            audio_dtypes.append(event.data.dtype)
+            events.append("audio")
+        elif isinstance(event, VoiceStreamEventLifecycle):
+            events.append(event.event)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert audio_dtypes == [np.dtype(expected_dtype)]
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_rejects_unsupported_output_dtype() -> None:
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
+    pipeline = VoicePipeline(
+        workflow=workflow,
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={"tts_settings": {"buffer_size": 1, "dtype": "int32"}},
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    with pytest.raises(UserError, match="Invalid output dtype"):
+        async for _ in result.stream():
+            pass
 
 
 @pytest.mark.asyncio
