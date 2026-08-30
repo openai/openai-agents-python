@@ -48,11 +48,15 @@ class _PendingInputWriteFailureSession(SimpleListSession):
 
 
 class _CheckpointOpenAIConversationsSession(OpenAIConversationsSession):
-    def __init__(self) -> None:
-        self._session_id = "test"
+    def __init__(self, session_id: str | None = "test") -> None:
+        self._session_id = session_id
         self.items: list[TResponseInputItem] = []
+        self.initializations = 0
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        if self._session_id is None:
+            self._session_id = "lazy-test"
+            self.initializations += 1
         return list(self.items if limit is None else self.items[-limit:])
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
@@ -890,6 +894,28 @@ async def test_conversations_admits_unpersistable_pending_input_without_append()
     admitted_items = [item for item in state._generated_items if isinstance(item, InputItem)]
     assert [item.raw_item for item in admitted_items] == [reasoning_input]
     assert [item for item in state._session_items if isinstance(item, InputItem)] == admitted_items
+
+
+@pytest.mark.asyncio
+async def test_conversations_initializes_lazy_session_before_pending_checkpoint() -> None:
+    model, agent, state, _calls = await _make_after_turn_state()
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    session = _CheckpointOpenAIConversationsSession(session_id=None)
+
+    result = await Runner.run(
+        agent,
+        state,
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    assert result.final_output == "Recovered"
+    assert session.initializations == 1
+    assert session.session_id == "lazy-test"
+    assert [_message_text(item) for item in session.items].count("Late input") == 1
+    assert state.pending_input == []
+    assert state._pending_session_write is None
 
 
 @pytest.mark.asyncio

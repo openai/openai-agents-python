@@ -688,8 +688,18 @@ async def save_result_to_session(
         return saved_run_items_count
 
     if resumed_write_state is not None:
+        try:
+            pending_session_id = session.session_id
+        except ValueError:
+            if not is_openai_conversation_session:
+                raise
+            # OpenAI Conversations sessions create their ID lazily. A zero-item read follows the
+            # public initialization path without appending history, so the ID can be checkpointed
+            # before the fallible write begins.
+            await _session_get_items(session, limit=0, wrapper=wrapper)
+            pending_session_id = session.session_id
         pending_write: _PendingSessionWrite = {
-            "session_id": session.session_id,
+            "session_id": pending_session_id,
             "items": copy.deepcopy(items_to_save),
             "before": None,
             "persisted_count": (
