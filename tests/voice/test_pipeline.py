@@ -1366,7 +1366,18 @@ async def test_voicepipeline_accepts_numpy_dtype_spellings(
 
 
 @pytest.mark.asyncio
-async def test_voicepipeline_rejects_unsupported_output_dtype() -> None:
+@pytest.mark.parametrize(
+    "dtype_spelling",
+    [
+        "int32",
+        {"names": ["x"], "formats": []},
+    ],
+    ids=["resolvable-but-unsupported", "unresolvable-structured-dtype"],
+)
+async def test_voicepipeline_rejects_unsupported_output_dtype(
+    dtype_spelling: npt.DTypeLike,
+) -> None:
+    """An unsupported dtype keeps the SDK error, whether or not NumPy can parse it."""
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
     fake_tts = ZeroPcmTTSModel()
@@ -1374,7 +1385,7 @@ async def test_voicepipeline_rejects_unsupported_output_dtype() -> None:
         workflow=workflow,
         stt_model=fake_stt,
         tts_model=fake_tts,
-        config={"tts_settings": {"buffer_size": 1, "dtype": "int32"}},
+        config={"tts_settings": {"buffer_size": 1, "dtype": dtype_spelling}},
     )
     result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
 
