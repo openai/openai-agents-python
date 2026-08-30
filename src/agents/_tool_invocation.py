@@ -102,7 +102,7 @@ def _normalize_arguments(value: Any) -> Any:
                 ValueError(f"Invalid JSON constant: {constant}")
             ),
         )
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
         return value
     return _normalize_value(parsed)
 
