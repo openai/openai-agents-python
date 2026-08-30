@@ -26,7 +26,7 @@ def _is_g711_format(format: RealtimeAudioFormat | None) -> bool:
     how the session was configured and which path delivered it.
     """
     if isinstance(format, str):
-        return format.lower() in _G711_FORMAT_NAMES or format.lower().startswith("g711")
+        return format.lower() in _G711_FORMAT_NAMES
     if isinstance(format, AudioPCMU | AudioPCMA):
         return True
     if isinstance(format, Mapping):
