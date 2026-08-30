@@ -5,8 +5,7 @@ from typing import Any
 
 import pytest
 
-from agents import Runner
-from agents import _tool_invocation
+from agents import Runner, _tool_invocation
 from agents.tool import FunctionTool
 from agents.util import _approvals
 
