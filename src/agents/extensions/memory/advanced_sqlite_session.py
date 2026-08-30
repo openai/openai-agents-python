@@ -36,15 +36,26 @@ def _allow_all_sqlite_actions(
     return sqlite3.SQLITE_OK
 
 
+_LIKE_ESCAPE_CHAR = "\\"
+
+
 def _stored_message_data_needle(search_term: str) -> str:
-    """Return ``search_term`` in the encoding used by the stored ``message_data`` column.
+    """Return ``search_term`` as a literal LIKE pattern for the ``message_data`` column.
 
     Session rows are written as ``json.dumps(item)``, which escapes every non-ASCII character
     as ``\\uXXXX`` and escapes ``"``, ``\\``, and control characters. Matching a raw search term
-    against that column therefore never finds non-ASCII content. Re-encoding the term the same
-    way keeps ASCII searches byte-identical while making non-ASCII searches match.
+    against that column therefore never finds non-ASCII content, so the term is re-encoded the
+    same way first.
+
+    ``%`` and ``_`` are then escaped, along with the escape character itself, so that a term
+    containing them matches literally instead of acting as a LIKE wildcard. Callers must pair
+    this with ``LIKE ? ESCAPE '\\'``.
     """
-    return json.dumps(search_term)[1:-1]
+    encoded = json.dumps(search_term)[1:-1]
+    # The escape character has to be escaped first, or it would double-escape the others.
+    for char in (_LIKE_ESCAPE_CHAR, "%", "_"):
+        encoded = encoded.replace(char, _LIKE_ESCAPE_CHAR + char)
+    return encoded
 
 
 def _content_preview(content: Any, max_length: int | None = None) -> str:
@@ -1606,7 +1617,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         JOIN {self.messages_table} am ON ms.message_id = am.id
                         WHERE ms.session_id = ? AND ms.branch_id = ?
                         AND ms.message_type = 'user'
-                        AND am.message_data LIKE ?
+                        AND am.message_data LIKE ? ESCAPE '\\'
                         ORDER BY ms.branch_turn_number
                     """,
                         (

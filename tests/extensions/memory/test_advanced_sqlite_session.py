@@ -1837,6 +1837,36 @@ async def test_find_turns_by_content_matches_non_ascii_content():
     session.close()
 
 
+async def test_find_turns_by_content_treats_like_metacharacters_literally():
+    """% and _ in a search term must match literally, not act as LIKE wildcards."""
+    session_id = "find_turns_like_metachars_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    await session.add_items(
+        [{"role": "user", "content": "進捗は 50% です"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "進捗は 5000 です"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "変数 a_b を確認"}, {"role": "assistant", "content": "了解"}]
+    )
+    await session.add_items(
+        [{"role": "user", "content": "変数 axb を確認"}, {"role": "assistant", "content": "了解"}]
+    )
+
+    # "50%" must not behave as "50 followed by anything".
+    assert [t["turn"] for t in await session.find_turns_by_content("50%")] == [1]
+    # "a_b" must not behave as "a, any character, b".
+    assert [t["turn"] for t in await session.find_turns_by_content("a_b")] == [3]
+    # A bare "%" is a literal percent sign, so it matches only the turn that has one,
+    # rather than acting as a wildcard and matching every turn.
+    assert [t["turn"] for t in await session.find_turns_by_content("%")] == [1]
+    assert [t["turn"] for t in await session.find_turns_by_content("_")] == [3]
+
+    session.close()
+
+
 async def test_find_turns_by_content_with_list_content():
     """find_turns_by_content returns a string preview for list (multimodal) content."""
     session_id = "find_turns_list_content_test"
