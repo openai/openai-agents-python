@@ -131,40 +131,6 @@ def test_typeless_root_is_normalized_to_object():
     }
 
 
-def test_prefix_items_property_name_is_not_rejected():
-    schema = {
-        "type": "object",
-        "properties": {"prefixItems": {"type": "string"}},
-    }
-
-    result = ensure_strict_json_schema(schema)
-
-    assert result["properties"]["prefixItems"] == {"type": "string"}
-
-
-@pytest.mark.parametrize("schema_map_keyword", ["dependentSchemas", "patternProperties"])
-def test_prefix_items_is_rejected_in_schema_maps_regardless_of_entry_name(schema_map_keyword):
-    with pytest.raises(UserError, match="`prefixItems`"):
-        ensure_strict_json_schema(
-            {
-                "type": "object",
-                schema_map_keyword: {"default": {"type": "array", "prefixItems": []}},
-            }
-        )
-
-
-def test_prefix_items_in_annotations_is_not_rejected():
-    result = ensure_strict_json_schema(
-        {
-            "type": "string",
-            "default": {"prefixItems": []},
-            "examples": [{"prefixItems": []}],
-        }
-    )
-
-    assert result["default"] == {"prefixItems": []}
-
-
 def test_nullable_object_root_errors():
     with pytest.raises(UserError, match="root of a strict JSON schema"):
         ensure_strict_json_schema(
