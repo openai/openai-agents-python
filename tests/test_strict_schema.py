@@ -1,10 +1,17 @@
 import copy
 from collections import OrderedDict
+from typing import Any
 
 import pytest
 
 from agents.exceptions import UserError
 from agents.strict_schema import ensure_strict_json_schema, resolve_ref
+from agents.tool import FunctionTool
+from agents.tool_context import ToolContext
+
+
+async def _echo_tool_input(_ctx: ToolContext[Any], input_json: str) -> str:
+    return input_json
 
 
 def _nested_object_schema(depth: int) -> dict[str, object]:
@@ -732,12 +739,12 @@ def test_resolve_ref_rejects_non_ascii_json_pointer_array_index_tokens(index_tok
         resolve_ref(root=root, ref=f"#/allOf/{index_token}")
 
 
-def test_ensure_strict_json_schema_inlines_ref_to_allof_member():
+def test_function_tool_inlines_ref_through_allof_array_member():
     schema = {
         "type": "object",
         "properties": {
             "value": {
-                "$ref": "#/allOf/0",
+                "$ref": "#/allOf/0/properties/value",
                 "description": "from the first allOf member",
             }
         },
@@ -745,26 +752,108 @@ def test_ensure_strict_json_schema_inlines_ref_to_allof_member():
         "allOf": [
             {
                 "type": "object",
-                "properties": {"a": {"type": "string"}},
-                "required": ["a"],
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
                 "additionalProperties": False,
             },
             {
                 "type": "object",
-                "properties": {"b": {"type": "integer"}},
-                "required": ["b"],
+                "properties": {"value": {"type": "string", "minLength": 1}},
+                "required": ["value"],
                 "additionalProperties": False,
             },
         ],
     }
 
-    result = ensure_strict_json_schema(schema)
+    tool = FunctionTool(
+        name="array_ref",
+        description="Resolve a reference through an array member.",
+        params_json_schema=schema,
+        on_invoke_tool=_echo_tool_input,
+    )
 
-    value_schema = result["properties"]["value"]
-    assert value_schema["type"] == "object"
+    value_schema = tool.params_json_schema["properties"]["value"]
     assert value_schema["description"] == "from the first allOf member"
     assert "$ref" not in value_schema
-    assert value_schema["properties"]["a"]["type"] == "string"
+    assert value_schema["type"] == "string"
+    assert tool.params_json_schema["allOf"] == [
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string", "minLength": 1}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    ]
+
+
+@pytest.mark.parametrize("index_token", ["00", "01"], ids=["zero", "nonzero"])
+def test_function_tool_rejects_leading_zero_json_pointer_array_indexes(index_token):
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {
+                "$ref": f"#/allOf/{index_token}/properties/value",
+                "description": "value",
+            }
+        },
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", "minLength": 1}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="Invalid JSON Pointer array index"):
+        FunctionTool(
+            name="invalid_array_ref",
+            description="Invalid array reference.",
+            params_json_schema=schema,
+            on_invoke_tool=_echo_tool_input,
+        )
+
+
+def test_function_tool_rejects_out_of_range_json_pointer_array_index():
+    schema = {
+        "type": "object",
+        "properties": {"value": {"$ref": "#/allOf/2/properties/value", "description": "value"}},
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", "minLength": 1}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="out of range"):
+        FunctionTool(
+            name="invalid_array_ref",
+            description="Invalid array reference.",
+            params_json_schema=schema,
+            on_invoke_tool=_echo_tool_input,
+        )
 
 
 @pytest.mark.parametrize("additional_properties", [True, {}], ids=["true", "schema"])
