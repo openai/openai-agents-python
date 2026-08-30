@@ -53,6 +53,23 @@ _PROGRAM_OWNED_HOSTED_ITEM_TYPES = frozenset(
         "mcp_approval_response",
     }
 )
+_OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID: frozenset[str] = frozenset(
+    {
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_call",
+        "item_reference",
+        "program",
+        "program_output",
+    }
+)
 
 __all__ = [
     "NestedHistoryOwnedItemRef",
@@ -68,6 +85,8 @@ __all__ = [
     "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
+    "sanitize_openai_conversation_item",
+    "is_unpersistable_openai_conversation_item",
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
@@ -721,6 +740,27 @@ def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInp
     cleaned.pop(TOOL_CALL_SESSION_DESCRIPTION_KEY, None)
     cleaned.pop(TOOL_CALL_SESSION_TITLE_KEY, None)
     return cast(TResponseInputItem, cleaned)
+
+
+def sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
+    """Remove fields that the OpenAI Conversations persistence API must not receive."""
+    if isinstance(item, dict):
+        clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
+        if clean_item.get("id") == FAKE_RESPONSES_ID or (
+            clean_item.get("type") != "reasoning"
+            and clean_item.get("type") not in _OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID
+        ):
+            clean_item.pop("id", None)
+        clean_item.pop("provider_data", None)
+        return cast(TResponseInputItem, clean_item)
+    return item
+
+
+def is_unpersistable_openai_conversation_item(item: TResponseInputItem) -> bool:
+    """Return whether Conversations must omit an item that can still enter model input."""
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        return False
+    return not item.get("id") and not item.get("encrypted_content")
 
 
 def apply_reasoning_item_id_policy(

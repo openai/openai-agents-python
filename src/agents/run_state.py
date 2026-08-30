@@ -105,10 +105,14 @@ from .logger import (
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
+    apply_reasoning_item_id_policy,
+    deduplicate_input_items_preferring_latest,
     digest_input_item,
     ensure_nested_history_run_item_occurrence_key,
+    is_unpersistable_openai_conversation_item,
     nested_history_run_item_occurrence_key,
     run_item_to_input_item,
+    sanitize_openai_conversation_item,
 )
 from .run_internal.tool_caller import (
     ensure_programmatic_tool_call_parent,
@@ -3950,6 +3954,95 @@ def _validate_run_state_schema_version(
     return schema_version
 
 
+def _pending_input_checkpoint_batch_matches(
+    pending_input: list[TResponseInputItem],
+    items: list[TResponseInputItem],
+) -> bool:
+    """Bind a pending-input checkpoint to the Session batch it owns."""
+    expected_items = deduplicate_input_items_preferring_latest(pending_input)
+    if [digest_input_item(item) for item in items] == [
+        digest_input_item(item) for item in expected_items
+    ]:
+        return True
+
+    # The serialized checkpoint does not expose its Session implementation, so also accept the
+    # exact OpenAI Conversations persistence projection. Required provider IDs remain part of the
+    # comparison; resume_pending_session_write() revalidates against the supplied Session.
+    conversation_items = [sanitize_openai_conversation_item(item) for item in expected_items]
+    conversation_items = [
+        item for item in conversation_items if not is_unpersistable_openai_conversation_item(item)
+    ]
+    return [digest_input_item(item) for item in items] == [
+        digest_input_item(item) for item in conversation_items
+    ]
+
+
+def _pending_input_checkpoint_prefix_matches(
+    pending_input: list[TResponseInputItem],
+    staged_input: list[TResponseInputItem],
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None,
+) -> bool:
+    if len(pending_input) != len(staged_input):
+        return False
+    pending_digests = [digest_input_item(item) for item in pending_input]
+    if pending_digests == [digest_input_item(item) for item in staged_input]:
+        return True
+    expected_input = apply_reasoning_item_id_policy(
+        staged_input,
+        reasoning_item_id_policy,
+    )
+    return pending_digests == [digest_input_item(item) for item in expected_input]
+
+
+def _pending_input_checkpoint_admissions_match(
+    state: RunState[Any, Agent[Any]],
+    pending_input: list[TResponseInputItem],
+) -> bool:
+    """Require one shared, durable InputItem occurrence for every checkpoint-owned input."""
+    owned_count = len(pending_input)
+    if len(state._generated_items) < owned_count or len(state._session_items) < owned_count:
+        return False
+
+    generated_tail = state._generated_items[-owned_count:]
+    session_tail = state._session_items[-owned_count:]
+    if not all(isinstance(item, InputItem) for item in generated_tail + session_tail):
+        return False
+
+    owned_digests = [digest_input_item(item) for item in pending_input]
+    if [digest_input_item(cast(InputItem, item).raw_item) for item in generated_tail] != (
+        owned_digests
+    ) or [digest_input_item(cast(InputItem, item).raw_item) for item in session_tail] != (
+        owned_digests
+    ):
+        return False
+
+    generated_ids = [cast(InputItem, item).input_id for item in generated_tail]
+    session_ids = [cast(InputItem, item).input_id for item in session_tail]
+    if generated_ids != session_ids or len(set(generated_ids)) != owned_count:
+        return False
+    if any(
+        generated is not session
+        for generated, session in zip(generated_tail, session_tail, strict=True)
+    ):
+        return False
+
+    for input_id in generated_ids:
+        if (
+            sum(
+                isinstance(item, InputItem) and item.input_id == input_id
+                for item in state._generated_items
+            )
+            != 1
+            or sum(
+                isinstance(item, InputItem) and item.input_id == input_id
+                for item in state._session_items
+            )
+            != 1
+        ):
+            return False
+    return True
+
+
 async def _build_run_state_from_json(
     initial_agent: Agent[Any],
     state_json: dict[str, Any],
@@ -4410,11 +4503,22 @@ async def _build_run_state_from_json(
                     or not pending_input_write
                     or not all(isinstance(item, dict) for item in pending_input_write)
                     or len(pending_input_write) > len(state._pending_input)
-                    or [digest_input_item(item) for item in pending_input_write]
-                    != [
-                        digest_input_item(item)
-                        for item in state._pending_input[: len(pending_input_write)]
-                    ]
+                    or not _pending_input_checkpoint_prefix_matches(
+                        cast(list[TResponseInputItem], pending_input_write),
+                        state._pending_input[: len(pending_input_write)],
+                        cast(
+                            Literal["preserve", "omit"] | None,
+                            state_json.get("reasoning_item_id_policy"),
+                        ),
+                    )
+                    or not _pending_input_checkpoint_batch_matches(
+                        cast(list[TResponseInputItem], pending_input_write),
+                        cast(list[TResponseInputItem], pending_write["items"]),
+                    )
+                    or not _pending_input_checkpoint_admissions_match(
+                        state,
+                        state._pending_input[: len(pending_input_write)],
+                    )
                 )
             )
         ):

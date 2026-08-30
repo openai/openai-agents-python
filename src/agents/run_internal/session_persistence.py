@@ -39,7 +39,6 @@ from ..memory import (
 )
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..memory.session import _call_session_method, _get_session_wrapper
-from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
 from ..run_state import RunState, _PendingSessionWrite
 from .items import (
@@ -54,10 +53,12 @@ from .items import (
     ensure_input_item_format,
     ensure_nested_history_run_item_occurrence_key,
     fingerprint_input_item,
+    is_unpersistable_openai_conversation_item as _is_unpersistable_for_openai_conversation,
     nested_history_run_item_occurrence_key,
     normalize_input_items_for_api,
     reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
+    sanitize_openai_conversation_item as _sanitize_openai_conversation_item,
     strip_internal_input_item_metadata,
 )
 from .oai_conversation import OpenAIServerConversationTracker
@@ -814,19 +815,51 @@ async def resume_pending_session_write(
 
     pending_input = pending.get("pending_input")
 
+    def validate_pending_input_batch() -> None:
+        if pending_input is None:
+            return
+        expected_items = deduplicate_input_items_preferring_latest(pending_input)
+        if isinstance(session, OpenAIConversationsSession):
+            expected_items = [_sanitize_openai_conversation_item(item) for item in expected_items]
+            expected_items = [
+                item
+                for item in expected_items
+                if not _is_unpersistable_for_openai_conversation(item)
+            ]
+        strict_expected = [
+            _fingerprint_or_repr(item, ignore_ids_for_matching=False) for item in expected_items
+        ]
+        strict_checkpoint = [
+            _fingerprint_or_repr(item, ignore_ids_for_matching=False) for item in pending["items"]
+        ]
+        if strict_expected != strict_checkpoint:
+            raise UserError(
+                "Cannot reconcile the pending Session write: its staged input batch changed. "
+                "Restore the checkpointed Session items before resuming."
+            )
+
     def validate_pending_input_prefix() -> None:
         if pending_input is None:
             return
         prefix = run_state._pending_input[: len(pending_input)]
-        if len(prefix) != len(pending_input) or [digest_input_item(item) for item in prefix] != [
-            digest_input_item(item) for item in pending_input
-        ]:
+        pending_digests = [digest_input_item(item) for item in pending_input]
+        prefix_digests = [digest_input_item(item) for item in prefix]
+        expected_prefix = apply_reasoning_item_id_policy(
+            prefix,
+            run_state._reasoning_item_id_policy,
+        )
+        expected_digests = [digest_input_item(item) for item in expected_prefix]
+        if len(prefix) != len(pending_input) or pending_digests not in (
+            prefix_digests,
+            expected_digests,
+        ):
             raise UserError(
                 "Cannot reconcile the pending Session write: its staged input changed. "
                 "Restore the checkpointed pending input before resuming."
             )
 
     validate_pending_input_prefix()
+    validate_pending_input_batch()
 
     run_state._session_write_in_progress = True
     try:
@@ -854,6 +887,7 @@ async def resume_pending_session_write(
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
         validate_pending_input_prefix()
+        validate_pending_input_batch()
         if pending_input is not None:
             del run_state._pending_input[: len(pending_input)]
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
@@ -1024,60 +1058,6 @@ def _ignore_ids_for_matching(session: Session) -> bool:
     return isinstance(session, OpenAIConversationsSession) or getattr(
         session, "_ignore_ids_for_matching", False
     )
-
-
-_OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID: frozenset[str] = frozenset(
-    {
-        "file_search_call",
-        "web_search_call",
-        "computer_call",
-        "code_interpreter_call",
-        "image_generation_call",
-        "local_shell_call",
-        "local_shell_call_output",
-        "mcp_list_tools",
-        "mcp_approval_request",
-        "mcp_call",
-        "item_reference",
-        "program",
-        "program_output",
-    }
-)
-
-
-def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
-    """Remove provider-specific fields before fingerprinting or persistence.
-
-    Some Responses input item types require their server-assigned ``id`` when they are
-    persisted through the Conversations API. Reasoning items also need their server
-    identity or encrypted content to remain persistable. Other item IDs remain stripped
-    so replayed messages, function calls, and tool outputs do not carry stale provider IDs.
-
-    ``FAKE_RESPONSES_ID`` is the SDK's own placeholder for providers that assign no item ID,
-    so it is never a server identity and is stripped from every item type.
-    """
-    if isinstance(item, dict):
-        clean_item = cast(dict[str, Any], strip_internal_input_item_metadata(item))
-        if clean_item.get("id") == FAKE_RESPONSES_ID or (
-            clean_item.get("type") != "reasoning"
-            and not _openai_conversation_item_requires_id(clean_item)
-        ):
-            clean_item.pop("id", None)
-        clean_item.pop("provider_data", None)
-        return cast(TResponseInputItem, clean_item)
-    return item
-
-
-def _openai_conversation_item_requires_id(item: dict[str, Any]) -> bool:
-    """Return whether the Conversations create-item schema requires this item's top-level ID."""
-    return item.get("type") in _OPENAI_CONVERSATION_ITEM_TYPES_WITH_REQUIRED_ID
-
-
-def _is_unpersistable_for_openai_conversation(item: TResponseInputItem) -> bool:
-    """Return whether the item should be counted but not sent to Conversations."""
-    if not isinstance(item, dict) or item.get("type") != "reasoning":
-        return False
-    return not item.get("id") and not item.get("encrypted_content")
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(

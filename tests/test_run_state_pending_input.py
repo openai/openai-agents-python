@@ -15,10 +15,12 @@ from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorErro
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
+from agents.memory import OpenAIConversationsSession
 from agents.run import CallModelData, ModelInputData
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_steps import NextStepInterruption, NextStepRunAgain
+from agents.run_internal.session_persistence import resume_pending_session_write
 from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
 from agents.testing import ScriptedModel
 from agents.tool import Tool
@@ -43,6 +45,18 @@ class _PendingInputWriteFailureSession(SimpleListSession):
         await super().add_items(items)
         if failure == "after":
             raise self.error
+
+
+class _CheckpointOpenAIConversationsSession(OpenAIConversationsSession):
+    def __init__(self) -> None:
+        self._session_id = "test"
+        self.items: list[TResponseInputItem] = []
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        return list(self.items if limit is None else self.items[-limit:])
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.items.extend(copy.deepcopy(items))
 
 
 def _item_type(item: TResponseInputItem) -> str | None:
@@ -749,6 +763,104 @@ async def test_pending_input_session_checkpoint_requires_schema_1_18() -> None:
     legacy_restored = await RunState.from_json(agent, legacy_payload)
     assert legacy_restored._schema_version == "1.17"
     assert legacy_restored._pending_session_write == legacy_payload["pending_session_write"]
+
+    corrupted_batch = copy.deepcopy(payload)
+    corrupted_batch["pending_session_write"]["items"][0]["content"] = "Wrong input"
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, corrupted_batch)
+
+    missing_admission = copy.deepcopy(payload)
+    missing_admission["generated_items"].pop()
+    missing_admission["session_items"].pop()
+    missing_admission["generated_session_item_indexes"].pop()
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, missing_admission)
+
+    required_id_corruption = copy.deepcopy(payload)
+    owned_call = {
+        "type": "file_search_call",
+        "id": "file-search-correct",
+        "queries": ["checkpoint integrity"],
+        "status": "completed",
+    }
+    required_id_corruption["pending_input"] = [copy.deepcopy(owned_call)]
+    required_id_corruption["pending_session_write"]["pending_input"] = [copy.deepcopy(owned_call)]
+    required_id_corruption["pending_session_write"]["items"] = [
+        {**owned_call, "id": "file-search-wrong"}
+    ]
+    required_id_corruption["generated_items"][-1]["raw_item"] = copy.deepcopy(owned_call)
+    required_id_corruption["session_items"][-1]["raw_item"] = copy.deepcopy(owned_call)
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, required_id_corruption)
+
+
+@pytest.mark.asyncio
+async def test_pending_input_reconciliation_rejects_corrupted_live_batch() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "before"
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    pending_write = state._pending_session_write
+    assert pending_write is not None
+    cast(dict[str, Any], pending_write["items"][0])["content"] = "Wrong input"
+    model_calls_before = len(model.calls)
+
+    with pytest.raises(UserError, match="staged input batch changed"):
+        await _resume_pending_input_state(agent, state, session, streamed=False)
+
+    assert state._pending_session_write is pending_write
+    assert [_message_text(item) for item in state.pending_input] == ["Late input"]
+    assert [_message_text(item) for item in await session.get_items()].count("Wrong input") == 0
+    assert len(model.calls) == model_calls_before
+
+
+@pytest.mark.asyncio
+async def test_conversations_checkpoint_rejects_corrupted_required_item_id() -> None:
+    agent = Agent(name="checkpoint-agent")
+    owned_call = cast(
+        TResponseInputItem,
+        {
+            "type": "file_search_call",
+            "id": "file-search-correct",
+            "queries": ["checkpoint integrity"],
+            "status": "completed",
+        },
+    )
+    admission = InputItem(agent=agent, raw_item=owned_call)
+    state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="original input",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_input = [copy.deepcopy(owned_call)]
+    state._generated_items = [admission]
+    state._session_items = [admission]
+    state._pending_session_write = {
+        "session_id": "test",
+        "items": [cast(TResponseInputItem, {**owned_call, "id": "file-search-wrong"})],
+        "before": None,
+        "persisted_count": 0,
+        "pending_input": [copy.deepcopy(owned_call)],
+    }
+    session = _CheckpointOpenAIConversationsSession()
+
+    with pytest.raises(UserError, match="staged input batch changed"):
+        await resume_pending_session_write(state, session)
+
+    assert session.items == []
+    assert state._pending_session_write is not None
+    assert state.pending_input == [owned_call]
 
 
 @pytest.mark.asyncio
