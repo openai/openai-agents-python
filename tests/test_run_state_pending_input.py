@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Literal, cast
 
@@ -711,6 +712,43 @@ async def test_pending_input_session_append_recovers_exactly_once(
         if isinstance(item, InputItem) and _message_text(item.raw_item) == "Late input"
     ]
     assert restored_admission_ids == [admitted_input_id]
+
+
+@pytest.mark.asyncio
+async def test_pending_input_session_checkpoint_requires_schema_1_18() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "before"
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    payload = state.to_json()
+    assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.18"
+    assert payload["pending_session_write"]["pending_input"] == payload["pending_input"]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored._schema_version == "1.18"
+    assert restored._pending_session_write is not None
+    assert restored._pending_session_write["pending_input"] == restored.pending_input
+
+    disguised_payload = copy.deepcopy(payload)
+    disguised_payload["$schemaVersion"] = "1.17"
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, disguised_payload)
+
+    legacy_payload = copy.deepcopy(disguised_payload)
+    del legacy_payload["pending_session_write"]["pending_input"]
+    legacy_restored = await RunState.from_json(agent, legacy_payload)
+    assert legacy_restored._schema_version == "1.17"
+    assert legacy_restored._pending_session_write == legacy_payload["pending_session_write"]
 
 
 @pytest.mark.asyncio

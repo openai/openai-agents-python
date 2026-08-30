@@ -460,6 +460,36 @@ state._sandbox = {
             "reader while preserving the Docker session payload."
         ),
     ),
+    Scenario(
+        "1.18",
+        "b2e3048e02fdff424baa3485726b887b23ebdb4e",
+        "pending_input_session_write",
+        """
+from agents.items import InputItem
+from agents.run_internal.run_steps import NextStepRunAgain
+
+pending = {"role": "user", "content": "late input"}
+admitted = InputItem(agent=agent, raw_item=pending, input_id="pending-input-1")
+state._current_step = NextStepRunAgain()
+state._pending_input = [pending]
+state._generated_items = [admitted]
+state._session_items = [admitted]
+state._pending_session_write = {
+    "session_id": "compat-session",
+    "items": [pending],
+    "before": None,
+    "persisted_count": 0,
+    "pending_input": [pending],
+}
+""",
+        provenance="canonical_compatibility",
+        emitted_version="1.17",
+        note=(
+            "The pending-input ownership implementation was first emitted with the unreleased "
+            "1.17 writer. The fixture changes only the schema label to exercise the 1.18 "
+            "compatibility reader while preserving the pending Session write."
+        ),
+    ),
 )
 
 
@@ -488,6 +518,19 @@ MINIMAL_SCENARIOS = (
             "The labels implementation was first emitted with the unreleased 1.16 writer. "
             "The fixture changes only the schema label to exercise the 1.17 compatibility "
             "reader while preserving older payload compatibility."
+        ),
+    ),
+    Scenario(
+        "1.18",
+        "b2e3048e02fdff424baa3485726b887b23ebdb4e",
+        "minimal",
+        "",
+        provenance="canonical_compatibility",
+        emitted_version="1.17",
+        note=(
+            "The pending-input ownership implementation was first emitted with the unreleased "
+            "1.17 writer. The fixture changes only the schema label to exercise the 1.18 "
+            "compatibility reader while preserving older payload compatibility."
         ),
     ),
 )

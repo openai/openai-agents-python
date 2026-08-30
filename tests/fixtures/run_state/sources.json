@@ -127,6 +127,15 @@
       "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving the Docker session payload.",
       "provenance": "canonical_compatibility",
       "version": "1.17"
+    },
+    {
+      "commit": "b2e3048e02fdff424baa3485726b887b23ebdb4e",
+      "emitted_version": "1.17",
+      "feature": "pending_input_session_write",
+      "fixture": "features/v1_18_pending_input_session_write.json",
+      "note": "The pending-input ownership implementation was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving the pending Session write.",
+      "provenance": "canonical_compatibility",
+      "version": "1.18"
     }
   ],
   "resume": {
@@ -193,6 +202,13 @@
       "emitted_version": "1.16",
       "fixture": "minimal/v1_17.json",
       "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving older payload compatibility.",
+      "provenance": "canonical_compatibility"
+    },
+    "1.18": {
+      "commit": "b2e3048e02fdff424baa3485726b887b23ebdb4e",
+      "emitted_version": "1.17",
+      "fixture": "minimal/v1_18.json",
+      "note": "The pending-input ownership implementation was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving older payload compatibility.",
       "provenance": "canonical_compatibility"
     },
     "1.2": {

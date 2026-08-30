@@ -189,10 +189,11 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
+_PENDING_INPUT_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.18"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -226,8 +227,9 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes and pending-input ownership."
+        "resume flows, including pending resumed Session writes."
     ),
+    "1.18": "Persists pending-input ownership for unresolved Session writes.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -4373,6 +4375,10 @@ async def _build_run_state_from_json(
         pending_input_write = (
             pending_write.get("pending_input") if isinstance(pending_write, dict) else None
         )
+        pending_input_write_major, pending_input_write_minor = (
+            int(part)
+            for part in _PENDING_INPUT_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        )
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
@@ -4392,6 +4398,11 @@ async def _build_run_state_from_json(
             )
             or type(pending_write.get("persisted_count")) is not int
             or pending_write["persisted_count"] < 0
+            or (
+                "pending_input" in pending_write_keys
+                and (schema_major, schema_minor)
+                < (pending_input_write_major, pending_input_write_minor)
+            )
             or (
                 "pending_input" in pending_write_keys
                 and (
