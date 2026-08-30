@@ -15,7 +15,7 @@ from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorErro
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
-from agents.memory import OpenAIConversationsSession
+from agents.memory import OpenAIConversationsSession, Session
 from agents.run import CallModelData, ModelInputData
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
@@ -57,10 +57,72 @@ class _CheckpointOpenAIConversationsSession(OpenAIConversationsSession):
         if self._session_id is None:
             self._session_id = "lazy-test"
             self.initializations += 1
+        if limit == 0:
+            return []
         return list(self.items if limit is None else self.items[-limit:])
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         self.items.extend(copy.deepcopy(items))
+
+
+class _NormalizingOpenAIConversationsSession(_CheckpointOpenAIConversationsSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failure: Literal["before", "after"] | None = None
+        self.error = RuntimeError("normalized Conversations append failed")
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        failure, self.failure = self.failure, None
+        if failure == "before":
+            raise self.error
+
+        normalized_items: list[TResponseInputItem] = []
+        for item in copy.deepcopy(items):
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                normalized_item = cast(dict[str, Any], item)
+                normalized_item["id"] = f"fc_{len(self.items) + len(normalized_items)}"
+                normalized_item["status"] = "completed"
+                normalized_item["created_by"] = "server"
+                normalized_items.append(cast(TResponseInputItem, normalized_item))
+                continue
+            if not isinstance(item, dict) or item.get("role") not in {
+                "user",
+                "assistant",
+                "system",
+                "developer",
+            }:
+                normalized_items.append(item)
+                continue
+
+            normalized_item = cast(dict[str, Any], item)
+            normalized_item["id"] = f"msg_{len(self.items) + len(normalized_items)}"
+            normalized_item["type"] = "message"
+            normalized_item["status"] = "completed"
+            normalized_item["phase"] = None
+            content = normalized_item.get("content")
+            if isinstance(content, str):
+                if normalized_item["role"] == "assistant":
+                    normalized_item["content"] = [
+                        {
+                            "type": "output_text",
+                            "text": content,
+                            "annotations": [],
+                            "logprobs": None,
+                        }
+                    ]
+                else:
+                    normalized_item["content"] = [
+                        {
+                            "type": "input_text",
+                            "text": content,
+                            "prompt_cache_breakpoint": None,
+                        }
+                    ]
+            normalized_items.append(cast(TResponseInputItem, normalized_item))
+
+        self.items.extend(normalized_items)
+        if failure == "after":
+            raise self.error
 
 
 def _item_type(item: TResponseInputItem) -> str | None:
@@ -101,7 +163,7 @@ def _assistant_message_text(item: TResponseInputItem) -> str | None:
 
 async def _make_after_turn_state(
     *,
-    session: SimpleListSession | None = None,
+    session: Session | None = None,
     auto_previous_response_id: bool = False,
 ) -> tuple[ScriptedModel, Agent[Any], RunState[Any], list[str]]:
     calls: list[str] = []
@@ -141,7 +203,7 @@ async def _make_after_turn_state(
 async def _resume_pending_input_state(
     agent: Agent[Any],
     state: RunState[Any],
-    session: SimpleListSession,
+    session: Session,
     *,
     streamed: bool,
 ) -> Any:
@@ -916,6 +978,296 @@ async def test_conversations_initializes_lazy_session_before_pending_checkpoint(
     assert [_message_text(item) for item in session.items].count("Late input") == 1
     assert state.pending_input == []
     assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_streamed", "round_trip"),
+    [(False, True), (True, False)],
+    ids=["run-json-to-stream", "stream-live-to-run"],
+)
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+@pytest.mark.parametrize(
+    ("role", "pending_value", "text"),
+    [
+        ("user", "Normalized user input", "Normalized user input"),
+        (
+            "assistant",
+            [{"role": "assistant", "content": "Normalized assistant input"}],
+            "Normalized assistant input",
+        ),
+    ],
+)
+async def test_conversations_normalized_pending_append_recovers_exactly_once(
+    failing_streamed: bool,
+    round_trip: bool,
+    failure: Literal["before", "after"],
+    role: Literal["user", "assistant"],
+    pending_value: str | list[TResponseInputItem],
+    text: str,
+) -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    guardrail_calls = 0
+
+    def inspect_pending_input(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailFunctionOutput(output_info="accepted", tripwire_triggered=False)
+
+    agent.input_guardrails = [InputGuardrail(guardrail_function=inspect_pending_input)]
+    state.add_input(copy.deepcopy(pending_value))
+    model.enqueue([get_text_message("Recovered")])
+    model_calls_before = len(model.calls)
+    session.failure = failure
+
+    failed_stream_result = None
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed") as exc_info:
+        if failing_streamed:
+            failed_stream_result = Runner.run_streamed(
+                agent,
+                state,
+                session=session,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+            async for _event in failed_stream_result.stream_events():
+                pass
+        else:
+            await Runner.run(
+                agent,
+                state,
+                session=session,
+                run_config=RunConfig(tracing_disabled=True),
+            )
+
+    assert exc_info.value is session.error
+    if failed_stream_result is not None:
+        state = failed_stream_result.to_state()
+    extractor = _assistant_message_text if role == "assistant" else _message_text
+    assert [extractor(item) for item in session.items].count(text) == (
+        0 if failure == "before" else 1
+    )
+    assert len(model.calls) == model_calls_before
+    assert guardrail_calls == 1
+    assert state._pending_session_write is not None
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    result = await _resume_pending_input_state(
+        agent,
+        state,
+        session,
+        streamed=not failing_streamed,
+    )
+
+    assert result.final_output == "Recovered"
+    assert len(model.calls) == model_calls_before + 1
+    assert guardrail_calls == 1
+    assert state.pending_input == []
+    assert state._pending_session_write is None
+    assert [extractor(item) for item in session.items].count(text) == 1
+    model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    assert [extractor(item) for item in model_input].count(text) == 1
+    assert [extractor(item) for item in result.to_input_list()].count(text) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["changed-text", "unrelated-tail"])
+async def test_conversations_normalized_reconciliation_rejects_history_drift(
+    drift: str,
+) -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Drift target")
+    model.enqueue([get_text_message("Must not run")])
+    model_calls_before = len(model.calls)
+    session.failure = "after"
+
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+    if drift == "changed-text":
+        target = next(item for item in session.items if _message_text(item) == "Drift target")
+        assert isinstance(target, dict)
+        content = target.get("content")
+        assert isinstance(content, list) and isinstance(content[0], dict)
+        content[0]["text"] = "Changed by another writer"
+    else:
+        session.items.append(
+            cast(
+                TResponseInputItem,
+                {
+                    "id": "msg_unrelated",
+                    "type": "message",
+                    "role": "user",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "Another writer"}],
+                },
+            )
+        )
+    history_before_retry = copy.deepcopy(session.items)
+    state = await RunState.from_json(agent, state.to_json())
+
+    with pytest.raises(UserError, match="history changed or is ambiguous"):
+        await _resume_pending_input_state(agent, state, session, streamed=True)
+
+    assert session.items == history_before_retry
+    assert len(model.calls) == model_calls_before
+    assert state._pending_session_write is not None
+    assert [_message_text(item) for item in state.pending_input] == ["Drift target"]
+
+
+@pytest.mark.asyncio
+async def test_conversations_legacy_checkpoint_reconciles_normalized_tail() -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    existing = cast(TResponseInputItem, {"role": "user", "content": "before"})
+    pending = cast(TResponseInputItem, {"role": "user", "content": "after"})
+    await session.add_items([copy.deepcopy(existing)])
+    agent = Agent(name="legacy-checkpoint-agent")
+    state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="original input",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": session.session_id,
+        "items": [copy.deepcopy(pending)],
+        "before": None,
+        "persisted_count": 0,
+    }
+    session.failure = "after"
+
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed"):
+        await resume_pending_session_write(state, session)
+
+    assert [_message_text(item) for item in session.items] == ["before", "after"]
+    payload = state.to_json()
+    payload["$schemaVersion"] = "1.17"
+    restored = await RunState.from_json(agent, payload)
+
+    await resume_pending_session_write(restored, session)
+
+    assert restored._pending_session_write is None
+    assert [_message_text(item) for item in session.items] == ["before", "after"]
+
+
+@pytest.mark.asyncio
+async def test_conversations_function_call_response_defaults_reconcile_lost_ack() -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    function_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "call_normalized",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    )
+    agent = Agent(name="function-call-checkpoint-agent")
+    state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="original input",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": session.session_id,
+        "items": [copy.deepcopy(function_call)],
+        "before": None,
+        "persisted_count": 0,
+    }
+    session.failure = "after"
+
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed"):
+        await resume_pending_session_write(state, session)
+
+    stored_call = next(item for item in session.items if _item_type(item) == "function_call")
+    assert isinstance(stored_call, dict)
+    assert stored_call["status"] == "completed"
+    assert stored_call["created_by"] == "server"
+    restored = await RunState.from_json(agent, state.to_json())
+
+    await resume_pending_session_write(restored, session)
+
+    assert restored._pending_session_write is None
+    assert sum(_item_type(item) == "function_call" for item in session.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_conversations_complete_duplicate_tail_recognizes_lost_ack() -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    duplicate = cast(TResponseInputItem, {"role": "user", "content": "same"})
+    await session.add_items([copy.deepcopy(duplicate)])
+    agent = Agent(name="complete-checkpoint-agent")
+    state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="original input",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": session.session_id,
+        "items": [copy.deepcopy(duplicate)],
+        "before": None,
+        "persisted_count": 0,
+    }
+    session.failure = "after"
+
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed"):
+        await resume_pending_session_write(state, session)
+
+    assert [_message_text(item) for item in session.items].count("same") == 2
+    restored = await RunState.from_json(agent, state.to_json())
+
+    await resume_pending_session_write(restored, session)
+
+    assert [_message_text(item) for item in session.items].count("same") == 2
+    assert restored._pending_session_write is None
+
+
+@pytest.mark.asyncio
+async def test_conversations_saturated_duplicate_tail_remains_fail_closed() -> None:
+    session = _NormalizingOpenAIConversationsSession()
+    duplicate = cast(TResponseInputItem, {"role": "user", "content": "same"})
+    for _ in range(3):
+        await session.add_items([copy.deepcopy(duplicate)])
+    agent = Agent(name="saturated-checkpoint-agent")
+    state = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="original input",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": session.session_id,
+        "items": [copy.deepcopy(duplicate)],
+        "before": None,
+        "persisted_count": 0,
+    }
+    session.failure = "before"
+
+    with pytest.raises(RuntimeError, match="normalized Conversations append failed"):
+        await resume_pending_session_write(state, session)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    history_before_retry = copy.deepcopy(session.items)
+    with pytest.raises(UserError, match="history changed or is ambiguous"):
+        await resume_pending_session_write(restored, session)
+
+    assert session.items == history_before_retry
+    assert [_message_text(item) for item in session.items].count("same") == 3
+    assert restored._pending_session_write is not None
 
 
 @pytest.mark.asyncio

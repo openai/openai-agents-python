@@ -5,11 +5,21 @@ from typing import Any, cast
 import pytest
 
 from agents.items import TResponseInputItem
-from agents.run_internal.session_persistence import _sanitize_openai_conversation_item
+from agents.run_internal.session_persistence import (
+    _canonicalize_openai_conversation_item_for_reconciliation,
+    _sanitize_openai_conversation_item,
+)
 
 
 def _sanitize(item: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], _sanitize_openai_conversation_item(cast(TResponseInputItem, item)))
+
+
+def _canonicalize(item: dict[str, Any]) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        _canonicalize_openai_conversation_item_for_reconciliation(cast(TResponseInputItem, item)),
+    )
 
 
 @pytest.mark.parametrize(
@@ -177,3 +187,159 @@ def test_sanitize_passes_through_non_dict_items() -> None:
     sanitized: Any = _sanitize_openai_conversation_item(cast(TResponseInputItem, item))
 
     assert sanitized is item
+
+
+@pytest.mark.parametrize(
+    ("shorthand", "normalized"),
+    [
+        (
+            {"role": "user", "content": "hello"},
+            {
+                "id": "msg_user",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "phase": None,
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "hello",
+                        "prompt_cache_breakpoint": None,
+                    }
+                ],
+            },
+        ),
+        (
+            {"role": "assistant", "content": "hello"},
+            {
+                "id": "msg_assistant",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "phase": None,
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "hello",
+                        "annotations": [],
+                        "logprobs": None,
+                    }
+                ],
+            },
+        ),
+        (
+            {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "lookup",
+                "arguments": "{}",
+            },
+            {
+                "id": "fc_123",
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "lookup",
+                "arguments": "{}",
+                "status": "completed",
+                "created_by": "server",
+            },
+        ),
+    ],
+)
+def test_conversation_reconciliation_canonicalizes_message_response_defaults(
+    shorthand: dict[str, Any], normalized: dict[str, Any]
+) -> None:
+    assert _canonicalize(shorthand) == _canonicalize(normalized)
+
+
+@pytest.mark.parametrize(
+    "different",
+    [
+        {"role": "user", "content": "different"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "hello", "status": "incomplete"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "hello"},
+                {"type": "input_text", "text": "again"},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "hello",
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                }
+            ],
+        },
+    ],
+)
+def test_conversation_reconciliation_preserves_semantic_message_differences(
+    different: dict[str, Any],
+) -> None:
+    baseline = {"role": "user", "content": "hello"}
+
+    assert _canonicalize(different) != _canonicalize(baseline)
+
+
+def test_conversation_reconciliation_preserves_nonempty_assistant_metadata() -> None:
+    shorthand = {"role": "assistant", "content": "hello"}
+    annotated = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "hello",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": "https://example.com",
+                        "title": "Example",
+                        "start_index": 0,
+                        "end_index": 5,
+                    }
+                ],
+            }
+        ],
+    }
+
+    assert _canonicalize(annotated) != _canonicalize(shorthand)
+
+
+def test_conversation_reconciliation_preserves_nonterminal_function_call_status() -> None:
+    submitted = {
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+    incomplete = {**submitted, "status": "incomplete"}
+
+    assert _canonicalize(incomplete) != _canonicalize(submitted)
+
+
+def test_conversation_reconciliation_strips_shell_output_actor_metadata() -> None:
+    output_chunk = {
+        "stdout": "done",
+        "stderr": "",
+        "outcome": {"type": "exit", "exit_code": 0},
+    }
+    submitted = {
+        "type": "shell_call_output",
+        "call_id": "call_shell",
+        "status": "completed",
+        "output": [output_chunk],
+    }
+    returned = {
+        **submitted,
+        "id": "shell_output_123",
+        "created_by": "server",
+        "output": [{**output_chunk, "created_by": "server"}],
+    }
+
+    assert _canonicalize(returned) == _canonicalize(submitted)

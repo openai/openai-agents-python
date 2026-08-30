@@ -817,7 +817,7 @@ async def resume_pending_session_write(
     if session is None or session.session_id != pending["session_id"]:
         raise UserError("Resume the pending Session write with the original Session and session ID")
 
-    def digests(items: Sequence[TResponseInputItem]) -> list[str]:
+    def legacy_digests(items: Sequence[TResponseInputItem]) -> list[str]:
         return [
             hashlib.sha256(
                 _fingerprint_or_repr(
@@ -826,6 +826,13 @@ async def resume_pending_session_write(
             ).hexdigest()
             for item in items
         ]
+
+    def appended_digests(items: Sequence[TResponseInputItem]) -> list[str]:
+        if not isinstance(session, OpenAIConversationsSession):
+            return legacy_digests(items)
+        return legacy_digests(
+            [_canonicalize_openai_conversation_item_for_reconciliation(item) for item in items]
+        )
 
     pending_input = pending.get("pending_input")
 
@@ -883,20 +890,39 @@ async def resume_pending_session_write(
             tail = await _session_get_items(
                 session, limit=len(pending["items"]) + 1, wrapper=wrapper
             )
-            pending["before"] = digests(tail)
+            pending["before"] = legacy_digests(tail)
             append = True
         else:
-            expected = before + digests(pending["items"])
-            tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
-            observed = digests(tail)
-            committed = observed == expected
+            expected_length = len(before) + len(pending["items"])
+            tail = await _session_get_items(session, limit=expected_length, wrapper=wrapper)
+            observed = legacy_digests(tail)
+            committed = (
+                len(tail) == expected_length
+                and observed[: len(before)] == before
+                and appended_digests(tail[len(before) :]) == appended_digests(pending["items"])
+            )
             unchanged = observed[-len(before) :] == before if before else not observed
-            if committed == unchanged:
+            if committed:
+                # The initial read requests one item beyond the pending batch. Returning fewer
+                # proves that ``before`` covered the complete history, so an exact expected tail
+                # is authoritative even when duplicate content also matches ``unchanged``. A
+                # saturated window cannot distinguish a lost ACK from an older duplicate moving
+                # into view after a pre-commit failure, and must remain fail-closed.
+                before_was_complete = len(before) < len(pending["items"]) + 1
+                if unchanged and not before_was_complete:
+                    raise UserError(
+                        "Cannot reconcile the pending Session write: history changed or is "
+                        "ambiguous. Repair the original Session before resuming; do not rerun "
+                        "the completed tool."
+                    )
+                append = False
+            elif unchanged:
+                append = True
+            else:
                 raise UserError(
                     "Cannot reconcile the pending Session write: history changed or is ambiguous. "
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
-            append = unchanged
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
@@ -1072,6 +1098,77 @@ def _ignore_ids_for_matching(session: Session) -> bool:
     return isinstance(session, OpenAIConversationsSession) or getattr(
         session, "_ignore_ids_for_matching", False
     )
+
+
+def _canonicalize_openai_conversation_item_for_reconciliation(
+    item: TResponseInputItem,
+) -> TResponseInputItem:
+    """Canonicalize known Conversations API defaults only for backend ACK matching.
+
+    This intentionally does not participate in checkpoint ownership validation, where exact
+    payloads and required IDs remain significant. The Conversations API assigns item IDs and
+    expands shorthand messages when reading them back, so those response-only differences must
+    not turn a committed append into an ambiguous lost-ack retry.
+    """
+    normalized = ensure_input_item_format(item)
+    if not isinstance(normalized, dict):
+        return normalized
+
+    clean = cast(
+        dict[str, Any],
+        _sanitize_openai_conversation_item(normalized),
+    )
+    clean.pop("id", None)
+    clean.pop("created_by", None)
+    if clean.get("status") == "completed":
+        clean.pop("status", None)
+
+    if clean.get("type") == "shell_call_output":
+        chunks = clean.get("output")
+        if isinstance(chunks, list):
+            clean["output"] = [
+                {key: value for key, value in chunk.items() if key != "created_by"}
+                if isinstance(chunk, dict)
+                else chunk
+                for chunk in chunks
+            ]
+
+    item_type = clean.get("type")
+    role = clean.get("role")
+    if item_type not in (None, "message") or role not in (
+        "user",
+        "assistant",
+        "system",
+        "developer",
+    ):
+        return cast(TResponseInputItem, clean)
+
+    clean.pop("type", None)
+    if clean.get("status") in (None, "completed"):
+        clean.pop("status", None)
+    if clean.get("phase") is None:
+        clean.pop("phase", None)
+
+    content = clean.get("content")
+    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict):
+        return cast(TResponseInputItem, clean)
+
+    expected_text_type = "output_text" if role == "assistant" else "input_text"
+    text_part = dict(content[0])
+    if text_part.get("type") != expected_text_type:
+        return cast(TResponseInputItem, clean)
+
+    if expected_text_type == "output_text":
+        if text_part.get("annotations") == []:
+            text_part.pop("annotations", None)
+        if text_part.get("logprobs") is None or text_part.get("logprobs") == []:
+            text_part.pop("logprobs", None)
+    elif text_part.get("prompt_cache_breakpoint") is None:
+        text_part.pop("prompt_cache_breakpoint", None)
+
+    if set(text_part) == {"type", "text"} and isinstance(text_part.get("text"), str):
+        clean["content"] = text_part["text"]
+    return cast(TResponseInputItem, clean)
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(
