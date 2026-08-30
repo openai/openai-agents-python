@@ -1,37 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import time
 from collections import deque
 from collections.abc import Callable
 
 from .pty_types import truncate_text_by_tokens
-
-
-def _incomplete_utf8_tail_len(buf: bytes | bytearray) -> int:
-    """Return the number of trailing bytes that begin an incomplete UTF-8 sequence.
-
-    Returns 0 when ``buf`` ends on a character boundary or with bytes that cannot
-    start a longer sequence, so decoding the whole buffer is safe.
-    """
-    for i in range(1, min(4, len(buf)) + 1):
-        byte = buf[-i]
-        if byte & 0xC0 == 0x80:
-            # Continuation byte; keep scanning back for its lead byte.
-            continue
-        if byte & 0x80 == 0x00:
-            seq_len = 1
-        elif byte & 0xE0 == 0xC0:
-            seq_len = 2
-        elif byte & 0xF0 == 0xE0:
-            seq_len = 3
-        elif byte & 0xF8 == 0xF0:
-            seq_len = 4
-        else:
-            # Invalid lead byte; nothing worth holding back.
-            return 0
-        return i if i < seq_len else 0
-    return 0
 
 
 async def collect_pty_output(
@@ -73,18 +48,23 @@ async def collect_pty_output(
             break
         output_notify.clear()
 
-    # A multi-byte character may be split across two collection windows. Unless
-    # the process is done (no further windows will arrive), hold back a trailing
-    # incomplete UTF-8 sequence and push it to the front of the shared deque so
-    # the next window can complete it, instead of both halves decoding to U+FFFD.
-    if not final:
-        tail_len = _incomplete_utf8_tail_len(output)
-        if tail_len:
-            tail = bytes(output[-tail_len:])
-            del output[-tail_len:]
-            async with output_lock:
-                output_chunks.appendleft(tail)
+    # Re-check completion at the finalization boundary: if the process finished
+    # after the loop broke on its deadline, there is no further window, so we
+    # must flush rather than requeue (the requeued entry would be discarded).
+    final = final or is_done()
 
-    text = output.decode("utf-8", errors="replace")
+    # A multi-byte character can be split across two collection windows. Decode
+    # incrementally so a genuinely incomplete trailing sequence is buffered and
+    # pushed back for the next window to complete, while invalid bytes still
+    # decode to U+FFFD immediately (matching errors="replace"). When the process
+    # is done the decoder is finalized, flushing any pending bytes.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text = decoder.decode(bytes(output), final=final)
+    if not final:
+        buffered = decoder.getstate()[0]
+        if buffered:
+            async with output_lock:
+                output_chunks.appendleft(bytes(buffered))
+
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count

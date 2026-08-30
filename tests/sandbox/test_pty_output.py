@@ -96,3 +96,22 @@ async def test_collect_pty_output_preserves_char_split_across_windows() -> None:
     combined = (first + second).decode("utf-8")
     assert combined == text
     assert "�" not in combined
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_replaces_invalid_byte_without_withholding() -> None:
+    # An invalid UTF-8 lead byte (0xC0) must decode to U+FFFD immediately in a
+    # non-final window, not be buffered as if it were an incomplete sequence.
+    output_chunks: deque[bytes] = deque([b"ok\xc0"])
+
+    out, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=asyncio.Event(),
+        is_done=lambda: False,
+        yield_time_ms=10,
+        max_output_tokens=None,
+    )
+
+    assert out.decode("utf-8") == "ok�"
+    assert not output_chunks  # nothing was withheld
