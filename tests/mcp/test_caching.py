@@ -68,6 +68,33 @@ async def test_server_caching_works(
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
 @patch("mcp.client.session.ClientSession.list_tools")
+async def test_server_caching_works_with_empty_tools(
+    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """An empty tools list is a populated cache and must not be fetched again."""
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_tools_list=True,
+    )
+    mock_list_tools.return_value = ListToolsResult(tools=[])
+
+    async with server:
+        first_result = await server.list_tools()
+        assert first_result == []
+        assert server.cached_tools == []
+
+        second_result = await server.list_tools()
+        assert second_result == []
+
+    assert mock_list_tools.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
 async def test_paginated_tools_are_cached_before_filtering(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
