@@ -16,6 +16,7 @@ from agents.sandbox.util.tar_utils import (
     safe_tar_member_rel_path,
     strip_tar_member_prefix,
     validate_tar_bytes,
+    validate_tarfile,
 )
 
 
@@ -70,9 +71,11 @@ def _fifo(name: str) -> _Member:
     return _Member(member)
 
 
-def _safe_extract(raw: bytes, root: Path) -> None:
+def _safe_extract(raw: bytes, root: Path, *, allow_external_symlink_targets: bool = False) -> None:
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
-        safe_extract_tarfile(tar, root=root)
+        safe_extract_tarfile(
+            tar, root=root, allow_external_symlink_targets=allow_external_symlink_targets
+        )
 
 
 def test_safe_extract_tarfile_preserves_venv_style_symlinks(tmp_path: Path) -> None:
@@ -88,8 +91,8 @@ def test_safe_extract_tarfile_preserves_venv_style_symlinks(tmp_path: Path) -> N
         _symlink("./uv-project/.venv/bin/python", "python3"),
     )
 
-    validate_tar_bytes(raw)
-    _safe_extract(raw, tmp_path)
+    validate_tar_bytes(raw, allow_external_symlink_targets=True)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     assert (tmp_path / "uv-project" / "main.py").read_text() == 'print("snapshot smoke")\n'
     assert os.readlink(tmp_path / "uv-project" / ".venv" / "lib64") == "lib"
@@ -165,6 +168,68 @@ def test_validate_tar_bytes_allows_internal_symlink_target_in_strict_mode() -> N
     validate_tar_bytes(raw, allow_external_symlink_targets=False)
 
 
+def test_validate_tar_bytes_rejects_external_symlink_target_by_default() -> None:
+    raw = _tar_bytes(_symlink("leak", "/etc/passwd"))
+
+    with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+        validate_tar_bytes(raw)
+
+
+def test_validate_tarfile_rejects_external_symlink_target_by_default() -> None:
+    raw = _tar_bytes(_symlink("leak", "/etc/passwd"))
+
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
+        with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+            validate_tarfile(tar)
+
+
+def test_safe_extract_tarfile_rejects_external_symlink_target_by_default(tmp_path: Path) -> None:
+    raw = _tar_bytes(_symlink("leak", "/etc/passwd"))
+    root = tmp_path / "root"
+    root.mkdir()
+
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
+        with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+            safe_extract_tarfile(tar, root=root)
+
+    assert not (root / "leak").exists()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "C:/Windows/System32",
+        r"C:\Windows\System32",
+        r"..\..\Windows",
+        r"\\server\share",
+    ],
+)
+def test_validate_tar_bytes_rejects_windows_symlink_targets_by_default(target: str) -> None:
+    # Member names already reject this syntax. Targets are parsed as POSIX, so these
+    # would otherwise read as ordinary relative components.
+    raw = _tar_bytes(_symlink("link", target))
+
+    with pytest.raises(UnsafeTarMemberError, match="windows (drive symlink target|path separator)"):
+        validate_tar_bytes(raw)
+
+
+def test_validate_tar_bytes_allows_windows_symlink_targets_when_opted_in() -> None:
+    raw = _tar_bytes(_symlink("link", "C:/Windows/System32"))
+
+    validate_tar_bytes(raw, allow_external_symlink_targets=True)
+
+
+def test_strip_tar_member_prefix_still_persists_external_symlink_targets() -> None:
+    # Persisting reads a workspace that already contains the link. Hydration is where it
+    # would take effect, and every hydrate path rejects it.
+    raw = _tar_bytes(_dir("workspace"), _symlink("workspace/python", "/usr/bin/python3"))
+
+    normalized = strip_tar_member_prefix(io.BytesIO(raw), prefix="workspace")
+
+    with tarfile.open(fileobj=normalized, mode="r:*") as tar:
+        assert tar.getnames() == [".", "python"]
+
+
 def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
     raw = _tar_bytes(
         _dir("workspace"),
@@ -200,7 +265,7 @@ def test_strip_tar_member_prefix_rewrites_pax_path_headers() -> None:
 def test_safe_extract_tarfile_can_rehydrate_existing_leaf_symlink(tmp_path: Path) -> None:
     raw = _tar_bytes(_symlink("link.txt", "/usr/local/bin/python3"))
 
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
     assert os.readlink(tmp_path / "link.txt") == "/usr/local/bin/python3"
 
     raw = _tar_bytes(_symlink("link.txt", "target-v2.txt"))
@@ -239,7 +304,7 @@ def test_safe_extract_tarfile_can_replace_existing_leaf_symlink_with_file(
     tmp_path: Path,
 ) -> None:
     raw = _tar_bytes(_symlink("python", "/usr/local/bin/python3"))
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     raw = _tar_bytes(_file("python", b"real file"))
 
@@ -252,7 +317,7 @@ def test_safe_extract_tarfile_can_replace_existing_leaf_symlink_with_directory(
     tmp_path: Path,
 ) -> None:
     raw = _tar_bytes(_symlink("bin", "/usr/local/bin"))
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     raw = _tar_bytes(_dir("bin"), _file("bin/python", b"real file"))
 
@@ -292,27 +357,36 @@ def test_validate_tar_bytes_rejects_members_under_archive_symlink() -> None:
     )
 
     with pytest.raises(UnsafeTarMemberError, match="descends through symlink"):
-        validate_tar_bytes(raw)
+        validate_tar_bytes(raw, allow_external_symlink_targets=True)
 
 
 def test_validate_tar_bytes_can_reject_specific_symlink_path() -> None:
     raw = _tar_bytes(_symlink("workspace", "/tmp/outside"))
 
     with pytest.raises(UnsafeTarMemberError, match="symlink member not allowed: workspace"):
-        validate_tar_bytes(raw, reject_symlink_rel_paths={Path("workspace")})
+        validate_tar_bytes(
+            raw,
+            reject_symlink_rel_paths={Path("workspace")},
+            allow_external_symlink_targets=True,
+        )
 
 
 def test_validate_tar_bytes_specific_symlink_rejection_normalizes_dot_prefix() -> None:
     raw = _tar_bytes(_symlink("./workspace", "/tmp/outside"))
 
     with pytest.raises(UnsafeTarMemberError, match="symlink member not allowed: workspace"):
-        validate_tar_bytes(raw, reject_symlink_rel_paths={"workspace"})
+        validate_tar_bytes(
+            raw,
+            reject_symlink_rel_paths={"workspace"},
+            allow_external_symlink_targets=True,
+        )
 
 
 def test_validate_tar_bytes_specific_symlink_rejection_does_not_reject_children() -> None:
     validate_tar_bytes(
         _tar_bytes(_dir("workspace"), _symlink("workspace/link", "/tmp/outside")),
         reject_symlink_rel_paths={"workspace"},
+        allow_external_symlink_targets=True,
     )
 
 

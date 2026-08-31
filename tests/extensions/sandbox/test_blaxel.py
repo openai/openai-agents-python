@@ -1178,8 +1178,8 @@ def _make_tar_with_symlink_and_file(*, symlink_name: str, target: str, file_name
 
 
 class TestValidateTarBytes:
-    def _validate(self, raw: bytes) -> None:
-        validate_tar_bytes(raw)
+    def _validate(self, raw: bytes, *, allow_external_symlink_targets: bool = False) -> None:
+        validate_tar_bytes(raw, allow_external_symlink_targets=allow_external_symlink_targets)
 
     def test_valid_tar(self) -> None:
         raw = _make_tar({"hello.txt": b"content", "subdir/": None})
@@ -1210,7 +1210,7 @@ class TestValidateTarBytes:
             file_name="link.txt/nested.txt",
         )
         with pytest.raises(ValueError, match="descends through symlink"):
-            self._validate(raw)
+            self._validate(raw, allow_external_symlink_targets=True)
 
     def test_corrupt_tar_rejected(self) -> None:
         with pytest.raises(ValueError, match="invalid tar"):
