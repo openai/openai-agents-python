@@ -53,7 +53,6 @@ from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
     PtyExecUpdate,
-    _settle_pty_cleanup,
     allocate_pty_process_id,
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
@@ -144,7 +143,6 @@ class _UnixPtyProcessEntry:
     process: asyncio.subprocess.Process
     tty: bool
     primary_fd: int | None = None
-    group_termination_pending: bool = False
     last_used: float = field(default_factory=time.monotonic)
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -164,7 +162,6 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _running: bool
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _UnixPtyProcessEntry]
-    _unregistered_pty_processes: dict[int, _UnixPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
     _fd_close_tasks: set[asyncio.Task[None]]
     _host_environment_allowlist: frozenset[str] | None
@@ -174,7 +171,6 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._running = False
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
-        self._unregistered_pty_processes = {}
         self._reserved_pty_process_ids = set()
         self._fd_close_tasks = set()
         self._host_environment_allowlist = None
@@ -384,31 +380,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 asyncio.create_task(self._pump_process_stream(entry, process.stderr)),
             ]
 
-        self._unregistered_pty_processes[id(entry)] = entry
-        registered = False
-        try:
-            entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
+        entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
 
-            pruned_entry: _UnixPtyProcessEntry | None = None
-            async with self._pty_lock:
-                process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
-                self._reserved_pty_process_ids.add(process_id)
-                pruned_entry = self._prune_pty_processes_if_needed()
-                self._pty_processes[process_id] = entry
-                self._unregistered_pty_processes.pop(id(entry), None)
-                process_count = len(self._pty_processes)
-                registered = True
-        except asyncio.CancelledError as cancellation:
-            if not registered:
-                await _settle_pty_cleanup(
-                    self._terminate_pty_entry(entry),
-                    initial_cancellation=cancellation,
-                )
-            raise
-        except BaseException:
-            if not registered:
-                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
-            raise
+        pruned_entry: _UnixPtyProcessEntry | None = None
+        async with self._pty_lock:
+            process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
+            self._reserved_pty_process_ids.add(process_id)
+            pruned_entry = self._prune_pty_processes_if_needed()
+            self._pty_processes[process_id] = entry
+            process_count = len(self._pty_processes)
 
         if pruned_entry is not None:
             await self._terminate_pty_entry(pruned_entry)
@@ -479,26 +459,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def pty_terminate_all(self) -> None:
         async with self._pty_lock:
-            entries_by_id = {
-                id(entry): entry
-                for entry in (
-                    *self._pty_processes.values(),
-                    *self._unregistered_pty_processes.values(),
-                )
-            }
+            entries = list(self._pty_processes.values())
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
-            self._unregistered_pty_processes.update(entries_by_id)
 
-        first_error: Exception | None = None
-        for entry in entries_by_id.values():
-            try:
-                await self._terminate_pty_entry(entry)
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+        for entry in entries:
+            await self._terminate_pty_entry(entry)
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
         if self._host_environment_allowlist is None:
@@ -622,33 +588,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         process = entry.process
         primary_fd = entry.primary_fd
         entry.primary_fd = None
-        self._unregistered_pty_processes[id(entry)] = entry
 
-        termination_error: OSError | None = None
-        termination_cause: OSError | None = None
-        should_terminate_group = process.returncode is None or entry.group_termination_pending
-        if should_terminate_group and process.pid is None:
-            termination_error = OSError("Cannot terminate PTY process without a PID")
-        if should_terminate_group and process.pid is not None:
-            entry.group_termination_pending = False
-            try:
+        if process.returncode is None and process.pid is not None:
+            with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            except OSError as group_error:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    if not isinstance(group_error, ProcessLookupError):
-                        entry.group_termination_pending = True
-                        termination_error = group_error
-                except OSError as process_error:
-                    if not isinstance(group_error, ProcessLookupError):
-                        entry.group_termination_pending = True
-                    termination_error = process_error
-                    termination_cause = group_error
-                else:
-                    entry.group_termination_pending = False
-            else:
-                entry.group_termination_pending = False
 
         for task in entry.pump_tasks:
             task.cancel()
@@ -662,16 +605,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 self._schedule_fd_close(primary_fd)
             entry.output_closed.set()
             entry.output_notify.set()
-        else:
-            if primary_fd is not None:
-                _close_fd_quietly(primary_fd)
-            await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
-            if entry.wait_task is not None:
-                await asyncio.gather(entry.wait_task, return_exceptions=True)
+            return
 
-        if termination_error is not None:
-            raise termination_error from termination_cause
-        self._unregistered_pty_processes.pop(id(entry), None)
+        if primary_fd is not None:
+            _close_fd_quietly(primary_fd)
+        await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
+        if entry.wait_task is not None:
+            await asyncio.gather(entry.wait_task, return_exceptions=True)
 
     def _schedule_fd_close(self, fd: int) -> None:
         task = asyncio.create_task(asyncio.to_thread(_close_fd_quietly, fd))
