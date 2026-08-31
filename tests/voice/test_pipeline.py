@@ -1334,12 +1334,17 @@ async def test_voicepipeline_float32() -> None:
         ("int16", np.int16),
         (np.dtype("float32"), np.float32),
     ],
-    ids=["float32-string", "int16-string", "float32-dtype-instance"],
+    ids=["float32-string", "int16-string", "already-supported-spelling"],
 )
 async def test_voicepipeline_accepts_numpy_dtype_spellings(
     dtype_spelling: npt.DTypeLike, expected_dtype: type[np.int16] | type[np.float32]
 ) -> None:
-    """Dictionary settings carry ``dtype`` as the spelling NumPy resolves, not the type object."""
+    """Dictionary settings carry ``dtype`` as the spelling NumPy resolves, not the type object.
+
+    The string cases are the ones that fail before this change. The resolved-dtype case is a
+    pin on the spelling that already worked rather than new coverage, since every accepted
+    spelling now resolves to the same dtype and takes the same branch.
+    """
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
     fake_tts = ZeroPcmTTSModel()
