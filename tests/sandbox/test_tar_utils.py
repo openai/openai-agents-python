@@ -199,9 +199,9 @@ def test_safe_extract_tarfile_rejects_external_symlink_target_by_default(tmp_pat
     "target",
     [
         "C:/Windows/System32",
-        "C:\Windows\System32",
-        "..\..\Windows",
-        "\\server\share",
+        r"C:\Windows\System32",
+        r"..\..\Windows",
+        r"\\server\share",
     ],
 )
 def test_validate_tar_bytes_rejects_windows_symlink_targets_by_default(target: str) -> None:
