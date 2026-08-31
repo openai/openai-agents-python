@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import time
 
@@ -7,6 +8,7 @@ from openai.types.responses import ResponseCompletedEvent
 
 from agents import Agent, Runner
 from agents.guardrail import input_guardrail
+from agents.models.multi_provider import MultiProvider
 from agents.stream_events import RawResponsesStreamEvent
 from agents.testing import ScriptedModel
 
@@ -109,13 +111,29 @@ async def test_cancel_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_cancel_before_streaming():
+async def test_cancel_before_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    closed: list[MultiProvider] = []
+
+    async def record_close(provider: MultiProvider) -> None:
+        closed.append(provider)
+
+    monkeypatch.setattr(MultiProvider, "aclose", record_close)
     model = ScriptedModel()
     agent = Agent(name="Joker", model=model)
     result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     result.cancel()  # Cancel before streaming
     events = [e async for e in result.stream_events()]
+    gc.collect()
+
     assert events == [], "No events should be yielded if cancel() is called before streaming."
+    assert len(closed) == 1
+    assert not any(
+        warning.category is RuntimeWarning and "was never awaited" in str(warning.message)
+        for warning in recwarn
+    )
 
 
 @pytest.mark.asyncio

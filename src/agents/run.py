@@ -55,7 +55,6 @@ from .run_config import (
     ToolExecutionConfig,
     ToolNameCollisionPolicy as ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
-    _coerce_run_config,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -107,6 +106,10 @@ from .run_internal.items import (
     copy_input_items,
     normalize_resumed_input,
     reconcile_nested_history_owned_input_after_rewrite,
+)
+from .run_internal.model_provider_lifecycle import (
+    _close_runner_owned_model_provider,
+    _normalize_run_config_for_runner,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
@@ -553,18 +556,25 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
+        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         try:
-            return await self._run_impl(starting_agent, input, **kwargs)
-        except BaseException as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _detach_data_redacted_error_traceback(error)
-            redacted_error = error
+            try:
+                return await self._run_impl(starting_agent, input, **kwargs)
+            except BaseException as error:
+                if not _is_error_data_redacted(error):
+                    raise
+                _detach_data_redacted_error_traceback(error)
+                redacted_error = error
+        finally:
+            if owns_model_provider:
+                await _close_runner_owned_model_provider(run_config.model_provider)
 
         self = cast(Any, None)
         starting_agent = cast(Any, None)
         input = cast(Any, None)
+        run_config = cast(Any, None)
         cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
         _detach_data_redacted_error_traceback(redacted_error)
@@ -586,7 +596,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config = cast(RunConfig, run_config)
 
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = (
@@ -2347,7 +2357,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)
@@ -2565,8 +2575,8 @@ class AgentRunner:
             sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
-        streamed_result.run_loop_task = asyncio.create_task(
-            _await_data_redacted_error_boundary(
+        async def run_loop() -> None:
+            await _await_data_redacted_error_boundary(
                 lambda: start_streaming(
                     starting_input=input_for_result,
                     streamed_result=streamed_result,
@@ -2586,7 +2596,13 @@ class AgentRunner:
                     sandbox_runtime=sandbox_runtime,
                 )
             )
-        )
+
+        streamed_result.run_loop_task = asyncio.create_task(run_loop())
+        if owns_model_provider:
+            model_provider = run_config.model_provider
+            streamed_result._ensure_model_provider_cleanup_on_completion(
+                lambda: _close_runner_owned_model_provider(model_provider)
+            )
         if sandbox_runtime.enabled:
             streamed_result.ensure_sandbox_cleanup_on_completion()
         return streamed_result
