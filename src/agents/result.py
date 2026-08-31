@@ -18,6 +18,7 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     RunErrorDetails,
+    UserError,
     _await_data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
@@ -424,8 +425,18 @@ class RunResultBase(abc.ABC):
         Returns:
             The final output casted to the given type.
         """
-        if raise_if_incorrect_type and not isinstance(self.final_output, cls):
-            raise TypeError(f"Final output is not of type {cls.__name__}")
+        if raise_if_incorrect_type:
+            try:
+                is_correct = isinstance(self.final_output, cls)
+            except TypeError:
+                type_name = getattr(cls, "__name__", repr(cls))
+                raise UserError(
+                    f"final_output_as cannot validate generic type {type_name}. "
+                    "Use raise_if_incorrect_type=False for generic types."
+                ) from None
+            if not is_correct:
+                type_name = getattr(cls, "__name__", repr(cls))
+                raise TypeError(f"Final output is not of type {type_name}")
 
         return cast(T, self.final_output)
 

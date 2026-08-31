@@ -103,6 +103,15 @@ def test_bad_cast_with_param_raises():
         result.final_output_as(int, raise_if_incorrect_type=True)
 
 
+def test_bad_cast_with_generic_type_raises_user_error():
+    """Bad casts with generic types (like list[str]) should raise UserError."""
+    from agents.exceptions import UserError
+
+    result = create_run_result(["test"])
+    with pytest.raises(UserError, match="Use raise_if_incorrect_type=False for generic types"):
+        result.final_output_as(list[str], raise_if_incorrect_type=True)
+
+
 def test_run_result_release_agents_breaks_strong_refs() -> None:
     message = _create_message("hello")
     agent = Agent(name="leak-test-agent")
