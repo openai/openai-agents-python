@@ -87,6 +87,12 @@ class TTSModelSettings:
     speed: float | None = None
     """The speed with which the TTS model will read the text. Between 0.25 and 4.0."""
 
+    def __post_init__(self) -> None:
+        # Configurations loaded from JSON/YAML commonly represent NumPy dtypes as strings.
+        # Normalize those spellings once at the settings boundary so downstream consumers can
+        # compare against the supported NumPy dtypes consistently.
+        self.dtype = np.dtype(self.dtype)
+
 
 class TTSModel(abc.ABC):
     """A text-to-speech model that can convert text into audio output."""
@@ -228,3 +234,4 @@ class VoiceModelProvider(abc.ABC):
     @abc.abstractmethod
     def get_tts_model(self, model_name: str | None) -> TTSModel:
         """Get a text-to-speech model by name."""
+        pass
