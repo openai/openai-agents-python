@@ -157,7 +157,11 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
 
         out.seek(0)
         with tarfile.open(fileobj=out, mode="r:*") as tar:
-            validate_tarfile(tar)
+            # Persisting a snapshot reads a workspace that already exists, so an external
+            # symlink here is something the workspace already contained rather than
+            # something an archive is introducing. Hydration is where that link would
+            # take effect, and every hydrate path rejects it.
+            validate_tarfile(tar, allow_external_symlink_targets=True)
         out.seek(0)
         return cast(io.IOBase, out)
     except Exception:
@@ -259,7 +263,7 @@ def validate_tarfile(
     skip_rel_paths: Iterable[str | Path] = (),
     root_name: str | None = None,
     allow_symlinks: bool = True,
-    allow_external_symlink_targets: bool = True,
+    allow_external_symlink_targets: bool = False,
 ) -> None:
     """Validate a workspace tar before handing it to a local or remote extractor.
 
@@ -345,7 +349,7 @@ def validate_tar_bytes(
     reject_symlink_rel_paths: Iterable[str | Path] = (),
     skip_rel_paths: Iterable[str | Path] = (),
     root_name: str | None = None,
-    allow_external_symlink_targets: bool = True,
+    allow_external_symlink_targets: bool = False,
 ) -> None:
     """Validate raw workspace tar bytes with the shared safe tar policy."""
 
@@ -369,7 +373,7 @@ def safe_extract_tarfile(
     tar: tarfile.TarFile,
     *,
     root: Path,
-    allow_external_symlink_targets: bool = True,
+    allow_external_symlink_targets: bool = False,
 ) -> None:
     """
     Safely extract a tar archive into `root`.
