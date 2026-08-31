@@ -484,6 +484,36 @@ async def test_voicepipeline_normalizes_nested_dictionary_config() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dtype", "expected_dtype"),
+    [("int16", np.int16), ("float32", np.float32)],
+    ids=["int16-string", "float32-string"],
+)
+async def test_voicepipeline_accepts_string_tts_dtype_from_dictionary_config(
+    dtype: str,
+    expected_dtype: npt.DTypeLike,
+) -> None:
+    fake_stt = QueuedSTTModel(["first"])
+    fake_tts = ZeroPcmTTSModel()
+    pipeline = VoicePipeline(
+        workflow=QueuedVoiceWorkflow([["out_1"]]),
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={
+            "tracing_disabled": True,
+            "tts_settings": {"buffer_size": 1, "dtype": dtype},
+        },
+    )
+
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    events, audio_chunks = await extract_events(result)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    decoded_audio = np.frombuffer(audio_chunks[0], dtype=expected_dtype)
+    assert decoded_audio.dtype == np.dtype(expected_dtype)
+
+
+@pytest.mark.asyncio
 async def test_queued_stt_model_shares_static_and_streamed_transcription_queue() -> None:
     stt = QueuedSTTModel(["static", "streamed"])
 

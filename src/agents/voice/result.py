@@ -106,9 +106,14 @@ class StreamedAudioResult:
 
         np_array = np.frombuffer(combined_buffer, dtype=np.int16)
 
-        if output_dtype == np.int16:
+        try:
+            normalized_output_dtype = np.dtype(output_dtype)
+        except (TypeError, ValueError) as error:
+            raise UserError("Invalid output dtype") from error
+
+        if normalized_output_dtype == np.dtype(np.int16):
             return np_array
-        elif output_dtype == np.float32:
+        elif normalized_output_dtype == np.dtype(np.float32):
             return (np_array.astype(np.float32) / 32767.0).reshape(-1, 1)
         else:
             raise UserError("Invalid output dtype")
