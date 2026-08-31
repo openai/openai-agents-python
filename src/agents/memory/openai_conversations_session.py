@@ -143,6 +143,7 @@ class OpenAIConversationsSession(SessionABC):
                 await self._openai_client.conversations.delete(
                     conversation_id=session_id,
                 )
-                self._session_id = None
+                if self._session_id == session_id:
+                    self._session_id = None
 
             await _await_mutation(delete_and_clear_session_id())
