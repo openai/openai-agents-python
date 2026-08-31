@@ -71,9 +71,11 @@ def _fifo(name: str) -> _Member:
     return _Member(member)
 
 
-def _safe_extract(raw: bytes, root: Path) -> None:
+def _safe_extract(raw: bytes, root: Path, *, allow_external_symlink_targets: bool = False) -> None:
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tar:
-        safe_extract_tarfile(tar, root=root)
+        safe_extract_tarfile(
+            tar, root=root, allow_external_symlink_targets=allow_external_symlink_targets
+        )
 
 
 def test_safe_extract_tarfile_preserves_venv_style_symlinks(tmp_path: Path) -> None:
@@ -89,8 +91,8 @@ def test_safe_extract_tarfile_preserves_venv_style_symlinks(tmp_path: Path) -> N
         _symlink("./uv-project/.venv/bin/python", "python3"),
     )
 
-    validate_tar_bytes(raw)
-    _safe_extract(raw, tmp_path)
+    validate_tar_bytes(raw, allow_external_symlink_targets=True)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     assert (tmp_path / "uv-project" / "main.py").read_text() == 'print("snapshot smoke")\n'
     assert os.readlink(tmp_path / "uv-project" / ".venv" / "lib64") == "lib"
@@ -239,7 +241,7 @@ def test_strip_tar_member_prefix_rewrites_pax_path_headers() -> None:
 def test_safe_extract_tarfile_can_rehydrate_existing_leaf_symlink(tmp_path: Path) -> None:
     raw = _tar_bytes(_symlink("link.txt", "/usr/local/bin/python3"))
 
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
     assert os.readlink(tmp_path / "link.txt") == "/usr/local/bin/python3"
 
     raw = _tar_bytes(_symlink("link.txt", "target-v2.txt"))
@@ -278,7 +280,7 @@ def test_safe_extract_tarfile_can_replace_existing_leaf_symlink_with_file(
     tmp_path: Path,
 ) -> None:
     raw = _tar_bytes(_symlink("python", "/usr/local/bin/python3"))
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     raw = _tar_bytes(_file("python", b"real file"))
 
@@ -291,7 +293,7 @@ def test_safe_extract_tarfile_can_replace_existing_leaf_symlink_with_directory(
     tmp_path: Path,
 ) -> None:
     raw = _tar_bytes(_symlink("bin", "/usr/local/bin"))
-    _safe_extract(raw, tmp_path)
+    _safe_extract(raw, tmp_path, allow_external_symlink_targets=True)
 
     raw = _tar_bytes(_dir("bin"), _file("bin/python", b"real file"))
 
