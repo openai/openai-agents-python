@@ -397,6 +397,40 @@ class TestUnixLocalPty:
         assert session._fd_close_tasks == set()
 
     @pytest.mark.asyncio
+    async def test_pty_termination_preserves_group_error_when_leader_disappears(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _RecordingUnixLocalSession(tmp_path)
+        allow_group_kill = False
+
+        def killpg(pid: int, signum: signal.Signals) -> None:
+            _ = (pid, signum)
+            if not allow_group_kill:
+                raise PermissionError("synthetic group cleanup failure")
+
+        def kill() -> None:
+            raise ProcessLookupError("synthetic missing leader")
+
+        monkeypatch.setattr(unix_local_module.os, "killpg", killpg)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=None, pid=1234, kill=kill),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=False)
+
+        with pytest.raises(PermissionError, match="synthetic group cleanup failure"):
+            await session._terminate_pty_entry(entry)
+
+        assert tuple(session._unregistered_pty_processes.values()) == (entry,)
+
+        allow_group_kill = True
+        await session.pty_terminate_all()
+
+        assert session._unregistered_pty_processes == {}
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_native_macos_sandbox
     async def test_pty_exec_write_poll_and_unknown_session_errors(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()

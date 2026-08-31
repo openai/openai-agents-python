@@ -634,7 +634,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 try:
                     process.kill()
                 except ProcessLookupError:
-                    pass
+                    if not isinstance(group_error, ProcessLookupError):
+                        termination_error = group_error
                 except OSError as process_error:
                     termination_error = process_error
                     termination_cause = group_error
