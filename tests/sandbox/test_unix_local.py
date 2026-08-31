@@ -234,6 +234,7 @@ class TestUnixLocalPty:
         process_wait_cancelled = asyncio.Event()
         pump_task_count = 0
         cancelled_pump_task_count = 0
+        process_kill_calls = 0
         killpg_calls: list[tuple[int, signal.Signals]] = []
 
         class _Stream:
@@ -265,14 +266,22 @@ class TestUnixLocalPty:
                     process_wait_cancelled.set()
                     raise
 
+            def kill(self) -> None:
+                nonlocal process_kill_calls
+                process_kill_calls += 1
+                raise PermissionError("synthetic direct cleanup failure")
+
+        process = _Process()
+
         async def create_subprocess(*args: object, **kwargs: object) -> _Process:
             _ = (args, kwargs)
             process_started.set()
-            return _Process()
+            return process
 
         def killpg(pid: int, signum: signal.Signals) -> None:
             killpg_calls.append((pid, signum))
-            raise PermissionError("synthetic cleanup failure")
+            if len(killpg_calls) == 1:
+                raise PermissionError("synthetic cleanup failure")
 
         monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
         monkeypatch.setattr(unix_local_module.os, "killpg", killpg)
@@ -292,12 +301,22 @@ class TestUnixLocalPty:
             if sys.version_info >= (3, 11):
                 assert exc_info.value.args == ("startup-cancel",)
             assert killpg_calls == [(1234, signal.SIGKILL)]
+            assert process_kill_calls == 1
             assert pump_tasks_cancelled.is_set()
             assert process_wait_cancelled.is_set()
             assert session._pty_processes == {}
             assert session._reserved_pty_process_ids == set()
+            retained_entries = tuple(session._unregistered_pty_processes.values())
+            assert len(retained_entries) == 1
+            assert retained_entries[0].process is process
         finally:
             session._pty_lock.release()
+
+        await session.pty_terminate_all()
+
+        assert killpg_calls == [(1234, signal.SIGKILL), (1234, signal.SIGKILL)]
+        assert process_kill_calls == 1
+        assert session._unregistered_pty_processes == {}
 
     @pytest.mark.asyncio
     async def test_tty_start_cancellation_closes_open_file_descriptors(

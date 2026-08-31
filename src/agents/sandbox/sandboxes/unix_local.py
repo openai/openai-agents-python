@@ -163,6 +163,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     _running: bool
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, _UnixPtyProcessEntry]
+    _unregistered_pty_processes: dict[int, _UnixPtyProcessEntry]
     _reserved_pty_process_ids: set[int]
     _fd_close_tasks: set[asyncio.Task[None]]
     _host_environment_allowlist: frozenset[str] | None
@@ -172,6 +173,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._running = False
         self._pty_lock = asyncio.Lock()
         self._pty_processes = {}
+        self._unregistered_pty_processes = {}
         self._reserved_pty_process_ids = set()
         self._fd_close_tasks = set()
         self._host_environment_allowlist = None
@@ -381,6 +383,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 asyncio.create_task(self._pump_process_stream(entry, process.stderr)),
             ]
 
+        self._unregistered_pty_processes[id(entry)] = entry
         registered = False
         try:
             entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
@@ -391,6 +394,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 self._reserved_pty_process_ids.add(process_id)
                 pruned_entry = self._prune_pty_processes_if_needed()
                 self._pty_processes[process_id] = entry
+                self._unregistered_pty_processes.pop(id(entry), None)
                 process_count = len(self._pty_processes)
                 registered = True
         except asyncio.CancelledError as cancellation:
@@ -474,11 +478,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def pty_terminate_all(self) -> None:
         async with self._pty_lock:
-            entries = list(self._pty_processes.values())
+            entries_by_id = {
+                id(entry): entry
+                for entry in (
+                    *self._pty_processes.values(),
+                    *self._unregistered_pty_processes.values(),
+                )
+            }
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
+        for entry in entries_by_id.values():
             await self._terminate_pty_entry(entry)
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
@@ -604,9 +614,22 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         primary_fd = entry.primary_fd
         entry.primary_fd = None
 
+        termination_failed = process.returncode is None and process.pid is None
         if process.returncode is None and process.pid is not None:
-            with suppress(OSError):
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    termination_failed = True
+
+        if termination_failed:
+            self._unregistered_pty_processes[id(entry)] = entry
+        else:
+            self._unregistered_pty_processes.pop(id(entry), None)
 
         for task in entry.pump_tasks:
             task.cancel()
