@@ -1371,7 +1371,7 @@ async def test_voicepipeline_accepts_numpy_dtype_spellings(
     [
         "int32",
         {"names": ["x"], "formats": []},
-        ">i2",
+        np.dtype(np.int16).newbyteorder("S"),
     ],
     ids=[
         "resolvable-but-unsupported",
@@ -1387,7 +1387,8 @@ async def test_voicepipeline_rejects_unsupported_output_dtype(
     A non-native byte order is rejected on purpose. The emitted samples are read from the
     PCM stream in native order, so honoring a byte-swapped request would need the samples
     converted rather than relabeled, and returning them as they are would hand back
-    different values than the caller asked to read.
+    different values than the caller asked to read. That case is swapped from the running
+    host's own order so the expectation holds on a big-endian machine too.
     """
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
