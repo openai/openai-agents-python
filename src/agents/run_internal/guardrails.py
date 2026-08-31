@@ -184,10 +184,8 @@ async def run_output_guardrails(
     if not guardrails:
         return []
 
-    guardrail_tasks = [
-        asyncio.create_task(run_single_output_guardrail(guardrail, agent, agent_output, context))
-        for guardrail in guardrails
-    ]
+    sequential_guardrails = [g for g in guardrails if not g.run_in_parallel]
+    parallel_guardrails = [g for g in guardrails if g.run_in_parallel]
 
     guardrail_results: list[OutputGuardrailResult] = []
 
@@ -195,6 +193,28 @@ async def run_output_guardrails(
         guardrail_results.append(result)
         if results_sink is not None:
             results_sink.append(result)
+
+    # Run sequential guardrails first, one by one
+    for guardrail in sequential_guardrails:
+        result = await run_single_output_guardrail(guardrail, agent, agent_output, context)
+        if result.output.tripwire_triggered:
+            record(result)
+            _error_tracing.attach_error_to_current_span(
+                SpanError(
+                    message="Guardrail tripwire triggered",
+                    data={"guardrail": result.guardrail.get_name()},
+                )
+            )
+            raise OutputGuardrailTripwireTriggered(result)
+        record(result)
+
+    if not parallel_guardrails:
+        return guardrail_results
+
+    guardrail_tasks = [
+        asyncio.create_task(run_single_output_guardrail(guardrail, agent, agent_output, context))
+        for guardrail in parallel_guardrails
+    ]
 
     try:
         for done in asyncio.as_completed(guardrail_tasks):

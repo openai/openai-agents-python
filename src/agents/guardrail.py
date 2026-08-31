@@ -156,6 +156,11 @@ class OutputGuardrail(Generic[TContext]):
     function's name.
     """
 
+    run_in_parallel: bool = True
+    """Whether the guardrail runs concurrently with other guardrails (True, default) or before
+    subsequent guardrails (False).
+    """
+
     def get_name(self) -> str:
         if self.name:
             return self.name
@@ -296,6 +301,7 @@ def output_guardrail(
 def output_guardrail(
     *,
     name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> Callable[
     [_OutputGuardrailFuncSync[TContext_co] | _OutputGuardrailFuncAsync[TContext_co]],
     OutputGuardrail[TContext_co],
@@ -308,6 +314,7 @@ def output_guardrail(
     | None = None,
     *,
     name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> (
     OutputGuardrail[TContext_co]
     | Callable[
@@ -333,6 +340,7 @@ def output_guardrail(
             guardrail_function=f,
             # Guardrail name defaults to function's name when not specified (None).
             name=name if name else f.__name__,
+            run_in_parallel=run_in_parallel,
         )
 
     if func is not None:
