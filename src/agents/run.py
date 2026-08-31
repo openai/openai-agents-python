@@ -37,14 +37,8 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import RunHooks
-from .logger import (
-    log_model_action_warning,
-    log_model_and_tool_action_warning,
-    log_tool_action_warning,
-    logger,
-)
+from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
-from .models.interface import ModelProvider
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -61,7 +55,6 @@ from .run_config import (
     ToolExecutionConfig,
     ToolNameCollisionPolicy as ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
-    _coerce_run_config,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -113,6 +106,10 @@ from .run_internal.items import (
     copy_input_items,
     normalize_resumed_input,
     reconcile_nested_history_owned_input_after_rewrite,
+)
+from .run_internal.model_provider_lifecycle import (
+    _close_runner_owned_model_provider,
+    _normalize_run_config_for_runner,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
@@ -545,44 +542,6 @@ class Runner:
             conversation_id=conversation_id,
             session=session,
         )
-
-
-def _normalize_run_config_for_runner(
-    value: RunConfig | dict[str, Any] | None,
-) -> tuple[RunConfig, bool]:
-    """Normalize a run config and report whether Runner created its model provider."""
-    owns_model_provider = value is None or (
-        isinstance(value, dict) and "model_provider" not in value
-    )
-    run_config = RunConfig() if value is None else _coerce_run_config(value)
-    return run_config, owns_model_provider
-
-
-async def _close_runner_owned_model_provider(model_provider: ModelProvider) -> None:
-    """Finish provider cleanup despite repeated cancellation, then restore cancellation."""
-
-    async def close() -> None:
-        try:
-            await model_provider.aclose()
-        except Exception as error:
-            log_model_action_warning(
-                logger,
-                "Failed to close model provider created for run",
-                error,
-            )
-
-    close_task = asyncio.create_task(close())
-    try:
-        await asyncio.shield(close_task)
-    except asyncio.CancelledError:
-        while not close_task.done():
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                continue
-        if not close_task.cancelled():
-            close_task.result()
-        raise
 
 
 class AgentRunner:
