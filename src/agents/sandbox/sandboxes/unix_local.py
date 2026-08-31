@@ -605,7 +605,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry.primary_fd = None
 
         if process.returncode is None and process.pid is not None:
-            with suppress(ProcessLookupError):
+            with suppress(OSError):
                 os.killpg(process.pid, signal.SIGKILL)
 
         for task in entry.pump_tasks:

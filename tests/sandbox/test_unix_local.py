@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import signal
+import sys
 import tarfile
 import threading
 import time
@@ -227,16 +228,42 @@ class TestUnixLocalPty:
         workspace.mkdir()
         session = _RecordingUnixLocalSession(workspace)
         process_started = asyncio.Event()
+        pump_tasks_started = asyncio.Event()
+        pump_tasks_cancelled = asyncio.Event()
+        process_wait_started = asyncio.Event()
+        process_wait_cancelled = asyncio.Event()
+        pump_task_count = 0
+        cancelled_pump_task_count = 0
         killpg_calls: list[tuple[int, signal.Signals]] = []
+
+        class _Stream:
+            async def read(self, size: int) -> bytes:
+                nonlocal pump_task_count, cancelled_pump_task_count
+                _ = size
+                pump_task_count += 1
+                if pump_task_count == 2:
+                    pump_tasks_started.set()
+                try:
+                    return await asyncio.Future[bytes]()
+                except asyncio.CancelledError:
+                    cancelled_pump_task_count += 1
+                    if cancelled_pump_task_count == 2:
+                        pump_tasks_cancelled.set()
+                    raise
 
         class _Process:
             pid = 1234
             returncode = None
-            stdout = None
-            stderr = None
+            stdout = _Stream()
+            stderr = _Stream()
 
             async def wait(self) -> None:
-                return None
+                process_wait_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    process_wait_cancelled.set()
+                    raise
 
         async def create_subprocess(*args: object, **kwargs: object) -> _Process:
             _ = (args, kwargs)
@@ -255,14 +282,18 @@ class TestUnixLocalPty:
                 session.pty_exec_start("echo", "hello", shell=False, yield_time_s=0.01)
             )
             await process_started.wait()
-            await asyncio.sleep(0)
+            await pump_tasks_started.wait()
+            await process_wait_started.wait()
             task.cancel("startup-cancel")
 
             with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
-            assert exc_info.value.args == ("startup-cancel",)
+            if sys.version_info >= (3, 11):
+                assert exc_info.value.args == ("startup-cancel",)
             assert killpg_calls == [(1234, signal.SIGKILL)]
+            assert pump_tasks_cancelled.is_set()
+            assert process_wait_cancelled.is_set()
             assert session._pty_processes == {}
             assert session._reserved_pty_process_ids == set()
         finally:
