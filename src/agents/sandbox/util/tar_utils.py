@@ -59,6 +59,20 @@ def _validate_symlink_target(
     if not member.issym() or allow_external_symlink_targets:
         return
 
+    # Member names already reject Windows drive and separator syntax. Targets are parsed
+    # as POSIX, so `C:/Windows` and `..\\..\\Windows` would otherwise read as ordinary
+    # relative components and pass the checks below.
+    if PureWindowsPath(member.linkname).drive:
+        raise UnsafeTarMemberError(
+            member=member.name,
+            reason=f"windows drive symlink target not allowed: {member.linkname}",
+        )
+    if "\\" in member.linkname:
+        raise UnsafeTarMemberError(
+            member=member.name,
+            reason=f"windows path separator in symlink target: {member.linkname}",
+        )
+
     target = PurePosixPath(member.linkname)
     if target.is_absolute():
         raise UnsafeTarMemberError(

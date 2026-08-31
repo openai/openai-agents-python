@@ -195,6 +195,30 @@ def test_safe_extract_tarfile_rejects_external_symlink_target_by_default(tmp_pat
     assert not (root / "leak").exists()
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "C:/Windows/System32",
+        "C:\Windows\System32",
+        "..\..\Windows",
+        "\\server\share",
+    ],
+)
+def test_validate_tar_bytes_rejects_windows_symlink_targets_by_default(target: str) -> None:
+    # Member names already reject this syntax. Targets are parsed as POSIX, so these
+    # would otherwise read as ordinary relative components.
+    raw = _tar_bytes(_symlink("link", target))
+
+    with pytest.raises(UnsafeTarMemberError, match="windows (drive symlink target|path separator)"):
+        validate_tar_bytes(raw)
+
+
+def test_validate_tar_bytes_allows_windows_symlink_targets_when_opted_in() -> None:
+    raw = _tar_bytes(_symlink("link", "C:/Windows/System32"))
+
+    validate_tar_bytes(raw, allow_external_symlink_targets=True)
+
+
 def test_strip_tar_member_prefix_still_persists_external_symlink_targets() -> None:
     # Persisting reads a workspace that already contains the link. Hydration is where it
     # would take effect, and every hydrate path rejects it.
