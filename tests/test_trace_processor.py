@@ -105,6 +105,24 @@ def test_batch_trace_processor_queue_full(mocked_exporter):
     processor.shutdown()
 
 
+def test_batch_trace_processor_dropped_count(mocked_exporter):
+    processor = BatchTraceProcessor(exporter=mocked_exporter, max_queue_size=2, schedule_delay=0.1)
+    
+    # Fill the queue
+    processor.on_trace_start(get_trace(processor))
+    processor.on_trace_start(get_trace(processor))
+    assert processor.dropped_count == 0
+
+    # Next item should be dropped and counter incremented
+    processor.on_trace_start(get_trace(processor))
+    assert processor.dropped_count == 1
+
+    processor.on_span_end(get_span(processor))
+    assert processor.dropped_count == 2
+
+    processor.shutdown()
+
+
 def test_batch_processor_doesnt_enqueue_on_trace_end_or_span_start(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter)
 

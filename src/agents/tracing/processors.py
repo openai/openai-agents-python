@@ -580,6 +580,12 @@ class BatchTraceProcessor(TracingProcessor):
         self._thread_start_lock = threading.Lock()
         self._export_lock = threading.Lock()
         self._shutdown_deadline: float | None = None
+        self._dropped_count: int = 0
+
+    @property
+    def dropped_count(self) -> int:
+        """The number of spans or traces dropped due to a full queue."""
+        return self._dropped_count
 
     def _ensure_thread_started(self) -> None:
         # Fast path without holding the lock
@@ -601,6 +607,7 @@ class BatchTraceProcessor(TracingProcessor):
         try:
             self._queue.put_nowait(trace)
         except queue.Full:
+            self._dropped_count += 1
             logger.warning("Queue is full, dropping trace.")
 
     def on_trace_end(self, trace: Trace) -> None:
@@ -618,6 +625,7 @@ class BatchTraceProcessor(TracingProcessor):
         try:
             self._queue.put_nowait(span)
         except queue.Full:
+            self._dropped_count += 1
             logger.warning("Queue is full, dropping span.")
 
     def shutdown(self, timeout: float | None = None):
