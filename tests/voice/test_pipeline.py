@@ -1371,13 +1371,24 @@ async def test_voicepipeline_accepts_numpy_dtype_spellings(
     [
         "int32",
         {"names": ["x"], "formats": []},
+        ">i2",
     ],
-    ids=["resolvable-but-unsupported", "unresolvable-structured-dtype"],
+    ids=[
+        "resolvable-but-unsupported",
+        "unresolvable-structured-dtype",
+        "non-native-byte-order",
+    ],
 )
 async def test_voicepipeline_rejects_unsupported_output_dtype(
     dtype_spelling: npt.DTypeLike,
 ) -> None:
-    """An unsupported dtype keeps the SDK error, whether or not NumPy can parse it."""
+    """An unsupported dtype keeps the SDK error, whether or not NumPy can parse it.
+
+    A non-native byte order is rejected on purpose. The emitted samples are read from the
+    PCM stream in native order, so honoring a byte-swapped request would need the samples
+    converted rather than relabeled, and returning them as they are would hand back
+    different values than the caller asked to read.
+    """
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
     fake_tts = ZeroPcmTTSModel()
