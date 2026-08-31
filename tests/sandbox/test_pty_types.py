@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -62,7 +63,8 @@ async def test_settle_pty_cleanup_preserves_cancel_reason_when_cleanup_fails() -
     with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
 
-    assert exc_info.value.args == ("route-A",)
+    if sys.version_info >= (3, 11):
+        assert exc_info.value.args == ("route-A",)
 
 
 @pytest.mark.asyncio

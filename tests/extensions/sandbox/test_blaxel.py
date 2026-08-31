@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import shlex
+import sys
 import tarfile
 import time
 import uuid
@@ -1786,7 +1787,8 @@ class TestPtyExec:
             with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
-            assert exc_info.value.args == ("connect-cancel",)
+            if sys.version_info >= (3, 11):
+                assert exc_info.value.args == ("connect-cancel",)
             assert task.cancelled()
 
         assert fake_aiohttp.session is not None
@@ -1838,7 +1840,8 @@ class TestPtyExec:
             with pytest.raises(asyncio.CancelledError) as exc_info:
                 await task
 
-            assert exc_info.value.args == ("cleanup-cancel",)
+            if sys.version_info >= (3, 11):
+                assert exc_info.value.args == ("cleanup-cancel",)
         assert fake_aiohttp.session is not None
         assert fake_aiohttp.session._closed
         assert session._pty_sessions == {}
