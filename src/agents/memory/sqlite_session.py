@@ -5,38 +5,14 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Awaitable, Iterator
+from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC
+from .session import SessionABC, _await_mutation as _await_mutation
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
-
-_T = TypeVar("_T")
-
-
-async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
-    """Wait for a mutation outcome despite repeated caller cancellation."""
-    task = asyncio.ensure_future(awaitable)
-    cancellation: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.wait({task})
-        except asyncio.CancelledError as exc:
-            if cancellation is None:
-                cancellation = exc
-
-    try:
-        result = task.result()
-    except BaseException:
-        if cancellation is not None:
-            raise cancellation from None
-        raise
-    if cancellation is not None:
-        raise cancellation from None
-    return result
 
 
 class SQLiteSession(SessionABC):

@@ -8,7 +8,7 @@ from openai import AsyncOpenAI
 from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
-from .session import SessionABC
+from .session import SessionABC, _await_mutation
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
@@ -137,7 +137,12 @@ class OpenAIConversationsSession(SessionABC):
             if self._session_id is None:
                 return
 
-            await self._openai_client.conversations.delete(
-                conversation_id=self._session_id,
-            )
-            self._session_id = None
+            session_id = self._session_id
+
+            async def delete_and_clear_session_id() -> None:
+                await self._openai_client.conversations.delete(
+                    conversation_id=session_id,
+                )
+                self._session_id = None
+
+            await _await_mutation(delete_and_clear_session_id())
