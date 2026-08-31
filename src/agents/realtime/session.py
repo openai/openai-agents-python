@@ -1660,7 +1660,10 @@ class RealtimeSession(RealtimeModelListener):
 
         triggered_results = []
 
-        for guardrail in output_guardrails:
+        sequential_guardrails = [g for g in output_guardrails if not getattr(g, "run_in_parallel", True)]
+        parallel_guardrails = [g for g in output_guardrails if getattr(g, "run_in_parallel", True)]
+
+        async def _run_single(guardrail: Any) -> Any:
             try:
                 result = await guardrail.run(
                     # TODO (rm) Remove this cast, it's wrong
@@ -1668,10 +1671,7 @@ class RealtimeSession(RealtimeModelListener):
                     cast(Agent[Any], source_agent),
                     text,
                 )
-                if self._closing or self._closed:
-                    return False
-                if result.output.tripwire_triggered:
-                    triggered_results.append(result)
+                return result
             except Exception as exc:
                 log_model_and_tool_action_warning(
                     logger,
@@ -1679,7 +1679,35 @@ class RealtimeSession(RealtimeModelListener):
                     exc,
                     diagnostic_extra=partial(_guardrail_diagnostic_extra, guardrail),
                 )
-                continue
+                return None
+
+        # Run sequential guardrails first
+        for guardrail in sequential_guardrails:
+            result = await _run_single(guardrail)
+            if self._closing or self._closed:
+                return False
+            if result and result.output.tripwire_triggered:
+                triggered_results.append(result)
+                break
+
+        # Run parallel guardrails only if sequential didn't trip
+        if not triggered_results and parallel_guardrails:
+            tasks = [asyncio.create_task(_run_single(g)) for g in parallel_guardrails]
+            try:
+                for done in asyncio.as_completed(tasks):
+                    result = await done
+                    if self._closing or self._closed:
+                        return False
+                    if result and result.output.tripwire_triggered:
+                        triggered_results.append(result)
+                        for t in tasks:
+                            t.cancel()
+                        break
+            finally:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         if triggered_results:
             # Double-check: bail if already interrupted for this response

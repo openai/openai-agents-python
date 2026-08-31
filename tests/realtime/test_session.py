@@ -5722,20 +5722,20 @@ class TestGuardrailFunctionality:
         # Wait for async guardrail tasks to complete
         await self._wait_for_guardrail_tasks(session)
 
-        # Should have interrupted and sent message with both guardrail names
+        # Should have interrupted and sent message with the first tripped guardrail
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         message = mock_model.sent_messages[0]
-        assert "guardrail_1" in message and "guardrail_2" in message
+        # Because we fail fast, only one guardrail will finish tripping before others are cancelled.
+        assert "guardrail_1" in message or "guardrail_2" in message
 
-        # Should have emitted event with both guardrail results
+        # Should have emitted event with the guardrail result
         events = []
         while not session._event_queue.empty():
             events.append(await session._event_queue.get())
 
-        guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
-        assert len(guardrail_events) == 1
-        assert len(guardrail_events[0].guardrail_results) == 2
+        event = next(e for e in events if isinstance(e, RealtimeGuardrailTripped))
+        assert len(event.guardrail_results) == 1
 
     @pytest.mark.asyncio
     async def test_agent_output_guardrails_triggered(self, mock_model, triggered_guardrail):
