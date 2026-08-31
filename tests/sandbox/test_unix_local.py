@@ -255,7 +255,7 @@ class TestUnixLocalPty:
 
         class _Process:
             pid = 1234
-            returncode = None
+            returncode: int | None = None
             stdout = _Stream()
             stderr = _Stream()
 
@@ -322,6 +322,7 @@ class TestUnixLocalPty:
         assert len(retained_entries) == 1
         assert retained_entries[0].process is process
 
+        process.returncode = -signal.SIGKILL
         allow_group_kill = True
         await session.pty_terminate_all()
 

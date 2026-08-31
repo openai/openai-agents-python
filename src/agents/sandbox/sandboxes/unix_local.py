@@ -144,6 +144,7 @@ class _UnixPtyProcessEntry:
     process: asyncio.subprocess.Process
     tty: bool
     primary_fd: int | None = None
+    group_termination_pending: bool = False
     last_used: float = field(default_factory=time.monotonic)
     output_chunks: deque[bytes] = field(default_factory=deque)
     output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -625,9 +626,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         termination_error: OSError | None = None
         termination_cause: OSError | None = None
-        if process.returncode is None and process.pid is None:
+        should_terminate_group = process.returncode is None or entry.group_termination_pending
+        if should_terminate_group and process.pid is None:
             termination_error = OSError("Cannot terminate PTY process without a PID")
-        if process.returncode is None and process.pid is not None:
+        if should_terminate_group and process.pid is not None:
+            entry.group_termination_pending = False
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except OSError as group_error:
@@ -635,10 +638,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     process.kill()
                 except ProcessLookupError:
                     if not isinstance(group_error, ProcessLookupError):
+                        entry.group_termination_pending = True
                         termination_error = group_error
                 except OSError as process_error:
+                    if not isinstance(group_error, ProcessLookupError):
+                        entry.group_termination_pending = True
                     termination_error = process_error
                     termination_cause = group_error
+                else:
+                    entry.group_termination_pending = False
+            else:
+                entry.group_termination_pending = False
 
         for task in entry.pump_tasks:
             task.cancel()
