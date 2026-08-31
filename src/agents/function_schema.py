@@ -436,11 +436,15 @@ def function_schema(
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
+            # Keep Annotated metadata on each collected value. The stripped annotation above is
+            # still the source of truth for tuple-shape classification, while Pydantic applies
+            # Field constraints from the evaluated annotation to every positional argument.
+            variadic_value_ann = type_hints_with_extras.get(name, ann)
             if get_origin(ann) is tuple:
                 # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[ann]  # type: ignore
+                    ann = list[variadic_value_ann]  # type: ignore
                 # tuple[()] parameterizes an empty tuple and reports no args, while a bare
                 # typing.Tuple is unparameterized and carries no element type to reject.
                 elif hasattr(ann, "__args__"):
@@ -453,7 +457,7 @@ def function_schema(
                     ann = list[Any]
             else:
                 # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                ann = list[variadic_value_ann]  # type: ignore
 
             # Default factory to empty list
             fields[name] = (
@@ -467,7 +471,8 @@ def function_schema(
             # annotation as the value type -- mirroring the variadic-positional handling above,
             # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
             # set to ``Any`` above, yielding ``dict[str, Any]``.
-            ann = dict[str, ann]  # type: ignore
+            variadic_value_ann = type_hints_with_extras.get(name, ann)
+            ann = dict[str, variadic_value_ann]  # type: ignore
 
             fields[name] = (
                 ann,

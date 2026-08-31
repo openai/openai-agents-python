@@ -509,6 +509,40 @@ def test_var_positional_supported_annotations_still_build(func: Any):
     assert fs.params_json_schema["properties"]["args"]["type"] == "array"
 
 
+def test_var_positional_preserves_annotated_field_constraints():
+    def func(*args: Annotated[int, Field(gt=0)]) -> tuple[int, ...]:
+        return args
+
+    fs = function_schema(func, use_docstring_info=False)
+
+    args_schema = fs.params_json_schema["properties"]["args"]
+    assert args_schema["items"]["exclusiveMinimum"] == 0
+
+    parsed = fs.params_pydantic_model.model_validate({"args": [1, 2]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == (1, 2)
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"args": [0]})
+
+
+def test_var_keyword_preserves_annotated_field_constraints():
+    def func(**kwargs: Annotated[str, Field(min_length=2)]) -> dict[str, str]:
+        return kwargs
+
+    fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
+
+    kwargs_schema = fs.params_json_schema["properties"]["kwargs"]
+    assert kwargs_schema["additionalProperties"]["minLength"] == 2
+
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"first": "ok"}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == {"first": "ok"}
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"kwargs": {"first": "x"}})
+
+
 def test_var_keyword_dict_annotation():
     # Case 3:
     # A ``**kwargs: X`` annotation applies to each keyword *value* (PEP 484), so a
