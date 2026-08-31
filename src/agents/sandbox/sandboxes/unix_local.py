@@ -487,9 +487,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             }
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
+            self._unregistered_pty_processes.update(entries_by_id)
 
+        first_error: Exception | None = None
         for entry in entries_by_id.values():
-            await self._terminate_pty_entry(entry)
+            try:
+                await self._terminate_pty_entry(entry)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     async def _resolved_exec_context(self) -> tuple[dict[str, str], str]:
         if self._host_environment_allowlist is None:
@@ -613,23 +621,23 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         process = entry.process
         primary_fd = entry.primary_fd
         entry.primary_fd = None
+        self._unregistered_pty_processes[id(entry)] = entry
 
-        termination_failed = process.returncode is None and process.pid is None
+        termination_error: OSError | None = None
+        termination_cause: OSError | None = None
+        if process.returncode is None and process.pid is None:
+            termination_error = OSError("Cannot terminate PTY process without a PID")
         if process.returncode is None and process.pid is not None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
+            except OSError as group_error:
                 try:
                     process.kill()
                 except ProcessLookupError:
                     pass
-                except OSError:
-                    termination_failed = True
-
-        if termination_failed:
-            self._unregistered_pty_processes[id(entry)] = entry
-        else:
-            self._unregistered_pty_processes.pop(id(entry), None)
+                except OSError as process_error:
+                    termination_error = process_error
+                    termination_cause = group_error
 
         for task in entry.pump_tasks:
             task.cancel()
@@ -643,13 +651,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 self._schedule_fd_close(primary_fd)
             entry.output_closed.set()
             entry.output_notify.set()
-            return
+        else:
+            if primary_fd is not None:
+                _close_fd_quietly(primary_fd)
+            await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
+            if entry.wait_task is not None:
+                await asyncio.gather(entry.wait_task, return_exceptions=True)
 
-        if primary_fd is not None:
-            _close_fd_quietly(primary_fd)
-        await asyncio.gather(*entry.pump_tasks, return_exceptions=True)
-        if entry.wait_task is not None:
-            await asyncio.gather(entry.wait_task, return_exceptions=True)
+        if termination_error is not None:
+            raise termination_error from termination_cause
+        self._unregistered_pty_processes.pop(id(entry), None)
 
     def _schedule_fd_close(self, fd: int) -> None:
         task = asyncio.create_task(asyncio.to_thread(_close_fd_quietly, fd))

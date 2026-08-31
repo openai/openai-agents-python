@@ -234,6 +234,7 @@ class TestUnixLocalPty:
         process_wait_cancelled = asyncio.Event()
         pump_task_count = 0
         cancelled_pump_task_count = 0
+        allow_group_kill = False
         process_kill_calls = 0
         killpg_calls: list[tuple[int, signal.Signals]] = []
 
@@ -280,7 +281,7 @@ class TestUnixLocalPty:
 
         def killpg(pid: int, signum: signal.Signals) -> None:
             killpg_calls.append((pid, signum))
-            if len(killpg_calls) == 1:
+            if not allow_group_kill:
                 raise PermissionError("synthetic cleanup failure")
 
         monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
@@ -312,10 +313,24 @@ class TestUnixLocalPty:
         finally:
             session._pty_lock.release()
 
-        await session.pty_terminate_all()
+        with pytest.raises(PermissionError, match="synthetic direct cleanup failure"):
+            await session.pty_terminate_all()
 
         assert killpg_calls == [(1234, signal.SIGKILL), (1234, signal.SIGKILL)]
-        assert process_kill_calls == 1
+        assert process_kill_calls == 2
+        retained_entries = tuple(session._unregistered_pty_processes.values())
+        assert len(retained_entries) == 1
+        assert retained_entries[0].process is process
+
+        allow_group_kill = True
+        await session.pty_terminate_all()
+
+        assert killpg_calls == [
+            (1234, signal.SIGKILL),
+            (1234, signal.SIGKILL),
+            (1234, signal.SIGKILL),
+        ]
+        assert process_kill_calls == 2
         assert session._unregistered_pty_processes == {}
 
     @pytest.mark.asyncio
