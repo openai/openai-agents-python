@@ -131,6 +131,63 @@ def test_to_call_args_does_not_shadow_pydantic_model_fields_set():
     assert result == "hello:42"
 
 
+def test_param_named_model_config_raises_user_error():
+    """``model_config`` is consumed by ``create_model`` as model configuration, so the raw
+    failure is an opaque ``TypeError: 'FieldInfo' object is not iterable`` inside Pydantic."""
+
+    def func(model_config: str) -> str:
+        return model_config
+
+    with pytest.raises(UserError, match=r"`model_config`"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_param_named_model_dump_raises_user_error():
+    """Protected-namespace collisions such as ``model_dump`` must raise an actionable
+    UserError instead of Pydantic's raw ``ValueError``."""
+
+    def func(model_dump: str, query: str) -> str:
+        return f"{model_dump}:{query}"
+
+    with pytest.raises(UserError, match=r"`model_dump`"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_param_named_model_post_init_raises_user_error():
+    """A field named ``model_post_init`` becomes the model's post-init hook, so without the
+    guard the schema builds but every argument validation fails with an unrelated TypeError."""
+
+    def func(model_post_init: str) -> str:
+        return model_post_init
+
+    with pytest.raises(UserError, match=r"`model_post_init`"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_multiple_reserved_param_names_are_all_reported():
+    def func(model_dump: str, model_validate: str, query: str) -> str:
+        return query
+
+    with pytest.raises(UserError, match=r"`model_dump`, `model_validate`"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_non_reserved_pydantic_member_param_names_still_work():
+    """Names Pydantic accepts as fields (with a shadow warning) must keep working."""
+
+    def func(model_copy: str, model_json_schema: str) -> str:
+        return f"{model_copy}:{model_json_schema}"
+
+    with pytest.warns(UserWarning):
+        func_schema = function_schema(func, use_docstring_info=False)
+    parsed = func_schema.params_pydantic_model.model_validate(
+        {"model_copy": "a", "model_json_schema": "b"}
+    )
+
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    assert func(*args, **kwargs_dict) == "a:b"
+
+
 def varargs_function(x: int, *numbers: float, flag: bool = False, **kwargs: Any):
     return x, numbers, flag, kwargs
 
