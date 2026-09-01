@@ -1196,6 +1196,42 @@ async def test_voicepipeline_failing_close_after_a_clean_run_reaches_the_consume
 
 
 @pytest.mark.asyncio
+async def test_voicepipeline_producer_cancellation_releases_the_consumer() -> None:
+    # A provider-side cancellation must not leave stream() blocked after its producer has ended.
+    session_started = asyncio.Event()
+    session_closed = asyncio.Event()
+
+    class CancellingSession(QueuedTranscriptionSession):
+        async def transcribe_turns(self) -> AsyncIterator[str]:
+            session_started.set()
+            raise asyncio.CancelledError("provider cancelled")
+            yield ""  # pragma: no cover
+
+        async def close(self) -> None:
+            session_closed.set()
+
+    class CancellingSTT(QueuedSTTModel):
+        async def create_session(self, *args: Any, **kwargs: Any) -> CancellingSession:
+            return CancellingSession()
+
+    pipeline = VoicePipeline(
+        workflow=QueuedVoiceWorkflow(),
+        stt_model=CancellingSTT([]),
+        tts_model=ZeroPcmTTSModel(),
+    )
+    result = await pipeline.run(await StreamedAudioInputFactory.get(count=1))
+
+    await asyncio.wait_for(session_started.wait(), timeout=5)
+    with pytest.raises(asyncio.CancelledError, match="provider cancelled"):
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+    assert session_closed.is_set()
+    producer = result.text_generation_task
+    assert producer is not None
+    assert producer.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_voicepipeline_cancelled_consumer_closes_the_session_without_further_tts() -> None:
     # Cancelling the consumer tears down the producer. The transcription session still has to be
     # closed, and the turn the producer had open must not be sent to TTS on the way out.

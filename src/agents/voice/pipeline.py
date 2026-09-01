@@ -11,6 +11,7 @@ from ..logger import (
     logger,
 )
 from ..tracing import TraceCtxManager
+from .events import VoiceStreamEventLifecycle
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
@@ -165,6 +166,12 @@ class VoicePipeline:
                             async for text_event in result:
                                 await output._add_text(text_event)
                             await output._turn_done()
+                    except asyncio.CancelledError:
+                        # A transcription producer can be cancelled independently of the stream
+                        # consumer. Publish a terminal event before preserving that cancellation so
+                        # the consumer cannot wait forever on an empty output queue.
+                        output._queue.put_nowait(VoiceStreamEventLifecycle(event="session_ended"))
+                        raise
                     except Exception as e:
                         # Report before closing the session below. A `close()` that also fails
                         # would otherwise replace this exception on its way out and the consumer
@@ -182,15 +189,13 @@ class VoicePipeline:
                                 logger, "Error closing voice transcription session", e
                             )
                             # Report only if nothing else has, which keeps the turn error's
-                            # precedence. Clean runs and cancelled producers both arrive here
-                            # with no terminal event queued and no other way to be released.
+                            # precedence. A cancellation already queued a session terminal event,
+                            # but a cleanup failure still needs to be surfaced to the consumer.
                             if not reported_error:
                                 await output._add_error(e)
                             raise
-
-                # Only a clean run reaches here. The error path above has already queued its
-                # terminal event, and a cancelled producer has no consumer left to serve, so
-                # neither should start TTS work or wait on it.
+                # Only a clean run reaches here. Error and cancellation paths have already queued
+                # their terminal events, so neither should start TTS work or wait on it.
                 await output._done()
 
         output._set_task(asyncio.create_task(process_turns()))
