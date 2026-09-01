@@ -1526,8 +1526,15 @@ class AgentRunner:
                             store_setting: bool | None = store_setting,
                             generated_items: list[RunItem] = generated_items,
                             session_items: list[RunItem] = session_items,
+                            run_state: RunState[TContext] | None = run_state,
                         ) -> None:
                             nonlocal handler_output_recorded, handler_persisted_item_count
+                            # The handler output, its guardrails, and its end hooks are complete,
+                            # so this append carries an accepted result like any other terminal
+                            # one. run_state stays out of the save itself to keep the resumed
+                            # turn's persisted count intact.
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             handler_persisted_item_count = (
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
@@ -1541,6 +1548,8 @@ class AgentRunner:
                                     wrapper=context_wrapper,
                                 )
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
                             if not items:
                                 return
                             generated_items.extend(items)

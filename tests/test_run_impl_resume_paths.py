@@ -66,8 +66,14 @@ class _FailingResumeSession(SimpleListSession):
         self.block_next_add = False
         self.add_started = asyncio.Event()
         self.release_add = asyncio.Event()
+        self.fail_on_output: str | None = None
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self.fail_on_output is not None and any(
+            self.fail_on_output in json.dumps(item, default=str) for item in items
+        ):
+            self.fail_on_output = None
+            raise self.error
         failure, self.failure = self.failure, None
         if failure == "before":
             raise self.error
@@ -1361,3 +1367,90 @@ async def test_terminal_marker_rejects_an_older_schema_label() -> None:
     payload["$schemaVersion"] = "1.16"
     with pytest.raises(UserError, match="terminal marker is invalid"):
         await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_result_checkpoint_keeps_the_terminal_marker() -> None:
+    """A checkpoint taken from a failed streamed run stays closed to resumes.
+
+    A streamed result exists before its terminal append does, so `to_state()` is reachable on the
+    failed attempt. If that snapshot dropped the marker it would look like an ordinary resumable
+    state and bypass the rejection entirely.
+    """
+    agent, model, session, state, effects = await _terminal_output_session_state(True)
+    session.failure = "before"
+    streamed = Runner.run_streamed(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError, match="session append failed"):
+        async for _ in streamed.stream_events():
+            pass
+
+    checkpoint = streamed.to_state()
+    assert checkpoint.to_json()["terminal_unrecoverable"] is True
+
+    restored = await RunState.from_json(agent, checkpoint.to_json())
+    for candidate in (checkpoint, restored):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, candidate, session, False)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_handler_output_is_marked_before_it_is_persisted() -> None:
+    """The max-turns fallback is a final output too, so its failed append closes the state."""
+    handler_calls: list[str] = []
+    hooks = _TerminalLifecycleHooks()
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("unused")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(
+        agent, "charge 7", session=session, run_config=config, max_turns=1, hooks=hooks
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    def _handler(_data: Any) -> str:
+        handler_calls.append("handled")
+        return "max-turns-output"
+
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+
+    # The handler and its end hook each ran exactly once before the append failed.
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]

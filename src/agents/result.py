@@ -150,6 +150,9 @@ def _populate_state_from_result(
         state._pending_input = copy.deepcopy(source_state._pending_input)
         state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
+        # A streamed result exists before its terminal append does, so a checkpoint taken from a
+        # failed stream has to keep the fail-closed marker or it would look resumable.
+        state._terminal_unrecoverable = source_state._terminal_unrecoverable
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
         state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))
