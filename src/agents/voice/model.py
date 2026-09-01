@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from typing_extensions import TypedDict
 
+from .exceptions import UserError
 from .imports import np, npt
 from .input import AudioInput, StreamedAudioInput
 from .utils import get_sentence_based_splitter
@@ -91,7 +92,10 @@ class TTSModelSettings:
         # Configurations loaded from JSON/YAML commonly represent NumPy dtypes as strings.
         # Normalize those spellings once at the settings boundary so downstream consumers can
         # compare against the supported NumPy dtypes consistently.
-        self.dtype = np.dtype(self.dtype)
+        try:
+            self.dtype = np.dtype(self.dtype)
+        except (TypeError, ValueError) as error:
+            raise UserError("Invalid output dtype") from error
 
 
 class TTSModel(abc.ABC):
@@ -180,9 +184,6 @@ class STTModel(abc.ABC):
 
         Args:
             input: The audio input to transcribe.
-            settings: The settings to use for the transcription.
-            trace_include_sensitive_data: Whether to include sensitive data in traces.
-            trace_include_sensitive_audio_data: Whether to include sensitive audio data in traces.
 
         Returns:
             The text transcription of the audio input.
@@ -234,4 +235,3 @@ class VoiceModelProvider(abc.ABC):
     @abc.abstractmethod
     def get_tts_model(self, model_name: str | None) -> TTSModel:
         """Get a text-to-speech model by name."""
-        pass
