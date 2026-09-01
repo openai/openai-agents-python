@@ -1407,3 +1407,24 @@ def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
     args, kwargs_dict = fs.to_call_args(parsed)
 
     assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
+
+
+def test_param_named_dunder_doc_raises_user_error():
+    """``create_model`` consumes ``__doc__`` as its own keyword, so the parameter never
+    becomes a field. That has to surface as a UserError rather than a malformed model."""
+
+    def func(__doc__: str) -> str:
+        return __doc__
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(func, use_docstring_info=False)
+    assert "__doc__" in str(exc_info.value)
+
+
+def test_param_named_dunder_module_raises_user_error():
+    def func(__module__: str) -> str:
+        return __module__
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(func, use_docstring_info=False)
+    assert "__module__" in str(exc_info.value)

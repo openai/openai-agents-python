@@ -326,10 +326,11 @@ def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | 
     return None
 
 
-# Parameter names that build a generated arguments model without an error but can never behave
-# as ordinary fields. A field named ``model_post_init`` becomes the model's post-init hook, so
-# Pydantic calls the argument value after validation and every tool invocation fails with an
-# unrelated ``TypeError``.
+# Parameter names that build a generated arguments model without an error, survive as fields,
+# and still cannot behave as ordinary fields. A field named ``model_post_init`` becomes the
+# model's post-init hook, so Pydantic calls the argument value after validation and every tool
+# invocation fails with an unrelated ``TypeError``. Names that are silently swallowed by
+# ``create_model`` instead are caught after construction, by checking ``model_fields``.
 _PYDANTIC_RESERVED_PARAM_NAMES = frozenset({"model_post_init"})
 
 
@@ -558,6 +559,14 @@ def function_schema(
         if not rejected_params:
             raise
         raise _unsupported_pydantic_param_names_error(func_name, rejected_params) from exc
+
+    # ``create_model`` consumes some names as its own keyword arguments (``__doc__`` and
+    # ``__module__`` among them), so construction succeeds but the parameter silently never
+    # becomes a field. Verify every requested field survived rather than enumerating the
+    # control keywords, so this keeps holding if Pydantic adds more.
+    swallowed_params = sorted(name for name in fields if name not in dynamic_model.model_fields)
+    if swallowed_params:
+        raise _unsupported_pydantic_param_names_error(func_name, swallowed_params)
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
