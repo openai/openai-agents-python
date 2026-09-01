@@ -184,6 +184,9 @@ class STTModel(abc.ABC):
 
         Args:
             input: The audio input to transcribe.
+            settings: The settings to use for the transcription.
+            trace_include_sensitive_data: Whether to include sensitive data in traces.
+            trace_include_sensitive_audio_data: Whether to include sensitive audio data in traces.
 
         Returns:
             The text transcription of the audio input.
