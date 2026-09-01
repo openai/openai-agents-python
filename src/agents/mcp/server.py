@@ -965,6 +965,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
+        self._tools_cache_generation = 0
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
@@ -1101,6 +1102,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def invalidate_tools_cache(self):
         """Invalidate the tools cache."""
+        self._tools_cache_generation += 1
         self._cache_dirty = True
 
     def _extract_http_errors_from_exception(self, e: BaseException) -> list[Exception]:
@@ -1447,6 +1449,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             if self.cache_tools_list and not self._cache_dirty and self._tools_list:
                 tools = self._tools_list
             else:
+                refresh_generation = self._tools_cache_generation
                 tools = []
                 cursor: str | None = None
                 seen_cursors: set[str | None] = set()
@@ -1495,8 +1498,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 cursor = None
                 seen_cursors.clear()
                 del fetch_pages
-                self._tools_list = tools
-                self._cache_dirty = False
+                if refresh_generation == self._tools_cache_generation:
+                    self._tools_list = tools
+                    self._cache_dirty = False
 
             # Filter tools based on tool_filter
             filtered_tools = tools
