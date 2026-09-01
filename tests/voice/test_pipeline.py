@@ -1332,18 +1332,21 @@ async def test_voicepipeline_float32() -> None:
     [
         ("float32", np.float32),
         ("int16", np.int16),
+        ("f4", np.float32),
         (np.dtype("float32"), np.float32),
     ],
-    ids=["float32-string", "int16-string", "already-supported-spelling"],
+    ids=["float32-string", "int16-string", "alias-spelling", "already-supported-spelling"],
 )
 async def test_voicepipeline_accepts_numpy_dtype_spellings(
     dtype_spelling: npt.DTypeLike, expected_dtype: type[np.int16] | type[np.float32]
 ) -> None:
     """Dictionary settings carry ``dtype`` as the spelling NumPy resolves, not the type object.
 
-    The string cases are the ones that fail before this change. The resolved-dtype case is a
-    pin on the spelling that already worked rather than new coverage, since every accepted
-    spelling now resolves to the same dtype and takes the same branch.
+    The string cases are the ones that fail before this change, and the alias holds the
+    property the fix rests on: the value is resolved the way NumPy resolves it rather than
+    matched against a fixed set of names. The resolved-dtype case is a pin on the spelling
+    that already worked rather than new coverage, since every accepted spelling now resolves
+    to the same dtype and takes the same branch.
     """
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
@@ -1372,20 +1375,22 @@ async def test_voicepipeline_accepts_numpy_dtype_spellings(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "dtype_spelling",
+    ("dtype_spelling", "expected_cause"),
     [
-        "int32",
-        {"names": ["x"], "formats": []},
-        np.dtype(np.int16).newbyteorder("S"),
+        ("int32", None),
+        ({"names": ["x"], "formats": []}, ValueError),
+        ("not-a-dtype", TypeError),
+        (np.dtype(np.int16).newbyteorder("S"), None),
     ],
     ids=[
         "resolvable-but-unsupported",
         "unresolvable-structured-dtype",
+        "unparseable-string",
         "non-native-byte-order",
     ],
 )
 async def test_voicepipeline_rejects_unsupported_output_dtype(
-    dtype_spelling: npt.DTypeLike,
+    dtype_spelling: npt.DTypeLike, expected_cause: type[Exception] | None
 ) -> None:
     """An unsupported dtype keeps the SDK error, whether or not NumPy can parse it.
 
@@ -1394,6 +1399,10 @@ async def test_voicepipeline_rejects_unsupported_output_dtype(
     converted rather than relabeled, and returning them as they are would hand back
     different values than the caller asked to read. That case is swapped from the running
     host's own order so the expectation holds on a big-endian machine too.
+
+    A value NumPy cannot parse keeps the parse failure attached as the cause, since it names
+    the spelling that failed. A value NumPy resolves to an unsupported dtype has no cause,
+    because nothing was raised on the way to rejecting it.
     """
     fake_stt = QueuedSTTModel(["first"])
     workflow = QueuedVoiceWorkflow([["out_1"]])
@@ -1406,9 +1415,14 @@ async def test_voicepipeline_rejects_unsupported_output_dtype(
     )
     result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
 
-    with pytest.raises(UserError, match="Invalid output dtype"):
+    with pytest.raises(UserError, match="Invalid output dtype") as raised:
         async for _ in result.stream():
             pass
+
+    if expected_cause is None:
+        assert raised.value.__cause__ is None
+    else:
+        assert isinstance(raised.value.__cause__, expected_cause)
 
 
 @pytest.mark.asyncio
