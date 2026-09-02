@@ -536,6 +536,40 @@ class TestUnixLocalLs:
         ]
 
     @pytest.mark.asyncio
+    async def test_ls_as_user_lists_the_link_itself(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "plain.txt").write_text("hello", encoding="utf-8")
+        (workspace / "link").symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.ls("link", user=User(name="sandbox-user"))
+
+        assert len(session.exec_commands) == 1
+        assert session.exec_commands[0][:4] == ("sudo", "-u", "sandbox-user", "--")
+        assert session.exec_commands[0][4:] == ("ls", "-la", "--", str(workspace / "link"))
+
+    @pytest.mark.asyncio
+    async def test_ls_of_a_file_covered_by_an_exact_grant(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        granted = tmp_path / "outside.txt"
+        granted.write_text("granted", encoding="utf-8")
+        session = UnixLocalSandboxSession(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(
+                    root=str(workspace),
+                    extra_path_grants=(SandboxPathGrant(path=str(granted), read_only=True),),
+                ),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+
+        entries = await session.ls(str(granted))
+
+        assert [(entry.kind, entry.path) for entry in entries] == [(EntryKind.FILE, str(granted))]
+
+    @pytest.mark.asyncio
     async def test_ls_of_a_directory_lists_entries_with_kinds(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         (workspace / "sub").mkdir(parents=True)

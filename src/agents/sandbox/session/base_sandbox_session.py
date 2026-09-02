@@ -830,6 +830,10 @@ class BaseSandboxSession(abc.ABC):
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self.normalize_path(path, for_write=for_write)
 
+    async def _validate_listing_path(self, path: Path | str) -> Path:
+        """Validate the path ``ls`` lists; backends that resolve symlinks keep the leaf."""
+        return await self._validate_path_access(path)
+
     async def _validate_remote_path_access(
         self,
         path: Path | str,
@@ -1112,7 +1116,7 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to list as.
         :returns: A list of `FileEntry` objects.
         """
-        path = await self._validate_path_access(path)
+        path = await self._validate_listing_path(path)
 
         path_arg = sandbox_path_str(path)
         cmd = ("ls", "-la", "--", path_arg)

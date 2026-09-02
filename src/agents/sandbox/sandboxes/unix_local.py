@@ -915,13 +915,19 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     def _requested_leaf_path(self, path: Path | str, normalized: Path) -> Path:
         """Return the validated entry without following a leaf symlink.
 
-        `normalized` has already validated `path` (resolving every symlink); keep the leaf
-        name so a symlink is reported as itself, the way `ls -la <link>` prints it.
+        `normalized` has already validated `path` through its resolved target, so this only
+        rebuilds where the entry itself lives (parents resolved, leaf kept) for `lstat()` and
+        for the reported path; it must not demand authority over the parent, which an
+        exact-file grant does not confer.
         """
         raw_path = Path(path)
         if raw_path.name in ("", ".", ".."):
             return normalized
-        return self.normalize_path(raw_path.parent) / raw_path.name
+        absolute = raw_path if raw_path.is_absolute() else Path(self.state.manifest.root) / raw_path
+        return absolute.parent.resolve(strict=False) / absolute.name
+
+    async def _validate_listing_path(self, path: Path | str) -> Path:
+        return self._requested_leaf_path(path, self.normalize_path(path))
 
     async def ls(
         self,
