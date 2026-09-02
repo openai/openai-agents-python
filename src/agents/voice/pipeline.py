@@ -11,7 +11,6 @@ from ..logger import (
     logger,
 )
 from ..tracing import TraceCtxManager
-from .events import VoiceStreamEventLifecycle
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
@@ -136,6 +135,8 @@ class VoicePipeline:
             ):
                 transcription_session = None
                 reported_error = False
+                primary_exception: BaseException | None = None
+                close_exception: Exception | None = None
                 try:
                     try:
                         emitted_intro = False
@@ -166,12 +167,12 @@ class VoicePipeline:
                             async for text_event in result:
                                 await output._add_text(text_event)
                             await output._turn_done()
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as e:
                         # A transcription producer can be cancelled independently of the stream
-                        # consumer. Publish a terminal event before preserving that cancellation so
-                        # the consumer cannot wait forever on an empty output queue.
-                        output._queue.put_nowait(VoiceStreamEventLifecycle(event="session_ended"))
-                        raise
+                        # consumer. Stop pending synthesis and publish the terminal event through
+                        # the ordered dispatcher before preserving that cancellation.
+                        primary_exception = e
+                        await output._cancel()
                     except Exception as e:
                         # Report before closing the session below. A `close()` that also fails
                         # would otherwise replace this exception on its way out and the consumer
@@ -179,24 +180,39 @@ class VoicePipeline:
                         log_model_and_tool_action_error(logger, "Error processing voice turns", e)
                         await output._add_error(e)
                         reported_error = True
-                        raise
+                        primary_exception = e
                 finally:
                     if transcription_session is not None:
                         try:
                             await transcription_session.close()
+                        except asyncio.CancelledError as e:
+                            if primary_exception is None:
+                                primary_exception = e
+                                await output._cancel()
                         except Exception as e:
                             log_model_and_tool_action_error(
                                 logger, "Error closing voice transcription session", e
                             )
-                            # Report only if nothing else has, which keeps the turn error's
-                            # precedence. A cancellation already queued a session terminal event,
-                            # but a cleanup failure still needs to be surfaced to the consumer.
-                            if not reported_error:
-                                await output._add_error(e)
-                            raise
+                            if primary_exception is None:
+                                # Report only if nothing else has, which keeps the turn error's
+                                # precedence.
+                                if not reported_error:
+                                    await output._add_error(e)
+                                close_exception = e
+                            # Keep cancellation or the turn error as the producer outcome; the
+                            # close failure is already logged as secondary information.
+
+                if primary_exception is not None:
+                    raise primary_exception
+                if close_exception is not None:
+                    raise close_exception
                 # Only a clean run reaches here. Error and cancellation paths have already queued
                 # their terminal events, so neither should start TTS work or wait on it.
-                await output._done()
+                try:
+                    await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
 
         output._set_task(asyncio.create_task(process_turns()))
         return output

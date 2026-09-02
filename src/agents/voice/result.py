@@ -72,6 +72,7 @@ class StreamedAudioResult:
         self._first_byte_received = False
         self._generation_start_time: str | None = None
         self._completed_session = False
+        self._terminal_event_enqueued = False
         self._stored_exception: BaseException | None = None
         self._tracing_span: Span[SpeechGroupSpanData] | None = None
 
@@ -192,6 +193,10 @@ class StreamedAudioResult:
                     await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
                 else:
                     await local_queue.put(None)  # Signal completion for this segment
+            except asyncio.CancelledError:
+                # Let the ordered dispatcher advance past a segment cancelled during shutdown.
+                local_queue.put_nowait(None)
+                raise
             except Exception as e:
                 tts_span.set_error(
                     {
@@ -273,6 +278,30 @@ class StreamedAudioResult:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
         await self._wait_for_completion()
 
+    async def _cancel(self) -> None:
+        """Stop pending synthesis and enqueue an ordered terminal event."""
+        current_task = asyncio.current_task()
+        tasks = [task for task in self._tasks if task is not current_task and not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        dispatcher_is_running = (
+            self._dispatcher_task is not None and not self._dispatcher_task.done()
+        )
+        if self._completed_session and (self._terminal_event_enqueued or dispatcher_is_running):
+            return
+
+        self._completed_session = True
+        if not self._terminal_event_enqueued:
+            terminal_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+            self._enqueue_audio_segment(terminal_queue)
+            terminal_queue.put_nowait(VoiceStreamEventLifecycle(event="session_ended"))
+
+        if self._dispatcher_task is None or self._dispatcher_task.done():
+            self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
+
     async def _dispatch_audio(self):
         # Dispatch audio chunks from each segment in the order they were added
         while True:
@@ -296,8 +325,10 @@ class StreamedAudioResult:
                         self._finish_turn()
                         break
                     if chunk.event == "session_ended":
+                        self._terminal_event_enqueued = True
                         return
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+        self._terminal_event_enqueued = True
 
     async def _wait_for_completion(self):
         tasks: list[asyncio.Task[Any]] = self._tasks
