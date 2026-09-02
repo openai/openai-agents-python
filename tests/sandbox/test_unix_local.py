@@ -13,7 +13,8 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import ExecNonZeroError, PtySessionNotFoundError
+from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -468,6 +469,46 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class TestUnixLocalLs:
+    @pytest.mark.asyncio
+    async def test_ls_of_a_regular_file_returns_that_entry(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "plain.txt").write_text("hello", encoding="utf-8")
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls("plain.txt")
+
+        assert [(entry.kind, entry.path, entry.size) for entry in entries] == [
+            (EntryKind.FILE, str(workspace / "plain.txt"), len("hello"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ls_of_a_directory_lists_entries_with_kinds(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "plain.txt").write_text("hello", encoding="utf-8")
+        (workspace / "link").symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls(".")
+
+        assert {Path(entry.path).name: entry.kind for entry in entries} == {
+            "sub": EntryKind.DIRECTORY,
+            "plain.txt": EntryKind.FILE,
+            "link": EntryKind.SYMLINK,
+        }
+
+    @pytest.mark.asyncio
+    async def test_ls_of_a_missing_path_still_fails(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(ExecNonZeroError):
+            await session.ls("missing")
 
 
 @pytest.mark.asyncio

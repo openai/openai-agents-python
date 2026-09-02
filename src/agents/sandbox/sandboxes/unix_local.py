@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import tarfile
 import tempfile
 import termios
@@ -110,6 +111,26 @@ def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
 def _close_fd_quietly(fd: int) -> None:
     with suppress(OSError):
         os.close(fd)
+
+
+def _unix_file_entry(path: str, stat_result: os.stat_result) -> FileEntry:
+    mode = stat_result.st_mode
+    if stat.S_ISLNK(mode):
+        kind = EntryKind.SYMLINK
+    elif stat.S_ISDIR(mode):
+        kind = EntryKind.DIRECTORY
+    elif stat.S_ISREG(mode):
+        kind = EntryKind.FILE
+    else:
+        kind = EntryKind.OTHER
+    return FileEntry(
+        path=path,
+        permissions=Permissions.from_mode(mode),
+        owner=str(stat_result.st_uid),
+        group=str(stat_result.st_gid),
+        size=stat_result.st_size,
+        kind=kind,
+    )
 
 
 def _restore_pty_child_signal_defaults() -> None:
@@ -903,29 +924,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         normalized = self.normalize_path(path)
         command = ("ls", "-la", "--", str(normalized))
         try:
+            if not normalized.is_dir():
+                # `ls -la <file>` lists the file itself; the exec-backed sessions return that
+                # single entry, so do the same instead of failing with ENOTDIR.
+                return [_unix_file_entry(str(normalized), normalized.lstat())]
             with os.scandir(normalized) as entries:
-                listed: list[FileEntry] = []
-                for entry in entries:
-                    stat_result = entry.stat(follow_symlinks=False)
-                    if entry.is_symlink():
-                        kind = EntryKind.SYMLINK
-                    elif entry.is_dir(follow_symlinks=False):
-                        kind = EntryKind.DIRECTORY
-                    elif entry.is_file(follow_symlinks=False):
-                        kind = EntryKind.FILE
-                    else:
-                        kind = EntryKind.OTHER
-                    listed.append(
-                        FileEntry(
-                            path=entry.path,
-                            permissions=Permissions.from_mode(stat_result.st_mode),
-                            owner=str(stat_result.st_uid),
-                            group=str(stat_result.st_gid),
-                            size=stat_result.st_size,
-                            kind=kind,
-                        )
-                    )
-                return listed
+                return [
+                    _unix_file_entry(entry.path, entry.stat(follow_symlinks=False))
+                    for entry in entries
+                ]
         except OSError as e:
             raise ExecNonZeroError(
                 ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
