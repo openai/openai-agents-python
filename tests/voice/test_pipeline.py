@@ -1399,6 +1399,7 @@ async def test_voicepipeline_cancellation_preserves_ordered_output_before_sessio
 async def test_voicepipeline_cancellation_during_session_close_releases_consumer() -> None:
     """Cancellation during transcription cleanup must still wake the result stream."""
     close_started = asyncio.Event()
+    close_completed = asyncio.Event()
     release_close = asyncio.Event()
 
     class BlockingCloseSession(QueuedTranscriptionSession):
@@ -1409,6 +1410,7 @@ async def test_voicepipeline_cancellation_during_session_close_releases_consumer
         async def close(self) -> None:
             close_started.set()
             await release_close.wait()
+            close_completed.set()
 
     class BlockingCloseSTT(QueuedSTTModel):
         async def create_session(self, *args: Any, **kwargs: Any) -> BlockingCloseSession:
@@ -1426,10 +1428,14 @@ async def test_voicepipeline_cancellation_during_session_close_releases_consumer
 
     await asyncio.wait_for(close_started.wait(), timeout=5)
     producer.cancel("provider cancelled during close")
+    await asyncio.sleep(0)
+    assert not close_completed.is_set()
+    assert not consumer.done()
     release_close.set()
 
     with pytest.raises(asyncio.CancelledError, match="provider cancelled during close"):
         await asyncio.wait_for(consumer, timeout=5)
+    assert close_completed.is_set()
 
 
 @pytest.mark.asyncio

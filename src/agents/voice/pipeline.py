@@ -186,24 +186,45 @@ class VoicePipeline:
                         primary_exception = e
                 finally:
                     if transcription_session is not None:
+                        close_task = asyncio.create_task(transcription_session.close())
+                        close_cancellation: asyncio.CancelledError | None = None
+                        close_result: BaseException | None = None
+
+                        async def wait_for_close() -> None:
+                            nonlocal close_result
+                            close_result = (
+                                await asyncio.gather(close_task, return_exceptions=True)
+                            )[0]
+
                         try:
-                            await transcription_session.close()
+                            # Shield the provider cleanup so cancellation cannot interrupt its
+                            # resource release. A cancellation-resistant wait also handles a
+                            # second cancellation while the close operation is suspended.
+                            await asyncio.shield(close_task)
                         except asyncio.CancelledError as e:
-                            if primary_exception is None:
-                                primary_exception = e
-                                await output._cancel()
+                            close_cancellation = e
+                            await output._await_cleanup(wait_for_close())
                         except Exception as e:
+                            close_result = e
+
+                        if isinstance(close_result, asyncio.CancelledError):
+                            close_cancellation = close_result
+                        elif isinstance(close_result, Exception):
                             log_model_and_tool_action_error(
-                                logger, "Error closing voice transcription session", e
+                                logger, "Error closing voice transcription session", close_result
                             )
                             if primary_exception is None:
                                 # Report only if nothing else has, which keeps the turn error's
                                 # precedence.
                                 if not reported_error:
-                                    await output._add_error(e)
-                                close_exception = e
+                                    await output._add_error(close_result)
+                                close_exception = close_result
                             # Keep cancellation or the turn error as the producer outcome; the
                             # close failure is already logged as secondary information.
+
+                        if close_cancellation is not None and primary_exception is None:
+                            primary_exception = close_cancellation
+                            await output._cancel()
 
                 if primary_exception is not None:
                     raise primary_exception
