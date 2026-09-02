@@ -999,6 +999,41 @@ async def test_buffer_tool_call_stream_avoids_passthrough_index_for_missing_inde
     assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
 
 
+@pytest.mark.parametrize("function_tool_call_index", [0, None])
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_ignores_missing_passthrough_index(
+    function_tool_call_index: int | None,
+) -> None:
+    custom_tool_call_delta = ChoiceDeltaToolCall.model_construct(
+        index=None,
+        id="custom-id",
+        type="custom",
+    )
+    custom_chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[custom_tool_call_delta]))],
+    )
+    function_tool_call: dict[str, Any] = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "my_func", "arguments": "{}"},
+    }
+    if function_tool_call_index is not None:
+        function_tool_call["index"] = function_tool_call_index
+    chunks = (
+        custom_chunk,
+        _lenient_chunk({"tool_calls": [function_tool_call]}),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
+
+
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_merges_missing_index_continuation() -> None:
     chunks = (

@@ -450,7 +450,8 @@ class ChatCmplStreamHandler:
                         elif cls._should_buffer_tool_call_delta(tool_call_delta):
                             cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
                         else:
-                            passthrough_tool_call_indexes.add(tool_call_delta.index)
+                            if isinstance(tool_call_delta.index, int):
+                                passthrough_tool_call_indexes.add(tool_call_delta.index)
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
 
