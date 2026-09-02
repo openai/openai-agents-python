@@ -307,12 +307,12 @@ async def test_streamed_audio_result_publishes_terminal_before_cancellable_clean
     try:
         await asyncio.wait_for(synthesis_started.wait(), timeout=1)
         cancel_task.cancel("cancel during synthesis cleanup")
-        with pytest.raises(asyncio.CancelledError):
-            await cancel_task
-
         terminal = await asyncio.wait_for(result._queue.get(), timeout=1)
         assert isinstance(terminal, VoiceStreamEventLifecycle)
         assert terminal.event == "session_ended"
+        assert not cancel_task.done()
+        release_cleanup.set()
+        await asyncio.wait_for(cancel_task, timeout=1)
     finally:
         release_cleanup.set()
         if not cancel_task.done():
@@ -1301,6 +1301,42 @@ async def test_voicepipeline_single_turn_cancellation_releases_the_consumer() ->
 
 
 @pytest.mark.asyncio
+async def test_voicepipeline_cancellation_releases_synthesis_queue_before_task_starts() -> None:
+    fake_tts = ZeroPcmTTSModel()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
+
+    class CancellingWorkflow(QueuedVoiceWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "complete"
+            raise asyncio.CancelledError("workflow cancelled")
+            yield ""  # pragma: no cover
+
+    pipeline = VoicePipeline(
+        workflow=CancellingWorkflow(),
+        stt_model=QueuedSTTModel(["first"]),
+        tts_model=fake_tts,
+        config=VoicePipelineConfig(tts_settings=TTSModelSettings(text_splitter=split_immediately)),
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    events: list[str] = []
+
+    async def consume() -> None:
+        async for event in result.stream():
+            if isinstance(event, VoiceStreamEventLifecycle):
+                events.append(event.event)
+            elif isinstance(event, VoiceStreamEventAudio):
+                events.append("audio")
+
+    with pytest.raises(asyncio.CancelledError, match="workflow cancelled"):
+        await asyncio.wait_for(consume(), timeout=5)
+
+    assert events == ["turn_started", "session_ended"]
+    assert fake_tts.calls == ()
+
+
+@pytest.mark.asyncio
 async def test_voicepipeline_cancellation_preserves_ordered_output_before_session_end(
     monkeypatch,
 ) -> None:
@@ -1643,9 +1679,12 @@ async def test_voicepipeline_trace_not_finished_before_single_turn_completes() -
 
 
 @pytest.mark.asyncio
-async def test_voicepipeline_cancellation_finishes_turn_span_before_trace() -> None:
+async def test_voicepipeline_cancellation_finishes_turn_span_before_trace(monkeypatch) -> None:
     transcription_started = asyncio.Event()
     workflow_started = asyncio.Event()
+    tts_completed = asyncio.Event()
+    dispatcher_started = asyncio.Event()
+    release_dispatcher = asyncio.Event()
     never_finishes = asyncio.Event()
 
     class BlockingSTT(QueuedSTTModel):
@@ -1656,28 +1695,65 @@ async def test_voicepipeline_cancellation_finishes_turn_span_before_trace() -> N
 
     class BlockingWorkflow(QueuedVoiceWorkflow):
         async def run(self, _: str) -> AsyncIterator[str]:
-            yield "partial"
+            yield "complete"
             workflow_started.set()
             await never_finishes.wait()
+
+    class CompletingTTS(ZeroPcmTTSModel):
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            async for chunk in super().run(text, settings):
+                yield chunk
+            tts_completed.set()
+
+    def split_immediately(text: str) -> tuple[str, str]:
+        return text, ""
 
     pipeline = VoicePipeline(
         workflow=BlockingWorkflow(),
         stt_model=BlockingSTT([]),
-        tts_model=ZeroPcmTTSModel(),
+        tts_model=CompletingTTS(),
+        config=VoicePipelineConfig(tts_settings=TTSModelSettings(text_splitter=split_immediately)),
     )
     result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
     producer = result.text_generation_task
     assert producer is not None
 
+    original_dispatch_audio = result._dispatch_audio
+
+    async def delayed_dispatch_audio() -> None:
+        dispatcher_started.set()
+        await release_dispatcher.wait()
+        await original_dispatch_audio()
+
+    monkeypatch.setattr(result, "_dispatch_audio", delayed_dispatch_audio)
+
     await asyncio.wait_for(transcription_started.wait(), timeout=5)
     await asyncio.wait_for(workflow_started.wait(), timeout=5)
+    await asyncio.wait_for(tts_completed.wait(), timeout=5)
+    await asyncio.wait_for(dispatcher_started.wait(), timeout=5)
     producer.cancel("single-turn provider cancelled")
 
+    stream_events: list[str] = []
+
+    async def consume() -> None:
+        async for event in result.stream():
+            if isinstance(event, VoiceStreamEventLifecycle):
+                stream_events.append(event.event)
+            elif isinstance(event, VoiceStreamEventAudio):
+                stream_events.append("audio")
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    assert not consumer.done()
+    assert "trace_end" not in fetch_events()
+
+    release_dispatcher.set()
     with pytest.raises(asyncio.CancelledError, match="single-turn provider cancelled"):
-        await asyncio.wait_for(extract_events(result), timeout=5)
+        await asyncio.wait_for(consumer, timeout=5)
 
     events = fetch_events()
     assert events[-2:] == ["span_end", "trace_end"]
+    assert stream_events == ["turn_started", "audio", "session_ended"]
 
 
 @pytest.mark.asyncio

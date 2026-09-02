@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from typing import Any
 
 from ..exceptions import UserError
@@ -58,6 +58,10 @@ class StreamedAudioResult:
         self._turn_text_buffer = ""
         self._queue: asyncio.Queue[VoiceStreamEvent] = asyncio.Queue()
         self._tasks: list[asyncio.Task[Any]] = []
+        self._audio_task_queues: dict[
+            asyncio.Task[Any], asyncio.Queue[VoiceStreamEvent | None]
+        ] = {}
+        self._started_audio_tasks: set[asyncio.Task[Any]] = set()
         self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
             deque()
         )  # New: deque to hold local queues for each text segment
@@ -72,6 +76,7 @@ class StreamedAudioResult:
         self._first_byte_received = False
         self._generation_start_time: str | None = None
         self._completed_session = False
+        self._terminal_event_queued = False
         self._terminal_event_enqueued = False
         self._stored_exception: BaseException | None = None
         self._tracing_span: Span[SpeechGroupSpanData] | None = None
@@ -97,6 +102,16 @@ class StreamedAudioResult:
         self._ordered_tasks.append(local_queue)
         self._dispatcher_event.set()
 
+    def _create_audio_task(
+        self,
+        text: str,
+        local_queue: asyncio.Queue[VoiceStreamEvent | None],
+        finish_turn: bool = False,
+    ) -> None:
+        task = asyncio.create_task(self._stream_audio(text, local_queue, finish_turn))
+        self._tasks.append(task)
+        self._audio_task_queues[task] = local_queue
+
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
     ) -> npt.NDArray[np.int16 | np.float32]:
@@ -120,6 +135,10 @@ class StreamedAudioResult:
         local_queue: asyncio.Queue[VoiceStreamEvent | None],
         finish_turn: bool = False,
     ):
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._started_audio_tasks.add(current_task)
+
         with speech_span(
             model=self.tts_model.model_name,
             input=text if self._voice_pipeline_config.trace_include_sensitive_data else "",
@@ -231,9 +250,7 @@ class StreamedAudioResult:
         if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._enqueue_audio_segment(local_queue)
-            self._tasks.append(
-                asyncio.create_task(self._stream_audio(combined_sentences, local_queue))
-            )
+            self._create_audio_task(combined_sentences, local_queue)
             if self._dispatcher_task is None:
                 self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
 
@@ -241,11 +258,7 @@ class StreamedAudioResult:
         if self._text_buffer:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._enqueue_audio_segment(local_queue)
-            self._tasks.append(
-                asyncio.create_task(
-                    self._stream_audio(self._text_buffer, local_queue, finish_turn=True)
-                )
-            )
+            self._create_audio_task(self._text_buffer, local_queue, finish_turn=True)
             self._text_buffer = ""
         elif self._started_processing_turn:
             local_queue = asyncio.Queue()
@@ -281,34 +294,50 @@ class StreamedAudioResult:
     async def _cancel(self) -> None:
         """Stop pending synthesis and enqueue an ordered terminal event."""
         current_task = asyncio.current_task()
-        dispatcher_is_running = (
-            self._dispatcher_task is not None and not self._dispatcher_task.done()
-        )
-        if self._completed_session and (self._terminal_event_enqueued or dispatcher_is_running):
+        if self._completed_session and self._terminal_event_enqueued:
             return
 
         # Publish the terminal queue before awaiting any cancellable synthesis cleanup. A second
         # cancellation can interrupt that await, but the dispatcher must still have a terminal
         # event to release a consumer that is waiting independently of the producer.
         self._completed_session = True
-        if not self._terminal_event_enqueued:
+        if not self._terminal_event_queued and not self._terminal_event_enqueued:
             terminal_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._enqueue_audio_segment(terminal_queue)
             terminal_queue.put_nowait(VoiceStreamEventLifecycle(event="session_ended"))
+            self._terminal_event_queued = True
 
         if self._dispatcher_task is None or self._dispatcher_task.done():
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
 
         tasks = [task for task in self._tasks if task is not current_task and not task.done()]
         for task in tasks:
+            if task not in self._started_audio_tasks:
+                local_queue = self._audio_task_queues.get(task)
+                if local_queue is not None:
+                    local_queue.put_nowait(None)
             task.cancel()
+
         try:
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await self._await_cleanup(asyncio.gather(*tasks, return_exceptions=True))
+            if self._dispatcher_task is not None:
+                await self._await_cleanup(
+                    asyncio.gather(self._dispatcher_task, return_exceptions=True)
+                )
         finally:
             # This must happen while the producer is still inside its TraceCtxManager, so the
             # speech-group span closes before the enclosing trace emits trace_end.
             self._finish_turn()
+
+    async def _await_cleanup(self, awaitable: Awaitable[Any]) -> None:
+        """Wait for cleanup to finish even if a caller cancels the producer again."""
+        while True:
+            try:
+                await asyncio.shield(awaitable)
+            except asyncio.CancelledError:
+                continue
+            return
 
     async def _dispatch_audio(self):
         # Dispatch audio chunks from each segment in the order they were added
@@ -333,8 +362,10 @@ class StreamedAudioResult:
                         self._finish_turn()
                         break
                     if chunk.event == "session_ended":
+                        self._terminal_event_queued = True
                         self._terminal_event_enqueued = True
                         return
+        self._terminal_event_queued = True
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
         self._terminal_event_enqueued = True
 
@@ -421,6 +452,13 @@ class StreamedAudioResult:
                     await asyncio.shield(self.text_generation_task)
                 except BaseException as exc:
                     producer_exception = exc
+                    if isinstance(exc, asyncio.CancelledError) and self.text_generation_task.done():
+                        try:
+                            self.text_generation_task.exception()
+                        except asyncio.CancelledError as task_exception:
+                            # asyncio.shield() drops the cancellation message when the producer
+                            # is already cancelled; recover the original exception from the task.
+                            producer_exception = task_exception
 
             try:
                 await self._cleanup_tasks()
