@@ -558,6 +558,25 @@ class TestUnixLocalRmSymlinks:
         assert victim.read_text(encoding="utf-8") == "secret"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_path", ["C:\\outside\\file", "/outside/file", "../file"])
+    async def test_rm_rejects_absolute_and_escaping_raw_paths_before_splitting_the_leaf(
+        self,
+        tmp_path: Path,
+        raw_path: str,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # A workspace entry literally named like the raw path must not be what gets removed.
+        decoy = workspace / raw_path.split("/")[-1]
+        decoy.write_text("keep", encoding="utf-8")
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(InvalidManifestPathError):
+            await session.rm(raw_path)
+
+        assert decoy.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
     async def test_rm_as_user_checks_the_symlink_entry_and_keeps_its_target(
         self,
         tmp_path: Path,

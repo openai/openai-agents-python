@@ -958,6 +958,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         POSIX ``rm`` and the exec-backed sessions remove the link itself, so validate the entry's
         parent directory (following symlinks) and keep the leaf name unresolved.
         """
+        # Validate the raw input with the workspace path policy first (without following
+        # symlinks) so Windows-absolute strings and lexical escapes are rejected exactly as
+        # before, instead of being split into a leaf name under the workspace root.
+        self._workspace_path_policy().normalize_path(path, for_write=True)
         raw_path = Path(path)
         if raw_path.name in ("", ".", ".."):
             return self.normalize_path(raw_path, for_write=True)
