@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, cast
 
 import httpx2
@@ -1407,6 +1408,50 @@ async def test_buffer_tool_call_stream_merges_missing_index_continuation(
 
 
 @pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_late_index_used_by_passthrough() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "print(1)"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"arguments": "1}"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="index already used by a passthrough call"):
+        await _collect_buffered_tool_call_chunks(*chunks)
+
+
+@pytest.mark.asyncio
 async def test_buffer_tool_call_stream_merges_late_id_into_missing_index_call() -> None:
     chunks = (
         _lenient_chunk(
@@ -1439,6 +1484,51 @@ async def test_buffer_tool_call_stream_merges_late_id_into_missing_index_call() 
     expected_calls = [("call_1", "my_func", '{"a":1}')]
     assert _completed_function_calls(unbuffered_events) == expected_calls
     assert _completed_function_calls(buffered_events) == expected_calls
+
+
+@pytest.mark.parametrize("continuation_name", [None, "my_func"])
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_reconciles_late_index_by_id(
+    continuation_name: str | None,
+) -> None:
+    continuation_function = {"arguments": "1}"}
+    if continuation_name is not None:
+        continuation_function["name"] = continuation_name
+
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": continuation_function,
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    replayed_tool_calls = buffered_chunks[-1].choices[0].delta.tool_calls
+    assert replayed_tool_calls
+    assert [tool_call.index for tool_call in replayed_tool_calls] == [2]
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", '{"a":1}')]
 
 
 @pytest.mark.parametrize(
@@ -1640,6 +1730,42 @@ def test_accumulate_tool_call_delta_rejects_new_id_for_occupied_missing_index() 
 
     with pytest.raises(ModelBehaviorError, match="new ID while another index-less call"):
         ChatCmplStreamHandler._accumulate_tool_call_delta(buffered_calls, new_call)
+
+
+def test_accumulate_tool_call_delta_rejects_late_index_collision() -> None:
+    unindexed_call = _BufferedToolCall(index=None, call_id="call_1", name="first_func")
+    indexed_call = _BufferedToolCall(index=2, call_id="call_2", name="second_func")
+    buffered_calls = {None: unindexed_call, 2: indexed_call}
+    expected_calls = {None: replace(unindexed_call), 2: replace(indexed_call)}
+    continuation = ChoiceDeltaToolCall.model_construct(
+        index=2,
+        id="call_1",
+        type="function",
+        function=ChoiceDeltaToolCallFunction(arguments="{}"),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="index already used"):
+        ChatCmplStreamHandler._accumulate_tool_call_delta(buffered_calls, continuation)
+
+    assert buffered_calls == expected_calls
+
+
+def test_accumulate_tool_call_delta_rejects_ambiguous_late_index() -> None:
+    unindexed_call = _BufferedToolCall(index=None, call_id="call_1", name="first_func")
+    indexed_call = _BufferedToolCall(index=1, call_id="call_1", name="second_func")
+    buffered_calls = {None: unindexed_call, 1: indexed_call}
+    expected_calls = {None: replace(unindexed_call), 1: replace(indexed_call)}
+    continuation = ChoiceDeltaToolCall.model_construct(
+        index=2,
+        id="call_1",
+        type="function",
+        function=ChoiceDeltaToolCallFunction(arguments="{}"),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="same ID matched multiple buffered calls"):
+        ChatCmplStreamHandler._accumulate_tool_call_delta(buffered_calls, continuation)
+
+    assert buffered_calls == expected_calls
 
 
 @pytest.mark.asyncio

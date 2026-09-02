@@ -332,12 +332,28 @@ class ChatCmplStreamHandler:
         tool_call_delta: ChoiceDeltaToolCall,
     ) -> None:
         tool_call_index = tool_call_delta.index
-        if not isinstance(tool_call_index, int):
-            matching_indexes = [
-                index
-                for index, buffered_call in buffered_calls.items()
-                if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
-            ]
+        matching_indexes = [
+            index
+            for index, buffered_call in buffered_calls.items()
+            if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
+        ]
+        if isinstance(tool_call_index, int):
+            if None in matching_indexes:
+                if len(matching_indexes) > 1:
+                    raise ModelBehaviorError(
+                        "Chat Completions tool call delta supplied an index and the same ID "
+                        "matched multiple buffered calls."
+                    )
+                if tool_call_index in buffered_calls:
+                    raise ModelBehaviorError(
+                        "Chat Completions tool call delta supplied an index already used by "
+                        "another buffered call."
+                    )
+
+                buffered_call = buffered_calls.pop(None)
+                buffered_call.index = tool_call_index
+                buffered_calls[tool_call_index] = buffered_call
+        else:
             if len(matching_indexes) == 1:
                 tool_call_index = matching_indexes[0]
             elif len(matching_indexes) > 1:
@@ -520,6 +536,19 @@ class ChatCmplStreamHandler:
                             raise ModelBehaviorError(
                                 "Chat Completions tool call delta omitted an index and its ID "
                                 "matched both a buffered function call and a passthrough call."
+                            )
+
+                        unindexed_buffered_call = buffered_calls.get(None)
+                        if (
+                            isinstance(tool_call_delta.index, int)
+                            and tool_call_delta.index in passthrough_tool_call_indexes
+                            and tool_call_delta.id
+                            and unindexed_buffered_call is not None
+                            and unindexed_buffered_call.call_id == tool_call_delta.id
+                        ):
+                            raise ModelBehaviorError(
+                                "Chat Completions tool call delta supplied an index already used "
+                                "by a passthrough call."
                             )
 
                         if (
