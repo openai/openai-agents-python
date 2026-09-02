@@ -76,6 +76,7 @@ Check out a variety of sample implementations that use the SDK in the examples s
     -   Advanced SQLite session storage
     -   Redis session storage
     -   SQLAlchemy session storage
+    -   MongoDB session storage (`examples/memory/mongodb_session_example.py`)
     -   Dapr state store session storage
     -   Encrypted session storage
     -   OpenAI Conversations session storage
@@ -111,6 +112,7 @@ Check out a variety of sample implementations that use the SDK in the examples s
     -   Sandbox-backed handoffs (`examples/sandbox/handoffs.py`)
     -   Sandbox memory and snapshot resume (`examples/sandbox/memory.py`)
     -   Sandbox agents exposed as tools (`examples/sandbox/sandbox_agents_as_tools.py`)
+    -   One sandbox session shared by multiple runs with separate `SandboxRunConfig.cwd` values (`examples/sandbox/shared_session_workdirs.py`)
 
 - **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):** Learn how to implement OpenAI-hosted tools and experimental Codex tooling. Examples include:
 
