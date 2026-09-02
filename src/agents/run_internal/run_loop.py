@@ -43,6 +43,7 @@ from ..exceptions import (
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _mark_error_data_redacted,
+    _mark_error_to_drain_stream_events,
     _prepare_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
@@ -1887,6 +1888,11 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
+                    # Resolve any still-in-flight parallel input guardrail before committing the
+                    # handoff transition, so a tripwire or guardrail exception is surfaced instead
+                    # of the state (current_agent, run_state, published events) racing ahead of an
+                    # input guardrail that was still validating the original input.
+                    await input_guardrail_tripwire_triggered_for_stream(streamed_result)
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
@@ -1898,11 +1904,15 @@ async def start_streaming(
                     streamed_result._event_queue.put_nowait(
                         AgentUpdatedStreamEvent(new_agent=current_agent)
                     )
-                    await _save_stream_items_without_count(
-                        turn_session_items,
-                        turn_result.model_response.response_id,
-                        store_setting,
-                    )
+                    try:
+                        await _save_stream_items_without_count(
+                            turn_session_items,
+                            turn_result.model_response.response_id,
+                            store_setting,
+                        )
+                    except BaseException as session_persistence_error:
+                        _mark_error_to_drain_stream_events(session_persistence_error)
+                        raise
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True

@@ -38,7 +38,7 @@ from openai.types.responses.response_output_item import (
     ProgramOutput,
 )
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
-from typing_extensions import TypedDict, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from ._tool_identity import (
     FunctionToolLookupKey,
@@ -172,6 +172,14 @@ class _PendingSessionWrite(TypedDict):
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    # Compaction inputs for the batch this checkpoint is settling, so a later, separate
+    # resume_pending_session_write() call (not the original save_result_to_session() call)
+    # can still apply the same post-write Responses compaction decision. Optional so a
+    # RunState serialized before these fields existed degrades to "skip compaction" on
+    # read instead of raising KeyError.
+    response_id: NotRequired[str | None]
+    store: NotRequired[bool | None]
+    has_local_tool_outputs: NotRequired[bool]
 
 
 def _default_run_state_validation_error(
@@ -4360,11 +4368,18 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
+        required_pending_write_keys = {"session_id", "items", "before", "persisted_count"}
+        # response_id/store/has_local_tool_outputs carry the compaction inputs needed to replay
+        # deferred/forced Responses compaction on a later, separate resume; they are optional so
+        # a RunState serialized before these fields existed (same, unreleased schema version)
+        # still round-trips.
+        optional_pending_write_keys = {"response_id", "store", "has_local_tool_outputs"}
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
+            or not required_pending_write_keys <= set(pending_write)
+            or not set(pending_write) <= required_pending_write_keys | optional_pending_write_keys
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
             or not pending_write["items"]
@@ -4378,6 +4393,20 @@ async def _build_run_state_from_json(
             )
             or type(pending_write.get("persisted_count")) is not int
             or pending_write["persisted_count"] < 0
+            or (
+                "response_id" in pending_write
+                and pending_write["response_id"] is not None
+                and not isinstance(pending_write["response_id"], str)
+            )
+            or (
+                "store" in pending_write
+                and pending_write["store"] is not None
+                and not isinstance(pending_write["store"], bool)
+            )
+            or (
+                "has_local_tool_outputs" in pending_write
+                and not isinstance(pending_write["has_local_tool_outputs"], bool)
+            )
         ):
             raise validation_error_factory("Run state pending Session write is invalid", UserError)
         state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))
