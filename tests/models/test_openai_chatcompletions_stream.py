@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import httpx2
 import pytest
+from openai._models import construct_type
 from openai.types.chat.chat_completion import ChatCompletion, Choice as ChatCompletionChoice
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -104,6 +105,44 @@ async def _collect_buffered_tool_call_chunks(
         async for chunk in ChatCmplStreamHandler.buffer_tool_call_stream(
             _completion_stream(*chunks)
         )
+    ]
+
+
+async def _collect_buffered_handler_events(*chunks: ChatCompletionChunk) -> list[Any]:
+    return [
+        event
+        async for event in ChatCmplStreamHandler.handle_stream(
+            _empty_response(),
+            cast(Any, ChatCmplStreamHandler.buffer_tool_call_stream(_completion_stream(*chunks))),
+        )
+    ]
+
+
+def _lenient_chunk(delta: dict[str, Any], finish_reason: str | None = None) -> ChatCompletionChunk:
+    # Build the chunk the way ``AsyncStream`` does: ``construct_type`` does not validate the
+    # provider payload, so a tool call delta that omits ``index`` keeps ``index=None`` instead
+    # of failing validation. That is the shape OpenAI-compatible providers can produce.
+    return cast(
+        ChatCompletionChunk,
+        construct_type(
+            type_=ChatCompletionChunk,
+            value={
+                "id": "chunk-id",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "fake",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            },
+        ),
+    )
+
+
+def _completed_function_calls(events: list[Any]) -> list[tuple[str, str, str]]:
+    completed = cast(ResponseCompletedEvent, events[-1])
+    return [
+        (item.call_id, item.name, item.arguments)
+        for item in completed.response.output
+        if isinstance(item, ResponseFunctionToolCall)
     ]
 
 
@@ -856,6 +895,73 @@ async def test_buffer_tool_call_stream_keeps_passthrough_index_passthrough() -> 
     assert len(buffered_chunks) == 2
     assert buffered_chunks[0].choices[0].delta.tool_calls == [custom_tool_call_delta]
     assert buffered_chunks[1].choices[0].delta.tool_calls == [function_tool_call_delta]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_tolerates_missing_tool_call_index() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":'},
+                    }
+                ],
+            }
+        ),
+        _lenient_chunk({"tool_calls": [{"function": {"arguments": "1}"}}]}),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+    first_delta = chunks[0].choices[0].delta
+    assert first_delta.tool_calls and first_delta.tool_calls[0].index is None
+
+    unbuffered_events = await _collect_handler_events(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    expected_calls = [("call_1", "my_func", '{"a":1}')]
+    assert _completed_function_calls(unbuffered_events) == expected_calls
+    assert _completed_function_calls(buffered_events) == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_orders_missing_index_after_indexed_calls() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "first_func", "arguments": "{}"},
+                    }
+                ],
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "second_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    unbuffered_events = await _collect_handler_events(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    expected_calls = [("call_1", "first_func", "{}"), ("call_2", "second_func", "{}")]
+    assert _completed_function_calls(unbuffered_events) == expected_calls
+    assert _completed_function_calls(buffered_events) == expected_calls
 
 
 @pytest.mark.parametrize(

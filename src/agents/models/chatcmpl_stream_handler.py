@@ -157,6 +157,13 @@ class _BufferedToolCall:
     extra_content: dict[str, Any] | None = None
 
 
+def _buffered_tool_call_order(buffered_call: _BufferedToolCall) -> tuple[bool, int]:
+    """Sort indexed tool calls by index and keep an index-less call after them."""
+    if isinstance(buffered_call.index, int):
+        return (False, buffered_call.index)
+    return (True, 0)
+
+
 def _merge_buffered_metadata(
     current: dict[str, Any] | None,
     incoming: dict[str, Any],
@@ -341,6 +348,7 @@ class ChatCmplStreamHandler:
     @staticmethod
     def _buffered_tool_call_delta(
         buffered_call: _BufferedToolCall,
+        fallback_index: int = 0,
     ) -> ChoiceDeltaToolCall:
         if not buffered_call.call_id:
             raise ModelBehaviorError(
@@ -353,7 +361,9 @@ class ChatCmplStreamHandler:
             )
 
         tool_call_delta = ChoiceDeltaToolCall(
-            index=buffered_call.index,
+            # Lenient chunk parsing leaves the index as None when the provider omitted it,
+            # and the replayed delta needs a real index.
+            index=buffered_call.index if isinstance(buffered_call.index, int) else fallback_index,
             id=buffered_call.call_id,
             function=ChoiceDeltaToolCallFunction(
                 name=buffered_call.name,
@@ -376,9 +386,18 @@ class ChatCmplStreamHandler:
         template_chunk: ChatCompletionChunk,
         buffered_calls: dict[int, _BufferedToolCall],
     ) -> ChatCompletionChunk:
+        # OpenAI-compatible providers may omit the tool call index, which lenient chunk
+        # parsing leaves as None. Every index-less delta accumulates under that single key,
+        # so replay the indexed calls in index order and give the index-less call the next
+        # free index instead of failing on a None/int comparison.
+        ordered_calls = sorted(buffered_calls.values(), key=_buffered_tool_call_order)
+        fallback_index = (
+            max((call.index for call in ordered_calls if isinstance(call.index, int)), default=-1)
+            + 1
+        )
         tool_call_deltas = [
-            cls._buffered_tool_call_delta(buffered_call)
-            for _, buffered_call in sorted(buffered_calls.items())
+            cls._buffered_tool_call_delta(buffered_call, fallback_index=fallback_index)
+            for buffered_call in ordered_calls
         ]
         choice = Choice(
             index=0,
