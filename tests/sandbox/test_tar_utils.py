@@ -6,7 +6,7 @@ import stat
 import sys
 import tarfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -16,6 +16,7 @@ from agents.sandbox.util.tar_utils import (
     safe_tar_member_rel_path,
     strip_tar_member_prefix,
     validate_tar_bytes,
+    validate_tarfile,
 )
 
 
@@ -177,6 +178,93 @@ def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
 
     with tarfile.open(fileobj=normalized, mode="r:*") as tar:
         assert tar.getnames() == [".", "pkg", "pkg/main.py", "pkg/python"]
+
+
+def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
+    """A `workspace/...` archive shaped like Docker's, with members hydrate refuses as-is."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        root = tarfile.TarInfo("workspace")
+        root.type = tarfile.DIRTYPE
+        tar.addfile(root)
+        sub = tarfile.TarInfo("workspace/sub")
+        sub.type = tarfile.DIRTYPE
+        tar.addfile(sub)
+        payload = b"shared"
+        regular = tarfile.TarInfo("workspace/a.txt")
+        regular.size = len(payload)
+        tar.addfile(regular, io.BytesIO(payload))
+        hardlink = tarfile.TarInfo("workspace/sub/hardlink.txt")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "workspace/a.txt"
+        tar.addfile(hardlink)
+        fifo = tarfile.TarInfo("workspace/dev.fifo")
+        fifo.type = tarfile.FIFOTYPE
+        tar.addfile(fifo)
+        abs_inside = tarfile.TarInfo("workspace/sub/abs_up")
+        abs_inside.type = tarfile.SYMTYPE
+        abs_inside.linkname = "/workspace/a.txt"
+        tar.addfile(abs_inside)
+        rel = tarfile.TarInfo("workspace/rel")
+        rel.type = tarfile.SYMTYPE
+        rel.linkname = "a.txt"
+        tar.addfile(rel)
+        if external_symlink:
+            outside = tarfile.TarInfo("workspace/outside")
+            outside.type = tarfile.SYMTYPE
+            outside.linkname = "/usr/bin/python3"
+            tar.addfile(outside)
+    buf.seek(0)
+    return buf
+
+
+def test_strip_tar_member_prefix_rewrites_members_hydrate_refuses() -> None:
+    stripped = strip_tar_member_prefix(
+        _prefixed_workspace_archive(external_symlink=True),
+        prefix="workspace",
+        relativize_symlinks_under="/workspace",
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+        assert "dev.fifo" not in members
+        hardlink = members["sub/hardlink.txt"]
+        assert hardlink.isreg() and hardlink.size == len("shared")
+        extracted = tar.extractfile(hardlink)
+        assert extracted is not None and extracted.read() == b"shared"
+        assert members["sub/abs_up"].issym()
+        assert members["sub/abs_up"].linkname == "../a.txt"
+        assert members["rel"].linkname == "a.txt"
+        # External absolute targets are left for hydrate's policy to decide.
+        assert members["outside"].linkname == "/usr/bin/python3"
+
+
+def test_strip_tar_member_prefix_output_passes_strict_hydrate_validation(
+    tmp_path: Path,
+) -> None:
+    stripped = strip_tar_member_prefix(
+        _prefixed_workspace_archive(external_symlink=False),
+        prefix="workspace",
+        relativize_symlinks_under=PurePosixPath("/workspace"),
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        validate_tarfile(tar, allow_external_symlink_targets=False)
+        safe_extract_tarfile(tar, root=tmp_path, allow_external_symlink_targets=False)
+
+    assert (tmp_path / "sub" / "hardlink.txt").read_bytes() == b"shared"
+    assert (tmp_path / "sub" / "abs_up").read_bytes() == b"shared"
+    assert not (tmp_path / "dev.fifo").exists()
+
+
+def test_strip_tar_member_prefix_keeps_absolute_symlinks_without_a_root() -> None:
+    stripped = strip_tar_member_prefix(
+        _prefixed_workspace_archive(external_symlink=False), prefix="workspace"
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        assert tar.getmember("sub/abs_up").linkname == "/workspace/a.txt"
 
 
 def test_strip_tar_member_prefix_rewrites_pax_path_headers() -> None:

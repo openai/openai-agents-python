@@ -3,11 +3,12 @@ from __future__ import annotations
 import copy
 import io
 import os
+import posixpath
 import shutil
 import tarfile
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import cast
 
 
@@ -100,24 +101,58 @@ def safe_tar_member_rel_path(
     return Path(*rel.parts)
 
 
-def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase:
+def strip_tar_member_prefix(
+    data: io.IOBase,
+    *,
+    prefix: str | Path,
+    relativize_symlinks_under: str | PurePath | None = None,
+) -> io.IOBase:
     """Return a seekable tar stream after replacing a leading member prefix with `.`.
 
     For example, Docker archives a workspace copied to `/tmp/stage/workspace`
     as `workspace/...`; portable workspace snapshots should store the same
     files as `.` and `...`, independent of the source backend's root name.
+
+    The rewritten archive only contains members that the strict hydrate extractor
+    accepts. Archivers such as Docker's represent a second hardlinked path as a
+    hardlink member and keep FIFOs and device nodes, and ordinary workspaces contain
+    them (``uv`` and ``pnpm`` hardlink installed packages, dev servers leave FIFOs
+    behind). Hardlink members are stored as regular files with the target's payload,
+    FIFOs and device nodes are dropped, and when `relativize_symlinks_under` names
+    the workspace root, an absolute symlink target under that root becomes relative
+    to the link's own directory so it restores under any root.
     """
 
     prefix_rel = _normalize_rel(prefix)
     if prefix_rel == Path():
         raise ValueError("tar member prefix must not be empty")
+    symlink_root: PurePosixPath | None = None
+    if relativize_symlinks_under is not None:
+        symlink_root = PurePosixPath(
+            relativize_symlinks_under.as_posix()
+            if isinstance(relativize_symlinks_under, PurePath)
+            else relativize_symlinks_under
+        )
 
     out = tempfile.TemporaryFile()
     try:
-        with data:
-            with tarfile.open(fileobj=data, mode="r|*") as src:
+        # Spool the source so hardlink members can copy their target's payload; the
+        # incoming stream is not seekable and tar stores the payload once.
+        with data, tempfile.TemporaryFile() as spooled:
+            shutil.copyfileobj(data, spooled)
+            spooled.seek(0)
+            with tarfile.open(fileobj=spooled, mode="r:*") as src:
                 with tarfile.open(fileobj=out, mode="w|") as dst:
-                    for member in src:
+                    for member in src.getmembers():
+                        if member.isfifo() or member.ischr() or member.isblk():
+                            continue
+                        source = member
+                        if member.islnk():
+                            source = src.getmember(member.linkname)
+                            member = copy.copy(member)
+                            member.type = tarfile.REGTYPE
+                            member.linkname = ""
+                            member.size = source.size
                         rel_path = safe_tar_member_rel_path(
                             member,
                             allow_symlinks=True,
@@ -141,8 +176,14 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
                         rewritten.name = stripped_name
                         rewritten.pax_headers = dict(member.pax_headers)
                         rewritten.pax_headers.pop("path", None)
-                        if member.isreg():
-                            fileobj = src.extractfile(member)
+                        if rewritten.issym() and symlink_root is not None:
+                            rewritten.linkname = _relative_symlink_target(
+                                rewritten.linkname,
+                                link_name=stripped_name,
+                                root=symlink_root,
+                            )
+                        if rewritten.isreg():
+                            fileobj = src.extractfile(source)
                             if fileobj is None:
                                 raise UnsafeTarMemberError(
                                     member=member.name,
@@ -163,6 +204,21 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
     except Exception:
         out.close()
         raise
+
+
+def _relative_symlink_target(linkname: str, *, link_name: str, root: PurePosixPath) -> str:
+    """Make an absolute symlink target under `root` relative to the link's directory."""
+
+    target = PurePosixPath(linkname)
+    if not target.is_absolute():
+        return linkname
+    normalized = PurePosixPath(posixpath.normpath(linkname))
+    try:
+        target_rel = normalized.relative_to(root)
+    except ValueError:
+        return linkname
+    link_dir = PurePosixPath(link_name).parent
+    return posixpath.relpath(target_rel.as_posix() or ".", start=link_dir.as_posix())
 
 
 def _normalize_rel(prefix: str | Path) -> Path:
