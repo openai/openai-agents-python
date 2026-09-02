@@ -1333,8 +1333,6 @@ async def start_streaming(
                         list(run_state._session_items) if run_state is not None else []
                     )
                     deferred_session_prefix = _deferred_interrupted_session_prefix(
-                        current_agent,
-                        run_config,
                         base_session_items=base_session_items,
                         persisted_count=streamed_result._current_turn_persisted_item_count,
                         session_start=resumed_response_boundary.session_start,

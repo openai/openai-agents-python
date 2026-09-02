@@ -1125,8 +1125,6 @@ class AgentRunner:
                             )
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
                             deferred_session_prefix = _deferred_interrupted_session_prefix(
-                                current_agent,
-                                run_config,
                                 base_session_items=base_session_items,
                                 persisted_count=(
                                     run_state._current_turn_persisted_item_count
