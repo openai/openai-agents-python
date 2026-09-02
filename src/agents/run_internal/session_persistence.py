@@ -69,6 +69,10 @@ from .run_steps import (
     SingleStepResult,
 )
 
+# How far past the prefix's own length to look for it: enough to clear the outputs a
+# previous write of the same response would have appended after it.
+_PREFIX_MATCH_LOOKBACK = 8
+
 __all__ = [
     "admit_pending_input",
     "commit_server_pending_input",
@@ -782,33 +786,51 @@ async def deferred_interrupted_session_prefix(
     checkpoint state (``persisted_count``) and then CONFIRMED against the Session itself,
     because that counter can legitimately lie: the resumed-safety validator resets it to
     zero for a detached resume, and a later resume that reconnects the original Session
-    would otherwise rewrite items it already holds. Items already present
-    in the Session's tail are dropped here, so this is idempotent by construction and the
-    no-session case degrades to "write nothing", never to a duplicate.
+    would otherwise rewrite items it already holds. The confirmation matches the WHOLE
+    converted prefix as a contiguous run inside the Session's tail, all or nothing: an
+    assistant preamble repeats verbatim across turns, so filtering item by item against an
+    unordered set would delete a legitimate occurrence from history while still appending
+    the calls around it. Either this exact response is already there (write nothing) or
+    none of it is (write all of it), which makes the write idempotent by construction.
     """
     if persisted_count != 0 or session_start is None:
         return []
     prefix = list(base_session_items[session_start:])
     if not prefix or session is None:
         return prefix
-    # Pair each run item with the input item it would be written as, so an item already
-    # in the Session can be recognized. Items that convert to nothing (approvals) are
-    # never persisted, so they cannot be duplicates and ride along untouched.
+    # Suppress only what the Session provably already holds, and only by an identity that
+    # cannot collide: a tool call and a tool output are keyed by ``(type, call_id)``, which
+    # is unique per turn. Everything else — an assistant preamble, a reasoning item — is
+    # kept unconditionally, because those repeat verbatim across turns and a coincidental
+    # match would delete a legitimate occurrence from history. So a partially written
+    # response (its calls persisted by an earlier attempt, its output not yet) contributes
+    # exactly the missing half instead of duplicating or losing anything.
     paired = [(item, run_item_to_input_item(item, reasoning_item_id_policy)) for item in prefix]
-    candidates = [written for _, written in paired if written is not None]
-    if not candidates:
+    keyed = [key for _, written in paired if (key := _identity_key(written)) is not None]
+    if not keyed:
         return prefix
-    ignore_ids = _ignore_ids_for_matching(session)
-    tail = await _session_get_items(session, limit=len(candidates), wrapper=wrapper)
-    if not tail:
+    tail = await _session_get_items(
+        session, limit=len(keyed) * 2 + _PREFIX_MATCH_LOOKBACK, wrapper=wrapper
+    )
+    present = {key for item in tail if (key := _identity_key(item)) is not None}
+    if not present:
         return prefix
-    present = {_fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids) for item in tail}
-    return [
-        item
-        for item, written in paired
-        if written is None
-        or _fingerprint_or_repr(written, ignore_ids_for_matching=ignore_ids) not in present
-    ]
+    return [item for item, written in paired if _identity_key(written) not in present]
+
+
+def _identity_key(item: TResponseInputItem | None) -> tuple[str, str] | None:
+    """Return a collision-free identity for an item, or ``None`` when it has none.
+
+    Only ``call_id``-bearing items have one. Two assistant messages with the same text are
+    indistinguishable and must never be treated as the same row.
+    """
+    if not isinstance(item, dict):
+        return None
+    call_id = item.get("call_id")
+    item_type = item.get("type")
+    if isinstance(call_id, str) and isinstance(item_type, str):
+        return (item_type, call_id)
+    return None
 
 
 async def resume_pending_session_write(
