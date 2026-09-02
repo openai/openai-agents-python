@@ -25,7 +25,7 @@ from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from ...logger import log_tool_action_warning
@@ -110,6 +110,40 @@ def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
 def _close_fd_quietly(fd: int) -> None:
     with suppress(OSError):
         os.close(fd)
+
+
+def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInfo | None:
+    """Rewrite one ``persist_workspace`` member so ``hydrate_workspace`` can restore it.
+
+    The strict extractor used for hydrate refuses hardlink members, special files, and
+    absolute symlink targets. A local workspace legitimately contains all three (``uv`` and
+    ``pnpm`` hardlink installed packages, dev servers leave FIFOs behind, ``ln -s "$PWD/x"``
+    makes an absolute link), and archiving them as-is produced a snapshot that could never be
+    restored. Store hardlinks as regular files, drop FIFOs and device nodes, and make an
+    absolute symlink target that stays under the workspace root relative so it survives the
+    root moving between sessions. Absolute targets outside the workspace are kept unchanged.
+    """
+
+    if ti.isfifo() or ti.ischr() or ti.isblk():
+        return None
+    if ti.islnk():
+        # tarfile turns the second occurrence of an inode into a hardlink member with no
+        # payload; ``TarFile.add`` reads the file contents for a regular member instead.
+        ti.type = tarfile.REGTYPE
+        ti.linkname = ""
+        ti.size = os.stat(root / ti.name).st_size
+        return ti
+    if ti.issym() and PurePosixPath(ti.linkname).is_absolute():
+        normalized_target = Path(os.path.normpath(ti.linkname))
+        link_dir = PurePosixPath(ti.name).parent
+        for candidate_root in (root, root.resolve(strict=False)):
+            try:
+                target_rel = normalized_target.relative_to(candidate_root)
+            except ValueError:
+                continue
+            ti.linkname = os.path.relpath(target_rel.as_posix() or ".", start=link_dir.as_posix())
+            break
+    return ti
 
 
 def _restore_pty_child_signal_defaults() -> None:
@@ -1097,7 +1131,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                             skip_rel_paths=skip,
                             root_name=None,
                         )
-                        else ti
+                        else _restorable_tar_member(ti, root=root)
                     ),
                 )
 
