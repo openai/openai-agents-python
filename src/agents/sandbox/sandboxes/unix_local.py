@@ -912,6 +912,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         policy = self._workspace_path_policy()
         return policy.normalize_path(path, for_write=for_write, resolve_symlinks=True)
 
+    def _requested_leaf_path(self, path: Path | str, normalized: Path) -> Path:
+        """Return the validated entry without following a leaf symlink.
+
+        `normalized` has already validated `path` (resolving every symlink); keep the leaf
+        name so a symlink is reported as itself, the way `ls -la <link>` prints it.
+        """
+        raw_path = Path(path)
+        if raw_path.name in ("", ".", ".."):
+            return normalized
+        return self.normalize_path(raw_path.parent) / raw_path.name
+
     async def ls(
         self,
         path: Path | str,
@@ -925,9 +936,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         command = ("ls", "-la", "--", str(normalized))
         try:
             if not normalized.is_dir():
-                # `ls -la <file>` lists the file itself; the exec-backed sessions return that
-                # single entry, so do the same instead of failing with ENOTDIR.
-                return [_unix_file_entry(str(normalized), normalized.lstat())]
+                # `ls -la <file>` lists the entry itself, and for a symlink that is the link,
+                # not its target; the exec-backed sessions return that single entry, so do
+                # the same instead of failing with ENOTDIR.
+                requested = self._requested_leaf_path(path, normalized)
+                return [_unix_file_entry(str(requested), requested.lstat())]
             with os.scandir(normalized) as entries:
                 return [
                     _unix_file_entry(entry.path, entry.stat(follow_symlinks=False))

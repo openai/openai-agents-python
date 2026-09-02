@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import io
 import signal
+import socket
+import stat
 import tarfile
 import threading
 import time
@@ -24,7 +26,7 @@ from agents.sandbox.sandboxes.unix_local import (
     _UnixPtyProcessEntry,
 )
 from agents.sandbox.snapshot import NoopSnapshot
-from agents.sandbox.types import ExecResult, User
+from agents.sandbox.types import ExecResult, Permissions, User
 
 
 class _RecordingUnixLocalSession(UnixLocalSandboxSession):
@@ -471,6 +473,23 @@ class TestUnixLocalUserScopedFilesystem:
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
 
 
+@pytest.mark.parametrize(
+    ("mode", "directory"),
+    [
+        (stat.S_IFDIR | 0o755, True),
+        (stat.S_IFREG | 0o644, False),
+        (stat.S_IFLNK | 0o777, False),
+        (stat.S_IFSOCK | 0o755, False),  # S_IFSOCK shares the S_IFDIR bit
+        (stat.S_IFBLK | 0o660, False),  # so does S_IFBLK
+    ],
+)
+def test_permissions_from_mode_uses_the_file_type_not_a_bit_mask(
+    mode: int,
+    directory: bool,
+) -> None:
+    assert Permissions.from_mode(mode).directory is directory
+
+
 class TestUnixLocalLs:
     @pytest.mark.asyncio
     async def test_ls_of_a_regular_file_returns_that_entry(self, tmp_path: Path) -> None:
@@ -483,6 +502,37 @@ class TestUnixLocalLs:
 
         assert [(entry.kind, entry.path, entry.size) for entry in entries] == [
             (EntryKind.FILE, str(workspace / "plain.txt"), len("hello"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ls_of_a_file_symlink_returns_the_link_itself(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "plain.txt").write_text("hello", encoding="utf-8")
+        (workspace / "link").symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls("link")
+
+        assert [(entry.kind, entry.path) for entry in entries] == [
+            (EntryKind.SYMLINK, str(workspace / "link"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ls_of_a_socket_is_not_reported_as_a_directory(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        sock = socket.socket(socket.AF_UNIX)
+        try:
+            sock.bind(str(workspace / "dev.sock"))
+        finally:
+            sock.close()
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls("dev.sock")
+
+        assert [(entry.kind, entry.permissions.directory) for entry in entries] == [
+            (EntryKind.OTHER, False)
         ]
 
     @pytest.mark.asyncio
