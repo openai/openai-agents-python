@@ -13,7 +13,11 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import InvalidManifestPathError, PtySessionNotFoundError
+from agents.sandbox.errors import (
+    InvalidManifestPathError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -575,6 +579,57 @@ class TestUnixLocalRmSymlinks:
             await session.rm(raw_path)
 
         assert decoy.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_rm_applies_the_most_specific_grant_to_the_leaf(self, tmp_path: Path) -> None:
+        """A link into a writable grant must not let rm delete a nested read-only grant root."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        shared = tmp_path / "shared"
+        protected = shared / "protected"
+        protected.mkdir(parents=True)
+        (protected / "keep.txt").write_text("keep", encoding="utf-8")
+        (workspace / "tmp-link").symlink_to(shared)
+        session = UnixLocalSandboxSession(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(
+                    root=str(workspace),
+                    extra_path_grants=(
+                        SandboxPathGrant(path=str(shared)),
+                        SandboxPathGrant(path=str(protected), read_only=True),
+                    ),
+                ),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await session.rm("tmp-link/protected", recursive=True)
+
+        assert (protected / "keep.txt").read_text(encoding="utf-8") == "keep"
+        (shared / "scratch.txt").write_text("scratch", encoding="utf-8")
+        await session.rm("tmp-link/scratch.txt")
+        assert not (shared / "scratch.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_rm_accepts_paths_resolved_through_a_symlinked_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Manifest.root may be a symlink; ls() reports resolved paths that rm() must accept."""
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        (real_root / "via-real.txt").write_text("x", encoding="utf-8")
+        (real_root / "via-link.txt").write_text("x", encoding="utf-8")
+        session = _RecordingUnixLocalSession(root_link)
+
+        await session.rm(str(real_root / "via-real.txt"))
+        await session.rm(str(root_link / "via-link.txt"))
+
+        assert not (real_root / "via-real.txt").exists()
+        assert not (real_root / "via-link.txt").exists()
 
     @pytest.mark.asyncio
     async def test_rm_as_user_checks_the_symlink_entry_and_keeps_its_target(

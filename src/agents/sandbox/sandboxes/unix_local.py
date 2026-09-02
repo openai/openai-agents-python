@@ -955,18 +955,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         ``normalize_path`` resolves every symlink, so for a symlink it names the link target.
         ``rm`` on the target deleted the real file or directory tree and left the link dangling,
         and a link that pointed outside the workspace (or nowhere) could not be removed at all.
-        POSIX ``rm`` and the exec-backed sessions remove the link itself, so validate the entry's
-        parent directory (following symlinks) and keep the leaf name unresolved.
+        POSIX ``rm`` and the exec-backed sessions remove the link itself, so validate the entry
+        at its own location: parents are resolved, the leaf is kept, and the workspace root,
+        extra grants (longest match) and read-only grants apply to that location.
         """
-        # Validate the raw input with the workspace path policy first (without following
-        # symlinks) so Windows-absolute strings and lexical escapes are rejected exactly as
-        # before, instead of being split into a leaf name under the workspace root.
-        self._workspace_path_policy().normalize_path(path, for_write=True)
-        raw_path = Path(path)
-        if raw_path.name in ("", ".", ".."):
-            return self.normalize_path(raw_path, for_write=True)
-        parent = self.normalize_path(raw_path.parent, for_write=True)
-        return parent / raw_path.name
+
+        return self._workspace_path_policy().normalize_path(
+            path, for_write=True, resolve_symlinks=True, follow_leaf_symlink=False
+        )
 
     async def rm(
         self,
