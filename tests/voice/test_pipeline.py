@@ -139,6 +139,42 @@ async def test_streamed_audio_result_propagates_consumer_cancellation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_preserves_consumer_cancel_on_producer_cancel() -> None:
+    result = StreamedAudioResult(
+        ZeroPcmTTSModel(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    producer_release = asyncio.Event()
+
+    async def produce_events() -> None:
+        await producer_release.wait()
+
+    producer = asyncio.create_task(produce_events())
+    result._set_task(producer)
+    await result._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+
+    stream = cast(AsyncGenerator[VoiceStreamEvent, None], result.stream())
+    event = await anext(stream)
+    assert isinstance(event, VoiceStreamEventLifecycle)
+    assert event.event == "session_ended"
+
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.sleep(0)
+    producer.cancel("producer cancellation")
+    close_task.cancel("consumer cancellation")
+
+    try:
+        with pytest.raises(asyncio.CancelledError, match="consumer cancellation"):
+            await close_task
+    finally:
+        producer_release.set()
+        if not producer.done():
+            producer.cancel()
+        await asyncio.gather(close_task, producer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_result_preserves_cancellation_when_cleanup_fails(
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
@@ -1429,6 +1465,8 @@ async def test_voicepipeline_cancellation_during_session_close_releases_consumer
     await asyncio.wait_for(close_started.wait(), timeout=5)
     producer.cancel("provider cancelled during close")
     await asyncio.sleep(0)
+    producer.cancel("second cancellation during close")
+    await asyncio.sleep(0)
     assert not close_completed.is_set()
     assert not consumer.done()
     release_close.set()
@@ -1436,6 +1474,24 @@ async def test_voicepipeline_cancellation_during_session_close_releases_consumer
     with pytest.raises(asyncio.CancelledError, match="provider cancelled during close"):
         await asyncio.wait_for(consumer, timeout=5)
     assert close_completed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_releases_completed_audio_task_bookkeeping() -> None:
+    result = StreamedAudioResult(
+        ZeroPcmTTSModel(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
+
+    result._create_audio_task("hello", local_queue)
+    task = result._tasks[-1]
+    await task
+    await asyncio.sleep(0)
+
+    assert task not in result._audio_task_queues
+    assert task not in result._started_audio_tasks
 
 
 @pytest.mark.asyncio

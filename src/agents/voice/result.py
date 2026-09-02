@@ -111,6 +111,11 @@ class StreamedAudioResult:
         task = asyncio.create_task(self._stream_audio(text, local_queue, finish_turn))
         self._tasks.append(task)
         self._audio_task_queues[task] = local_queue
+        task.add_done_callback(self._release_audio_task)
+
+    def _release_audio_task(self, task: asyncio.Task[Any]) -> None:
+        self._audio_task_queues.pop(task, None)
+        self._started_audio_tasks.discard(task)
 
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
@@ -138,6 +143,7 @@ class StreamedAudioResult:
         current_task = asyncio.current_task()
         if current_task is not None:
             self._started_audio_tasks.add(current_task)
+            self._audio_task_queues.pop(current_task, None)
 
         with speech_span(
             model=self.tts_model.model_name,
@@ -313,7 +319,7 @@ class StreamedAudioResult:
         tasks = [task for task in self._tasks if task is not current_task and not task.done()]
         for task in tasks:
             if task not in self._started_audio_tasks:
-                local_queue = self._audio_task_queues.get(task)
+                local_queue = self._audio_task_queues.pop(task, None)
                 if local_queue is not None:
                     local_queue.put_nowait(None)
             task.cancel()
@@ -332,9 +338,10 @@ class StreamedAudioResult:
 
     async def _await_cleanup(self, awaitable: Awaitable[Any]) -> None:
         """Wait for cleanup to finish even if a caller cancels the producer again."""
+        cleanup_task = asyncio.ensure_future(awaitable)
         while True:
             try:
-                await asyncio.shield(awaitable)
+                await asyncio.shield(cleanup_task)
             except asyncio.CancelledError:
                 continue
             return
@@ -452,7 +459,15 @@ class StreamedAudioResult:
                     await asyncio.shield(self.text_generation_task)
                 except BaseException as exc:
                     producer_exception = exc
-                    if isinstance(exc, asyncio.CancelledError) and self.text_generation_task.done():
+                    consumer_task = asyncio.current_task()
+                    consumer_is_cancelling = (
+                        consumer_task is not None and consumer_task.cancelling() > 0
+                    )
+                    if (
+                        isinstance(exc, asyncio.CancelledError)
+                        and self.text_generation_task.done()
+                        and not consumer_is_cancelling
+                    ):
                         try:
                             self.text_generation_task.exception()
                         except asyncio.CancelledError as task_exception:
