@@ -88,6 +88,7 @@ from .run_internal.blocked_output import (
     _blocked_output_failure_items,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
+    _deferred_interrupted_session_prefix,
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
@@ -1123,22 +1124,17 @@ class AgentRunner:
                                 list(run_state._session_items) if run_state is not None else []
                             )
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
-                            # Mirror of the streamed path: when the interruption-time
-                            # write was deferred (``_should_defer_interrupted_session_items``),
-                            # persist that deferred prefix ahead of the resolved turn's
-                            # items once the resume commits to continuing the run.
-                            deferred_session_prefix: list[RunItem] = []
-                            if (
-                                run_state is not None
-                                and _should_defer_interrupted_session_items(
-                                    current_agent, run_config
-                                )
-                                and run_state._current_turn_persisted_item_count == 0
-                                and resumed_response_boundary.session_start is not None
-                            ):
-                                deferred_session_prefix = base_session_items[
-                                    resumed_response_boundary.session_start :
-                                ]
+                            deferred_session_prefix = _deferred_interrupted_session_prefix(
+                                current_agent,
+                                run_config,
+                                base_session_items=base_session_items,
+                                persisted_count=(
+                                    run_state._current_turn_persisted_item_count
+                                    if run_state is not None
+                                    else 0
+                                ),
+                                session_start=resumed_response_boundary.session_start,
+                            )
                             session_items.extend(turn_session_items)
                             if run_state is not None:
                                 if turn_result.nested_history_owned_items is not None:

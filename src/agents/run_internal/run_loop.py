@@ -111,6 +111,7 @@ from .blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
+    _deferred_interrupted_session_prefix,
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
@@ -1331,22 +1332,13 @@ async def start_streaming(
                     base_session_items = (
                         list(run_state._session_items) if run_state is not None else []
                     )
-                    # If the interruption-time write for this response was deferred
-                    # (``_finalize_streamed_interruption`` persisted ``[]`` because
-                    # ``_should_defer_interrupted_session_items`` was true), nothing of
-                    # the current response is in the Session yet. Once the resume
-                    # commits to continuing the run (run-again / handoff), persist that
-                    # deferred prefix ahead of the resolved turn's items so the tool
-                    # output never lands without its ``function_call``.
-                    deferred_session_prefix: list[RunItem] = []
-                    if (
-                        _should_defer_interrupted_session_items(current_agent, run_config)
-                        and streamed_result._current_turn_persisted_item_count == 0
-                        and resumed_response_boundary.session_start is not None
-                    ):
-                        deferred_session_prefix = base_session_items[
-                            resumed_response_boundary.session_start :
-                        ]
+                    deferred_session_prefix = _deferred_interrupted_session_prefix(
+                        current_agent,
+                        run_config,
+                        base_session_items=base_session_items,
+                        persisted_count=streamed_result._current_turn_persisted_item_count,
+                        session_start=resumed_response_boundary.session_start,
+                    )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
                     if turn_result.nested_history_owned_items is not None:
