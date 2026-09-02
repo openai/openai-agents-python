@@ -1056,6 +1056,17 @@ class BaseSandboxSession(abc.ABC):
         user: str | User | None = None,
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
+        await self._check_rm_access_with_exec(workspace_path, recursive=recursive, user=user)
+        return workspace_path
+
+    async def _check_rm_access_with_exec(
+        self,
+        workspace_path: Path,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        """Run the sandbox-side ``rm`` access check for an already validated workspace path."""
         recursive_flag = "1" if recursive else "0"
         path_arg = sandbox_path_str(workspace_path)
         cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
@@ -1075,7 +1086,6 @@ class BaseSandboxSession(abc.ABC):
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
             )
-        return workspace_path
 
     @abc.abstractmethod
     async def running(self) -> bool:
