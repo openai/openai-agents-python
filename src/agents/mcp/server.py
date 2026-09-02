@@ -1600,7 +1600,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, tool_name: str, arguments: dict[str, Any] | None
     ) -> None:
         """Validate required tool parameters from cached MCP tool schemas before invocation."""
-        if self._tools_list is None:
+        if self._cache_dirty or self._tools_list is None:
             return
 
         tool = next((item for item in self._tools_list if item.name == tool_name), None)
