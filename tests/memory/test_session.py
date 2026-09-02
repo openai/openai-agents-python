@@ -962,6 +962,25 @@ async def test_session_settings_resolve():
     assert final_none.limit == 100
 
 
+def test_session_settings_resolve_accepts_base_override_for_subclass() -> None:
+    """A subclass can resolve settings produced by the base RunConfig type."""
+    from pydantic.dataclasses import dataclass
+
+    @dataclass
+    class TenantSessionSettings(SessionSettings):
+        tenant: str = "default"
+
+    base = TenantSessionSettings(limit=100, tenant="acme")
+    run_config = RunConfig(session_settings={"limit": 50})
+
+    final = base.resolve(run_config.session_settings)
+
+    assert isinstance(final, TenantSessionSettings)
+    assert final.limit == 50
+    assert final.tenant == "acme"
+    assert base.limit == 100
+
+
 @pytest.mark.asyncio
 async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""
