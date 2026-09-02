@@ -73,6 +73,27 @@ def test_streamed_audio_result_odd_length_buffer_int16() -> None:
     assert transformed.tolist() == [1]
 
 
+def test_streamed_audio_result_decodes_pcm16_as_little_endian(monkeypatch) -> None:
+    result = StreamedAudioResult(
+        ZeroPcmTTSModel(),
+        TTSModelSettings(dtype=np.int16),
+        VoicePipelineConfig(),
+    )
+    native_frombuffer = np.frombuffer
+
+    def simulate_big_endian_host(buffer, *, dtype):
+        if dtype is np.int16:
+            dtype = np.dtype(">i2")
+        return native_frombuffer(buffer, dtype=dtype)
+
+    monkeypatch.setattr(np, "frombuffer", simulate_big_endian_host)
+
+    transformed = result._transform_audio_buffer([b"\x01\x02\x03\x04"], np.int16)
+
+    assert transformed.dtype == np.int16
+    assert transformed.tolist() == [0x0201, 0x0403]
+
+
 @pytest.mark.asyncio
 async def test_streamed_audio_result_raises_falsy_task_exception() -> None:
     class FalsyError(RuntimeError):

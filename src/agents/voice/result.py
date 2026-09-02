@@ -104,7 +104,9 @@ class StreamedAudioResult:
             # np.int16 needs 2-byte alignment; pad odd-length chunks safely.
             combined_buffer += b"\x00"
 
-        np_array = np.frombuffer(combined_buffer, dtype=np.int16)
+        # TTS providers return PCM16 bytes in little-endian order. Decode that wire format
+        # explicitly, then normalize the result to the native int16 dtype returned to callers.
+        np_array = np.frombuffer(combined_buffer, dtype="<i2").astype(np.int16, copy=False)
 
         if output_dtype == np.int16:
             return np_array
