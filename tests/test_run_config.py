@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any, cast
 
 import pytest
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 from agents import (
     Agent,
@@ -38,6 +40,16 @@ class DummyProvider(ModelProvider):
         # record the requested model name and return our test model
         self.last_requested = model_name
         return self.model_to_return
+
+
+@pydantic_dataclass
+class _DeclaredSessionSettings(SessionSettings):
+    tenant: str = "default"
+
+
+@dataclass
+class _DeclaredSessionRunConfig(RunConfig):
+    session_settings: _DeclaredSessionSettings | None = None
 
 
 def test_run_config_normalizes_first_party_dictionary_settings() -> None:
@@ -97,6 +109,22 @@ def test_run_config_preserves_typed_configuration_instances() -> None:
 
     assert config.model_settings is settings
     assert config.session_settings is session_settings
+
+
+def test_run_config_subclass_uses_declared_session_settings_type() -> None:
+    config = cast(Any, _DeclaredSessionRunConfig)(session_settings={"limit": 5, "tenant": "acme"})
+
+    assert isinstance(config.session_settings, _DeclaredSessionSettings)
+    assert config.session_settings.limit == 5
+    assert config.session_settings.tenant == "acme"
+
+
+def test_run_config_subclass_rejects_base_session_settings_instance() -> None:
+    with pytest.raises(
+        TypeError,
+        match="must be a _DeclaredSessionSettings instance or a dict",
+    ):
+        cast(Any, _DeclaredSessionRunConfig)(session_settings=SessionSettings(limit=5))
 
 
 def test_run_config_accepts_output_guardrail_blocked_message_customizers() -> None:

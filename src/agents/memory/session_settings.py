@@ -48,7 +48,8 @@ class SessionSettings:
             if isinstance(override, dict)
             else None
         )
-        override = _coerce_session_settings(override, settings_type=type(self))
+        if type(override) is not SessionSettings:
+            override = _coerce_session_settings(override, settings_type=type(self))
 
         changes = {
             field.name: getattr(override, field.name, None)
@@ -76,9 +77,6 @@ def _coerce_session_settings(
     *,
     settings_type: type[SessionSettings],
 ) -> SessionSettings:
-    """Normalize SDK-owned session settings while preserving compatible typed instances."""
-    if type(value) is SessionSettings or isinstance(value, settings_type):
-        return value
     return coerce_dataclass_config(value, settings_type, parameter_name="session")
 
 
