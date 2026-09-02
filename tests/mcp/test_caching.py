@@ -2,9 +2,10 @@ import asyncio
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
-from mcp.types import PaginatedRequestParams
+from mcp.types import CallToolResult, PaginatedRequestParams, TextContent
 
 from agents import Agent
+from agents.exceptions import UserError
 from agents.mcp import MCPServerStdio
 from agents.run_context import RunContextWrapper
 
@@ -68,42 +69,59 @@ async def test_server_caching_works(
 @pytest.mark.asyncio
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.call_tool", new_callable=AsyncMock)
 @patch("mcp.client.session.ClientSession.list_tools")
 async def test_cache_invalidation_during_refresh_is_preserved(
-    mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+    mock_list_tools: AsyncMock,
+    mock_call_tool: AsyncMock,
+    mock_initialize: AsyncMock,
+    mock_stdio_client,
 ):
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
     request_count = 0
+    responses = [
+        ListToolsResult(
+            tools=[
+                MCPTool(
+                    name="tool1",
+                    description="initial",
+                    inputSchema={"required": ["q"]},
+                ),
+            ],
+        ),
+        ListToolsResult(
+            tools=[
+                MCPTool(
+                    name="tool1",
+                    description="before-second-invalidation",
+                    inputSchema={},
+                ),
+            ],
+        ),
+        ListToolsResult(
+            tools=[
+                MCPTool(
+                    name="tool1",
+                    description="after-second-invalidation",
+                    inputSchema={"required": ["latest"]},
+                ),
+            ],
+        ),
+    ]
 
     async def list_tools():
         nonlocal request_count
         request_count += 1
-        if request_count == 1:
-            return ListToolsResult(
-                tools=[MCPTool(name="initial", inputSchema={})],
-            )
         if request_count == 2:
             refresh_started.set()
             await release_refresh.wait()
-            return ListToolsResult(
-                tools=[
-                    MCPTool(
-                        name="before-second-invalidation",
-                        inputSchema={},
-                    ),
-                ],
-            )
-        return ListToolsResult(
-            tools=[
-                MCPTool(
-                    name="after-second-invalidation",
-                    inputSchema={},
-                ),
-            ],
-        )
+        return responses[request_count - 1]
 
     mock_list_tools.side_effect = list_tools
+    mock_call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="ok")],
+    )
     server = MCPServerStdio(
         params={"command": tee},
         cache_tools_list=True,
@@ -111,7 +129,7 @@ async def test_cache_invalidation_during_refresh_is_preserved(
 
     async with server:
         initial = await server.list_tools()
-        assert [tool.name for tool in initial] == ["initial"]
+        assert initial[0].description == "initial"
 
         server.invalidate_tools_cache()
         refresh_task = asyncio.create_task(server.list_tools())
@@ -127,21 +145,20 @@ async def test_cache_invalidation_during_refresh_is_preserved(
                 refresh_task.cancel()
             await asyncio.gather(refresh_task, return_exceptions=True)
 
-        assert [tool.name for tool in refreshed] == [
-            "before-second-invalidation",
-        ]
-        assert [tool.name for tool in (server.cached_tools or [])] == [
-            "initial",
-        ]
+        assert refreshed[0].description == "before-second-invalidation"
+        assert (server.cached_tools or [])[0].description == "initial"
+
+        await server.call_tool("tool1", {})
+        assert mock_call_tool.call_count == 1
 
         latest = await server.list_tools()
-        assert [tool.name for tool in latest] == [
-            "after-second-invalidation",
-        ]
-        assert [tool.name for tool in (server.cached_tools or [])] == [
-            "after-second-invalidation",
-        ]
+        assert latest[0].description == "after-second-invalidation"
+        assert (server.cached_tools or [])[0].description == "after-second-invalidation"
         assert request_count == 3
+
+        with pytest.raises(UserError, match="missing required parameters: latest"):
+            await server.call_tool("tool1", {})
+        assert mock_call_tool.call_count == 1
 
 
 @pytest.mark.asyncio
