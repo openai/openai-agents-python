@@ -570,6 +570,45 @@ class TestUnixLocalLs:
         assert [(entry.kind, entry.path) for entry in entries] == [(EntryKind.FILE, str(granted))]
 
     @pytest.mark.asyncio
+    async def test_ls_of_a_directory_symlink_returns_the_link_itself(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "realdir").mkdir(parents=True)
+        (workspace / "realdir" / "inner.txt").write_text("x", encoding="utf-8")
+        (workspace / "linkdir").symlink_to("realdir")
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls("linkdir")
+
+        assert [(entry.kind, entry.path) for entry in entries] == [
+            (EntryKind.SYMLINK, str(workspace / "linkdir"))
+        ]
+        assert {Path(entry.path).name for entry in await session.ls("realdir")} == {"inner.txt"}
+
+    @pytest.mark.asyncio
+    async def test_ls_never_rebuilds_the_leaf_through_a_symlinked_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`link/../secret` is validated as `<root>/secret`; the leaf must be rebuilt from that
+        canonical path rather than by following `link` and stepping out of the workspace."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret").write_text("secret", encoding="utf-8")
+        (workspace / "link").symlink_to(outside)
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(ExecNonZeroError):
+            await session.ls("link/../secret")
+
+        (workspace / "secret").write_text("inside", encoding="utf-8")
+        entries = await session.ls("link/../secret")
+        assert [(entry.kind, entry.path) for entry in entries] == [
+            (EntryKind.FILE, str(workspace / "secret"))
+        ]
+
+    @pytest.mark.asyncio
     async def test_ls_of_a_directory_lists_entries_with_kinds(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         (workspace / "sub").mkdir(parents=True)

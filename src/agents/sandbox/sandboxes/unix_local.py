@@ -35,6 +35,7 @@ from ..errors import (
     ExecNonZeroError,
     ExecTimeoutError,
     ExecTransportError,
+    InvalidManifestPathError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -915,16 +916,21 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     def _requested_leaf_path(self, path: Path | str, normalized: Path) -> Path:
         """Return the validated entry without following a leaf symlink.
 
-        `normalized` has already validated `path` through its resolved target, so this only
-        rebuilds where the entry itself lives (parents resolved, leaf kept) for `lstat()` and
-        for the reported path; it must not demand authority over the parent, which an
-        exact-file grant does not confer.
+        `normalized` has already validated `path` through its resolved target. Rebuild where
+        the entry itself lives from the policy's canonical lexical path (so `link/../x` names
+        `x` under the workspace, as validation saw it, and never re-follows `link`), resolving
+        only the parents and keeping the leaf for `lstat()` and the reported path. This does
+        not demand authority over the parent, which an exact-file grant does not confer.
         """
-        raw_path = Path(path)
-        if raw_path.name in ("", ".", ".."):
+        try:
+            canonical = self._workspace_path_policy().normalize_path(path)
+        except InvalidManifestPathError:
+            # The lexical form is not under the configured root (e.g. a path already resolved
+            # through a symlinked Manifest.root); the resolved path is the best we have.
             return normalized
-        absolute = raw_path if raw_path.is_absolute() else Path(self.state.manifest.root) / raw_path
-        return absolute.parent.resolve(strict=False) / absolute.name
+        if not canonical.name:
+            return normalized
+        return canonical.parent.resolve(strict=False) / canonical.name
 
     async def _validate_listing_path(self, path: Path | str) -> Path:
         return self._requested_leaf_path(path, self.normalize_path(path))
@@ -938,16 +944,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if user is not None:
             return await super().ls(path, user=user)
 
-        normalized = self.normalize_path(path)
-        command = ("ls", "-la", "--", str(normalized))
+        requested = self._requested_leaf_path(path, self.normalize_path(path))
+        command = ("ls", "-la", "--", str(requested))
         try:
-            if not normalized.is_dir():
-                # `ls -la <file>` lists the entry itself, and for a symlink that is the link,
-                # not its target; the exec-backed sessions return that single entry, so do
-                # the same instead of failing with ENOTDIR.
-                requested = self._requested_leaf_path(path, normalized)
-                return [_unix_file_entry(str(requested), requested.lstat())]
-            with os.scandir(normalized) as entries:
+            # Match `ls -la <path>`: a directory lists its entries; anything else, including a
+            # symlink (even one to a directory), is reported as the single entry itself. The
+            # exec-backed sessions return the same shape.
+            stat_result = requested.lstat()
+            if not stat.S_ISDIR(stat_result.st_mode):
+                return [_unix_file_entry(str(requested), stat_result)]
+            with os.scandir(requested) as entries:
                 return [
                     _unix_file_entry(entry.path, entry.stat(follow_symlinks=False))
                     for entry in entries
