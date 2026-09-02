@@ -111,7 +111,6 @@ from .blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
-    _deferred_interrupted_session_prefix,
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
@@ -175,6 +174,7 @@ from .session_persistence import (
     _session_get_items,
     admit_pending_input,
     commit_server_pending_input,
+    deferred_interrupted_session_prefix,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -1190,6 +1190,10 @@ async def start_streaming(
         raise
 
     try:
+        # The deferred prefix belongs to the resumed turn only: it is filled when that turn
+        # locates it and emptied once written, so later turns of the same run never
+        # re-send it.
+        deferred_session_prefix: list[RunItem] = []
         while True:
             validate_output_guardrails_with_server_managed_conversation(
                 current_agent,
@@ -1332,10 +1336,12 @@ async def start_streaming(
                     base_session_items = (
                         list(run_state._session_items) if run_state is not None else []
                     )
-                    deferred_session_prefix = _deferred_interrupted_session_prefix(
+                    deferred_session_prefix = await deferred_interrupted_session_prefix(
+                        session,
                         base_session_items=base_session_items,
                         persisted_count=streamed_result._current_turn_persisted_item_count,
                         session_start=resumed_response_boundary.session_start,
+                        reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
                     )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
@@ -1430,8 +1436,14 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
+                        # An empty resolved turn (a handoff input_filter can drop
+                        # every item) must not leave the prefix stranded on its own:
+                        # a call written without its output poisons the Session just
+                        # as the orphaned output does. Keep deferring instead.
                         await _save_resumed_items(
-                            deferred_session_prefix + list(turn_session_items),
+                            (deferred_session_prefix + list(turn_session_items))
+                            if turn_session_items
+                            else [],
                             turn_result.model_response.response_id,
                             store_setting,
                         )
@@ -1456,7 +1468,12 @@ async def start_streaming(
                             output=turn_result.next_step.output,
                             context_wrapper=context_wrapper,
                             save_items=_save_resumed_items,
-                            items=list(turn_session_items),
+                            # The deferred prefix rides here too: with output guardrails
+                            # ``_final_turn_items_for_persistence`` rebuilds the whole
+                            # current response and would recover it, but WITHOUT them it
+                            # returns these items verbatim — and a resume may legitimately
+                            # run without the guardrails the park had.
+                            items=deferred_session_prefix + list(turn_session_items),
                             model_response=turn_result.model_response,
                             processed_response=(
                                 turn_result.processed_response
@@ -1473,8 +1490,14 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
+                        # An empty resolved turn (a handoff input_filter can drop
+                        # every item) must not leave the prefix stranded on its own:
+                        # a call written without its output poisons the Session just
+                        # as the orphaned output does. Keep deferring instead.
                         await _save_resumed_items(
-                            deferred_session_prefix + list(turn_session_items),
+                            (deferred_session_prefix + list(turn_session_items))
+                            if turn_session_items
+                            else [],
                             turn_result.model_response.response_id,
                             store_setting,
                         )

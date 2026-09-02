@@ -80,6 +80,7 @@ __all__ = [
     "resumed_turn_items",
     "save_result_to_session",
     "save_resumed_turn_items",
+    "deferred_interrupted_session_prefix",
     "resume_pending_session_write",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -757,6 +758,57 @@ async def save_resumed_turn_items(
         ),
     )
     return persisted_count + saved_count
+
+
+async def deferred_interrupted_session_prefix(
+    session: Session | None,
+    *,
+    base_session_items: Sequence[RunItem],
+    persisted_count: int,
+    session_start: int | None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> list[RunItem]:
+    """Return the interrupted response's session items that are still missing from the Session.
+
+    When ``_should_defer_interrupted_session_items`` gated the interruption-time write,
+    nothing of the current response reached the Session, and a resume that continues the
+    run must persist that prefix ahead of the resolved turn's items — otherwise a tool
+    output lands without its ``function_call`` and the provider rejects every later run
+    over the Session.
+
+    The park-time decision is NOT re-evaluated against the live configuration: the caller
+    may resume with a different ``tool_use_behavior`` or guardrail set. It is read from
+    checkpoint state (``persisted_count``) and then CONFIRMED against the Session itself,
+    because that counter can legitimately lie: the resumed-safety validator resets it to
+    zero for a detached resume, and a later resume that reconnects the original Session
+    would otherwise rewrite items it already holds. Items already present
+    in the Session's tail are dropped here, so this is idempotent by construction and the
+    no-session case degrades to "write nothing", never to a duplicate.
+    """
+    if persisted_count != 0 or session_start is None:
+        return []
+    prefix = list(base_session_items[session_start:])
+    if not prefix or session is None:
+        return prefix
+    # Pair each run item with the input item it would be written as, so an item already
+    # in the Session can be recognized. Items that convert to nothing (approvals) are
+    # never persisted, so they cannot be duplicates and ride along untouched.
+    paired = [(item, run_item_to_input_item(item, reasoning_item_id_policy)) for item in prefix]
+    candidates = [written for _, written in paired if written is not None]
+    if not candidates:
+        return prefix
+    ignore_ids = _ignore_ids_for_matching(session)
+    tail = await _session_get_items(session, limit=len(candidates), wrapper=wrapper)
+    if not tail:
+        return prefix
+    present = {_fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids) for item in tail}
+    return [
+        item
+        for item, written in paired
+        if written is None
+        or _fingerprint_or_repr(written, ignore_ids_for_matching=ignore_ids) not in present
+    ]
 
 
 async def resume_pending_session_write(

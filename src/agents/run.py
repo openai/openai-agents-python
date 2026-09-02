@@ -88,7 +88,6 @@ from .run_internal.blocked_output import (
     _blocked_output_failure_items,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
-    _deferred_interrupted_session_prefix,
     _final_turn_items_for_persistence,
     _has_output_guardrails,
     _is_terminal_tool_output_response,
@@ -137,6 +136,7 @@ from .run_internal.session_persistence import (
     _session_get_items,
     admit_pending_input,
     commit_server_pending_input,
+    deferred_interrupted_session_prefix,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -964,6 +964,10 @@ class AgentRunner:
                     current_task_span.finish(reset_current=True)
                 raise
 
+            # The deferred prefix belongs to the resumed turn only: it is filled when that turn
+            # locates it and emptied once written, so later turns of the same run never
+            # re-send it.
+            deferred_session_prefix: list[RunItem] = []
             try:
                 while True:
                     validate_output_guardrails_with_server_managed_conversation(
@@ -1124,7 +1128,8 @@ class AgentRunner:
                                 list(run_state._session_items) if run_state is not None else []
                             )
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
-                            deferred_session_prefix = _deferred_interrupted_session_prefix(
+                            deferred_session_prefix = await deferred_interrupted_session_prefix(
+                                session,
                                 base_session_items=base_session_items,
                                 persisted_count=(
                                     run_state._current_turn_persisted_item_count
@@ -1132,6 +1137,12 @@ class AgentRunner:
                                     else 0
                                 ),
                                 session_start=resumed_response_boundary.session_start,
+                                reasoning_item_id_policy=(
+                                    run_state._reasoning_item_id_policy
+                                    if run_state is not None
+                                    else None
+                                ),
+                                wrapper=context_wrapper,
                             )
                             session_items.extend(turn_session_items)
                             if run_state is not None:
@@ -1170,6 +1181,9 @@ class AgentRunner:
                                 session_persistence_enabled
                                 and turn_session_items
                                 and run_state is not None
+                                # A final output is persisted by the final-turn sweep
+                                # below, which receives the prefix through
+                                # ``final_turn_deferred_prefix``.
                                 and not isinstance(turn_result.next_step, NextStepFinalOutput)
                                 and not (
                                     isinstance(turn_result.next_step, NextStepInterruption)
@@ -1248,6 +1262,9 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
+                                # Written above with the resolved turn's items; later turns
+                                # of this run must not re-send it.
+                                deferred_session_prefix = []
                                 continue
 
                             append_model_response_if_new(
@@ -1377,7 +1394,12 @@ class AgentRunner:
                                     raise
 
                                 final_turn_items = _final_turn_items_for_persistence(
-                                    turn_session_items,
+                                    # Same reason as the streamed path: with output
+                                    # guardrails this rebuilds the whole current response
+                                    # and would recover the deferred prefix, but WITHOUT
+                                    # them it returns these items verbatim — and a resume
+                                    # may run without the guardrails the park had.
+                                    deferred_session_prefix + list(turn_session_items),
                                     current_processed_response,
                                     run_state,
                                     current_agent,
