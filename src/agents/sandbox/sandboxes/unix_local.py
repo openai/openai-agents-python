@@ -960,6 +960,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             normalized = await self._check_rm_with_exec(path, recursive=recursive, user=user)
         else:
             normalized = self.normalize_path(path, for_write=True)
+        self._raise_if_workspace_root_removal(normalized)
         try:
             if normalized.is_dir() and not normalized.is_symlink():
                 if recursive:

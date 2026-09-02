@@ -15,6 +15,7 @@ from agents.sandbox.entries import GCSMount, InContainerMountStrategy, Mountpoin
 from agents.sandbox.errors import (
     MountConfigError,
     WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
@@ -235,6 +236,27 @@ async def test_check_mkdir_with_exec_runs_non_destructive_probe_as_user() -> Non
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
     assert session.last_command[4:6] == ("sh", "-lc")
     assert session.last_command[-2:] == ("/workspace/nested/dir", "1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_spelling", [".", "", "/workspace", "/workspace/", "sub/.."])
+async def test_rm_refuses_to_remove_the_workspace_root(root_spelling: str) -> None:
+    session = _CaptureExecSession()
+
+    with pytest.raises(WorkspaceArchiveWriteError) as excinfo:
+        await session.rm(root_spelling, recursive=True)
+
+    assert excinfo.value.context.get("reason") == "workspace_root_removal_refused"
+    assert session.last_command is None
+
+
+@pytest.mark.asyncio
+async def test_rm_of_a_workspace_entry_still_runs() -> None:
+    session = _CaptureExecSession()
+
+    await session.rm("sub", recursive=True)
+
+    assert session.last_command == ("rm", "-rf", "--", "/workspace/sub")
 
 
 @pytest.mark.asyncio

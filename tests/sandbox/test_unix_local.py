@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import PtySessionNotFoundError, WorkspaceArchiveWriteError
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -468,6 +468,38 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class TestUnixLocalRmWorkspaceRoot:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("root_spelling", [".", "", "{root}", "{root}/", "sub/.."])
+    async def test_rm_refuses_to_remove_the_workspace_root(
+        self,
+        tmp_path: Path,
+        root_spelling: str,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "sub" / "keep.txt").write_text("keep", encoding="utf-8")
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(WorkspaceArchiveWriteError) as excinfo:
+            await session.rm(root_spelling.format(root=workspace), recursive=True)
+
+        assert excinfo.value.context.get("reason") == "workspace_root_removal_refused"
+        assert (workspace / "sub" / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_rm_of_a_workspace_entry_still_removes_it(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "sub" / "old.txt").write_text("old", encoding="utf-8")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("sub", recursive=True)
+
+        assert workspace.is_dir()
+        assert not (workspace / "sub").exists()
 
 
 @pytest.mark.asyncio

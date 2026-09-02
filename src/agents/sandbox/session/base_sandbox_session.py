@@ -830,6 +830,27 @@ class BaseSandboxSession(abc.ABC):
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return self.normalize_path(path, for_write=for_write)
 
+    def _raise_if_workspace_root_removal(self, path: Path) -> None:
+        """Refuse ``rm`` of the workspace root itself.
+
+        `rm(".")`, `rm("")` or `rm("<root>")` passed path validation and then deleted the
+        whole workspace directory, after which every exec, read and write in the session
+        failed with WorkspaceRootNotFoundError. Removing the root is never what a caller
+        wants from a file operation; clearing the workspace is `rm` of its entries.
+        """
+
+        root = Path(self.state.manifest.root)
+        candidates = {sandbox_path_str(root), sandbox_path_str(self._workspace_root_path())}
+        try:
+            candidates.add(sandbox_path_str(root.resolve(strict=False)))
+        except OSError:
+            pass
+        if sandbox_path_str(path) in candidates:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={"reason": "workspace_root_removal_refused"},
+            )
+
     async def _validate_remote_path_access(
         self,
         path: Path | str,
@@ -1136,6 +1157,7 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to remove as.
         """
         path = await self._validate_path_access(path, for_write=True)
+        self._raise_if_workspace_root_removal(path)
 
         cmd: list[str] = ["rm"]
         if recursive:
