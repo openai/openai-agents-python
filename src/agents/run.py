@@ -1116,7 +1116,29 @@ class AgentRunner:
 
                             input_before_turn_rewrite = original_input
                             original_input = turn_result.original_input
+                            # Captured before ``update_run_state_after_resume`` replaces
+                            # ``_session_items``: the park-time list still holds the
+                            # current response's deferred items.
+                            base_session_items = (
+                                list(run_state._session_items) if run_state is not None else []
+                            )
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
+                            # Mirror of the streamed path: when the interruption-time
+                            # write was deferred (``_should_defer_interrupted_session_items``),
+                            # persist that deferred prefix ahead of the resolved turn's
+                            # items once the resume commits to continuing the run.
+                            deferred_session_prefix: list[RunItem] = []
+                            if (
+                                run_state is not None
+                                and _should_defer_interrupted_session_items(
+                                    current_agent, run_config
+                                )
+                                and run_state._current_turn_persisted_item_count == 0
+                                and resumed_response_boundary.session_start is not None
+                            ):
+                                deferred_session_prefix = base_session_items[
+                                    resumed_response_boundary.session_start :
+                                ]
                             session_items.extend(turn_session_items)
                             if run_state is not None:
                                 if turn_result.nested_history_owned_items is not None:
@@ -1167,7 +1189,7 @@ class AgentRunner:
                                     await save_resumed_turn_items(
                                         run_state=run_state,
                                         session=session,
-                                        items=turn_session_items,
+                                        items=deferred_session_prefix + turn_session_items,
                                         persisted_count=(
                                             run_state._current_turn_persisted_item_count
                                         ),

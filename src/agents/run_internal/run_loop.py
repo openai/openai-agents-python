@@ -1331,6 +1331,22 @@ async def start_streaming(
                     base_session_items = (
                         list(run_state._session_items) if run_state is not None else []
                     )
+                    # If the interruption-time write for this response was deferred
+                    # (``_finalize_streamed_interruption`` persisted ``[]`` because
+                    # ``_should_defer_interrupted_session_items`` was true), nothing of
+                    # the current response is in the Session yet. Once the resume
+                    # commits to continuing the run (run-again / handoff), persist that
+                    # deferred prefix ahead of the resolved turn's items so the tool
+                    # output never lands without its ``function_call``.
+                    deferred_session_prefix: list[RunItem] = []
+                    if (
+                        _should_defer_interrupted_session_items(current_agent, run_config)
+                        and streamed_result._current_turn_persisted_item_count == 0
+                        and resumed_response_boundary.session_start is not None
+                    ):
+                        deferred_session_prefix = base_session_items[
+                            resumed_response_boundary.session_start :
+                        ]
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
                     if turn_result.nested_history_owned_items is not None:
@@ -1419,7 +1435,7 @@ async def start_streaming(
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
                         await _save_resumed_items(
-                            list(turn_session_items),
+                            deferred_session_prefix + list(turn_session_items),
                             turn_result.model_response.response_id,
                             store_setting,
                         )
@@ -1462,7 +1478,7 @@ async def start_streaming(
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
                         await _save_resumed_items(
-                            list(turn_session_items),
+                            deferred_session_prefix + list(turn_session_items),
                             turn_result.model_response.response_id,
                             store_setting,
                         )
