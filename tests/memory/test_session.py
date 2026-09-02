@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic.dataclasses import dataclass
 
 from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession, TResponseInputItem
 from agents.memory.sqlite_session import _await_mutation
@@ -960,6 +961,106 @@ async def test_session_settings_resolve():
     # Resolving with None returns self
     final_none = base.resolve(None)
     assert final_none.limit == 100
+
+
+@dataclass
+class _TenantSessionSettings(SessionSettings):
+    tenant: str = "default"
+
+
+@dataclass
+class _OtherSessionSettings(SessionSettings):
+    tenant: str = "other"
+
+
+def test_session_settings_resolve_accepts_base_override_on_subclass():
+    """A SessionSettings subclass accepts a base-class override and keeps its own fields."""
+    settings = _TenantSessionSettings(limit=1, tenant="acme")
+
+    resolved = settings.resolve(SessionSettings(limit=5))
+
+    assert isinstance(resolved, _TenantSessionSettings)
+    assert resolved.limit == 5
+    assert resolved.tenant == "acme"
+
+
+def test_session_settings_resolve_rejects_sibling_subclass_override():
+    """Unrelated settings subclasses cannot silently copy overlapping fields."""
+    settings = _TenantSessionSettings(limit=1, tenant="acme")
+
+    with pytest.raises(TypeError, match="must be a _TenantSessionSettings instance or a dict"):
+        settings.resolve(_OtherSessionSettings(limit=5, tenant="other"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    [SessionSettings(limit=5), {"limit": 5}],
+    ids=["instance", "dict"],
+)
+async def test_runner_session_settings_override_applies_to_subclassed_settings(
+    override: SessionSettings | dict[str, Any],
+):
+    """A base SessionSettings override from RunConfig applies to a session whose settings
+    are a SessionSettings subclass."""
+    session = SQLiteSession(
+        "subclass_override_test",
+        session_settings=_TenantSessionSettings(tenant="acme"),
+    )
+    try:
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Turn {i}"} for i in range(10)
+        ]
+        await session.add_items(items)
+
+        model = ScriptedModel()
+        model.enqueue([get_text_message("Got it")])
+        agent = Agent(name="test", model=model)
+
+        await Runner.run(
+            agent,
+            "New question",
+            session=session,
+            run_config=RunConfig(session_settings=override),
+        )
+
+        # The override's limit applies: only the last 5 history items plus the new question.
+        history_items = [
+            item for item in model.calls[-1].input if item.get("content") != "New question"
+        ]
+        assert len(history_items) == 5
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_session_settings_override_rejects_sibling_subclass():
+    """Runner rejects an unrelated settings subclass before invoking the model."""
+    session = SQLiteSession(
+        "sibling_subclass_override_test",
+        session_settings=_TenantSessionSettings(tenant="acme"),
+    )
+    try:
+        model = ScriptedModel()
+        model.enqueue([get_text_message("Got it")])
+        agent = Agent(name="test", model=model)
+
+        with pytest.raises(
+            TypeError,
+            match="must be a _TenantSessionSettings instance or a dict",
+        ):
+            await Runner.run(
+                agent,
+                "New question",
+                session=session,
+                run_config=RunConfig(
+                    session_settings=_OtherSessionSettings(limit=5, tenant="other")
+                ),
+            )
+
+        assert not model.calls
+    finally:
+        session.close()
 
 
 @pytest.mark.asyncio
