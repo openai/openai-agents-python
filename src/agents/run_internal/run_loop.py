@@ -1879,23 +1879,23 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
+                    current_agent = turn_result.next_step.new_agent
+                    if run_state is not None:
+                        run_state._current_agent = current_agent
+                    _publish_streamed_result_agent(streamed_result, current_agent)
+                    if streamed_result._state is not None:
+                        streamed_result._state._current_step = NextStepRunAgain()
                     await _save_stream_items_without_count(
                         turn_session_items,
                         turn_result.model_response.response_id,
                         store_setting,
                     )
-                    current_agent = turn_result.next_step.new_agent
-                    if run_state is not None:
-                        run_state._current_agent = current_agent
-                    _publish_streamed_result_agent(streamed_result, current_agent)
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True
                     streamed_result._event_queue.put_nowait(
                         AgentUpdatedStreamEvent(new_agent=current_agent)
                     )
-                    if streamed_result._state is not None:
-                        streamed_result._state._current_step = NextStepRunAgain()
 
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break

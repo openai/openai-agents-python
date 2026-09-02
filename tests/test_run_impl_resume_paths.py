@@ -82,6 +82,25 @@ class _FailingResumeSession(SimpleListSession):
             raise self.error
 
 
+class _FailSecondAddItemsSession(SimpleListSession):
+    """Let the initial input-priming append succeed, then fail the next append.
+
+    Unlike ``_FailingResumeSession``, this targets a specific append by call order rather than
+    a resume-cycle phase, so it can isolate a fresh (non-resumed) run's first real turn save.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.error = RuntimeError("session append failed")
+        self._call_count = 0
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self._call_count += 1
+        if self._call_count == 2:
+            raise self.error
+        await super().add_items(items)
+
+
 class _LostAckSQLiteSession(SQLiteSession):
     fail_after_commit = False
     error = RuntimeError("session append failed")
@@ -1221,3 +1240,40 @@ async def test_resumed_handoff_session_append_is_recovered_before_next_model(
     assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
     assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
     assert "pending_session_write" not in result.to_state().to_json()
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_preserves_agent_after_session_append_failure() -> None:
+    """A fresh (non-resumed) streamed run's generic-loop handoff branch must publish the new
+    agent and next-step state before the fallible session append, mirroring the fix already
+    applied to the is_resumed_state branch covered by
+    test_resumed_handoff_session_append_is_recovered_before_next_model. Every fresh streamed
+    run passes through this branch, not just resumed ones.
+    """
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+            [get_text_message("done")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = _FailSecondAddItemsSession()
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError) as error:
+        async for _ in failed_result.stream_events():
+            pass
+    assert error.value is session.error
+
+    state = failed_result.to_state()
+    assert state._current_agent is not None
+    assert state._current_agent.name == "delegate"
+    assert failed_result.current_agent.name == "delegate"
+
+    result = await _run_session_resume(triage, state, session, False)
+    assert result.final_output == "done"
+    assert result.last_agent.name == "delegate"
+    assert len(model.calls) == 2
