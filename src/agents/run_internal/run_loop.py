@@ -1395,13 +1395,19 @@ async def start_streaming(
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
                             save_items=_save_resumed_items,
+                            # A resume can interrupt again (a partial approval of a
+                            # multi-approval response). If the gate still defers, keep
+                            # deferring; otherwise this write is the deferred prefix's
+                            # last chance — it bumps the persisted count, so leaving the
+                            # prefix out here would orphan the parked calls for every
+                            # later resume. Mirrors the non-streaming path's guard.
                             items=(
                                 []
                                 if _should_defer_interrupted_session_items(
                                     current_agent,
                                     run_config,
                                 )
-                                else list(turn_session_items)
+                                else deferred_session_prefix + list(turn_session_items)
                             ),
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
