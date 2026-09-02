@@ -263,7 +263,9 @@ _SERIALIZED_FIELDS_BY_STRATEGY_TYPE: dict[str, frozenset[str]] = {
     "cloudflare_bucket_mount": frozenset({"type"}),
     "daytona_cloud_bucket": frozenset({"type", "pattern"}),
     "e2b_cloud_bucket": frozenset({"type", "pattern"}),
-    "modal_cloud_bucket": frozenset({"type", "secret_name", "secret_environment_name"}),
+    "modal_cloud_bucket": frozenset(
+        {"type", "secret_name", "secret_environment_name", "oidc_auth_role_arn"}
+    ),
     "runloop_cloud_bucket": frozenset({"type", "pattern"}),
     "vercel_cloud_bucket": frozenset({"type"}),
 }

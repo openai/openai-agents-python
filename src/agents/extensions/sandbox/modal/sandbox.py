@@ -2028,6 +2028,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 bucket_endpoint_url=config.bucket_endpoint_url,
                 key_prefix=config.key_prefix,
                 secret=secret,
+                oidc_auth_role_arn=config.oidc_auth_role_arn,
                 read_only=config.read_only,
             )
         return volumes

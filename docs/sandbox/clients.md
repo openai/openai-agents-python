@@ -138,7 +138,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | Backend | Mount notes |
 | --- | --- |
 | Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
-| `ModalSandboxClient` | Supports cloud bucket mounts by using `ModalCloudBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
+| `ModalSandboxClient` | Supports cloud bucket mounts by using `ModalCloudBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials, a named Modal Secret, or an AWS IAM role assumed via Modal OIDC (`oidc_auth_role_arn`). |
 | `CloudflareSandboxClient` | Supports bucket mounts by using `CloudflareBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
 | `BlaxelSandboxClient` | Supports cloud bucket mounts by pairing `BlaxelCloudBucketMountStrategy` with an `S3Mount`, `R2Mount`, or `GCSMount` entry. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy`, both available from `agents.extensions.sandbox.blaxel`. |
 | `DaytonaSandboxClient` | Supports mounting cloud storage through `rclone` by using `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
