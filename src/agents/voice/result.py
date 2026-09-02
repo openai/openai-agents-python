@@ -281,18 +281,15 @@ class StreamedAudioResult:
     async def _cancel(self) -> None:
         """Stop pending synthesis and enqueue an ordered terminal event."""
         current_task = asyncio.current_task()
-        tasks = [task for task in self._tasks if task is not current_task and not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
         dispatcher_is_running = (
             self._dispatcher_task is not None and not self._dispatcher_task.done()
         )
         if self._completed_session and (self._terminal_event_enqueued or dispatcher_is_running):
             return
 
+        # Publish the terminal queue before awaiting any cancellable synthesis cleanup. A second
+        # cancellation can interrupt that await, but the dispatcher must still have a terminal
+        # event to release a consumer that is waiting independently of the producer.
         self._completed_session = True
         if not self._terminal_event_enqueued:
             terminal_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
@@ -301,6 +298,17 @@ class StreamedAudioResult:
 
         if self._dispatcher_task is None or self._dispatcher_task.done():
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
+
+        tasks = [task for task in self._tasks if task is not current_task and not task.done()]
+        for task in tasks:
+            task.cancel()
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            # This must happen while the producer is still inside its TraceCtxManager, so the
+            # speech-group span closes before the enclosing trace emits trace_end.
+            self._finish_turn()
 
     async def _dispatch_audio(self):
         # Dispatch audio chunks from each segment in the order they were added

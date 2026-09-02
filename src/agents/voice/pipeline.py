@@ -112,6 +112,9 @@ class VoicePipeline:
                         await output._add_text(text_event)
                     await output._turn_done()
                     await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
                 except Exception as e:
                     log_model_and_tool_action_error(logger, "Error processing single voice turn", e)
                     await output._add_error(e)

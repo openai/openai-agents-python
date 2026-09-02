@@ -282,6 +282,47 @@ async def test_streamed_audio_result_closes_gracefully_after_session_end_yield()
 
 
 @pytest.mark.asyncio
+async def test_streamed_audio_result_publishes_terminal_before_cancellable_cleanup() -> None:
+    result = StreamedAudioResult(
+        ZeroPcmTTSModel(),
+        TTSModelSettings(),
+        VoicePipelineConfig(),
+    )
+    synthesis_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def synthesis() -> None:
+        try:
+            await never_finishes.wait()
+        except asyncio.CancelledError:
+            synthesis_started.set()
+            await release_cleanup.wait()
+            raise
+
+    synthesis_task = asyncio.create_task(synthesis())
+    result._tasks.append(synthesis_task)
+    cancel_task = asyncio.create_task(result._cancel())
+
+    try:
+        await asyncio.wait_for(synthesis_started.wait(), timeout=1)
+        cancel_task.cancel("cancel during synthesis cleanup")
+        with pytest.raises(asyncio.CancelledError):
+            await cancel_task
+
+        terminal = await asyncio.wait_for(result._queue.get(), timeout=1)
+        assert isinstance(terminal, VoiceStreamEventLifecycle)
+        assert terminal.event == "session_ended"
+    finally:
+        release_cleanup.set()
+        if not cancel_task.done():
+            cancel_task.cancel()
+        if not synthesis_task.done():
+            synthesis_task.cancel()
+        await asyncio.gather(cancel_task, synthesis_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_streamed_audio_result_propagates_cancellation_when_terminal_cleanup_fails(
     monkeypatch,
 ) -> None:
@@ -1232,6 +1273,34 @@ async def test_voicepipeline_producer_cancellation_releases_the_consumer() -> No
 
 
 @pytest.mark.asyncio
+async def test_voicepipeline_single_turn_cancellation_releases_the_consumer() -> None:
+    transcription_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    class BlockingSTT(QueuedSTTModel):
+        async def transcribe(self, *args: Any, **kwargs: Any) -> str:
+            del args, kwargs
+            transcription_started.set()
+            await never_finishes.wait()
+            raise AssertionError("Unreachable")
+
+    pipeline = VoicePipeline(
+        workflow=QueuedVoiceWorkflow([["unused"]]),
+        stt_model=BlockingSTT([]),
+        tts_model=ZeroPcmTTSModel(),
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    producer = result.text_generation_task
+    assert producer is not None
+
+    await asyncio.wait_for(transcription_started.wait(), timeout=5)
+    producer.cancel("single-turn provider cancelled")
+
+    with pytest.raises(asyncio.CancelledError, match="single-turn provider cancelled"):
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_voicepipeline_cancellation_preserves_ordered_output_before_session_end(
     monkeypatch,
 ) -> None:
@@ -1571,6 +1640,44 @@ async def test_voicepipeline_trace_not_finished_before_single_turn_completes() -
     gate.set()
     await extract_events(result)
     assert fetch_events()[-1] == "trace_end"
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_cancellation_finishes_turn_span_before_trace() -> None:
+    transcription_started = asyncio.Event()
+    workflow_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    class BlockingSTT(QueuedSTTModel):
+        async def transcribe(self, *args: Any, **kwargs: Any) -> str:
+            del args, kwargs
+            transcription_started.set()
+            return "first"
+
+    class BlockingWorkflow(QueuedVoiceWorkflow):
+        async def run(self, _: str) -> AsyncIterator[str]:
+            yield "partial"
+            workflow_started.set()
+            await never_finishes.wait()
+
+    pipeline = VoicePipeline(
+        workflow=BlockingWorkflow(),
+        stt_model=BlockingSTT([]),
+        tts_model=ZeroPcmTTSModel(),
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    producer = result.text_generation_task
+    assert producer is not None
+
+    await asyncio.wait_for(transcription_started.wait(), timeout=5)
+    await asyncio.wait_for(workflow_started.wait(), timeout=5)
+    producer.cancel("single-turn provider cancelled")
+
+    with pytest.raises(asyncio.CancelledError, match="single-turn provider cancelled"):
+        await asyncio.wait_for(extract_events(result), timeout=5)
+
+    events = fetch_events()
+    assert events[-2:] == ["span_end", "trace_end"]
 
 
 @pytest.mark.asyncio
