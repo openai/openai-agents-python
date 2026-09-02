@@ -964,6 +964,95 @@ async def test_buffer_tool_call_stream_orders_missing_index_after_indexed_calls(
     assert _completed_function_calls(buffered_events) == expected_calls
 
 
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_avoids_passthrough_index_for_missing_index() -> None:
+    custom_tool_call_delta = ChoiceDeltaToolCall.model_construct(
+        index=0,
+        id="custom-id",
+        type="custom",
+    )
+    custom_chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[custom_tool_call_delta]))],
+    )
+    chunks = (
+        custom_chunk,
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_merges_missing_index_continuation() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({"tool_calls": [{"function": {"arguments": "1}"}}]}),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", '{"a":1}')]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_ambiguous_missing_index_continuation() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "first_func", "arguments": '{"a":'},
+                    },
+                    {
+                        "index": 1,
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "second_func", "arguments": '{"b":'},
+                    },
+                ]
+            }
+        ),
+        _lenient_chunk({"tool_calls": [{"function": {"arguments": "1}"}}]}),
+    )
+
+    with pytest.raises(
+        ModelBehaviorError, match="omitted an index while multiple function tool calls"
+    ):
+        await _collect_buffered_handler_events(*chunks)
+
+
 @pytest.mark.parametrize(
     ("delta", "expected"),
     [

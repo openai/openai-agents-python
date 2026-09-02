@@ -149,7 +149,7 @@ class StreamingState:
 class _BufferedToolCall:
     """Accumulates a streamed Chat Completions function tool call."""
 
-    index: int
+    index: int | None
     call_id: str | None = None
     name: str | None = None
     arguments: str = ""
@@ -314,12 +314,24 @@ class ChatCmplStreamHandler:
 
     @staticmethod
     def _accumulate_tool_call_delta(
-        buffered_calls: dict[int, _BufferedToolCall],
+        buffered_calls: dict[int | None, _BufferedToolCall],
         tool_call_delta: ChoiceDeltaToolCall,
     ) -> None:
+        tool_call_index = tool_call_delta.index
+        if not isinstance(tool_call_index, int) and not tool_call_delta.id:
+            if None in buffered_calls:
+                tool_call_index = None
+            elif len(buffered_calls) == 1:
+                tool_call_index = next(iter(buffered_calls))
+            elif len(buffered_calls) > 1:
+                raise ModelBehaviorError(
+                    "Chat Completions tool call delta omitted an index while multiple "
+                    "function tool calls were being buffered."
+                )
+
         buffered_call = buffered_calls.setdefault(
-            tool_call_delta.index,
-            _BufferedToolCall(index=tool_call_delta.index),
+            tool_call_index,
+            _BufferedToolCall(index=tool_call_index),
         )
 
         if tool_call_delta.id:
@@ -361,8 +373,6 @@ class ChatCmplStreamHandler:
             )
 
         tool_call_delta = ChoiceDeltaToolCall(
-            # Lenient chunk parsing leaves the index as None when the provider omitted it,
-            # and the replayed delta needs a real index.
             index=buffered_call.index if isinstance(buffered_call.index, int) else fallback_index,
             id=buffered_call.call_id,
             function=ChoiceDeltaToolCallFunction(
@@ -384,17 +394,14 @@ class ChatCmplStreamHandler:
     def _buffered_tool_calls_chunk(
         cls,
         template_chunk: ChatCompletionChunk,
-        buffered_calls: dict[int, _BufferedToolCall],
+        buffered_calls: dict[int | None, _BufferedToolCall],
+        passthrough_tool_call_indexes: set[int],
     ) -> ChatCompletionChunk:
-        # OpenAI-compatible providers may omit the tool call index, which lenient chunk
-        # parsing leaves as None. Every index-less delta accumulates under that single key,
-        # so replay the indexed calls in index order and give the index-less call the next
-        # free index instead of failing on a None/int comparison.
         ordered_calls = sorted(buffered_calls.values(), key=_buffered_tool_call_order)
-        fallback_index = (
-            max((call.index for call in ordered_calls if isinstance(call.index, int)), default=-1)
-            + 1
-        )
+        occupied_indexes = passthrough_tool_call_indexes | {
+            call.index for call in ordered_calls if isinstance(call.index, int)
+        }
+        fallback_index = max(occupied_indexes, default=-1) + 1
         tool_call_deltas = [
             cls._buffered_tool_call_delta(buffered_call, fallback_index=fallback_index)
             for buffered_call in ordered_calls
@@ -412,7 +419,7 @@ class ChatCmplStreamHandler:
         stream: AsyncIterator[ChatCompletionChunk],
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Buffer streamed function tool-call deltas until they are complete."""
-        buffered_calls: dict[int, _BufferedToolCall] = {}
+        buffered_calls: dict[int | None, _BufferedToolCall] = {}
         passthrough_tool_call_indexes: set[int] = set()
         saw_passthrough_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
@@ -477,7 +484,11 @@ class ChatCmplStreamHandler:
         if buffered_calls:
             if last_chunk is None:
                 return
-            yield cls._buffered_tool_calls_chunk(last_chunk, buffered_calls)
+            yield cls._buffered_tool_calls_chunk(
+                last_chunk,
+                buffered_calls,
+                passthrough_tool_call_indexes,
+            )
 
     @staticmethod
     def _merged_provider_data(
