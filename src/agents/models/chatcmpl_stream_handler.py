@@ -332,6 +332,7 @@ class ChatCmplStreamHandler:
         tool_call_delta: ChoiceDeltaToolCall,
     ) -> None:
         tool_call_index = tool_call_delta.index
+        function_name = tool_call_delta.function.name if tool_call_delta.function else None
         matching_indexes = [
             index
             for index, buffered_call in buffered_calls.items()
@@ -353,6 +354,21 @@ class ChatCmplStreamHandler:
                 buffered_call = buffered_calls.pop(None)
                 buffered_call.index = tool_call_index
                 buffered_calls[tool_call_index] = buffered_call
+            elif (
+                not tool_call_delta.id
+                and None in buffered_calls
+                and tool_call_index not in buffered_calls
+            ):
+                buffered_name = buffered_calls[None].name
+                if not function_name or not buffered_name or function_name == buffered_name:
+                    if len(buffered_calls) > 1:
+                        raise ModelBehaviorError(
+                            "Chat Completions tool call delta supplied a new index without an ID "
+                            "while multiple function calls were being buffered."
+                        )
+                    buffered_call = buffered_calls.pop(None)
+                    buffered_call.index = tool_call_index
+                    buffered_calls[tool_call_index] = buffered_call
         else:
             if len(matching_indexes) == 1:
                 tool_call_index = matching_indexes[0]
@@ -367,7 +383,6 @@ class ChatCmplStreamHandler:
                     "another index-less call was being buffered."
                 )
             else:
-                function_name = tool_call_delta.function.name if tool_call_delta.function else None
                 if function_name and None in buffered_calls:
                     buffered_name = buffered_calls[None].name
                     if buffered_name and buffered_name != function_name:
@@ -515,36 +530,52 @@ class ChatCmplStreamHandler:
                 if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
-                        is_unindexed_untyped_continuation = (
-                            not isinstance(tool_call_delta.index, int)
-                            and getattr(tool_call_delta, "type", None) is None
+                        is_untyped_continuation = (
+                            getattr(tool_call_delta, "type", None) is None
                             and tool_call_delta.function is None
+                        )
+                        is_unindexed_untyped_continuation = (
+                            not isinstance(tool_call_delta.index, int) and is_untyped_continuation
                         )
                         buffered_id_matches = [
                             buffered_call
                             for buffered_call in buffered_calls.values()
                             if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
                         ]
+                        is_passthrough_continuation_by_id = (
+                            is_untyped_continuation
+                            and bool(tool_call_delta.id)
+                            and tool_call_delta.id in passthrough_tool_call_indexes_by_id
+                        )
                         is_unindexed_passthrough_continuation = (
                             is_unindexed_untyped_continuation
                             and (
-                                tool_call_delta.id in passthrough_tool_call_indexes_by_id
+                                is_passthrough_continuation_by_id
                                 or (saw_unindexed_passthrough_tool_call and not tool_call_delta.id)
                             )
                         )
-                        if is_unindexed_passthrough_continuation and buffered_id_matches:
+                        if is_passthrough_continuation_by_id and buffered_id_matches:
                             raise ModelBehaviorError(
-                                "Chat Completions tool call delta omitted an index and its ID "
-                                "matched both a buffered function call and a passthrough call."
+                                "Chat Completions tool call delta ID matched both a buffered "
+                                "function call and a passthrough call."
                             )
 
                         unindexed_buffered_call = buffered_calls.get(None)
                         if (
                             isinstance(tool_call_delta.index, int)
                             and tool_call_delta.index in passthrough_tool_call_indexes
-                            and tool_call_delta.id
                             and unindexed_buffered_call is not None
-                            and unindexed_buffered_call.call_id == tool_call_delta.id
+                            and (
+                                (
+                                    tool_call_delta.id
+                                    and unindexed_buffered_call.call_id == tool_call_delta.id
+                                )
+                                or (
+                                    not tool_call_delta.id
+                                    and len(buffered_calls) == 1
+                                    and tool_call_delta.function is not None
+                                )
+                            )
                         ):
                             raise ModelBehaviorError(
                                 "Chat Completions tool call delta supplied an index already used "
@@ -553,15 +584,39 @@ class ChatCmplStreamHandler:
 
                         if (
                             tool_call_delta.index in passthrough_tool_call_indexes
+                            or is_passthrough_continuation_by_id
                             or is_unindexed_passthrough_continuation
                         ):
                             if passthrough_id := tool_call_delta.id:
                                 owner_index = passthrough_tool_call_indexes_by_id.get(
                                     passthrough_id
                                 )
-                                if isinstance(owner_index, int) and not isinstance(
-                                    tool_call_delta.index, int
-                                ):
+                                if isinstance(tool_call_delta.index, int):
+                                    promotes_unindexed_passthrough_owner = (
+                                        is_passthrough_continuation_by_id
+                                        and not isinstance(owner_index, int)
+                                    )
+                                    if isinstance(owner_index, int) and (
+                                        owner_index != tool_call_delta.index
+                                    ):
+                                        raise ModelBehaviorError(
+                                            "Chat Completions passthrough tool call delta supplied "
+                                            "a different index from its buffered ID owner."
+                                        )
+                                    if tool_call_delta.index in buffered_calls:
+                                        raise ModelBehaviorError(
+                                            "Chat Completions passthrough tool call delta supplied "
+                                            "an index already used by a buffered function call."
+                                        )
+                                    passthrough_tool_call_indexes.add(tool_call_delta.index)
+                                    passthrough_tool_call_indexes_by_id[passthrough_id] = (
+                                        tool_call_delta.index
+                                    )
+                                    if promotes_unindexed_passthrough_owner:
+                                        tool_call_delta = tool_call_delta.model_copy(
+                                            update={"type": "custom"}
+                                        )
+                                elif isinstance(owner_index, int):
                                     tool_call_delta = tool_call_delta.model_copy(
                                         update={"index": owner_index}
                                     )

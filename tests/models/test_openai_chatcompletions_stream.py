@@ -1154,6 +1154,132 @@ async def test_buffer_tool_call_stream_forwards_missing_index_passthrough_contin
     assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
 
 
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_promotes_indexed_passthrough_continuation_by_id() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "pri"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "custom-id",
+                        "custom": {"input": "nt("},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({"tool_calls": [{"id": "custom-id", "custom": {"input": "1)"}}]}),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    indexed_continuation = buffered_chunks[1].choices[0].delta.tool_calls
+    unindexed_continuation = buffered_chunks[2].choices[0].delta.tool_calls
+    assert indexed_continuation and indexed_continuation[0].index == 2
+    assert unindexed_continuation and unindexed_continuation[0].index == 2
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_indexed_passthrough_continuation_collision() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "pri"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "custom-id",
+                        "custom": {"input": "nt(1)"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="index already used by a buffered function"):
+        await _collect_buffered_tool_call_chunks(*chunks)
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_passthrough_continuation_index_change() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 1,
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "pri"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "custom-id",
+                        "custom": {"input": "nt(1)"},
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="different index from its buffered ID owner"):
+        await _collect_buffered_tool_call_chunks(*chunks)
+
+
 @pytest.mark.parametrize("function_tool_call_index", [1, None], ids=["indexed", "unindexed"])
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_forwards_indexed_passthrough_continuation_by_id(
@@ -1531,6 +1657,91 @@ async def test_buffer_tool_call_stream_reconciles_late_index_by_id(
     assert _completed_function_calls(buffered_events) == [("call_1", "my_func", '{"a":1}')]
 
 
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_reconciles_late_index_without_id_for_sole_call() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "type": "function",
+                        "function": {"arguments": "1}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    replayed_tool_calls = buffered_chunks[-1].choices[0].delta.tool_calls
+    assert replayed_tool_calls
+    assert [tool_call.index for tool_call in replayed_tool_calls] == [2]
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", '{"a":1}')]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_keeps_different_named_idless_late_index_distinct() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "first_func", "arguments": '{"a":1}'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "type": "function",
+                        "function": {"name": "second_func", "arguments": '{"b":'},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"arguments": "1}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    assert _completed_function_calls(buffered_events) == [
+        ("call_1", "first_func", '{"a":1}'),
+        ("call_2", "second_func", '{"b":1}'),
+    ]
+
+
 @pytest.mark.parametrize(
     "opening_name",
     ["my_func", None],
@@ -1763,6 +1974,24 @@ def test_accumulate_tool_call_delta_rejects_ambiguous_late_index() -> None:
     )
 
     with pytest.raises(ModelBehaviorError, match="same ID matched multiple buffered calls"):
+        ChatCmplStreamHandler._accumulate_tool_call_delta(buffered_calls, continuation)
+
+    assert buffered_calls == expected_calls
+
+
+def test_accumulate_tool_call_delta_rejects_ambiguous_idless_late_index() -> None:
+    unindexed_call = _BufferedToolCall(index=None, call_id="call_1", name="first_func")
+    indexed_call = _BufferedToolCall(index=0, call_id="call_2", name="second_func")
+    buffered_calls = {None: unindexed_call, 0: indexed_call}
+    expected_calls = {None: replace(unindexed_call), 0: replace(indexed_call)}
+    continuation = ChoiceDeltaToolCall.model_construct(
+        index=2,
+        id=None,
+        type="function",
+        function=ChoiceDeltaToolCallFunction(arguments="{}"),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="new index without an ID"):
         ChatCmplStreamHandler._accumulate_tool_call_delta(buffered_calls, continuation)
 
     assert buffered_calls == expected_calls
