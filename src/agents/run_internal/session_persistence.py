@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..exceptions import UserError
 from ..items import (
     HandoffOutputItem,
@@ -821,16 +822,32 @@ async def deferred_interrupted_session_prefix(
 def _identity_key(item: TResponseInputItem | None) -> tuple[str, str] | None:
     """Return a collision-free identity for an item, or ``None`` when it has none.
 
-    Only ``call_id``-bearing items have one. Two assistant messages with the same text are
-    indistinguishable and must never be treated as the same row.
+    Only items carrying a unique per-turn id have one, and each family names it
+    differently: function calls and their outputs use ``call_id``, a hosted MCP approval
+    request uses ``id`` (read through the canonical
+    ``get_hosted_mcp_approval_request_identity`` rather than a local rule), and its
+    response points back with ``approval_request_id``. Everything else — an assistant
+    message, a reasoning item — returns ``None`` and is therefore never suppressed: two
+    with the same content are indistinguishable and must not be treated as the same row.
     """
     if not isinstance(item, dict):
         return None
-    call_id = item.get("call_id")
     item_type = item.get("type")
-    if isinstance(call_id, str) and isinstance(item_type, str):
-        return (item_type, call_id)
-    return None
+    if not isinstance(item_type, str):
+        return None
+    if item_type == "mcp_approval_request":
+        identity = get_hosted_mcp_approval_request_identity(item)
+        request_id = identity.request_id if identity is not None else None
+        return (item_type, request_id) if request_id else None
+    if item_type == "mcp_approval_response":
+        approval_request_id = item.get("approval_request_id")
+        return (
+            (item_type, approval_request_id)
+            if isinstance(approval_request_id, str) and approval_request_id
+            else None
+        )
+    call_id = item.get("call_id")
+    return (item_type, call_id) if isinstance(call_id, str) and call_id else None
 
 
 async def resume_pending_session_write(
