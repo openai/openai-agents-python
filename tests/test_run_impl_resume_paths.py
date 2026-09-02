@@ -9,7 +9,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool, handoff
+from agents import Agent, GuardrailFunctionOutput, Runner, function_tool, handoff, output_guardrail
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
@@ -1454,3 +1454,44 @@ async def test_max_turns_handler_output_is_marked_before_it_is_persisted() -> No
         )
     assert handler_calls == ["handled"]
     assert hooks.ends == ["max-turns-output"]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_guardrail_failure_leaves_the_state_retryable() -> None:
+    """A handler output that never passed its guardrails must not close the state.
+
+    `finalize_max_turns_handler_output()` drives the same save callback from its guardrail-error
+    path. Marking there would reject every later resume for an output the caller never received,
+    which is a worse outcome than the replay the marker exists to prevent.
+    """
+    guardrail_calls: list[str] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    @output_guardrail
+    async def exploding(context: Any, agent: Agent[Any], output: Any) -> GuardrailFunctionOutput:
+        guardrail_calls.append(str(output))
+        raise RuntimeError("guardrail exploded")
+
+    model = ScriptedModel([[get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")]])
+    agent = Agent(name="payment", model=model, tools=[charge], output_guardrails=[exploding])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "charge 7", session=session, run_config=config, max_turns=1)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    handlers: dict[str, Any] = {"max_turns": lambda _data: "max-turns-output"}
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)
+
+    assert guardrail_calls == ["max-turns-output"]
+    assert "terminal_unrecoverable" not in state.to_json()
+
+    # The retry reports the real guardrail failure rather than a fail-closed rejection.
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)

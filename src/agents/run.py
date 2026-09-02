@@ -1526,15 +1526,8 @@ class AgentRunner:
                             store_setting: bool | None = store_setting,
                             generated_items: list[RunItem] = generated_items,
                             session_items: list[RunItem] = session_items,
-                            run_state: RunState[TContext] | None = run_state,
                         ) -> None:
                             nonlocal handler_output_recorded, handler_persisted_item_count
-                            # The handler output, its guardrails, and its end hooks are complete,
-                            # so this append carries an accepted result like any other terminal
-                            # one. run_state stays out of the save itself to keep the resumed
-                            # turn's persisted count intact.
-                            if run_state is not None:
-                                run_state._terminal_unrecoverable = True
                             handler_persisted_item_count = (
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
@@ -1548,8 +1541,6 @@ class AgentRunner:
                                     wrapper=context_wrapper,
                                 )
                             )
-                            if run_state is not None:
-                                run_state._terminal_unrecoverable = False
                             if not items:
                                 return
                             generated_items.extend(items)
@@ -1570,7 +1561,16 @@ class AgentRunner:
                             include_in_history=include_in_history,
                         )
                         if include_in_history and not handler_output_recorded:
+                            # Only reachable once the handler output cleared its guardrails and
+                            # ran its end hooks, so this append carries an accepted result like
+                            # any other terminal one. The callback itself stays unmarked because
+                            # finalize_max_turns_handler_output() also drives it from its
+                            # guardrail-error path, where no output was ever accepted.
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await _save_max_turns_handler_output([synthesized_item])
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
