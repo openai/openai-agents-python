@@ -9,7 +9,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool, handoff
+from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
@@ -98,6 +98,20 @@ class _FailSecondAddItemsSession(SimpleListSession):
         self._call_count += 1
         if self._call_count == 2:
             raise self.error
+        await super().add_items(items)
+
+
+class _FailSecondAddItemsSessionWithYield(_FailSecondAddItemsSession):
+    """Same failure shape as ``_FailSecondAddItemsSession``, but the failing call performs a
+    genuine ``await`` (a scheduler yield) before raising, like a real I/O-backed Session
+    (SQLite, network, etc.) would. A purely synchronous raise never yields control back to the
+    ``stream_events()`` consumer before the run-loop task finishes, so a test built on it cannot
+    observe whether an already-queued stream event was delivered before the error surfaced.
+    """
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self._call_count == 1:
+            await asyncio.sleep(0)
         await super().add_items(items)
 
 
@@ -1277,3 +1291,50 @@ async def test_fresh_streamed_handoff_preserves_agent_after_session_append_failu
     assert result.final_output == "done"
     assert result.last_agent.name == "delegate"
     assert len(model.calls) == 2
+    expected_pair = ["function_call", "function_call_output"]
+    stored = await session.get_items()
+    assert _call_pair(stored, "handoff-1") == expected_pair
+    assert "pending_session_write" not in result.to_state().to_json()
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_publishes_agent_update_before_session_append_failure() -> (
+    None
+):
+    """The generic-loop handoff branch must queue ``AgentUpdatedStreamEvent`` for the new agent
+    before the fallible session append, so ``stream_events()`` consumers observe the transition
+    even when the append later raises. Mirrors the already-merged ordering fix for the
+    ``is_resumed_state``-specific branch (lines ~1407-1437), which is out of scope here.
+
+    Uses a session whose failing append performs a genuine ``await`` before raising: a purely
+    synchronous raise (as in ``_FailSecondAddItemsSession``) never yields control back to this
+    consumer before the run-loop task finishes, so it cannot prove event delivery either way
+    (a separate, pre-existing gate: ``stream_events()`` only drains an already-queued event past
+    a terminal error when that error was marked via ``_mark_error_to_drain_stream_events()``,
+    which session-append failures never are).
+    """
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+            [get_text_message("done")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = _FailSecondAddItemsSessionWithYield()
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    collected_events: list[Any] = []
+    caught: RuntimeError | None = None
+    try:
+        async for event in failed_result.stream_events():
+            collected_events.append(event)
+    except RuntimeError as error:
+        caught = error
+    assert caught is session.error
+    assert any(
+        isinstance(event, AgentUpdatedStreamEvent) and event.new_agent.name == "delegate"
+        for event in collected_events
+    )

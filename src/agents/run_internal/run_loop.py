@@ -418,6 +418,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    resumed_write_state: RunState | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -433,6 +434,7 @@ async def _save_stream_items(
         response_id=response_id,
         store=store,
         wrapper=streamed_result.context_wrapper,
+        resumed_write_state=resumed_write_state,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -1152,6 +1154,12 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
+                resumed_write_state=(
+                    run_state
+                    if run_state is not None
+                    and isinstance(run_state._current_step, NextStepRunAgain)
+                    else None
+                ),
             )
 
         async def _save_max_turns_items(
@@ -1885,6 +1893,11 @@ async def start_streaming(
                     _publish_streamed_result_agent(streamed_result, current_agent)
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
+                    # Queue the agent-transition event before the fallible session append so
+                    # stream consumers observe the transition even if the append later raises.
+                    streamed_result._event_queue.put_nowait(
+                        AgentUpdatedStreamEvent(new_agent=current_agent)
+                    )
                     await _save_stream_items_without_count(
                         turn_session_items,
                         turn_result.model_response.response_id,
@@ -1893,9 +1906,6 @@ async def start_streaming(
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True
-                    streamed_result._event_queue.put_nowait(
-                        AgentUpdatedStreamEvent(new_agent=current_agent)
-                    )
 
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
