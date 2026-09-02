@@ -949,6 +949,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    def _raise_if_workspace_root_removal(self, path: Path) -> None:
+        # The validated path is a host realpath here, so also compare against the resolved
+        # root (Manifest.root may be a symlink, and /tmp is one on macOS).
+        root = Path(self.state.manifest.root)
+        if path == root.resolve(strict=False):
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={"reason": "workspace_root_removal_refused"},
+            )
+        super()._raise_if_workspace_root_removal(path)
+
     async def rm(
         self,
         path: Path | str,

@@ -839,12 +839,12 @@ class BaseSandboxSession(abc.ABC):
         wants from a file operation; clearing the workspace is `rm` of its entries.
         """
 
-        root = Path(self.state.manifest.root)
-        candidates = {sandbox_path_str(root), sandbox_path_str(self._workspace_root_path())}
-        try:
-            candidates.add(sandbox_path_str(root.resolve(strict=False)))
-        except OSError:
-            pass
+        # Compare POSIX spellings only: the manifest root names a path inside the sandbox,
+        # and resolving it on the SDK host would compare against the wrong filesystem.
+        candidates = {
+            sandbox_path_str(self.state.manifest.root),
+            sandbox_path_str(self._workspace_root_path()),
+        }
         if sandbox_path_str(path) in candidates:
             raise WorkspaceArchiveWriteError(
                 path=path,
