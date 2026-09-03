@@ -1261,6 +1261,50 @@ def test_chat_completions_warns_once_for_responses_only_reasoning_settings(
     assert "reasoning.context" in caplog.text
 
 
+def test_chat_completions_warns_once_for_responses_only_response_settings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+    )
+    model_settings = ModelSettings(
+        truncation="auto",
+        response_include=cast(Any, ["reasoning.encrypted_content"]),
+        context_management=cast(Any, [{"type": "transcript_trimming"}]),
+    )
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    model._handle_unsupported_response_settings(model_settings)
+    model._handle_unsupported_response_settings(model_settings)
+
+    assert caplog.text.count("Ignoring them") == 1
+    assert "`truncation`" in caplog.text
+    assert "`response_include`" in caplog.text
+    assert "`context_management`" in caplog.text
+
+
+def test_chat_completions_rejects_responses_only_response_settings_in_strict_mode() -> None:
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+        strict_feature_validation=True,
+    )
+
+    with pytest.raises(UserError, match="`truncation`"):
+        model._handle_unsupported_response_settings(ModelSettings(truncation="auto"))
+
+
+def test_chat_completions_allows_settings_the_responses_api_owns_when_unset() -> None:
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+        strict_feature_validation=True,
+    )
+
+    model._handle_unsupported_response_settings(ModelSettings())
+
+
 def test_chat_completions_rejects_responses_only_reasoning_settings_in_strict_mode() -> None:
     model = OpenAIChatCompletionsModel(
         model="gpt-5.6-sol",

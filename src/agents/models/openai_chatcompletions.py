@@ -75,6 +75,7 @@ class OpenAIChatCompletionsModel(Model):
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
         self._has_warned_unsupported_reasoning_settings = False
+        self._has_warned_unsupported_response_settings = False
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -128,6 +129,31 @@ class OpenAIChatCompletionsModel(Model):
                 message,
             )
             self._has_warned_unsupported_reasoning_settings = True
+
+    def _handle_unsupported_response_settings(self, model_settings: ModelSettings) -> None:
+        unsupported = [
+            name
+            for name in ("truncation", "response_include", "context_management")
+            if getattr(model_settings, name, None) is not None
+        ]
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(f"`{name}`" for name in unsupported)
+        message = (
+            f"OpenAIChatCompletionsModel does not support {unsupported_params}. "
+            "These settings are only sent by the Responses API; use a Responses model "
+            "instead."
+        )
+        if self._strict_feature_validation:
+            raise UserError(message)
+
+        if not self._has_warned_unsupported_response_settings:
+            logger.warning(
+                "%s Ignoring them; enable strict feature validation to raise an error instead.",
+                message,
+            )
+            self._has_warned_unsupported_response_settings = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -637,6 +663,7 @@ class OpenAIChatCompletionsModel(Model):
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         self._handle_unsupported_prompt(prompt)
         self._handle_unsupported_reasoning_settings(model_settings)
+        self._handle_unsupported_response_settings(model_settings)
         self._validate_official_openai_input_content_types(input)
         converted_messages = Converter.items_to_messages(
             input,
