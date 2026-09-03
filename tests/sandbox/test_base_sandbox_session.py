@@ -135,6 +135,7 @@ async def test_pty_cleanup_settles_a_sequential_batch() -> None:
 
     task = asyncio.create_task(_session()._settle_pty_cleanup(cleanup_all()))
     try:
+
         async def wait_for_first_entry() -> None:
             while started != [1]:
                 await asyncio.sleep(0)
@@ -153,3 +154,18 @@ async def test_pty_cleanup_settles_a_sequential_batch() -> None:
             task.cancel()
         with suppress(BaseException):
             await task
+
+
+@pytest.mark.asyncio
+async def test_pty_cleanup_attempts_remaining_entries_after_failure() -> None:
+    attempted: list[int] = []
+
+    async def cleanup(entry: int) -> None:
+        attempted.append(entry)
+        if entry == 1:
+            raise RuntimeError("first cleanup failed")
+
+    with pytest.raises(RuntimeError, match="first cleanup failed"):
+        await _session()._cleanup_pty_entries((1, 2), cleanup)
+
+    assert attempted == [1, 2]
