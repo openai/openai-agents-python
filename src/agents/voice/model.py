@@ -89,13 +89,15 @@ class TTSModelSettings:
     """The speed with which the TTS model will read the text. Between 0.25 and 4.0."""
 
     def __post_init__(self) -> None:
-        # Configurations loaded from JSON/YAML commonly represent NumPy dtypes as strings.
-        # Normalize those spellings once at the settings boundary so downstream consumers can
-        # compare against the supported NumPy dtypes consistently.
-        try:
-            self.dtype = np.dtype(self.dtype)
-        except (TypeError, ValueError) as error:
-            raise UserError("Invalid output dtype") from error
+        # Serialized configs commonly carry NumPy dtypes as strings. Normalize only those string
+        # spellings: custom TTS providers receive this settings object directly and may rely on
+        # non-string DTypeLike inputs (for example the callable np.int16 scalar class) retaining
+        # their original representation.
+        if isinstance(self.dtype, str):
+            try:
+                self.dtype = np.dtype(self.dtype)
+            except (TypeError, ValueError) as error:
+                raise UserError("Invalid output dtype") from error
 
 
 class TTSModel(abc.ABC):
