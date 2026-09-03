@@ -75,7 +75,7 @@ class OpenAIChatCompletionsModel(Model):
         self._has_warned_unsupported_prompt = False
         self._has_warned_unsupported_conversation_state = False
         self._has_warned_unsupported_reasoning_settings = False
-        self._has_warned_unsupported_response_settings = False
+        self._warned_unsupported_response_settings: set[str] = set()
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -139,21 +139,32 @@ class OpenAIChatCompletionsModel(Model):
         if not unsupported:
             return
 
-        unsupported_params = ", ".join(f"`{name}`" for name in unsupported)
-        message = (
+        if self._strict_feature_validation:
+            raise UserError(self._unsupported_response_settings_message(unsupported))
+
+        # Warn per setting name rather than once overall. A later call that adds a
+        # setting not warned about yet would otherwise be dropped in silence, which is
+        # the behavior this handler exists to report.
+        unwarned = [
+            name for name in unsupported if name not in self._warned_unsupported_response_settings
+        ]
+        if not unwarned:
+            return
+
+        logger.warning(
+            "%s Ignoring them; enable strict feature validation to raise an error instead.",
+            self._unsupported_response_settings_message(unwarned),
+        )
+        self._warned_unsupported_response_settings.update(unwarned)
+
+    @staticmethod
+    def _unsupported_response_settings_message(names: list[str]) -> str:
+        unsupported_params = ", ".join(f"`{name}`" for name in names)
+        return (
             f"OpenAIChatCompletionsModel does not support {unsupported_params}. "
             "These settings are only sent by the Responses API; use a Responses model "
             "instead."
         )
-        if self._strict_feature_validation:
-            raise UserError(message)
-
-        if not self._has_warned_unsupported_response_settings:
-            logger.warning(
-                "%s Ignoring them; enable strict feature validation to raise an error instead.",
-                message,
-            )
-            self._has_warned_unsupported_response_settings = True
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)

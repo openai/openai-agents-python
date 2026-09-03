@@ -1284,6 +1284,41 @@ def test_chat_completions_warns_once_for_responses_only_response_settings(
     assert "`context_management`" in caplog.text
 
 
+def test_chat_completions_warns_for_a_response_setting_added_on_a_later_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A setting introduced after the first warning must still be reported.
+
+    Suppressing it would drop the setting in silence, which is what this handler
+    exists to prevent.
+    """
+    model = OpenAIChatCompletionsModel(
+        model="gpt-5.6-sol",
+        openai_client=cast(Any, object()),
+    )
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    model._handle_unsupported_response_settings(ModelSettings(truncation="auto"))
+    assert "`truncation`" in caplog.text
+    assert "`context_management`" not in caplog.text
+
+    caplog.clear()
+    model._handle_unsupported_response_settings(
+        ModelSettings(
+            truncation="auto",
+            context_management=cast(Any, [{"type": "transcript_trimming"}]),
+        )
+    )
+
+    # Only the newly introduced setting is named; truncation is not repeated.
+    assert "`context_management`" in caplog.text
+    assert "`truncation`" not in caplog.text
+
+    caplog.clear()
+    model._handle_unsupported_response_settings(ModelSettings(truncation="auto"))
+    assert caplog.text == ""
+
+
 def test_chat_completions_rejects_responses_only_response_settings_in_strict_mode() -> None:
     model = OpenAIChatCompletionsModel(
         model="gpt-5.6-sol",
