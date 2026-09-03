@@ -1629,14 +1629,9 @@ async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_passthrough_c
         await _collect_buffered_tool_call_chunks(*chunks)
 
 
-@pytest.mark.parametrize("continuation_name", [None, "my_func"])
 @pytest.mark.asyncio
-async def test_buffer_tool_call_stream_merges_missing_index_continuation(
-    continuation_name: str | None,
-) -> None:
+async def test_buffer_tool_call_stream_merges_arguments_only_missing_index_continuation() -> None:
     continuation_function = {"arguments": "1}"}
-    if continuation_name is not None:
-        continuation_function["name"] = continuation_name
     chunks = (
         _lenient_chunk(
             {
@@ -1657,6 +1652,37 @@ async def test_buffer_tool_call_stream_merges_missing_index_continuation(
     buffered_events = await _collect_buffered_handler_events(*chunks)
 
     assert _completed_function_calls(buffered_events) == [("call_1", "my_func", '{"a":1}')]
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_ambiguous_same_named_unindexed_opening() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"b":'},
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="same function name"):
+        await _collect_buffered_tool_call_chunks(*chunks)
 
 
 @pytest.mark.asyncio

@@ -397,8 +397,13 @@ class ChatCmplStreamHandler:
                     elif len(buffered_calls) == 1:
                         sole_index = next(iter(buffered_calls))
                         sole_name = buffered_calls[sole_index].name
-                        if not sole_name or sole_name == function_name:
+                        if not sole_name:
                             tool_call_index = sole_index
+                        elif sole_name == function_name:
+                            raise ModelBehaviorError(
+                                "Chat Completions tool call delta omitted an index and ID while "
+                                "another buffered call used the same function name."
+                            )
                         else:
                             tool_call_index = None
                     else:
