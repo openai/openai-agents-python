@@ -862,17 +862,20 @@ async def resume_pending_session_write(
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
+        # Keep the checkpoint until compaction also settles: if _apply_post_write_compaction
+        # raises below, a later retry must still be able to redo just the compaction step
+        # instead of silently losing it. The append itself is retry-safe (the reconciliation
+        # above detects an already-committed batch and skips re-appending it).
+        await _apply_post_write_compaction(
+            session,
+            response_id=pending.get("response_id"),
+            store=pending.get("store"),
+            has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
+            wrapper=compaction_wrapper if compaction_wrapper is not None else wrapper,
+        )
         run_state._pending_session_write = None
     finally:
         run_state._session_write_in_progress = False
-
-    await _apply_post_write_compaction(
-        session,
-        response_id=pending.get("response_id"),
-        store=pending.get("store"),
-        has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
-        wrapper=compaction_wrapper if compaction_wrapper is not None else wrapper,
-    )
 
 
 async def rewind_session_items(

@@ -1512,3 +1512,88 @@ async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume()
     # The deferred decision must actually have been forced through on the delegate's own save,
     # i.e. the compact API was invoked at all -- not just checked and declined.
     assert len(compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_retains_checkpoint_when_post_write_compaction_fails() -> None:
+    """If the post-write compaction decision raises after a checkpointed handoff batch's append
+    has already settled, the checkpoint (``_pending_session_write``) must survive so a later
+    retry can redo just the compaction step -- clearing it before the fallible compaction call
+    would silently and permanently lose the requested deferred/forced compaction with no way to
+    recover it. See .agents/references/session-persistence.md.
+    """
+    hook_calls: list[str | None] = []
+    compaction_error = RuntimeError("compaction decision hook exploded")
+    should_fail = True
+
+    def should_trigger_compaction(context: dict[str, Any]) -> bool:
+        hook_calls.append(context["response_id"])
+        if context["response_id"] == "resp-handoff" and should_fail:
+            raise compaction_error
+        return context["response_id"] == "resp-handoff"
+
+    compact_calls: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compact_calls.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    backend = _FailSecondAddItemsSession()
+    session = OpenAIResponsesCompactionSession(
+        "compaction-handoff-failure-test",
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=should_trigger_compaction,
+    )
+
+    model = ScriptedModel(
+        [
+            {
+                "output": [
+                    get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")
+                ],
+                "response_id": "resp-handoff",
+            },
+            {"output": [get_text_message("done")], "response_id": "resp-delegate"},
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError) as append_error:
+        async for _ in failed_result.stream_events():
+            pass
+    assert append_error.value is backend.error
+    state = failed_result.to_state()
+    assert state._pending_session_write is not None
+
+    # Resume: the append itself now succeeds (the backend's failure was one-shot), but the
+    # compaction decision hook raises for the handoff's own response_id.
+    with pytest.raises(RuntimeError) as compaction_error_info:
+        await _run_session_resume(triage, state, session, False)
+    assert compaction_error_info.value is compaction_error
+    # The checkpoint must still be present so a later retry can redo compaction alone, instead
+    # of the handoff's requested compaction being silently and permanently lost.
+    assert state._pending_session_write is not None
+    assert state._pending_session_write.get("response_id") == "resp-handoff"
+
+    # Retry: the hook no longer fails. The append must not be repeated (no duplicate items in
+    # session history), but compaction must actually run this time.
+    should_fail = False
+    hook_calls.clear()
+    result = await _run_session_resume(triage, state, session, False)
+    assert result.final_output == "done"
+    assert hook_calls == ["resp-handoff"]
+    assert len(compact_calls) == 1
+    stored = await session.get_items()
+    handoff_pair = [
+        str(item.get("type"))
+        for item in stored
+        if isinstance(item, dict) and item.get("call_id") == "handoff-1"
+    ]
+    assert handoff_pair == ["function_call", "function_call_output"]
