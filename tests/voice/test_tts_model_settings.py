@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import numpy as np
 import pytest
 
 from agents.exceptions import UserError
 from agents.voice import AudioInput, TTSModelSettings, VoicePipeline
 
-from .helpers import extract_events
 from .pipeline_test_models import QueuedSTTModel, QueuedVoiceWorkflow, ZeroPcmTTSModel
 
 
@@ -30,18 +31,47 @@ async def test_voicepipeline_accepts_string_tts_dtype_from_dictionary_config(
     )
 
     result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
-    events, audio_chunks = await extract_events(result)
+    events: list[str] = []
+    seen_dtypes: list[np.dtype[object]] = []
+    async for event in result.stream():
+        if event.type == "voice_stream_event_audio":
+            events.append("audio")
+            if event.data is not None:
+                seen_dtypes.append(event.data.dtype)
+        elif event.type == "voice_stream_event_lifecycle":
+            events.append(event.event)
+        elif event.type == "voice_stream_event_error":
+            events.append("error")
 
     assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
-    decoded_audio = np.frombuffer(audio_chunks[0], dtype=expected_dtype)
-    assert decoded_audio.dtype == np.dtype(expected_dtype)
+    assert seen_dtypes
+    assert all(dtype == np.dtype(expected_dtype) for dtype in seen_dtypes)
 
 
-@pytest.mark.parametrize(
-    "dtype",
-    ["not-a-dtype", {"names": ["x"], "formats": []}],
-    ids=["unparseable-string", "malformed-structured-dtype"],
-)
-def test_tts_model_settings_preserves_user_error_for_invalid_dtype(dtype: object) -> None:
+@pytest.mark.parametrize("dtype", ["not-a-dtype"], ids=["unparseable-string"])
+def test_tts_model_settings_preserves_user_error_for_invalid_string_dtype(dtype: str) -> None:
     with pytest.raises(UserError, match="Invalid output dtype"):
-        TTSModelSettings(dtype=dtype)  # type: ignore[arg-type]
+        TTSModelSettings(dtype=dtype)
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_preserves_non_string_dtype_for_custom_tts_provider() -> None:
+    class CallableDtypeTTSModel(ZeroPcmTTSModel):
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            del text
+            # Custom providers historically receive the original DTypeLike object. In particular,
+            # NumPy scalar classes are callable and provider code may legitimately use that API.
+            assert settings.dtype is np.int16
+            assert settings.dtype(1) == np.int16(1)  # type: ignore[operator]
+            yield np.zeros(2, dtype=np.int16).tobytes()
+
+    pipeline = VoicePipeline(
+        workflow=QueuedVoiceWorkflow([["out_1"]]),
+        stt_model=QueuedSTTModel(["first"]),
+        tts_model=CallableDtypeTTSModel(),
+        config={"tts_settings": {"buffer_size": 1, "dtype": np.int16}},
+    )
+
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+    async for _ in result.stream():
+        pass
