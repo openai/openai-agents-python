@@ -7,6 +7,12 @@
       "name": "InputItem"
     },
     {
+      "canonical_module": "agents.tool",
+      "canonical_name": "WebSearchToolImageSettings",
+      "module": "agents",
+      "name": "WebSearchToolImageSettings"
+    },
+    {
       "canonical_module": "agents.testing.model",
       "canonical_name": "InvalidModelStep",
       "module": "agents.testing",
@@ -835,6 +841,14 @@
       "module": "agents.voice",
       "names": [
         "id"
+      ]
+    },
+    {
+      "class_name": "WebSearchToolImageSettings",
+      "module": "agents",
+      "names": [
+        "max_results",
+        "caption"
       ]
     }
   ]
