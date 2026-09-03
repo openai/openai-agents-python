@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import cast
+from typing import IO, cast
 
 
 class UnsafeTarMemberError(ValueError):
@@ -117,7 +117,8 @@ def strip_tar_member_prefix(
     accepts. Archivers such as Docker's represent a second hardlinked path as a
     hardlink member and keep FIFOs and device nodes, and ordinary workspaces contain
     them (``uv`` and ``pnpm`` hardlink installed packages, dev servers leave FIFOs
-    behind). Hardlink members are stored as regular files with the target's payload,
+    behind). Hardlink members are stored as regular files with the target's payload (read
+    back from the rewritten archive, so the source is still streamed once),
     FIFOs and device nodes are dropped, and when `relativize_symlinks_under` names
     the workspace root, an absolute symlink target under that root becomes relative
     to the link's own directory so it restores under any root.
@@ -136,65 +137,73 @@ def strip_tar_member_prefix(
 
     out = tempfile.TemporaryFile()
     try:
-        # Spool the source so hardlink members can copy their target's payload; the
-        # incoming stream is not seekable and tar stores the payload once.
-        with data, tempfile.TemporaryFile() as spooled:
-            shutil.copyfileobj(data, spooled)
-            spooled.seek(0)
-            with tarfile.open(fileobj=spooled, mode="r:*") as src:
-                with tarfile.open(fileobj=out, mode="w|") as dst:
-                    for member in src.getmembers():
-                        if member.isfifo() or member.ischr() or member.isblk():
-                            continue
-                        source = member
-                        if member.islnk():
-                            source = src.getmember(member.linkname)
-                            member = copy.copy(member)
-                            member.type = tarfile.REGTYPE
-                            member.linkname = ""
-                            member.size = source.size
-                        rel_path = safe_tar_member_rel_path(
-                            member,
-                            allow_symlinks=True,
+        # Stream the source once. A hardlink member carries no payload of its own, so its
+        # target's bytes are read back from the rewritten archive being written (recorded by
+        # original member name), which keeps temp usage at one archive instead of two.
+        written_payloads: dict[str, tuple[int, int]] = {}
+        with data, tarfile.open(fileobj=data, mode="r|*") as src:
+            with tarfile.open(fileobj=out, mode="w") as dst:
+                for member in src:
+                    if member.isfifo() or member.ischr() or member.isblk():
+                        continue
+                    payload: tuple[int, int] | None = None
+                    if member.islnk():
+                        payload = written_payloads.get(member.linkname)
+                        if payload is None:
+                            reason = (
+                                f"hardlink target is not a file in the archive: {member.linkname}"
+                            )
+                            raise UnsafeTarMemberError(member=member.name, reason=reason)
+                        member = copy.copy(member)
+                        member.type = tarfile.REGTYPE
+                        member.linkname = ""
+                        member.size = payload[1]
+                    rel_path = safe_tar_member_rel_path(
+                        member,
+                        allow_symlinks=True,
+                    )
+                    if rel_path is None:
+                        stripped_name = "."
+                    elif rel_path == prefix_rel:
+                        stripped_name = "."
+                    elif rel_path.parts[: len(prefix_rel.parts)] == prefix_rel.parts:
+                        stripped_name = Path(*rel_path.parts[len(prefix_rel.parts) :]).as_posix()
+                    else:
+                        reason = f"member does not start with prefix: {prefix_rel.as_posix()}"
+                        raise UnsafeTarMemberError(
+                            member=member.name,
+                            reason=reason,
                         )
-                        if rel_path is None:
-                            stripped_name = "."
-                        elif rel_path == prefix_rel:
-                            stripped_name = "."
-                        elif rel_path.parts[: len(prefix_rel.parts)] == prefix_rel.parts:
-                            stripped_name = Path(
-                                *rel_path.parts[len(prefix_rel.parts) :]
-                            ).as_posix()
-                        else:
-                            reason = f"member does not start with prefix: {prefix_rel.as_posix()}"
+
+                    rewritten = copy.copy(member)
+                    rewritten.name = stripped_name
+                    rewritten.pax_headers = dict(member.pax_headers)
+                    rewritten.pax_headers.pop("path", None)
+                    if rewritten.issym() and symlink_root is not None:
+                        rewritten.linkname = _relative_symlink_target(
+                            rewritten.linkname,
+                            link_name=stripped_name,
+                            root=symlink_root,
+                        )
+                    if not rewritten.isreg():
+                        dst.addfile(rewritten)
+                        continue
+                    if payload is not None:
+                        fileobj: IO[bytes] = cast(IO[bytes], _ArchivePayloadReader(out, *payload))
+                    else:
+                        extracted = src.extractfile(member)
+                        if extracted is None:
                             raise UnsafeTarMemberError(
                                 member=member.name,
-                                reason=reason,
+                                reason="missing file payload",
                             )
-
-                        rewritten = copy.copy(member)
-                        rewritten.name = stripped_name
-                        rewritten.pax_headers = dict(member.pax_headers)
-                        rewritten.pax_headers.pop("path", None)
-                        if rewritten.issym() and symlink_root is not None:
-                            rewritten.linkname = _relative_symlink_target(
-                                rewritten.linkname,
-                                link_name=stripped_name,
-                                root=symlink_root,
-                            )
-                        if rewritten.isreg():
-                            fileobj = src.extractfile(source)
-                            if fileobj is None:
-                                raise UnsafeTarMemberError(
-                                    member=member.name,
-                                    reason="missing file payload",
-                                )
-                            try:
-                                dst.addfile(rewritten, fileobj)
-                            finally:
-                                fileobj.close()
-                        else:
-                            dst.addfile(rewritten)
+                        fileobj = extracted
+                    try:
+                        dst.addfile(rewritten, fileobj)
+                    finally:
+                        fileobj.close()
+                    padded = -(-rewritten.size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+                    written_payloads[member.name] = (dst.offset - padded, rewritten.size)
 
         out.seek(0)
         with tarfile.open(fileobj=out, mode="r:*") as tar:
@@ -204,6 +213,42 @@ def strip_tar_member_prefix(
     except Exception:
         out.close()
         raise
+
+
+class _ArchivePayloadReader(io.RawIOBase):
+    """Read a member payload back from the archive file that is still being written.
+
+    Every read seeks to the payload and then restores the writer's position, so the reader
+    can be interleaved with `TarFile.addfile()` writing to the same file object.
+    """
+
+    def __init__(self, archive: IO[bytes], start: int, size: int) -> None:
+        super().__init__()
+        self._archive = archive
+        self._position = start
+        self._end = start + size
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._end - self._position
+        if size is None or size < 0 or size > remaining:
+            size = remaining
+        if size <= 0:
+            return b""
+        write_position = self._archive.tell()
+        try:
+            self._archive.seek(self._position)
+            data = self._archive.read(size)
+        finally:
+            self._archive.seek(write_position)
+        self._position += len(data)
+        return data
+
+    def close(self) -> None:
+        # The archive stays open for the writer; only this view closes.
+        io.RawIOBase.close(self)
 
 
 def _relative_symlink_target(linkname: str, *, link_name: str, root: PurePosixPath) -> str:
