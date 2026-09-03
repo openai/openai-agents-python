@@ -2103,6 +2103,35 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
     session.close()
 
 
+async def test_usage_tracking_skips_empty_session(usage_data: Usage) -> None:
+    """Usage must not create a turn-zero row when the current branch is empty."""
+    session = AdvancedSQLiteSession(session_id="empty_usage_test", create_tables=True)
+
+    await session.store_run_usage(create_mock_run_result(usage_data))
+
+    assert await session.get_items() == []
+    assert await session.get_session_usage() is None
+    assert await session.get_turn_usage() == []
+
+    session.close()
+
+
+async def test_usage_tracking_skips_branch_with_all_turns_popped(usage_data: Usage) -> None:
+    """Usage must not create a row after all turns on the branch are popped."""
+    session = AdvancedSQLiteSession(session_id="popped_usage_test", create_tables=True)
+
+    await session.add_items([{"role": "user", "content": "Removed turn"}])
+    assert await session.pop_item() == {"role": "user", "content": "Removed turn"}
+
+    await session.store_run_usage(create_mock_run_result(usage_data))
+
+    assert await session.get_items() == []
+    assert await session.get_session_usage() is None
+    assert await session.get_turn_usage() == []
+
+    session.close()
+
+
 async def test_failed_usage_write_rolls_back_cached_connection(usage_data: Usage):
     """A swallowed usage-write failure must not strand a transaction or SQLite lock."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -2405,6 +2434,7 @@ async def test_usage_tracking_failure_identity_follows_model_data_policy(
     )
     secret = "SECRET_USAGE_FAILURE"
     run_result = create_mock_run_result(usage_data)
+    await session.add_items([{"role": "user", "content": "Usage turn"}])
 
     original_record_factory = logging.getLogRecordFactory()
 

@@ -635,6 +635,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # unrelated removals (e.g. delete_branch on another branch) do
                 # not drop this write.
                 current_turn, branch_id, turn_anchor = self._capture_current_turn()
+                if turn_anchor is None:
+                    # There is no conversation turn to which this usage can belong.
+                    # In particular, do not create a phantom turn 0 row for an empty
+                    # session or a branch whose turns have all been removed.
+                    return
                 # Only update turn-level usage - session usage is aggregated on demand
                 await self._update_turn_usage_internal(
                     current_turn,
