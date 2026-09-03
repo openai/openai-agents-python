@@ -1206,7 +1206,60 @@ async def test_buffer_tool_call_stream_promotes_indexed_passthrough_continuation
 
 
 @pytest.mark.asyncio
-async def test_buffer_tool_call_stream_rejects_indexed_passthrough_continuation_collision() -> None:
+async def test_buffer_tool_call_stream_promotes_indexed_passthrough_continuation_without_id() -> (
+    None
+):
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "pri"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({"tool_calls": [{"index": 2, "custom": {"input": "nt("}}]}),
+        _lenient_chunk({"tool_calls": [{"id": "custom-id", "custom": {"input": "1)"}}]}),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk({}, finish_reason="tool_calls"),
+    )
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
+    buffered_events = await _collect_buffered_handler_events(*chunks)
+
+    indexed_continuation = buffered_chunks[1].choices[0].delta.tool_calls
+    unindexed_continuation = buffered_chunks[2].choices[0].delta.tool_calls
+    assert indexed_continuation and indexed_continuation[0].index == 2
+    assert unindexed_continuation and unindexed_continuation[0].index == 2
+    assert _completed_function_calls(buffered_events) == [("call_1", "my_func", "{}")]
+
+
+@pytest.mark.parametrize("continuation_id", [None, "custom-id"])
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_indexed_passthrough_continuation_collision(
+    continuation_id: str | None,
+) -> None:
+    continuation: dict[str, Any] = {
+        "index": 2,
+        "custom": {"input": "nt(1)"},
+    }
+    if continuation_id is not None:
+        continuation["id"] = continuation_id
+
     chunks = (
         _lenient_chunk(
             {
@@ -1231,17 +1284,7 @@ async def test_buffer_tool_call_stream_rejects_indexed_passthrough_continuation_
                 ]
             }
         ),
-        _lenient_chunk(
-            {
-                "tool_calls": [
-                    {
-                        "index": 2,
-                        "id": "custom-id",
-                        "custom": {"input": "nt(1)"},
-                    }
-                ]
-            }
-        ),
+        _lenient_chunk({"tool_calls": [continuation]}),
     )
 
     with pytest.raises(ModelBehaviorError, match="index already used by a buffered function"):

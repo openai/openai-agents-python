@@ -506,7 +506,7 @@ class ChatCmplStreamHandler:
         buffered_calls: dict[int | None, _BufferedToolCall] = {}
         passthrough_tool_call_indexes: set[int] = set()
         passthrough_tool_call_indexes_by_id: dict[str, int | None] = {}
-        saw_unindexed_passthrough_tool_call = False
+        unindexed_passthrough_tool_call_count = 0
         saw_passthrough_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
 
@@ -537,6 +537,10 @@ class ChatCmplStreamHandler:
                         is_unindexed_untyped_continuation = (
                             not isinstance(tool_call_delta.index, int) and is_untyped_continuation
                         )
+                        passthrough_payload_keys = set(tool_call_delta.model_extra or {}) - {
+                            "provider_specific_fields",
+                            "extra_content",
+                        }
                         buffered_id_matches = [
                             buffered_call
                             for buffered_call in buffered_calls.values()
@@ -547,15 +551,14 @@ class ChatCmplStreamHandler:
                             and bool(tool_call_delta.id)
                             and tool_call_delta.id in passthrough_tool_call_indexes_by_id
                         )
-                        is_unindexed_passthrough_continuation = (
-                            is_unindexed_untyped_continuation
+                        is_idless_passthrough_continuation = (
+                            is_untyped_continuation
+                            and not tool_call_delta.id
+                            and unindexed_passthrough_tool_call_count == 1
+                            and None not in buffered_calls
                             and (
-                                is_passthrough_continuation_by_id
-                                or (
-                                    saw_unindexed_passthrough_tool_call
-                                    and not tool_call_delta.id
-                                    and None not in buffered_calls
-                                )
+                                not isinstance(tool_call_delta.index, int)
+                                or bool(passthrough_payload_keys)
                             )
                         )
                         if is_passthrough_continuation_by_id and buffered_id_matches:
@@ -573,6 +576,16 @@ class ChatCmplStreamHandler:
                             raise ModelBehaviorError(
                                 "Chat Completions tool call delta supplied an index already used "
                                 "by a passthrough call and an ID owned by a buffered function call."
+                            )
+
+                        if (
+                            is_idless_passthrough_continuation
+                            and isinstance(tool_call_delta.index, int)
+                            and tool_call_delta.index in buffered_calls
+                        ):
+                            raise ModelBehaviorError(
+                                "Chat Completions passthrough tool call delta supplied an index "
+                                "already used by a buffered function call."
                             )
 
                         unindexed_buffered_call = buffered_calls.get(None)
@@ -600,7 +613,7 @@ class ChatCmplStreamHandler:
                         if (
                             tool_call_delta.index in passthrough_tool_call_indexes
                             or is_passthrough_continuation_by_id
-                            or is_unindexed_passthrough_continuation
+                            or is_idless_passthrough_continuation
                         ):
                             if passthrough_id := tool_call_delta.id:
                                 owner_index = passthrough_tool_call_indexes_by_id.get(
@@ -628,6 +641,7 @@ class ChatCmplStreamHandler:
                                         tool_call_delta.index
                                     )
                                     if promotes_unindexed_passthrough_owner:
+                                        unindexed_passthrough_tool_call_count -= 1
                                         tool_call_delta = tool_call_delta.model_copy(
                                             update={"type": "custom"}
                                         )
@@ -641,6 +655,23 @@ class ChatCmplStreamHandler:
                                     if isinstance(tool_call_delta.index, int)
                                     else None,
                                 )
+                            elif (
+                                is_idless_passthrough_continuation
+                                and isinstance(tool_call_delta.index, int)
+                                and tool_call_delta.index not in passthrough_tool_call_indexes
+                            ):
+                                passthrough_tool_call_indexes.add(tool_call_delta.index)
+                                for passthrough_id, owner_index in list(
+                                    passthrough_tool_call_indexes_by_id.items()
+                                ):
+                                    if owner_index is None:
+                                        passthrough_tool_call_indexes_by_id[passthrough_id] = (
+                                            tool_call_delta.index
+                                        )
+                                unindexed_passthrough_tool_call_count = 0
+                                tool_call_delta = tool_call_delta.model_copy(
+                                    update={"type": "custom"}
+                                )
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
                         elif (
@@ -648,13 +679,7 @@ class ChatCmplStreamHandler:
                             and saw_passthrough_tool_call
                             and (
                                 not tool_call_delta.id
-                                or (
-                                    bool(
-                                        set(tool_call_delta.model_extra or {})
-                                        - {"provider_specific_fields", "extra_content"}
-                                    )
-                                    and not buffered_id_matches
-                                )
+                                or (bool(passthrough_payload_keys) and not buffered_id_matches)
                             )
                         ):
                             raise ModelBehaviorError(
@@ -668,7 +693,7 @@ class ChatCmplStreamHandler:
                             if isinstance(tool_call_delta.index, int):
                                 passthrough_tool_call_indexes.add(tool_call_delta.index)
                             else:
-                                saw_unindexed_passthrough_tool_call = True
+                                unindexed_passthrough_tool_call_count += 1
                             if tool_call_delta.id:
                                 passthrough_tool_call_indexes_by_id.setdefault(
                                     tool_call_delta.id,
