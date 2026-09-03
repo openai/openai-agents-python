@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from typing_extensions import TypedDict
 
-from .exceptions import UserError
+from ..exceptions import UserError
 from .imports import np, npt
 from .input import AudioInput, StreamedAudioInput
 from .utils import get_sentence_based_splitter
