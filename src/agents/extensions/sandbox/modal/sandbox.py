@@ -884,15 +884,15 @@ class ModalSandboxSession(BaseSandboxSession):
                 process_count = len(self._pty_processes)
         except asyncio.TimeoutError as e:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except asyncio.CancelledError:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise
         except Exception as e:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             if exception_chain_contains_type(e, _modal_exec_timeout_error_types()):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _modal_exec_transport_error(command=command, cause=e) from e
@@ -961,11 +961,9 @@ class ModalSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        async def cleanup_all() -> None:
-            for entry in entries:
-                await self._terminate_pty_entry(entry)
-
-        await self._settle_pty_cleanup(cleanup_all())
+        await self._settle_pty_cleanup(
+            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        )
 
     async def _write_pty_stdin(self, process: ContainerProcess[bytes], payload: bytes) -> None:
         stdin = process.stdin

@@ -714,7 +714,10 @@ class BaseSandboxSession(abc.ABC):
     async def _settle_pty_cleanup(self, operation: Awaitable[None]) -> None:
         """Complete cleanup after PTY ownership leaves the session registry."""
 
-        task = asyncio.create_task(operation, name="agents.pty_cleanup")
+        async def run_operation() -> None:
+            await operation
+
+        task = asyncio.create_task(run_operation(), name="agents.pty_cleanup")
         completion = asyncio.create_task(asyncio.wait((task,)))
         caller_cancellation: asyncio.CancelledError | None = None
         while not completion.done():
@@ -727,6 +730,23 @@ class BaseSandboxSession(abc.ABC):
         task.result()
         if caller_cancellation is not None:
             raise caller_cancellation
+
+    async def _cleanup_pty_entries(
+        self,
+        entries: Sequence[_PtyEntryT],
+        cleanup_entry: Callable[[_PtyEntryT], Awaitable[None]],
+    ) -> None:
+        """Attempt every PTY cleanup and re-raise the first failure."""
+
+        first_error: BaseException | None = None
+        for entry in entries:
+            try:
+                await cleanup_entry(entry)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     async def pty_exec_start(
         self,

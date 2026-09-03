@@ -8,6 +8,7 @@ import shlex
 import tarfile
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -1906,6 +1907,54 @@ class TestPtyExec:
             with pytest.raises(ExecTransportError):
                 await session.pty_exec_start("echo", "hello")
 
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_cancellation_cleans_unregistered_entry(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        class _BlockingSendWS(_FakeWS):
+            async def send_str(self, data: str) -> None:
+                self._sent.append(data)
+                send_started.set()
+                await release_send.wait()
+
+        class _TrackingAiohttp(_FakeAiohttp):
+            def __init__(self, ws: _FakeWS) -> None:
+                super().__init__(ws=ws)
+                self.session: _FakeHTTPSession | None = None
+
+            def ClientSession(self) -> _FakeHTTPSession:
+                self.session = _FakeHTTPSession(self._ws)
+                return self.session
+
+        ws = _BlockingSendWS()
+        fake_aiohttp = _TrackingAiohttp(ws)
+        session = _make_session(fake_sandbox)
+        task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
+        try:
+            with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
+                await asyncio.wait_for(send_started.wait(), timeout=5)
+                task.cancel("cancel setup")
+                release_send.set()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            assert ws._closed
+            assert fake_aiohttp.session is not None
+            assert fake_aiohttp.session._closed
+            assert session._pty_sessions == {}
+        finally:
+            release_send.set()
+            if not task.done():
+                task.cancel()
+            with suppress(BaseException):
+                await task
+
     @pytest.mark.parametrize(
         ("chars", "expected_send_count"),
         [
@@ -2022,6 +2071,41 @@ class TestPtyExec:
         assert first_ws._closed and first_http._closed
         assert second_ws._closed and second_http._closed
         assert session._pty_sessions == {}
+
+    @pytest.mark.asyncio
+    async def test_pty_terminate_all_continues_after_cleanup_failure(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
+
+        session = _make_session(fake_sandbox)
+        first_ws = _FakeWS()
+        second_ws = _FakeWS()
+        first_http = _FakeHTTPSession(first_ws)
+        second_http = _FakeHTTPSession(second_ws)
+        first = _BlaxelPtySessionEntry("first", first_ws, first_http)
+        second = _BlaxelPtySessionEntry("second", second_ws, second_http)
+        session._pty_sessions.update({1: first, 2: second})
+        session._reserved_pty_process_ids.update({1, 2})
+        cleanup_calls: list[str] = []
+
+        original_terminate = session._terminate_pty_entry
+
+        async def terminate(entry: _BlaxelPtySessionEntry) -> None:
+            cleanup_calls.append(entry.ws_session_id)
+            if entry is first:
+                raise RuntimeError("first cleanup failed")
+            await original_terminate(entry)
+
+        with patch.object(session, "_terminate_pty_entry", side_effect=terminate):
+            with pytest.raises(RuntimeError, match="first cleanup failed"):
+                await session.pty_terminate_all()
+
+        assert cleanup_calls == ["first", "second"]
+        assert second_ws._closed
+        assert second_http._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
 
     @pytest.mark.asyncio
     async def test_pty_ws_reader_error_message(self, fake_sandbox: _FakeSandboxInstance) -> None:

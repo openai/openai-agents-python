@@ -1119,10 +1119,14 @@ class CloudflareSandboxSession(BaseSandboxSession):
     ) -> None:
         """Best-effort cleanup of a PTY WebSocket or entry that was never registered."""
         if entry is not None and not registered:
-            await self._terminate_pty_entry(entry)
+            await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
         elif ws is not None and not registered:
-            with suppress(Exception):
-                await ws.close()
+
+            async def close_ws() -> None:
+                with suppress(Exception):
+                    await ws.close()
+
+            await self._settle_pty_cleanup(close_ws())
 
     async def pty_exec_start(
         self,
@@ -1275,11 +1279,9 @@ class CloudflareSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        async def cleanup_all() -> None:
-            for entry in entries:
-                await self._terminate_pty_entry(entry)
-
-        await self._settle_pty_cleanup(cleanup_all())
+        await self._settle_pty_cleanup(
+            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        )
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

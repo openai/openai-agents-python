@@ -1026,11 +1026,11 @@ class E2BSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.CancelledError:
             if not registered and entry.handle is not None:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise
         except Exception as e:
             if not registered and entry.handle is not None:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             if isinstance(e, ExecTransportError):
                 raise
             _raise_e2b_exec_error(
@@ -1108,11 +1108,9 @@ class E2BSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        async def cleanup_all() -> None:
-            for entry in entries:
-                await self._terminate_pty_entry(entry)
-
-        await self._settle_pty_cleanup(cleanup_all())
+        await self._settle_pty_cleanup(
+            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        )
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

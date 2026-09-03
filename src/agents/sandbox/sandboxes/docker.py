@@ -1053,13 +1053,15 @@ class DockerSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             elif pty_pid_path is not None:
-                await self._kill_pty_pid_path(pty_pid_path)
+                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except Exception as e:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+            elif pty_pid_path is not None:
+                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
             raise ExecTransportError(
                 command=command,
                 context={"retry_safe": True},
@@ -1067,7 +1069,9 @@ class DockerSandboxSession(BaseSandboxSession):
             ) from e
         except BaseException:
             if entry is not None and not registered:
-                await self._terminate_pty_entry(entry)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+            elif pty_pid_path is not None:
+                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
             raise
 
         if pruned_entry is not None:
@@ -1147,11 +1151,9 @@ class DockerSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        async def cleanup_all() -> None:
-            for entry in entries:
-                await self._terminate_pty_entry(entry)
-
-        await self._settle_pty_cleanup(cleanup_all())
+        await self._settle_pty_cleanup(
+            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        )
 
     def _pump_pty_socket(
         self, entry: _DockerPtyProcessEntry, loop: asyncio.AbstractEventLoop

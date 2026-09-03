@@ -720,29 +720,17 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except Exception as e:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             if timeout_error_types and isinstance(e, timeout_error_types):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _daytona_exec_transport_error(command=command, cause=e) from e
         except BaseException:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise
 
         if pruned is not None:
@@ -879,11 +867,9 @@ class DaytonaSandboxSession(BaseSandboxSession):
             self._pty_sessions.clear()
             self._reserved_pty_process_ids.clear()
 
-        async def cleanup_all() -> None:
-            for entry in entries:
-                await self._terminate_pty_entry(entry)
-
-        await self._settle_pty_cleanup(cleanup_all())
+        await self._settle_pty_cleanup(
+            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        )
 
     async def _collect_pty_output(
         self,
