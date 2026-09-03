@@ -551,13 +551,28 @@ class ChatCmplStreamHandler:
                             is_unindexed_untyped_continuation
                             and (
                                 is_passthrough_continuation_by_id
-                                or (saw_unindexed_passthrough_tool_call and not tool_call_delta.id)
+                                or (
+                                    saw_unindexed_passthrough_tool_call
+                                    and not tool_call_delta.id
+                                    and None not in buffered_calls
+                                )
                             )
                         )
                         if is_passthrough_continuation_by_id and buffered_id_matches:
                             raise ModelBehaviorError(
                                 "Chat Completions tool call delta ID matched both a buffered "
                                 "function call and a passthrough call."
+                            )
+
+                        if (
+                            isinstance(tool_call_delta.index, int)
+                            and tool_call_delta.index in passthrough_tool_call_indexes
+                            and tool_call_delta.id
+                            and buffered_id_matches
+                        ):
+                            raise ModelBehaviorError(
+                                "Chat Completions tool call delta supplied an index already used "
+                                "by a passthrough call and an ID owned by a buffered function call."
                             )
 
                         unindexed_buffered_call = buffered_calls.get(None)

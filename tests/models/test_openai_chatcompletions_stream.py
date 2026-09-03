@@ -1462,6 +1462,89 @@ async def test_buffer_tool_call_stream_allows_function_metadata_on_late_id() -> 
     assert _completed_function_calls(buffered_events) == expected_calls
 
 
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_ambiguous_mixed_unindexed_delta() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "print(1)"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {"tool_calls": [{"extra_content": {"google": {"thought_signature": "sig"}}}]}
+        ),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="could not be attributed"):
+        await _collect_buffered_tool_call_chunks(*chunks)
+
+
+@pytest.mark.asyncio
+async def test_buffer_tool_call_stream_rejects_conflicting_index_and_id_owners() -> None:
+    chunks = (
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "custom-id",
+                        "type": "custom",
+                        "custom": {"name": "code_exec", "input": "print(1)"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 1,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _lenient_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "extra_content": {"google": {"thought_signature": "sig"}},
+                    }
+                ]
+            }
+        ),
+    )
+
+    buffered = ChatCmplStreamHandler.buffer_tool_call_stream(_completion_stream(*chunks))
+    first_chunk = await anext(buffered)
+    first_tool_calls = first_chunk.choices[0].delta.tool_calls
+    assert first_tool_calls and first_tool_calls[0].id == "custom-id"
+
+    with pytest.raises(ModelBehaviorError, match="index already used by a passthrough call"):
+        await anext(buffered)
+
+
 @pytest.mark.parametrize("continuation_id", [None, "unknown-id"], ids=["without-id", "unknown-id"])
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_passthrough_continuation(
