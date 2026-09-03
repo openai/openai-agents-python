@@ -1026,11 +1026,11 @@ class E2BSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.CancelledError:
             if not registered and entry.handle is not None:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             raise
         except Exception as e:
             if not registered and entry.handle is not None:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             if isinstance(e, ExecTransportError):
                 raise
             _raise_e2b_exec_error(

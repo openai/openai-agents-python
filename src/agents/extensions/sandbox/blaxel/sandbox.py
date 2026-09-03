@@ -839,15 +839,11 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
-        except asyncio.CancelledError:
-            if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
-            raise
         except Exception as e:
             if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
         if pruned is not None:

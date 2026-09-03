@@ -1907,54 +1907,6 @@ class TestPtyExec:
             with pytest.raises(ExecTransportError):
                 await session.pty_exec_start("echo", "hello")
 
-    @pytest.mark.asyncio
-    async def test_pty_exec_start_cancellation_cleans_unregistered_entry(
-        self, fake_sandbox: _FakeSandboxInstance
-    ) -> None:
-        from agents.extensions.sandbox.blaxel import sandbox as mod
-
-        send_started = asyncio.Event()
-        release_send = asyncio.Event()
-
-        class _BlockingSendWS(_FakeWS):
-            async def send_str(self, data: str) -> None:
-                self._sent.append(data)
-                send_started.set()
-                await release_send.wait()
-
-        class _TrackingAiohttp(_FakeAiohttp):
-            def __init__(self, ws: _FakeWS) -> None:
-                super().__init__(ws=ws)
-                self.session: _FakeHTTPSession | None = None
-
-            def ClientSession(self) -> _FakeHTTPSession:
-                self.session = _FakeHTTPSession(self._ws)
-                return self.session
-
-        ws = _BlockingSendWS()
-        fake_aiohttp = _TrackingAiohttp(ws)
-        session = _make_session(fake_sandbox)
-        task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
-        try:
-            with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
-                await asyncio.wait_for(send_started.wait(), timeout=5)
-                task.cancel("cancel setup")
-                release_send.set()
-
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-
-            assert ws._closed
-            assert fake_aiohttp.session is not None
-            assert fake_aiohttp.session._closed
-            assert session._pty_sessions == {}
-        finally:
-            release_send.set()
-            if not task.done():
-                task.cancel()
-            with suppress(BaseException):
-                await task
-
     @pytest.mark.parametrize(
         ("chars", "expected_send_count"),
         [
@@ -2063,9 +2015,15 @@ class TestPtyExec:
             await asyncio.sleep(0)
             assert not first_ws._closed
             assert not second_ws._closed
-        finally:
+
             release_close.set()
             with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_close.set()
+            if not task.done():
+                task.cancel()
+            with suppress(BaseException):
                 await task
 
         assert first_ws._closed and first_http._closed

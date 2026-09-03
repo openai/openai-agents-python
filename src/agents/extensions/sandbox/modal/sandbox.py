@@ -884,15 +884,15 @@ class ModalSandboxSession(BaseSandboxSession):
                 process_count = len(self._pty_processes)
         except asyncio.TimeoutError as e:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except asyncio.CancelledError:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             raise
         except Exception as e:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             if exception_chain_contains_type(e, _modal_exec_timeout_error_types()):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _modal_exec_transport_error(command=command, cause=e) from e

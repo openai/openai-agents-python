@@ -383,19 +383,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry.wait_task = asyncio.create_task(self._watch_process_exit(entry))
 
         pruned_entry: _UnixPtyProcessEntry | None = None
-        registered = False
-        try:
-            async with self._pty_lock:
-                process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
-                self._reserved_pty_process_ids.add(process_id)
-                pruned_entry = self._prune_pty_processes_if_needed()
-                self._pty_processes[process_id] = entry
-                process_count = len(self._pty_processes)
-                registered = True
-        except BaseException:
-            if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
-            raise
+        async with self._pty_lock:
+            process_id = allocate_pty_process_id(self._reserved_pty_process_ids)
+            self._reserved_pty_process_ids.add(process_id)
+            pruned_entry = self._prune_pty_processes_if_needed()
+            self._pty_processes[process_id] = entry
+            process_count = len(self._pty_processes)
 
         if pruned_entry is not None:
             await self._settle_pty_cleanup(self._terminate_pty_entry(pruned_entry))
