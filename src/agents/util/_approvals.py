@@ -42,7 +42,9 @@ async def evaluate_needs_approval_setting(
         maybe_result = needs_approval_setting(*args)
         if inspect.isawaitable(maybe_result):
             maybe_result = await maybe_result
-        return bool(maybe_result)
+        if isinstance(maybe_result, bool):
+            return maybe_result
+        return True
     if strict:
         raise UserError(
             f"Invalid needs_approval value: expected a bool or callable, "
