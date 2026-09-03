@@ -157,27 +157,6 @@ class _BufferedToolCall:
     extra_content: dict[str, Any] | None = None
 
 
-def _buffered_tool_calls_in_replay_order(
-    buffered_calls: dict[int | None, _BufferedToolCall],
-) -> list[_BufferedToolCall]:
-    """Sort indexed calls while preserving where the index-less call first appeared."""
-    indexed_calls = sorted(
-        (call for call in buffered_calls.values() if isinstance(call.index, int)),
-        key=lambda call: cast(int, call.index),
-    )
-    if None not in buffered_calls:
-        return indexed_calls
-
-    unindexed_position = 0
-    for index in buffered_calls:
-        if index is None:
-            break
-        unindexed_position += 1
-
-    indexed_calls.insert(unindexed_position, buffered_calls[None])
-    return indexed_calls
-
-
 def _merge_buffered_metadata(
     current: dict[str, Any] | None,
     incoming: dict[str, Any],
@@ -338,90 +317,61 @@ class ChatCmplStreamHandler:
             for index, buffered_call in buffered_calls.items()
             if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
         ]
-        if isinstance(tool_call_index, int):
-            if None in matching_indexes:
-                if len(matching_indexes) > 1:
-                    raise ModelBehaviorError(
-                        "Chat Completions tool call delta supplied an index and the same ID "
-                        "matched multiple buffered calls."
-                    )
-                if tool_call_index in buffered_calls:
-                    raise ModelBehaviorError(
-                        "Chat Completions tool call delta supplied an index already used by "
-                        "another buffered call."
-                    )
 
-                buffered_call = buffered_calls.pop(None)
-                buffered_call.index = tool_call_index
-                buffered_calls[tool_call_index] = buffered_call
-            elif (
-                not tool_call_delta.id
-                and None in buffered_calls
-                and tool_call_index not in buffered_calls
-            ):
-                buffered_name = buffered_calls[None].name
-                if not function_name or not buffered_name or function_name == buffered_name:
-                    if len(buffered_calls) > 1:
-                        raise ModelBehaviorError(
-                            "Chat Completions tool call delta supplied a new index without an ID "
-                            "while multiple function calls were being buffered."
-                        )
-                    buffered_call = buffered_calls.pop(None)
-                    buffered_call.index = tool_call_index
-                    buffered_calls[tool_call_index] = buffered_call
-        else:
-            if len(matching_indexes) == 1:
-                tool_call_index = matching_indexes[0]
-            elif len(matching_indexes) > 1:
+        if len(matching_indexes) > 1:
+            raise ModelBehaviorError(
+                "Chat Completions tool call delta matched multiple buffered calls."
+            )
+
+        if isinstance(tool_call_index, int):
+            if matching_indexes and matching_indexes[0] != tool_call_index:
                 raise ModelBehaviorError(
-                    "Chat Completions tool call delta omitted an index and the same ID "
-                    "matched multiple buffered calls."
+                    "Chat Completions tool call index and ID identified different buffered calls."
                 )
-            elif tool_call_delta.id and None in buffered_calls and buffered_calls[None].call_id:
+        elif matching_indexes:
+            tool_call_index = matching_indexes[0]
+        elif tool_call_delta.id:
+            if None in buffered_calls and buffered_calls[None].call_id:
                 raise ModelBehaviorError(
-                    "Chat Completions tool call delta omitted an index with a new ID while "
+                    "Chat Completions tool call delta omitted an index for a new call while "
                     "another index-less call was being buffered."
                 )
-            else:
-                if function_name and None in buffered_calls:
-                    buffered_name = buffered_calls[None].name
-                    if buffered_name and buffered_name != function_name:
-                        raise ModelBehaviorError(
-                            "Chat Completions tool call delta omitted an index and used a "
-                            "different function name from the buffered index-less call."
-                        )
-
-                if not tool_call_delta.id and function_name:
-                    if None in buffered_calls:
-                        tool_call_index = None
-                    elif len(buffered_calls) == 1:
-                        sole_index = next(iter(buffered_calls))
-                        sole_name = buffered_calls[sole_index].name
-                        if not sole_name:
-                            tool_call_index = sole_index
-                        elif sole_name == function_name:
-                            raise ModelBehaviorError(
-                                "Chat Completions tool call delta omitted an index and ID while "
-                                "another buffered call used the same function name."
-                            )
-                        else:
-                            tool_call_index = None
-                    else:
-                        tool_call_index = None
-                elif not tool_call_delta.id and None in buffered_calls:
-                    tool_call_index = None
-                elif not tool_call_delta.id and len(buffered_calls) == 1:
-                    tool_call_index = next(iter(buffered_calls))
-                elif not tool_call_delta.id and len(buffered_calls) > 1:
+            tool_call_index = None
+        elif function_name:
+            if None in buffered_calls:
+                if buffered_calls[None].name:
                     raise ModelBehaviorError(
-                        "Chat Completions tool call delta omitted an index while multiple "
-                        "function tool calls were being buffered."
+                        "Chat Completions tool call delta omitted both index and ID, so its "
+                        "function-call owner could not be attributed safely."
                     )
+            elif any(call.name == function_name for call in buffered_calls.values()):
+                raise ModelBehaviorError(
+                    "Chat Completions tool call delta omitted both index and ID, so its "
+                    "function-call owner could not be attributed safely."
+                )
+            else:
+                tool_call_index = None
+        elif len(buffered_calls) == 1:
+            tool_call_index = next(iter(buffered_calls))
+        elif len(buffered_calls) > 1:
+            raise ModelBehaviorError(
+                "Chat Completions tool call delta omitted both index and ID while multiple "
+                "function calls were being buffered."
+            )
 
         buffered_call = buffered_calls.setdefault(
             tool_call_index,
             _BufferedToolCall(index=tool_call_index),
         )
+
+        if tool_call_delta.id and buffered_call.call_id not in (None, tool_call_delta.id):
+            raise ModelBehaviorError(
+                "Chat Completions tool call delta changed the ID of a buffered call."
+            )
+        if function_name and buffered_call.name not in (None, function_name):
+            raise ModelBehaviorError(
+                "Chat Completions tool call delta changed the name of a buffered function call."
+            )
 
         if tool_call_delta.id:
             buffered_call.call_id = tool_call_delta.id
@@ -449,6 +399,7 @@ class ChatCmplStreamHandler:
     @staticmethod
     def _buffered_tool_call_delta(
         buffered_call: _BufferedToolCall,
+        *,
         fallback_index: int = 0,
     ) -> ChoiceDeltaToolCall:
         if not buffered_call.call_id:
@@ -486,11 +437,17 @@ class ChatCmplStreamHandler:
         buffered_calls: dict[int | None, _BufferedToolCall],
         passthrough_tool_call_indexes: set[int],
     ) -> ChatCompletionChunk:
-        ordered_calls = _buffered_tool_calls_in_replay_order(buffered_calls)
-        occupied_indexes = passthrough_tool_call_indexes | {
+        ordered_calls = sorted(
+            buffered_calls.values(),
+            key=lambda call: (
+                not isinstance(call.index, int),
+                call.index if isinstance(call.index, int) else 0,
+            ),
+        )
+        used_indexes = passthrough_tool_call_indexes | {
             call.index for call in ordered_calls if isinstance(call.index, int)
         }
-        fallback_index = max(occupied_indexes, default=-1) + 1
+        fallback_index = max(used_indexes, default=-1) + 1
         tool_call_deltas = [
             cls._buffered_tool_call_delta(buffered_call, fallback_index=fallback_index)
             for buffered_call in ordered_calls
@@ -510,8 +467,6 @@ class ChatCmplStreamHandler:
         """Buffer streamed function tool-call deltas until they are complete."""
         buffered_calls: dict[int | None, _BufferedToolCall] = {}
         passthrough_tool_call_indexes: set[int] = set()
-        passthrough_tool_call_indexes_by_id: dict[str, int | None] = {}
-        unindexed_passthrough_tool_call_count = 0
         saw_passthrough_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
 
@@ -525,8 +480,6 @@ class ChatCmplStreamHandler:
             passthrough_choices: list[Choice] = []
             for choice in chunk.choices:
                 if choice.index != 0:
-                    if choice.delta and choice.delta.tool_calls:
-                        saw_passthrough_tool_call = True
                     passthrough_choices.append(choice)
                     continue
 
@@ -535,177 +488,40 @@ class ChatCmplStreamHandler:
                 if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
-                        is_untyped_continuation = (
-                            getattr(tool_call_delta, "type", None) is None
-                            and tool_call_delta.function is None
-                        )
-                        is_unindexed_untyped_continuation = (
-                            not isinstance(tool_call_delta.index, int) and is_untyped_continuation
-                        )
-                        passthrough_payload_keys = set(tool_call_delta.model_extra or {}) - {
-                            "provider_specific_fields",
-                            "extra_content",
-                        }
-                        buffered_id_matches = [
-                            buffered_call
-                            for buffered_call in buffered_calls.values()
-                            if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
-                        ]
-                        is_passthrough_continuation_by_id = (
-                            is_untyped_continuation
-                            and bool(tool_call_delta.id)
-                            and tool_call_delta.id in passthrough_tool_call_indexes_by_id
-                        )
-                        is_idless_passthrough_continuation = (
-                            is_untyped_continuation
-                            and not tool_call_delta.id
-                            and unindexed_passthrough_tool_call_count == 1
-                            and None not in buffered_calls
-                            and (
-                                not isinstance(tool_call_delta.index, int)
-                                or bool(passthrough_payload_keys)
-                            )
-                        )
-                        if is_passthrough_continuation_by_id and buffered_id_matches:
-                            raise ModelBehaviorError(
-                                "Chat Completions tool call delta ID matched both a buffered "
-                                "function call and a passthrough call."
-                            )
-
-                        if (
-                            isinstance(tool_call_delta.index, int)
-                            and tool_call_delta.index in passthrough_tool_call_indexes
-                            and tool_call_delta.id
-                            and buffered_id_matches
-                        ):
-                            raise ModelBehaviorError(
-                                "Chat Completions tool call delta supplied an index already used "
-                                "by a passthrough call and an ID owned by a buffered function call."
-                            )
-
-                        if (
-                            is_idless_passthrough_continuation
-                            and isinstance(tool_call_delta.index, int)
-                            and tool_call_delta.index in buffered_calls
-                        ):
-                            raise ModelBehaviorError(
-                                "Chat Completions passthrough tool call delta supplied an index "
-                                "already used by a buffered function call."
-                            )
-
-                        unindexed_buffered_call = buffered_calls.get(None)
-                        if (
-                            isinstance(tool_call_delta.index, int)
-                            and tool_call_delta.index in passthrough_tool_call_indexes
-                            and unindexed_buffered_call is not None
-                            and (
-                                (
-                                    tool_call_delta.id
-                                    and unindexed_buffered_call.call_id == tool_call_delta.id
-                                )
-                                or (
-                                    not tool_call_delta.id
-                                    and len(buffered_calls) == 1
-                                    and tool_call_delta.function is not None
-                                )
-                            )
-                        ):
-                            raise ModelBehaviorError(
-                                "Chat Completions tool call delta supplied an index already used "
-                                "by a passthrough call."
-                            )
-
-                        if (
-                            tool_call_delta.index in passthrough_tool_call_indexes
-                            or is_passthrough_continuation_by_id
-                            or is_idless_passthrough_continuation
-                        ):
-                            if passthrough_id := tool_call_delta.id:
-                                owner_index = passthrough_tool_call_indexes_by_id.get(
-                                    passthrough_id
-                                )
-                                if isinstance(tool_call_delta.index, int):
-                                    promotes_unindexed_passthrough_owner = (
-                                        is_passthrough_continuation_by_id
-                                        and not isinstance(owner_index, int)
-                                    )
-                                    if isinstance(owner_index, int) and (
-                                        owner_index != tool_call_delta.index
-                                    ):
-                                        raise ModelBehaviorError(
-                                            "Chat Completions passthrough tool call delta supplied "
-                                            "a different index from its buffered ID owner."
-                                        )
-                                    if tool_call_delta.index in buffered_calls:
-                                        raise ModelBehaviorError(
-                                            "Chat Completions passthrough tool call delta supplied "
-                                            "an index already used by a buffered function call."
-                                        )
-                                    passthrough_tool_call_indexes.add(tool_call_delta.index)
-                                    passthrough_tool_call_indexes_by_id[passthrough_id] = (
-                                        tool_call_delta.index
-                                    )
-                                    if promotes_unindexed_passthrough_owner:
-                                        unindexed_passthrough_tool_call_count -= 1
-                                        tool_call_delta = tool_call_delta.model_copy(
-                                            update={"type": "custom"}
-                                        )
-                                elif isinstance(owner_index, int):
-                                    tool_call_delta = tool_call_delta.model_copy(
-                                        update={"index": owner_index}
-                                    )
-                                passthrough_tool_call_indexes_by_id.setdefault(
-                                    passthrough_id,
-                                    tool_call_delta.index
-                                    if isinstance(tool_call_delta.index, int)
-                                    else None,
-                                )
-                            elif (
-                                is_idless_passthrough_continuation
-                                and isinstance(tool_call_delta.index, int)
-                                and tool_call_delta.index not in passthrough_tool_call_indexes
+                        if tool_call_delta.index in passthrough_tool_call_indexes:
+                            if tool_call_delta.id and any(
+                                buffered_call.call_id == tool_call_delta.id
+                                for buffered_call in buffered_calls.values()
                             ):
-                                passthrough_tool_call_indexes.add(tool_call_delta.index)
-                                for passthrough_id, owner_index in list(
-                                    passthrough_tool_call_indexes_by_id.items()
-                                ):
-                                    if owner_index is None:
-                                        passthrough_tool_call_indexes_by_id[passthrough_id] = (
-                                            tool_call_delta.index
-                                        )
-                                unindexed_passthrough_tool_call_count = 0
-                                tool_call_delta = tool_call_delta.model_copy(
-                                    update={"type": "custom"}
+                                raise ModelBehaviorError(
+                                    "Chat Completions tool call index and ID identified different "
+                                    "tool call owners."
                                 )
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
-                        elif (
-                            is_unindexed_untyped_continuation
-                            and saw_passthrough_tool_call
-                            and (
-                                not tool_call_delta.id
-                                or (bool(passthrough_payload_keys) and not buffered_id_matches)
-                            )
-                        ):
-                            raise ModelBehaviorError(
-                                "Chat Completions tool call delta omitted an index, type, and "
-                                "function payload after a passthrough call, so it could not be "
-                                "attributed safely."
-                            )
                         elif cls._should_buffer_tool_call_delta(tool_call_delta):
+                            if (
+                                saw_passthrough_tool_call
+                                and tool_call_delta.index is None
+                                and tool_call_delta.id is None
+                                and tool_call_delta.function is None
+                            ):
+                                raise ModelBehaviorError(
+                                    "Chat Completions tool call delta could not be attributed "
+                                    "safely between buffered and passthrough calls."
+                                )
                             cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
                         else:
+                            if (
+                                isinstance(tool_call_delta.index, int)
+                                and tool_call_delta.index in buffered_calls
+                            ):
+                                raise ModelBehaviorError(
+                                    "Chat Completions tool call index identified both a buffered "
+                                    "function call and a passthrough call."
+                                )
                             if isinstance(tool_call_delta.index, int):
                                 passthrough_tool_call_indexes.add(tool_call_delta.index)
-                            else:
-                                unindexed_passthrough_tool_call_count += 1
-                            if tool_call_delta.id:
-                                passthrough_tool_call_indexes_by_id.setdefault(
-                                    tool_call_delta.id,
-                                    tool_call_delta.index
-                                    if isinstance(tool_call_delta.index, int)
-                                    else None,
-                                )
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
 
