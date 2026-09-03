@@ -1053,15 +1053,13 @@ class DockerSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                await self._terminate_pty_entry(entry)
             elif pty_pid_path is not None:
-                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
+                await self._kill_pty_pid_path(pty_pid_path)
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except Exception as e:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
-            elif pty_pid_path is not None:
-                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
+                await self._terminate_pty_entry(entry)
             raise ExecTransportError(
                 command=command,
                 context={"retry_safe": True},
@@ -1069,9 +1067,7 @@ class DockerSandboxSession(BaseSandboxSession):
             ) from e
         except BaseException:
             if entry is not None and not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
-            elif pty_pid_path is not None:
-                await self._settle_pty_cleanup(self._kill_pty_pid_path(pty_pid_path))
+                await self._terminate_pty_entry(entry)
             raise
 
         if pruned_entry is not None:

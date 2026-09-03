@@ -720,17 +720,29 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
+                try:
+                    await asyncio.shield(cleanup_task)
+                except BaseException:
+                    await asyncio.shield(cleanup_task)
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except Exception as e:
             if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
+                try:
+                    await asyncio.shield(cleanup_task)
+                except BaseException:
+                    await asyncio.shield(cleanup_task)
             if timeout_error_types and isinstance(e, timeout_error_types):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _daytona_exec_transport_error(command=command, cause=e) from e
         except BaseException:
             if not registered:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(entry))
+                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
+                try:
+                    await asyncio.shield(cleanup_task)
+                except BaseException:
+                    await asyncio.shield(cleanup_task)
             raise
 
         if pruned is not None:
