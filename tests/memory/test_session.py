@@ -981,6 +981,25 @@ def test_session_settings_resolve_accepts_base_override_for_subclass() -> None:
     assert base.limit == 100
 
 
+def test_session_settings_resolve_rejects_incompatible_subclass_override() -> None:
+    """A subclass must not silently discard fields from a sibling subclass."""
+    from pydantic.dataclasses import dataclass
+
+    @dataclass
+    class TenantSessionSettings(SessionSettings):
+        tenant: str = "default"
+
+    @dataclass
+    class RegionSessionSettings(SessionSettings):
+        region: str = "default"
+
+    base = TenantSessionSettings(limit=100, tenant="acme")
+    override = RegionSessionSettings(limit=50, region="us-east-1")
+
+    with pytest.raises(TypeError, match="TenantSessionSettings"):
+        base.resolve(override)
+
+
 @pytest.mark.asyncio
 async def test_runner_with_session_settings_override():
     """Test that RunConfig can override session's default settings."""

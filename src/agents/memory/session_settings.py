@@ -77,7 +77,12 @@ def _coerce_session_settings(
     settings_type: type[SessionSettings],
 ) -> SessionSettings:
     if isinstance(value, SessionSettings):
-        return value
+        if type(value) is SessionSettings or isinstance(value, settings_type):
+            return value
+        raise TypeError(
+            f"Session settings override must be SessionSettings or an instance of "
+            f"{settings_type.__name__}; got {type(value).__name__}"
+        )
     return coerce_dataclass_config(value, settings_type, parameter_name="session")
 
 
