@@ -15,7 +15,11 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import ExecNonZeroError, PtySessionNotFoundError
+from agents.sandbox.errors import (
+    ExecNonZeroError,
+    InvalidManifestPathError,
+    PtySessionNotFoundError,
+)
 from agents.sandbox.files import EntryKind
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
@@ -606,6 +610,61 @@ class TestUnixLocalLs:
         entries = await session.ls("link/../secret")
         assert [(entry.kind, entry.path) for entry in entries] == [
             (EntryKind.FILE, str(workspace / "secret"))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ls_rejects_a_leaf_that_lives_outside_the_workspace(self, tmp_path: Path) -> None:
+        """`jump/back` resolves back inside the workspace, but the entry itself lives in an
+        ungranted directory; its metadata must not be read."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "inside.txt").write_text("inside", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "back").symlink_to(workspace / "inside.txt")
+        (workspace / "jump").symlink_to(outside)
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(InvalidManifestPathError):
+            await session.ls("jump/back")
+
+    @pytest.mark.asyncio
+    async def test_ls_treats_backslashes_as_separators_for_both_checks(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "sub" / "file.txt").write_text("x", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret").write_text("secret", encoding="utf-8")
+        (workspace / "link").symlink_to(outside)
+        session = _RecordingUnixLocalSession(workspace)
+
+        entries = await session.ls("sub\\file.txt")
+        assert [(entry.kind, entry.path) for entry in entries] == [
+            (EntryKind.FILE, str(workspace / "sub" / "file.txt"))
+        ]
+        with pytest.raises(InvalidManifestPathError):
+            await session.ls("link\\secret")
+
+    @pytest.mark.asyncio
+    async def test_ls_keeps_a_leaf_symlink_addressed_through_the_resolved_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        (real_root / "plain.txt").write_text("x", encoding="utf-8")
+        (real_root / "link").symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(root_link)
+
+        entries = await session.ls(str(real_root / "link"))
+
+        assert [(entry.kind, entry.path) for entry in entries] == [
+            (EntryKind.SYMLINK, str(real_root / "link"))
         ]
 
     @pytest.mark.asyncio

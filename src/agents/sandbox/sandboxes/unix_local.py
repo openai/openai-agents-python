@@ -35,7 +35,6 @@ from ..errors import (
     ExecNonZeroError,
     ExecTimeoutError,
     ExecTransportError,
-    InvalidManifestPathError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -70,7 +69,7 @@ from ..util.tar_utils import (
     safe_extract_tarfile,
     should_skip_tar_member,
 )
-from ..workspace_paths import _raise_if_filesystem_root
+from ..workspace_paths import _raise_if_filesystem_root, coerce_posix_path
 
 _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
@@ -913,27 +912,23 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         policy = self._workspace_path_policy()
         return policy.normalize_path(path, for_write=for_write, resolve_symlinks=True)
 
-    def _requested_leaf_path(self, path: Path | str, normalized: Path) -> Path:
-        """Return the validated entry without following a leaf symlink.
+    def _requested_leaf_path(self, path: Path | str) -> Path:
+        """Validate `path` and return the entry itself without following a leaf symlink.
 
-        `normalized` has already validated `path` through its resolved target. Rebuild where
-        the entry itself lives from the policy's canonical lexical path (so `link/../x` names
-        `x` under the workspace, as validation saw it, and never re-follows `link`), resolving
-        only the parents and keeping the leaf for `lstat()` and the reported path. This does
-        not demand authority over the parent, which an exact-file grant does not confer.
+        One POSIX identity of the input serves both checks: the fully resolved target must be
+        confined (an escaping link is rejected as before), and then the leaf's own location,
+        with only its parents resolved, must be under the workspace root or an extra grant.
+        The leaf is reported as itself, the way `ls -la <link>` prints it, so a symlink keeps
+        its kind and path, including under a symlinked Manifest.root.
         """
-        try:
-            canonical = self._workspace_path_policy().normalize_path(path)
-        except InvalidManifestPathError:
-            # The lexical form is not under the configured root (e.g. a path already resolved
-            # through a symlinked Manifest.root); the resolved path is the best we have.
-            return normalized
-        if not canonical.name:
-            return normalized
-        return canonical.parent.resolve(strict=False) / canonical.name
+        canonical = coerce_posix_path(path)
+        self.normalize_path(canonical.as_posix())
+        return self._workspace_path_policy().normalize_path(
+            canonical, resolve_symlinks=True, follow_leaf_symlink=False
+        )
 
     async def _validate_listing_path(self, path: Path | str) -> Path:
-        return self._requested_leaf_path(path, self.normalize_path(path))
+        return self._requested_leaf_path(path)
 
     async def ls(
         self,
@@ -944,7 +939,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         if user is not None:
             return await super().ls(path, user=user)
 
-        requested = self._requested_leaf_path(path, self.normalize_path(path))
+        requested = self._requested_leaf_path(path)
         command = ("ls", "-la", "--", str(requested))
         try:
             # Match `ls -la <path>`: a directory lists its entries; anything else, including a
