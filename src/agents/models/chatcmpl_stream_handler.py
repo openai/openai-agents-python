@@ -318,11 +318,6 @@ class ChatCmplStreamHandler:
             if tool_call_delta.id and buffered_call.call_id == tool_call_delta.id
         ]
 
-        if len(matching_indexes) > 1:
-            raise ModelBehaviorError(
-                "Chat Completions tool call delta matched multiple buffered calls."
-            )
-
         if isinstance(tool_call_index, int):
             if matching_indexes and matching_indexes[0] != tool_call_index:
                 raise ModelBehaviorError(
@@ -435,7 +430,7 @@ class ChatCmplStreamHandler:
         cls,
         template_chunk: ChatCompletionChunk,
         buffered_calls: dict[int | None, _BufferedToolCall],
-        passthrough_tool_call_indexes: set[int],
+        passthrough_tool_call_indexes: set[int | None],
     ) -> ChatCompletionChunk:
         ordered_calls = sorted(
             buffered_calls.values(),
@@ -444,9 +439,9 @@ class ChatCmplStreamHandler:
                 call.index if isinstance(call.index, int) else 0,
             ),
         )
-        used_indexes = passthrough_tool_call_indexes | {
-            call.index for call in ordered_calls if isinstance(call.index, int)
-        }
+        used_indexes = {
+            index for index in passthrough_tool_call_indexes if isinstance(index, int)
+        } | {call.index for call in ordered_calls if isinstance(call.index, int)}
         fallback_index = max(used_indexes, default=-1) + 1
         tool_call_deltas = [
             cls._buffered_tool_call_delta(buffered_call, fallback_index=fallback_index)
@@ -466,7 +461,7 @@ class ChatCmplStreamHandler:
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Buffer streamed function tool-call deltas until they are complete."""
         buffered_calls: dict[int | None, _BufferedToolCall] = {}
-        passthrough_tool_call_indexes: set[int] = set()
+        passthrough_tool_call_indexes: set[int | None] = set()
         saw_passthrough_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
 
@@ -480,6 +475,8 @@ class ChatCmplStreamHandler:
             passthrough_choices: list[Choice] = []
             for choice in chunk.choices:
                 if choice.index != 0:
+                    if choice.delta and choice.delta.tool_calls:
+                        saw_passthrough_tool_call = True
                     passthrough_choices.append(choice)
                     continue
 
@@ -488,11 +485,33 @@ class ChatCmplStreamHandler:
                 if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
-                        if tool_call_delta.index in passthrough_tool_call_indexes:
-                            if tool_call_delta.id and any(
+                        matches_buffered_id = bool(
+                            tool_call_delta.id
+                            and any(
                                 buffered_call.call_id == tool_call_delta.id
                                 for buffered_call in buffered_calls.values()
+                            )
+                        )
+                        is_unindexed_function_delta = tool_call_delta.index is None and (
+                            tool_call_delta.function is not None
+                            or tool_call_delta.type == "function"
+                            or matches_buffered_id
+                        )
+                        if (
+                            tool_call_delta.index in passthrough_tool_call_indexes
+                            and not is_unindexed_function_delta
+                        ):
+                            if (
+                                tool_call_delta.index is None
+                                and tool_call_delta.id is None
+                                and tool_call_delta.function is None
+                                and None in buffered_calls
                             ):
+                                raise ModelBehaviorError(
+                                    "Chat Completions tool call delta could not be attributed "
+                                    "safely between buffered and passthrough calls."
+                                )
+                            if matches_buffered_id:
                                 raise ModelBehaviorError(
                                     "Chat Completions tool call index and ID identified different "
                                     "tool call owners."
@@ -500,16 +519,6 @@ class ChatCmplStreamHandler:
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
                         elif cls._should_buffer_tool_call_delta(tool_call_delta):
-                            if (
-                                saw_passthrough_tool_call
-                                and tool_call_delta.index is None
-                                and tool_call_delta.id is None
-                                and tool_call_delta.function is None
-                            ):
-                                raise ModelBehaviorError(
-                                    "Chat Completions tool call delta could not be attributed "
-                                    "safely between buffered and passthrough calls."
-                                )
                             cls._accumulate_tool_call_delta(buffered_calls, tool_call_delta)
                         else:
                             if (
@@ -520,8 +529,7 @@ class ChatCmplStreamHandler:
                                     "Chat Completions tool call index identified both a buffered "
                                     "function call and a passthrough call."
                                 )
-                            if isinstance(tool_call_delta.index, int):
-                                passthrough_tool_call_indexes.add(tool_call_delta.index)
+                            passthrough_tool_call_indexes.add(tool_call_delta.index)
                             saw_passthrough_tool_call = True
                             remaining_tool_calls.append(tool_call_delta)
 

@@ -118,7 +118,12 @@ async def _collect_buffered_handler_events(*chunks: ChatCompletionChunk) -> list
     ]
 
 
-def _lenient_chunk(delta: dict[str, Any], finish_reason: str | None = None) -> ChatCompletionChunk:
+def _lenient_chunk(
+    delta: dict[str, Any],
+    finish_reason: str | None = None,
+    *,
+    choice_index: int = 0,
+) -> ChatCompletionChunk:
     """Construct a chunk as AsyncStream does, without validating a missing tool-call index."""
     return cast(
         ChatCompletionChunk,
@@ -129,7 +134,9 @@ def _lenient_chunk(delta: dict[str, Any], finish_reason: str | None = None) -> C
                 "object": "chat.completion.chunk",
                 "created": 1,
                 "model": "fake",
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+                "choices": [
+                    {"index": choice_index, "delta": delta, "finish_reason": finish_reason}
+                ],
             },
         ),
     )
@@ -987,6 +994,79 @@ async def test_missing_index_replay_avoids_passthrough_index_collision() -> None
 
 
 @pytest.mark.asyncio
+async def test_unindexed_passthrough_continuation_remains_passthrough() -> None:
+    opening = _lenient_chunk(
+        {"tool_calls": [{"id": "custom-id", "type": "custom", "custom": {"input": "start"}}]}
+    )
+    continuation = _lenient_chunk({"tool_calls": [{"custom": {"input": "-end"}}]})
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(opening, continuation)
+
+    assert [chunk.choices[0].delta.tool_calls for chunk in buffered_chunks] == [
+        opening.choices[0].delta.tool_calls,
+        continuation.choices[0].delta.tool_calls,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_indexed_function_does_not_block_unindexed_passthrough_continuation() -> None:
+    indexed_function = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "my_func", "arguments": "{}"},
+                }
+            ]
+        }
+    )
+    custom_opening = _lenient_chunk(
+        {"tool_calls": [{"id": "custom-id", "type": "custom", "custom": {"input": "start"}}]}
+    )
+    custom_continuation = _lenient_chunk({"tool_calls": [{"custom": {"input": "-end"}}]})
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(
+        indexed_function,
+        custom_opening,
+        custom_continuation,
+    )
+
+    assert [chunk.choices[0].delta.tool_calls for chunk in buffered_chunks[:-1]] == [
+        custom_opening.choices[0].delta.tool_calls,
+        custom_continuation.choices[0].delta.tool_calls,
+    ]
+    replayed_calls = buffered_chunks[-1].choices[0].delta.tool_calls
+    assert replayed_calls and replayed_calls[0].id == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_nonzero_choice_tool_call_suppresses_choice_zero_finish_error() -> None:
+    nonzero_choice = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "my_func", "arguments": "{}"},
+                }
+            ]
+        },
+        choice_index=1,
+    )
+    choice_zero_finish = _lenient_chunk({}, finish_reason="tool_calls")
+
+    buffered_chunks = await _collect_buffered_tool_call_chunks(
+        nonzero_choice,
+        choice_zero_finish,
+    )
+
+    assert buffered_chunks == [nonzero_choice]
+
+
+@pytest.mark.asyncio
 async def test_missing_index_continuation_merges_into_sole_buffered_function() -> None:
     chunks = (
         _lenient_chunk(
@@ -1043,6 +1123,27 @@ async def test_missing_index_continuation_uses_a_unique_function_call_id() -> No
 
 
 @pytest.mark.asyncio
+async def test_late_index_for_unindexed_function_is_rejected() -> None:
+    opening = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "my_func", "arguments": '{"a":'},
+                }
+            ]
+        }
+    )
+    late_index = _lenient_chunk(
+        {"tool_calls": [{"index": 0, "id": "call_1", "function": {"arguments": "1}"}}]}
+    )
+
+    with pytest.raises(ModelBehaviorError, match="index and ID identified different"):
+        await _collect_buffered_tool_call_chunks(opening, late_index)
+
+
+@pytest.mark.asyncio
 async def test_missing_index_continuation_rejects_multiple_buffered_functions() -> None:
     chunks = (
         _lenient_chunk(
@@ -1063,6 +1164,55 @@ async def test_missing_index_continuation_rejects_multiple_buffered_functions() 
 
     with pytest.raises(ModelBehaviorError, match="multiple function calls"):
         await _collect_buffered_tool_call_chunks(*chunks, continuation)
+
+
+@pytest.mark.asyncio
+async def test_parallel_unindexed_function_openings_are_rejected() -> None:
+    first = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "first_func", "arguments": "{}"},
+                }
+            ]
+        }
+    )
+    second = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "second_func", "arguments": "{}"},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ModelBehaviorError, match="omitted an index for a new call"):
+        await _collect_buffered_tool_call_chunks(first, second)
+
+
+@pytest.mark.asyncio
+async def test_passthrough_call_rejects_a_buffered_function_index() -> None:
+    function = _lenient_chunk(
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "my_func", "arguments": "{}"},
+                }
+            ]
+        }
+    )
+    custom = _lenient_chunk({"tool_calls": [{"index": 0, "id": "custom-id", "type": "custom"}]})
+
+    with pytest.raises(ModelBehaviorError, match="identified both a buffered function call"):
+        await _collect_buffered_tool_call_chunks(function, custom)
 
 
 @pytest.mark.asyncio
