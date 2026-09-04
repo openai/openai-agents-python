@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -239,6 +239,57 @@ async def test_invalid_tool_output_guardrail_raises_user_error():
             output="test output",
         )
         await guardrail.run(data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guardrail_kind", ["input", "output"])
+async def test_tool_guardrail_rejects_unknown_behavior(guardrail_kind: str) -> None:
+    invalid_output = ToolGuardrailFunctionOutput(
+        output_info=None,
+        behavior=cast(Any, {"type": "unknown"}),
+    )
+
+    if guardrail_kind == "input":
+        guardrail: ToolInputGuardrail[Any] | ToolOutputGuardrail[Any] = ToolInputGuardrail(
+            guardrail_function=lambda _data: invalid_output,
+            name="policy",
+        )
+        data: ToolInputGuardrailData | ToolOutputGuardrailData = ToolInputGuardrailData(
+            context=get_mock_tool_context(),
+            agent=Agent(name="test"),
+        )
+    else:
+        guardrail = ToolOutputGuardrail(
+            guardrail_function=lambda _data: invalid_output,
+            name="policy",
+        )
+        data = ToolOutputGuardrailData(
+            context=get_mock_tool_context(),
+            agent=Agent(name="test"),
+            output="sensitive output",
+        )
+
+    with pytest.raises(UserError, match="Tool guardrail policy returned an invalid behavior"):
+        await guardrail.run(data)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_tool_guardrail_rejects_reject_content_without_message() -> None:
+    guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+        guardrail_function=lambda _data: ToolGuardrailFunctionOutput(
+            output_info=None,
+            behavior=cast(Any, {"type": "reject_content"}),
+        ),
+        name="policy",
+    )
+
+    with pytest.raises(UserError, match="Tool guardrail policy returned an invalid behavior"):
+        await guardrail.run(
+            ToolInputGuardrailData(
+                context=get_mock_tool_context(),
+                agent=Agent(name="test"),
+            )
+        )
 
 
 # Test decorators

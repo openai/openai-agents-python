@@ -117,6 +117,22 @@ class ToolGuardrailFunctionOutput:
         return cls(output_info=output_info, behavior=RaiseExceptionBehavior(type="raise_exception"))
 
 
+def _validate_guardrail_behavior(
+    output: ToolGuardrailFunctionOutput, guardrail_name: str
+) -> ToolGuardrailFunctionOutput:
+    behavior = output.behavior
+    if not isinstance(behavior, dict):
+        raise UserError(f"Tool guardrail {guardrail_name} returned an invalid behavior")
+
+    behavior_type = behavior.get("type")
+    if behavior_type in {"allow", "raise_exception"}:
+        return output
+    if behavior_type == "reject_content" and isinstance(behavior.get("message"), str):
+        return output
+
+    raise UserError(f"Tool guardrail {guardrail_name} returned an invalid behavior")
+
+
 @dataclass
 class ToolInputGuardrailData:
     """Input data passed to a tool input guardrail function."""
@@ -173,8 +189,8 @@ class ToolInputGuardrail(Generic[TContext_co]):
 
         result = self.guardrail_function(data)
         if inspect.isawaitable(result):
-            return await result
-        return result
+            result = await result
+        return _validate_guardrail_behavior(result, self.get_name())
 
 
 @dataclass
@@ -202,8 +218,8 @@ class ToolOutputGuardrail(Generic[TContext_co]):
 
         result = self.guardrail_function(data)
         if inspect.isawaitable(result):
-            return await result
-        return result
+            result = await result
+        return _validate_guardrail_behavior(result, self.get_name())
 
 
 # Decorators
