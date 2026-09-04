@@ -69,6 +69,38 @@ _SESSION_ID_TYPE = String().with_variant(
     "mysql",
     "mariadb",
 )
+# Dialect names that receive the bounded, utf8mb4_bin variant above.
+_MYSQL_FAMILY_DIALECTS = frozenset({"mysql", "mariadb"})
+
+
+def _validate_mysql_session_id(session_id: str, dialect_name: str) -> None:
+    """Reject session IDs that the MySQL-family column cannot keep distinct.
+
+    ``utf8mb4_bin`` is a PAD SPACE collation, so MySQL and MariaDB ignore
+    trailing spaces when comparing ``VARCHAR`` values. ``"a"`` and ``"a "``
+    would therefore resolve to the same primary key and silently share one
+    conversation history, while SQLite and PostgreSQL keep them apart. IDs
+    longer than the column would also be truncated or rejected by the server
+    only at write time.
+
+    Only MySQL and MariaDB are checked: other backends store the unbounded,
+    space-significant type and keep their existing behavior.
+    """
+    if dialect_name not in _MYSQL_FAMILY_DIALECTS:
+        return
+    if session_id != session_id.rstrip(" "):
+        raise ValueError(
+            "session_id must not end with a space on MySQL or MariaDB: "
+            f"{session_id!r}. The session_id column uses the utf8mb4_bin "
+            "collation, which ignores trailing spaces when comparing values, "
+            "so this ID would share stored history with "
+            f"{session_id.rstrip(' ')!r}."
+        )
+    if len(session_id) > _MYSQL_SESSION_ID_MAX_LENGTH:
+        raise ValueError(
+            f"session_id must be at most {_MYSQL_SESSION_ID_MAX_LENGTH} characters on "
+            f"MySQL or MariaDB, got {len(session_id)}: {session_id!r}."
+        )
 
 
 class SQLAlchemySession(SessionABC):
@@ -186,6 +218,7 @@ class SQLAlchemySession(SessionABC):
             else SessionSettings()
         )
         self._engine = engine
+        _validate_mysql_session_id(session_id, engine.dialect.name)
         self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
         self._init_lock = (

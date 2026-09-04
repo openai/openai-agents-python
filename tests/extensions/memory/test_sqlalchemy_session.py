@@ -25,7 +25,10 @@ from sqlalchemy.sql import Select
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
 from agents import Agent, Runner, TResponseInputItem
-from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from agents.extensions.memory.sqlalchemy_session import (
+    SQLAlchemySession,
+    _validate_mysql_session_id,
+)
 from agents.testing import ScriptedModel
 from tests.test_responses import get_text_message
 
@@ -266,6 +269,61 @@ async def test_session_ids_are_case_sensitive():
 
         assert await upper.get_items() == [{"role": "user", "content": "upper"}]
         assert await lower.get_items() == [{"role": "user", "content": "lower"}]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+async def test_mysql_session_id_rejects_trailing_space(dialect_name: str):
+    """utf8mb4_bin is PAD SPACE, so a trailing space would collide on MySQL.
+
+    MySQL and MariaDB ignore trailing spaces when comparing VARCHAR values
+    under this collation, so "tenant " and "tenant" would resolve to the same
+    primary key and share one history. SQLite keeps them apart (asserted in
+    test_session_ids_keep_trailing_spaces_on_sqlite), so accepting the ID would
+    make the same code diverge per backend.
+    """
+    with pytest.raises(ValueError, match="must not end with a space"):
+        _validate_mysql_session_id("tenant ", dialect_name)
+
+
+@pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
+async def test_non_mysql_dialects_still_accept_trailing_space(dialect_name: str):
+    """Other backends keep the unbounded, space-significant column."""
+    _validate_mysql_session_id("tenant ", dialect_name)
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+async def test_mysql_session_id_rejects_ids_longer_than_the_column(dialect_name: str):
+    """The bounded VARCHAR(190) cannot store a longer ID without truncation."""
+    with pytest.raises(ValueError, match="at most 190 characters"):
+        _validate_mysql_session_id("a" * 191, dialect_name)
+
+    _validate_mysql_session_id("a" * 190, dialect_name)
+
+
+@pytest.mark.parametrize("session_id", ["  leading", "mid dle", "tenant"])
+async def test_mysql_session_id_allows_spaces_that_do_not_pad(session_id: str):
+    """Only trailing spaces are collation-significant; the rest stay valid."""
+    _validate_mysql_session_id(session_id, "mysql")
+
+
+async def test_session_ids_keep_trailing_spaces_on_sqlite():
+    """Oracle for the MySQL guard: SQLite treats a trailing space as distinct.
+
+    This is the behavior the MySQL-family column cannot reproduce, which is why
+    such IDs are rejected up front there instead of silently merging.
+    """
+    engine = create_async_engine(DB_URL)
+    bare = SQLAlchemySession("tenant", engine=engine, create_tables=True)
+    padded = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+
+    try:
+        await bare.add_items([{"role": "user", "content": "bare"}])
+        await padded.add_items([{"role": "user", "content": "padded"}])
+
+        assert await bare.get_items() == [{"role": "user", "content": "bare"}]
+        assert await padded.get_items() == [{"role": "user", "content": "padded"}]
     finally:
         await engine.dispose()
 
