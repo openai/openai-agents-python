@@ -3254,6 +3254,33 @@ async def test_execute_tools_handles_tool_approval_items(
     assert_single_approval_interruption(result, tool_name=scenario.expected_tool_name)
 
 
+@pytest.mark.parametrize("policy_result", [None, "approve"], ids=["none", "truthy-non-bool"])
+@pytest.mark.asyncio
+async def test_callable_needs_approval_non_bool_result_fails_closed(policy_result: Any) -> None:
+    tool_calls: list[str] = []
+
+    async def async_needs_approval(
+        _context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
+    ) -> Any:
+        return policy_result
+
+    @function_tool(name_override="sensitive_tool", needs_approval=async_needs_approval)
+    def sensitive_tool() -> str:
+        tool_calls.append("ran")
+        return "sensitive result"
+
+    agent = make_agent(tools=[sensitive_tool])
+    tool_call = make_function_tool_call("sensitive_tool", arguments="{}")
+    processed_response = make_processed_response(
+        functions=[ToolRunFunction(function_tool=sensitive_tool, tool_call=tool_call)]
+    )
+
+    result = await run_execute_with_processed_response(agent, processed_response)
+
+    assert_single_approval_interruption(result, tool_name="sensitive_tool")
+    assert tool_calls == []
+
+
 @pytest.mark.asyncio
 async def test_execute_tools_preserves_synthetic_namespace_for_deferred_top_level_approval() -> (
     None

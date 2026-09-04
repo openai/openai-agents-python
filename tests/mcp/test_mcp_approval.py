@@ -309,3 +309,32 @@ async def test_mcp_require_approval_async_callable_uses_run_context():
         {"needs_approval": True},
         {"needs_approval": False},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_policy", [False, True], ids=["sync", "async"])
+async def test_mcp_require_approval_callable_non_bool_fails_closed(async_policy: bool):
+    """Callable policies that do not return bool must still require approval."""
+
+    def require_approval(_run_context, _agent, _tool):
+        return None
+
+    async def async_require_approval(_run_context, _agent, _tool):
+        return None
+
+    policy = async_require_approval if async_policy else require_approval
+    server = FakeMCPServer(require_approval=policy)
+    server.add_tool("guarded", {"type": "object", "properties": {}})
+    model = ScriptedModel()
+    agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("guarded", "{}"),
+        followup=[get_text_message("done")],
+    )
+
+    first = await Runner.run(agent, "call guarded")
+
+    assert first.interruptions, "non-bool MCP policy result must fail closed"
+    assert server.tool_calls == []
