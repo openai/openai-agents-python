@@ -1605,6 +1605,86 @@ async def test_to_function_tool_async_callable_policy_is_awaited():
     assert needs_approval is True
 
 
+@pytest.mark.parametrize("async_policy", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_to_function_tool_non_bool_policy_result_requires_approval(async_policy: bool):
+    """A require_approval policy that does not return a bool must require approval."""
+
+    captured: dict[str, Any] = {}
+
+    def sync_policy(
+        run_context: RunContextWrapper[Any],
+        agent: Agent,
+        tool: MCPToolType,
+    ) -> Any:
+        captured["policy_ran"] = True
+        captured["tool"] = tool
+        return None
+
+    async def async_policy(
+        run_context: RunContextWrapper[Any],
+        agent: Agent,
+        tool: MCPToolType,
+    ) -> Any:
+        await asyncio.sleep(0)
+        captured["policy_ran"] = True
+        captured["tool"] = tool
+        return None
+
+    server = FakeMCPServer(require_approval=async_policy if async_policy else sync_policy)
+    tool = MCPTool(name="branch_gap_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+
+    function_tool = MCPUtil.to_function_tool(
+        tool,
+        server,
+        convert_schemas_to_strict=False,
+        agent=agent,
+    )
+
+    assert callable(function_tool.needs_approval)
+
+    run_context = RunContextWrapper(context=None)
+    needs_approval = await function_tool.needs_approval(run_context, {}, "call_none_123")
+
+    assert needs_approval is True
+    assert captured["policy_ran"] is True
+    assert captured["tool"].name == "branch_gap_tool"
+
+
+@pytest.mark.asyncio
+async def test_to_function_tool_sync_bool_policy_result_is_honored():
+    """A sync callable policy returning False must keep the released run behavior."""
+
+    def require_approval(
+        _run_context: RunContextWrapper[Any],
+        _agent: Agent,
+        _tool: MCPToolType,
+    ) -> bool:
+        return False
+
+    server = FakeMCPServer(require_approval=require_approval)
+    tool = MCPTool(name="unguarded_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+
+    function_tool = MCPUtil.to_function_tool(
+        tool,
+        server,
+        convert_schemas_to_strict=False,
+        agent=agent,
+    )
+
+    assert callable(function_tool.needs_approval)
+
+    needs_approval = await function_tool.needs_approval(
+        RunContextWrapper(context=None),
+        {},
+        "call_false_123",
+    )
+
+    assert needs_approval is False
+
+
 @pytest.mark.asyncio
 async def test_mcp_tool_failure_error_function_agent_default():
     """Agent-level failure_error_function should handle MCP tool failures."""

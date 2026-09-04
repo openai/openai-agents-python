@@ -45,6 +45,7 @@ from ..logger import (
 from ..run_context import RunContextWrapper
 from ..tool import ToolErrorFunction
 from ..tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
+from ..util._approvals import evaluate_needs_approval_setting
 from ..util._types import MaybeAwaitable
 from . import _compat as mcp_compat
 from ._compat import (
@@ -843,10 +844,9 @@ class MCPServer(abc.ABC):
             async def _needs_approval(
                 run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
             ) -> bool:
-                result = policy(run_context, agent, tool)
-                if inspect.isawaitable(result):
-                    result = await result
-                return bool(result)
+                return await evaluate_needs_approval_setting(
+                    lambda: policy(run_context, agent, tool)
+                )
 
             return _needs_approval
 
