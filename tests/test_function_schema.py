@@ -1373,6 +1373,33 @@ def test_free_form_mapping_under_strict_schema_names_the_function():
     with pytest.raises(UserError, match="Function tag cannot use a strict JSON schema") as excinfo:
         function_schema(tag)
     assert "dict[str, Any]" in str(excinfo.value)
+    assert "strict_mode=False" in str(excinfo.value)
 
     relaxed = function_schema(tag, strict_json_schema=False)
     assert relaxed.params_json_schema["properties"]["meta"]["type"] == "object"
+
+
+@pytest.mark.parametrize(
+    ("declare", "expected"),
+    [
+        (lambda: function_tool(_kwargs_tool), "accepts `**options`"),
+        (lambda: function_tool(_mapping_tool), "Function _mapping_tool cannot use a strict"),
+    ],
+)
+def test_function_tool_decorator_reports_the_strict_mode_fix(declare, expected):
+    """The supported entry point is the decorator, whose option is strict_mode, not
+    strict_json_schema; both messages must point at the option the caller can actually set."""
+    with pytest.raises(UserError, match=expected) as excinfo:
+        declare()
+    assert "strict_mode=False" in str(excinfo.value)
+
+    assert function_tool(_kwargs_tool, strict_mode=False).strict_json_schema is False
+    assert function_tool(_mapping_tool, strict_mode=False).strict_json_schema is False
+
+
+def _kwargs_tool(**options: int) -> dict[str, int]:
+    return options
+
+
+def _mapping_tool(meta: dict[str, Any]) -> dict[str, Any]:
+    return meta

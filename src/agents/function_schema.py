@@ -533,7 +533,7 @@ def function_schema(
             raise UserError(
                 f"Function {func_name} cannot use a strict JSON schema: {exc} A parameter typed as"
                 " a free-form mapping such as dict[str, Any] has this effect; use a TypedDict or a"
-                " BaseModel, or set strict_json_schema=False."
+                " BaseModel, or use @function_tool(strict_mode=False) / strict_json_schema=False."
             ) from exc
 
     # 5. Return as a FuncSchema dataclass
