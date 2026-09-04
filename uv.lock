@@ -2614,6 +2614,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "requests" },
     { name = "typing-extensions" },
+    { name = "urllib3" },
     { name = "websockets" },
 ]
 
@@ -2750,6 +2751,7 @@ requires-dist = [
     { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.26.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
+    { name = "urllib3", specifier = ">=2.7.0,<3" },
     { name = "vercel", marker = "extra == 'vercel'", specifier = ">=0.5.6,<0.6" },
     { name = "websockets", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },

@@ -12,6 +12,10 @@ dependencies = [
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
+    # urllib3 is pulled in transitively via requests; pin a safe floor so
+    # installs cannot resolve to a version exposed to the disclosed CVEs
+    # (highest fix 2.7.0, GHSA-qccp-gfcp-xxvc cross-origin header leak).
+    "urllib3>=2.7.0, <3",
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
 ]
