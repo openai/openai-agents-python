@@ -65,7 +65,7 @@ _T = TypeVar("_T")
 # MySQL-family dialects require a bounded VARCHAR for indexed string columns.
 _MYSQL_SESSION_ID_MAX_LENGTH = 190
 _SESSION_ID_TYPE = String().with_variant(
-    String(_MYSQL_SESSION_ID_MAX_LENGTH),
+    String(_MYSQL_SESSION_ID_MAX_LENGTH, collation="utf8mb4_bin"),
     "mysql",
     "mariadb",
 )

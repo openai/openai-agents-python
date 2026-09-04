@@ -51,7 +51,10 @@ async def test_schema_create_all_compiles_for_mysql_family(dialect_url: str):
     try:
         session._metadata.create_all(engine)
         for table in tables:
-            assert table.c.session_id.type.compile(dialect=engine.dialect) == "VARCHAR(190)"
+            assert (
+                table.c.session_id.type.compile(dialect=engine.dialect)
+                == "VARCHAR(190) COLLATE utf8mb4_bin"
+            )
     finally:
         await session.engine.dispose()
 
@@ -249,6 +252,22 @@ async def test_session_isolation(agent: Agent):
     result = await Runner.run(agent, "What animal did I say I like?", session=session1)
     assert "cats" in result.final_output.lower()
     assert "dogs" not in result.final_output.lower()
+
+
+async def test_session_ids_are_case_sensitive():
+    """Session IDs that differ only by case retain separate histories."""
+    engine = create_async_engine(DB_URL)
+    upper = SQLAlchemySession("Foo", engine=engine, create_tables=True)
+    lower = SQLAlchemySession("foo", engine=engine, create_tables=True)
+
+    try:
+        await upper.add_items([{"role": "user", "content": "upper"}])
+        await lower.add_items([{"role": "user", "content": "lower"}])
+
+        assert await upper.get_items() == [{"role": "user", "content": "upper"}]
+        assert await lower.get_items() == [{"role": "user", "content": "lower"}]
+    finally:
+        await engine.dispose()
 
 
 async def test_get_items_with_limit(agent: Agent):
