@@ -632,6 +632,18 @@ class TestUnixLocalRmSymlinks:
         assert not (real_root / "via-link.txt").exists()
 
     @pytest.mark.asyncio
+    async def test_rm_validates_the_symlinked_root_alias_itself(self, tmp_path: Path) -> None:
+        """Naming the root through its alias must not be misread as removing the alias link."""
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        session = _RecordingUnixLocalSession(root_link)
+
+        assert session._rm_target_path(".") == real_root
+        assert session._rm_target_path(str(root_link)) == real_root
+
+    @pytest.mark.asyncio
     async def test_rm_as_user_checks_the_symlink_entry_and_keeps_its_target(
         self,
         tmp_path: Path,
