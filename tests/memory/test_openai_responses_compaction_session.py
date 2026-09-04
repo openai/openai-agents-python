@@ -166,6 +166,53 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.get_items.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_pop_item_invalidates_response_chain_state(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session.run_compaction({"response_id": "resp-old"})
+        await session.pop_item()
+
+        with pytest.raises(ValueError, match="previous_response_id compaction"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pop_item_noop_preserves_response_chain_state(self) -> None:
+        underlying = SimpleListSession(history=[])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        await session.run_compaction({"response_id": "resp-old"})
+        assert await session.pop_item() is None
+        await session.run_compaction({"force": True})
+
+        mock_client.responses.compact.assert_awaited_once_with(
+            model="gpt-4.1", previous_response_id="resp-old"
+        )
+
+    @pytest.mark.asyncio
     async def test_run_compaction_requires_response_id(self) -> None:
         mock_session = self.create_mock_session()
         session = OpenAIResponsesCompactionSession(

@@ -431,6 +431,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             popped = await self.underlying_session.pop_item()
             if popped:
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
                 self._compaction_candidate_items = None
                 self._session_items = None
             return popped
