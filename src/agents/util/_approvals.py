@@ -42,7 +42,13 @@ async def evaluate_needs_approval_setting(
         maybe_result = needs_approval_setting(*args)
         if inspect.isawaitable(maybe_result):
             maybe_result = await maybe_result
-        return bool(maybe_result)
+        if not isinstance(maybe_result, bool):
+            # The predicate is declared to return a bool, so anything else means it did not
+            # answer the approval question. A branch that falls through returns None, and
+            # coercing that to False would run a guarded tool with no approval. Fail closed,
+            # matching the unparseable-arguments path in #3867.
+            return True
+        return maybe_result
     if strict:
         raise UserError(
             f"Invalid needs_approval value: expected a bool or callable, "

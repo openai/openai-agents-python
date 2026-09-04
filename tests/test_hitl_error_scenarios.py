@@ -962,6 +962,83 @@ async def test_callable_function_approval_fails_closed_for_invalid_arguments(
     assert tool_inputs == []
 
 
+@pytest.mark.parametrize(
+    "verdict", [None, "", 0, [], {}], ids=["none", "empty-str", "zero", "empty-list", "empty-dict"]
+)
+@pytest.mark.asyncio
+async def test_callable_function_approval_fails_closed_for_non_bool_verdict(
+    verdict: Any,
+) -> None:
+    """A predicate that does not answer with a bool must not let a guarded tool run.
+
+    The declared return type is bool, so a branch that falls through and returns None is out
+    of contract. Coercing it with bool() would silently mean "no approval needed", which is
+    the same unanswerable-question shape that #3867 made fail closed.
+    """
+    tool_inputs: list[str] = []
+
+    async def needs_approval(_ctx: Any, _params: dict[str, Any], _call_id: str) -> Any:
+        return verdict
+
+    async def invoke_tool(_ctx: Any, raw_arguments: str) -> str:
+        tool_inputs.append(raw_arguments)
+        return "sent"
+
+    tool = FunctionTool(
+        name="send_email",
+        description="Send an email.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+        needs_approval=needs_approval,
+    )
+    model, agent = make_model_and_agent(tools=[tool])
+    model.enqueue([make_function_tool_call(tool.name, arguments="{}", call_id="call-non-bool")])
+
+    result = await Runner.run(agent, "send an email")
+
+    assert len(result.interruptions) == 1
+    assert result.interruptions[0].tool_name == tool.name
+    assert tool_inputs == []
+
+
+@pytest.mark.parametrize("verdict", [True, False], ids=["true", "false"])
+@pytest.mark.asyncio
+async def test_callable_function_approval_honors_real_bool_verdicts(verdict: bool) -> None:
+    """Genuine bool answers keep their existing meaning."""
+    tool_inputs: list[str] = []
+
+    async def needs_approval(_ctx: Any, _params: dict[str, Any], _call_id: str) -> bool:
+        return verdict
+
+    async def invoke_tool(_ctx: Any, raw_arguments: str) -> str:
+        tool_inputs.append(raw_arguments)
+        return "sent"
+
+    tool = FunctionTool(
+        name="send_email",
+        description="Send an email.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+        needs_approval=needs_approval,
+    )
+    model, agent = make_model_and_agent(tools=[tool])
+    model.extend(
+        [
+            [make_function_tool_call(tool.name, arguments="{}", call_id="call-bool")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, "send an email")
+
+    if verdict:
+        assert len(result.interruptions) == 1
+        assert tool_inputs == []
+    else:
+        assert result.interruptions == []
+        assert tool_inputs == ["{}"]
+
+
 @pytest.mark.asyncio
 async def test_callable_function_approval_receives_valid_object_arguments() -> None:
     """Valid object arguments should preserve callable approval behavior."""
