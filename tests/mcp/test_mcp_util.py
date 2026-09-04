@@ -1605,9 +1605,9 @@ async def test_to_function_tool_async_callable_policy_is_awaited():
     assert needs_approval is True
 
 
-@pytest.mark.parametrize("async_policy", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
 @pytest.mark.asyncio
-async def test_to_function_tool_non_bool_policy_result_requires_approval(async_policy: bool):
+async def test_to_function_tool_non_bool_policy_result_requires_approval(is_async: bool):
     """A require_approval policy that does not return a bool must require approval."""
 
     captured: dict[str, Any] = {}
@@ -1631,7 +1631,7 @@ async def test_to_function_tool_non_bool_policy_result_requires_approval(async_p
         captured["tool"] = tool
         return None
 
-    server = FakeMCPServer(require_approval=async_policy if async_policy else sync_policy)
+    server = FakeMCPServer(require_approval=async_policy if is_async else sync_policy)
     tool = MCPTool(name="branch_gap_tool", inputSchema={})
     agent = Agent(name="test-agent")
 
