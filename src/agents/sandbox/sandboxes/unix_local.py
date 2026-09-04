@@ -134,7 +134,8 @@ def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInf
         ti.size = os.stat(root / ti.name).st_size
         return ti
     if ti.issym() and PurePosixPath(ti.linkname).is_absolute():
-        normalized_target = Path(os.path.normpath(ti.linkname))
+        # normpath keeps a leading "//"; Linux resolves it as "/", so collapse it first.
+        normalized_target = Path("/" + os.path.normpath(ti.linkname).lstrip("/"))
         link_dir = PurePosixPath(ti.name).parent
         for candidate_root in (root, root.resolve(strict=False)):
             try:
