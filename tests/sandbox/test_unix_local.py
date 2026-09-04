@@ -669,17 +669,22 @@ class TestUnixLocalLs:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("root_spelling", [".", "", "{alias}", "{alias}/"])
+    @pytest.mark.parametrize("configured_root", ["{alias}", "{dummy}/../ws-link"])
     async def test_ls_lists_a_symlinked_workspace_root(
         self,
         tmp_path: Path,
         root_spelling: str,
+        configured_root: str,
     ) -> None:
         real_root = tmp_path / "ws"
         real_root.mkdir()
         root_link = tmp_path / "ws-link"
         root_link.symlink_to(real_root)
+        (tmp_path / "dummy").mkdir()
         (real_root / "plain.txt").write_text("x", encoding="utf-8")
-        session = _RecordingUnixLocalSession(root_link)
+        session = _RecordingUnixLocalSession(
+            Path(configured_root.format(alias=root_link, dummy=tmp_path / "dummy"))
+        )
 
         entries = await session.ls(root_spelling.format(alias=root_link))
 
