@@ -835,7 +835,7 @@ class WebSearchTool:
     """
 
     image_settings: WebSearchToolImageSettings | None = None
-    """Settings for image results when `search_content_types` includes `"image"`."""
+    """Settings for image results; requires `search_content_types` to include `"image"`."""
 
     if TYPE_CHECKING:
 
@@ -853,6 +853,12 @@ class WebSearchTool:
         if isinstance(self.filters, dict):
             self.filters = coerce_pydantic_config(
                 self.filters, WebSearchToolFilters, parameter_name="web search filters"
+            )
+        if self.image_settings is not None and (
+            self.search_content_types is None or "image" not in self.search_content_types
+        ):
+            raise UserError(
+                'WebSearchTool image_settings requires search_content_types to include "image".'
             )
 
     @property

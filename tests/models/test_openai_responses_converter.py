@@ -23,7 +23,7 @@ We test the following aspects:
   one `ComputerTool`.
 """
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from openai import omit
@@ -515,6 +515,19 @@ def test_convert_tools_includes_web_search_content_types_and_image_settings() ->
             "image_settings": {"max_results": 3, "caption": True},
         }
     ]
+
+
+@pytest.mark.parametrize("search_content_types", [None, ["text"]])
+def test_web_search_tool_image_settings_require_image_results(
+    search_content_types: list[Literal["text", "image"]] | None,
+) -> None:
+    # Image settings without image results would send settings for results the
+    # request never asks for, so the constructor refuses the pair.
+    with pytest.raises(UserError, match='search_content_types to include "image"'):
+        WebSearchTool(
+            search_content_types=search_content_types,
+            image_settings={"max_results": 3},
+        )
 
 
 def test_convert_tools_text_only_content_types_adds_no_include() -> None:
