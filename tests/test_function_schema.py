@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 import pytest
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.json_schema import PydanticJsonSchemaWarning
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, Unpack
 
 from agents import RunContextWrapper, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
@@ -536,6 +536,40 @@ def test_var_keyword_dict_annotation():
     # A flat mapping of ints no longer matches the declared value type.
     with pytest.raises(ValidationError):
         fs.params_pydantic_model.model_validate({"kwargs": {"a": 1, "b": 2}})
+
+
+class _PEP692Options(TypedDict):
+    count: int
+    label: str
+
+
+def test_var_keyword_unpack_typeddict_annotation():
+    def func(**kwargs: Unpack[_PEP692Options]):
+        return kwargs
+
+    fs = function_schema(func, use_docstring_info=False)
+
+    kwargs_schema = fs.params_json_schema["properties"]["kwargs"]
+    options_schema = fs.params_json_schema["$defs"]["_PEP692Options"]
+    assert kwargs_schema == {"$ref": "#/$defs/_PEP692Options"}
+    assert options_schema["required"] == ["count", "label"]
+    assert options_schema["properties"]["count"]["type"] == "integer"
+    assert options_schema["properties"]["label"]["type"] == "string"
+
+    parsed = fs.params_pydantic_model.model_validate({"kwargs": {"count": 2, "label": "ready"}})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == {"count": 2, "label": "ready"}
+
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"kwargs": {"count": 2}})
+
+
+def test_var_keyword_unpack_requires_typeddict():
+    def func(**kwargs: Unpack[tuple[int, ...]]):  # type: ignore[misc]
+        return kwargs
+
+    with pytest.raises(UserError, match="Unpack.*TypedDict"):
+        function_schema(func, use_docstring_info=False)
 
 
 def test_var_keyword_scalar_annotation():

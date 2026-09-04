@@ -4,9 +4,12 @@ import contextlib
 import inspect
 import logging
 import re
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
+
+import typing_extensions
 
 # griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
@@ -462,12 +465,20 @@ def function_schema(
             )
 
         elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling: a ``**kwargs: X`` annotation applies to each keyword *value*
-            # (PEP 484), so the collected container is always ``dict[str, X]``. Preserve the full
-            # annotation as the value type -- mirroring the variadic-positional handling above,
-            # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
-            # set to ``Any`` above, yielding ``dict[str, Any]``.
-            ann = dict[str, ann]  # type: ignore
+            # ``**kwargs: X`` normally annotates each keyword value (PEP 484), so the collected
+            # container is ``dict[str, X]``. PEP 692 is the exception: ``Unpack[TypedDict]``
+            # describes the collected keyword mapping itself, including its named/required keys.
+            unpack_origins = {typing_extensions.Unpack, getattr(typing, "Unpack", None)}
+            if get_origin(ann) in unpack_origins:
+                unpack_args = get_args(ann)
+                if len(unpack_args) != 1 or not typing_extensions.is_typeddict(unpack_args[0]):
+                    raise UserError(
+                        f"Variadic parameter `**{name}` in function {func.__name__} is annotated"
+                        f" with unsupported `{ann}`. `Unpack` on **kwargs must contain a TypedDict."
+                    )
+                ann = unpack_args[0]
+            else:
+                ann = dict[str, ann]  # type: ignore
 
             fields[name] = (
                 ann,
