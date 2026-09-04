@@ -1382,7 +1382,7 @@ def test_free_form_mapping_under_strict_schema_names_the_function():
 @pytest.mark.parametrize(
     ("declare", "expected"),
     [
-        (lambda: function_tool(_kwargs_tool), "accepts `**options`"),
+        (lambda: function_tool(_kwargs_tool), r"accepts `\*\*options`"),
         (lambda: function_tool(_mapping_tool), "Function _mapping_tool cannot use a strict"),
     ],
 )
