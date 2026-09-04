@@ -210,6 +210,10 @@ def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
         rel.type = tarfile.SYMTYPE
         rel.linkname = "a.txt"
         tar.addfile(rel)
+        double_slash = tarfile.TarInfo("workspace/double_slash")
+        double_slash.type = tarfile.SYMTYPE
+        double_slash.linkname = "//workspace/a.txt"
+        tar.addfile(double_slash)
         # Longer than the 100-byte ustar field, so tarfile records it in a PAX linkpath.
         long_target = "/workspace/" + "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
         long_link = tarfile.TarInfo("workspace/long_link")
@@ -242,6 +246,7 @@ def test_strip_tar_member_prefix_rewrites_members_hydrate_refuses() -> None:
         assert members["sub/abs_up"].issym()
         assert members["sub/abs_up"].linkname == "../a.txt"
         assert members["rel"].linkname == "a.txt"
+        assert members["double_slash"].linkname == "a.txt"
         long_link = members["long_link"]
         assert long_link.linkname == "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
         assert "linkpath" not in long_link.pax_headers or (

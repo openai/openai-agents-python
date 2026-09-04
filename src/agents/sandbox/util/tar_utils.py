@@ -260,7 +260,9 @@ def _relative_symlink_target(linkname: str, *, link_name: str, root: PurePosixPa
     target = PurePosixPath(linkname)
     if not target.is_absolute():
         return linkname
-    normalized = PurePosixPath(posixpath.normpath(linkname))
+    # normpath keeps exactly two leading slashes (POSIX leaves "//" implementation-defined);
+    # Linux resolves them as "/", so collapse them before the containment check.
+    normalized = PurePosixPath("/" + posixpath.normpath(linkname).lstrip("/"))
     try:
         target_rel = normalized.relative_to(root)
     except ValueError:
