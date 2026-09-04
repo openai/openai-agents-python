@@ -1350,3 +1350,14 @@ def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
     args, kwargs_dict = fs.to_call_args(parsed)
 
     assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
+
+
+def test_model_config_parameter_raises_a_clear_user_error():
+    """Pydantic treats a ``model_config`` kwarg to create_model() as the configuration, which
+    surfaced as ``TypeError: 'FieldInfo' object is not iterable``. Name the real problem."""
+
+    def configure(model_config: int) -> int:
+        return model_config
+
+    with pytest.raises(UserError, match="`model_config` in function configure is reserved"):
+        function_schema(configure)

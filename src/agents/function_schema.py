@@ -511,6 +511,13 @@ def function_schema(
                 )
 
     # 3. Dynamically build a Pydantic model
+    if "model_config" in fields:
+        # Pydantic reads a ``model_config`` keyword as the model's configuration, not as a
+        # field, so create_model() fails deep inside Pydantic with an unhelpful TypeError.
+        raise UserError(
+            f"Parameter `model_config` in function {func_name} is reserved by Pydantic and cannot"
+            " be a tool argument. Rename the parameter."
+        )
     dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
 
     # 4. Build JSON schema from that model
