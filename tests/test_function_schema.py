@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 import pytest
 from pydantic import BaseModel, Field, ValidationError
 from pydantic.json_schema import PydanticJsonSchemaWarning
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, Unpack
 
 from agents import RunContextWrapper, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
@@ -460,6 +460,29 @@ def test_var_positional_tuple_annotation():
 
     with pytest.raises(ValidationError):
         fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
+
+
+def test_var_positional_unpack_homogeneous_tuple_annotation():
+    def func(*args: Unpack[tuple[int, ...]]) -> int:
+        return sum(args)
+
+    fs = function_schema(func, use_docstring_info=False)
+
+    args_schema = fs.params_json_schema["properties"]["args"]
+    assert args_schema["type"] == "array"
+    assert args_schema["items"]["type"] == "integer"
+
+    parsed = fs.params_pydantic_model.model_validate({"args": [1, 2, 3]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == 6
+
+
+def test_var_positional_unpack_fixed_tuple_annotation_is_rejected():
+    def func(*args: Unpack[tuple[int, str]]) -> int:
+        return len(args)
+
+    with pytest.raises(UserError, match=r"Unpack\[tuple\[T, \.\.\.\]\]"):
+        function_schema(func, use_docstring_info=False)
 
 
 def _var_positional_fixed_pair(*args: tuple[int, str]) -> int:

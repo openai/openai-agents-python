@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
+from typing_extensions import Unpack
 
 from .exceptions import ModelBehaviorError, UserError
 from .run_context import RunContextWrapper
@@ -436,7 +437,23 @@ def function_schema(
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
-            if get_origin(ann) is tuple:
+            if get_origin(ann) is Unpack:
+                # PEP 646 ``*args: Unpack[tuple[T, ...]]`` means each positional argument
+                # is ``T``. Unwrap it before handing the collected array to Pydantic; otherwise
+                # ``list[Unpack[...]]`` fails schema generation.
+                unpack_args = get_args(ann)
+                unpacked = unpack_args[0] if len(unpack_args) == 1 else None
+                unpacked_tuple_args = get_args(unpacked) if get_origin(unpacked) is tuple else ()
+                if len(unpacked_tuple_args) == 2 and unpacked_tuple_args[1] is Ellipsis:
+                    ann = list[unpacked_tuple_args[0]]  # type: ignore
+                else:
+                    raise UserError(
+                        f"Variadic parameter `*{name}` in function {func.__name__} uses the"
+                        f" unsupported `Unpack` annotation `{ann}`. Strict tool schemas support"
+                        " homogeneous variadic arguments, so use *args: T or"
+                        " Unpack[tuple[T, ...]] instead."
+                    )
+            elif get_origin(ann) is tuple:
                 # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
