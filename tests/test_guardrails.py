@@ -84,6 +84,66 @@ async def test_sync_input_guardrail():
     assert result.output.output_info == "test"
 
 
+@pytest.mark.asyncio
+async def test_input_guardrail_rejects_non_bool_tripwire() -> None:
+    guardrail = InputGuardrail(
+        guardrail_function=lambda ctx, agent, input: GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=None,  # type: ignore[arg-type]
+        ),
+        name="policy",
+    )
+
+    with pytest.raises(
+        UserError, match="Guardrail policy must return a boolean for tripwire_triggered"
+    ):
+        await guardrail.run(
+            agent=Agent(name="test"), input="test", context=RunContextWrapper(context=None)
+        )
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_rejects_non_bool_tripwire() -> None:
+    async def invalid_output_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=None,  # type: ignore[arg-type]
+        )
+
+    guardrail = OutputGuardrail(guardrail_function=invalid_output_guardrail, name="policy")
+
+    with pytest.raises(
+        UserError, match="Guardrail policy must return a boolean for tripwire_triggered"
+    ):
+        await guardrail.run(
+            context=RunContextWrapper(context=None),
+            agent=Agent(name="test"),
+            agent_output="test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_blocking_input_guardrail_non_bool_tripwire_stops_before_model() -> None:
+    @input_guardrail(run_in_parallel=False)
+    async def invalid_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=None,  # type: ignore[arg-type]
+        )
+
+    model = ScriptedModel([[get_text_message("model-ran")]])
+    agent = Agent(name="guardrail-repro", model=model, input_guardrails=[invalid_guardrail])
+
+    with pytest.raises(UserError, match="must return a boolean for tripwire_triggered"):
+        await Runner.run(agent, "test")
+
+    assert len(model.calls) == 0
+
+
 def get_async_input_guardrail(triggers: bool, output_info: Any | None = None):
     async def async_guardrail(
         context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]

@@ -68,6 +68,11 @@ class OutputGuardrailResult:
     """The output of the guardrail function."""
 
 
+def _validate_tripwire_triggered(output: GuardrailFunctionOutput, guardrail_name: str) -> None:
+    if not isinstance(output.tripwire_triggered, bool):
+        raise UserError(f"Guardrail {guardrail_name} must return a boolean for tripwire_triggered.")
+
+
 @dataclass
 class InputGuardrail(Generic[TContext]):
     """Input guardrails are checks that run either in parallel with the agent or before it starts.
@@ -119,15 +124,9 @@ class InputGuardrail(Generic[TContext]):
 
         output = self.guardrail_function(context, agent, input)
         if inspect.isawaitable(output):
-            return InputGuardrailResult(
-                guardrail=self,
-                output=await output,
-            )
-
-        return InputGuardrailResult(
-            guardrail=self,
-            output=output,
-        )
+            output = await output
+        _validate_tripwire_triggered(output, self.get_name())
+        return InputGuardrailResult(guardrail=self, output=output)
 
 
 @dataclass
@@ -170,13 +169,8 @@ class OutputGuardrail(Generic[TContext]):
 
         output = self.guardrail_function(context, agent, agent_output)
         if inspect.isawaitable(output):
-            return OutputGuardrailResult(
-                guardrail=self,
-                agent=agent,
-                agent_output=agent_output,
-                output=await output,
-            )
-
+            output = await output
+        _validate_tripwire_triggered(output, self.get_name())
         return OutputGuardrailResult(
             guardrail=self,
             agent=agent,
