@@ -638,7 +638,9 @@ class TestUnixLocalRmSymlinks:
         real_root.mkdir()
         root_link = tmp_path / "ws-link"
         root_link.symlink_to(real_root)
-        session = _RecordingUnixLocalSession(root_link)
+        (tmp_path / "dummy").mkdir()
+        # A noncanonical spelling of the root alias must be recognized as the root too.
+        session = _RecordingUnixLocalSession(tmp_path / "dummy" / ".." / "ws-link")
 
         assert session._rm_target_path(".") == real_root
         assert session._rm_target_path(str(root_link)) == real_root
