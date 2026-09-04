@@ -668,6 +668,24 @@ class TestUnixLocalLs:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("root_spelling", [".", "", "{alias}", "{alias}/"])
+    async def test_ls_lists_a_symlinked_workspace_root(
+        self,
+        tmp_path: Path,
+        root_spelling: str,
+    ) -> None:
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        (real_root / "plain.txt").write_text("x", encoding="utf-8")
+        session = _RecordingUnixLocalSession(root_link)
+
+        entries = await session.ls(root_spelling.format(alias=root_link))
+
+        assert [Path(entry.path).name for entry in entries] == ["plain.txt"]
+
+    @pytest.mark.asyncio
     async def test_ls_of_a_directory_lists_entries_with_kinds(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         (workspace / "sub").mkdir(parents=True)

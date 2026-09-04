@@ -442,7 +442,13 @@ class WorkspacePathPolicy:
         else:
             absolute = self._absolute_workspace_posix_path(coerce_posix_path(original))
             absolute_path = Path(str(absolute))
-        if follow_leaf_symlink or absolute_path.name in ("", ".", ".."):
+        # The workspace root itself is always addressed through its resolved form, so a
+        # symlinked root alias stays authorized; only entries below it keep their leaf.
+        if (
+            follow_leaf_symlink
+            or absolute_path.name in ("", ".", "..")
+            or absolute_path == self._root
+        ):
             resolved = absolute_path.resolve(strict=False)
         else:
             resolved = absolute_path.parent.resolve(strict=False) / absolute_path.name
