@@ -723,6 +723,70 @@ async def test_default_function_tool_error_trace_respects_sensitive_data_setting
     assert "secret-token-123" not in str(error)
 
 
+def _make_approval_function_tool() -> FunctionTool:
+    async def _approval_tool() -> str:
+        return "ok"
+
+    return function_tool(_approval_tool, name_override="approval_tool", needs_approval=True)
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_function_span_output_excludes_internal_result_object():
+    agent = Agent(
+        name="test",
+        instructions="system-prompt-abc",
+        tools=[_make_approval_function_tool()],
+    )
+    response = ModelResponse(
+        output=[get_function_tool_call("approval_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    output = function_spans[0]["span_data"]["output"]
+    assert output is None
+    assert "system-prompt-abc" not in str(function_spans[0])
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_function_span_output_respects_sensitive_data_setting():
+    agent = Agent(name="test", tools=[_make_approval_function_tool()])
+    tool_call = get_function_tool_call("approval_tool", "{}", call_id="1")
+    response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(None)
+    reject_tool_call(
+        context_wrapper,
+        agent,
+        tool_call,
+        tool_name="approval_tool",
+        rejection_message="secret-denial-456",
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    assert function_spans[0]["span_data"]["output"] is None
+
+
 @pytest.mark.asyncio
 async def test_multiple_tool_calls_still_raise_when_sibling_cancelled():
     async def _ok_tool() -> str:
