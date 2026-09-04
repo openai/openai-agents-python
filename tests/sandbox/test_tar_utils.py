@@ -210,6 +210,12 @@ def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
         rel.type = tarfile.SYMTYPE
         rel.linkname = "a.txt"
         tar.addfile(rel)
+        # Longer than the 100-byte ustar field, so tarfile records it in a PAX linkpath.
+        long_target = "/workspace/" + "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
+        long_link = tarfile.TarInfo("workspace/long_link")
+        long_link.type = tarfile.SYMTYPE
+        long_link.linkname = long_target
+        tar.addfile(long_link)
         if external_symlink:
             outside = tarfile.TarInfo("workspace/outside")
             outside.type = tarfile.SYMTYPE
@@ -236,6 +242,11 @@ def test_strip_tar_member_prefix_rewrites_members_hydrate_refuses() -> None:
         assert members["sub/abs_up"].issym()
         assert members["sub/abs_up"].linkname == "../a.txt"
         assert members["rel"].linkname == "a.txt"
+        long_link = members["long_link"]
+        assert long_link.linkname == "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
+        assert "linkpath" not in long_link.pax_headers or (
+            long_link.pax_headers["linkpath"] == long_link.linkname
+        )
         # External absolute targets are left for hydrate's policy to decide.
         assert members["outside"].linkname == "/usr/bin/python3"
 

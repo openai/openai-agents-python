@@ -185,6 +185,9 @@ def strip_tar_member_prefix(
                             link_name=stripped_name,
                             root=symlink_root,
                         )
+                        # A long source target lives in a PAX "linkpath" record that would
+                        # otherwise override the rewritten linkname; tobuf() re-derives it.
+                        rewritten.pax_headers.pop("linkpath", None)
                     if not rewritten.isreg():
                         dst.addfile(rewritten)
                         continue
