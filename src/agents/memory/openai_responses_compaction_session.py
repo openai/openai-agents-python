@@ -433,6 +433,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
             return popped
 
     async def clear_session(self) -> None:

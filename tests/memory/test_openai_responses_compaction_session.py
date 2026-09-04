@@ -166,6 +166,53 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.get_items.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_pop_item_invalidates_retained_response_chain_after_success(self) -> None:
+        item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+        await session.run_compaction({"response_id": "resp-old"})
+        assert await session.pop_item() == item
+        with pytest.raises(ValueError, match="previous_response_id compaction"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pop_item_noop_preserves_retained_response_chain(self) -> None:
+        underlying = SimpleListSession(history=[])
+        mock_response = SimpleNamespace(output=[], usage=None)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_response)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+        await session.run_compaction({"response_id": "resp-old"})
+        assert await session.pop_item() is None
+        await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-old"
+
+    @pytest.mark.asyncio
+    async def test_pop_item_failure_preserves_retained_response_chain(self) -> None:
+        underlying = self.create_mock_session()
+        underlying.pop_item.side_effect = RuntimeError("pop failed")
+        session = OpenAIResponsesCompactionSession(
+            session_id="test", underlying_session=underlying, compaction_mode="previous_response_id"
+        )
+        await session.run_compaction({"response_id": "resp-old"})
+        with pytest.raises(RuntimeError, match="pop failed"):
+            await session.pop_item()
+        assert session._response_id == "resp-old"
+
+    @pytest.mark.asyncio
     async def test_run_compaction_requires_response_id(self) -> None:
         mock_session = self.create_mock_session()
         session = OpenAIResponsesCompactionSession(
