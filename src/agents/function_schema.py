@@ -516,7 +516,25 @@ def function_schema(
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
     if strict_json_schema:
-        json_schema = ensure_strict_json_schema(json_schema)
+        var_keyword = next(
+            (name for name, param in filtered_params if param.kind == param.VAR_KEYWORD), None
+        )
+        if var_keyword is not None:
+            # A strict schema cannot describe **kwargs (it needs additionalProperties), so say
+            # so up front instead of surfacing the generic strict-schema error from deep inside.
+            raise UserError(
+                f"Function {func_name} accepts `**{var_keyword}`, which a strict JSON schema"
+                " cannot describe. Use @function_tool(strict_mode=False) or"
+                f" strict_json_schema=False, or replace `**{var_keyword}` with explicit parameters."
+            )
+        try:
+            json_schema = ensure_strict_json_schema(json_schema)
+        except UserError as exc:
+            raise UserError(
+                f"Function {func_name} cannot use a strict JSON schema: {exc} A parameter typed as"
+                " a free-form mapping such as dict[str, Any] has this effect; use a TypedDict or a"
+                " BaseModel, or set strict_json_schema=False."
+            ) from exc
 
     # 5. Return as a FuncSchema dataclass
     return FuncSchema(

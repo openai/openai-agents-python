@@ -1350,3 +1350,29 @@ def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
     args, kwargs_dict = fs.to_call_args(parsed)
 
     assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
+
+
+def test_var_keyword_under_strict_schema_names_the_parameter_and_the_fix():
+    def extra(**options: int) -> dict[str, int]:
+        return options
+
+    with pytest.raises(UserError, match=r"Function extra accepts `\*\*options`") as excinfo:
+        function_schema(extra)
+    assert "strict_mode=False" in str(excinfo.value)
+
+    relaxed = function_schema(extra, strict_json_schema=False)
+    assert relaxed.params_json_schema["properties"]["options"]["additionalProperties"] == {
+        "type": "integer"
+    }
+
+
+def test_free_form_mapping_under_strict_schema_names_the_function():
+    def tag(meta: dict[str, Any]) -> dict[str, Any]:
+        return meta
+
+    with pytest.raises(UserError, match="Function tag cannot use a strict JSON schema") as excinfo:
+        function_schema(tag)
+    assert "dict[str, Any]" in str(excinfo.value)
+
+    relaxed = function_schema(tag, strict_json_schema=False)
+    assert relaxed.params_json_schema["properties"]["meta"]["type"] == "object"
