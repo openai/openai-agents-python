@@ -795,6 +795,16 @@ class FileSearchTool:
         return "file_search"
 
 
+class WebSearchToolImageSettings(TypedDict, total=False):
+    """Image result settings for `WebSearchTool` when `search_content_types` includes `"image"`."""
+
+    max_results: int
+    """The number of image results to return."""
+
+    caption: bool
+    """Whether to include a short caption with each image when one is available."""
+
+
 @dataclass
 class WebSearchTool:
     """A hosted tool that lets the LLM search the web. Currently only supported with OpenAI models,
@@ -817,6 +827,16 @@ class WebSearchTool:
     indexed-only behavior where supported.
     """
 
+    search_content_types: list[Literal["text", "image"]] | None = None
+    """The kinds of results the search may return.
+
+    When omitted, the API default (text only) is used. Include `"image"` to
+    receive image results; pair it with `image_settings`.
+    """
+
+    image_settings: WebSearchToolImageSettings | None = None
+    """Settings for image results; requires `search_content_types` to include `"image"`."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -825,12 +845,20 @@ class WebSearchTool:
             filters: WebSearchToolFilters | dict[str, Any] | None = None,
             search_context_size: Literal["low", "medium", "high"] = "medium",
             external_web_access: bool | None = None,
+            search_content_types: list[Literal["text", "image"]] | None = None,
+            image_settings: WebSearchToolImageSettings | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
         if isinstance(self.filters, dict):
             self.filters = coerce_pydantic_config(
                 self.filters, WebSearchToolFilters, parameter_name="web search filters"
+            )
+        if self.image_settings is not None and (
+            self.search_content_types is None or "image" not in self.search_content_types
+        ):
+            raise UserError(
+                'WebSearchTool image_settings requires search_content_types to include "image".'
             )
 
     @property

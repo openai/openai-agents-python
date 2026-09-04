@@ -3892,6 +3892,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "module": "agents.voice",
             "names": ["id"],
         },
+        {
+            "class_name": "WebSearchToolImageSettings",
+            "module": "agents",
+            "names": ["max_results", "caption"],
+        },
     )
     for module_name in expected_modules:
         module = importlib.import_module(module_name)
