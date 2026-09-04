@@ -3210,6 +3210,41 @@ class TestToolCallExecution:
         assert tool_call_event.call_id not in session._pending_tool_calls
 
     @pytest.mark.asyncio
+    async def test_callable_function_approval_fails_closed_for_non_bool_result(
+        self, mock_model
+    ) -> None:
+        tool_inputs: list[str] = []
+
+        async def needs_approval(_ctx: Any, _params: dict[str, Any], _call_id: str) -> Any:
+            return None
+
+        async def invoke_tool(_ctx: ToolContext[Any], raw_arguments: str) -> str:
+            tool_inputs.append(raw_arguments)
+            return "sent"
+
+        tool = FunctionTool(
+            name="send_email",
+            description="Send an email.",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_tool,
+            needs_approval=needs_approval,
+        )
+        agent = RealtimeAgent(name="agent", tools=[tool])
+        session = RealtimeSession(mock_model, agent, None, run_config={"async_tool_calls": False})
+        tool_call_event = RealtimeModelToolCallEvent(
+            name=tool.name,
+            call_id="call-nonbool",
+            arguments='{"subject": "refund"}',
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert tool_call_event.call_id in session._pending_tool_calls
+        assert tool_inputs == []
+        approval_event = await session._event_queue.get()
+        assert isinstance(approval_event, RealtimeToolApprovalRequired)
+
+    @pytest.mark.asyncio
     async def test_tool_input_guardrail_rejects_before_realtime_function_execution(
         self, mock_model
     ):

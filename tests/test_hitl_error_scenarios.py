@@ -1000,6 +1000,87 @@ async def test_callable_function_approval_receives_valid_object_arguments() -> N
     assert tool_inputs == [arguments]
 
 
+@pytest.mark.parametrize(
+    "predicate_result",
+    [
+        None,
+        "",
+        0,
+        "needs review",
+    ],
+)
+@pytest.mark.asyncio
+async def test_callable_function_approval_fails_closed_for_non_bool_result(
+    predicate_result: Any,
+) -> None:
+    """A predicate that does not return a bool has not answered and must require approval."""
+    tool_inputs: list[str] = []
+
+    async def needs_approval(_ctx: Any, _params: dict[str, Any], _call_id: str) -> Any:
+        return predicate_result
+
+    async def invoke_tool(_ctx: Any, raw_arguments: str) -> str:
+        tool_inputs.append(raw_arguments)
+        return "sent"
+
+    tool = FunctionTool(
+        name="send_email",
+        description="Send an email.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+        needs_approval=needs_approval,
+    )
+    model, agent = make_model_and_agent(tools=[tool])
+    model.enqueue(
+        [
+            make_function_tool_call(
+                tool.name, arguments='{"subject": "refund"}', call_id="call-nonbool"
+            )
+        ]
+    )
+
+    result = await Runner.run(agent, "send an email")
+
+    assert len(result.interruptions) == 1
+    assert result.interruptions[0].tool_name == tool.name
+    assert tool_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_sync_callable_function_approval_fails_closed_for_none_result() -> None:
+    """The non-bool fail-closed rule applies to non-awaitable predicate results too."""
+    tool_inputs: list[str] = []
+
+    def needs_approval(_ctx: Any, _params: dict[str, Any], _call_id: str) -> Any:
+        return None
+
+    async def invoke_tool(_ctx: Any, raw_arguments: str) -> str:
+        tool_inputs.append(raw_arguments)
+        return "sent"
+
+    tool = FunctionTool(
+        name="send_email",
+        description="Send an email.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke_tool,
+        needs_approval=needs_approval,
+    )
+    model, agent = make_model_and_agent(tools=[tool])
+    model.enqueue(
+        [
+            make_function_tool_call(
+                tool.name, arguments='{"subject": "refund"}', call_id="call-nonbool"
+            )
+        ]
+    )
+
+    result = await Runner.run(agent, "send an email")
+
+    assert len(result.interruptions) == 1
+    assert result.interruptions[0].tool_name == tool.name
+    assert tool_inputs == []
+
+
 @pytest.mark.asyncio
 async def test_resume_invalid_needs_approval_raises() -> None:
     """Resume path should surface invalid needs_approval configuration errors."""

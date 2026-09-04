@@ -42,7 +42,11 @@ async def evaluate_needs_approval_setting(
         maybe_result = needs_approval_setting(*args)
         if inspect.isawaitable(maybe_result):
             maybe_result = await maybe_result
-        return bool(maybe_result)
+        # The predicate contract is a bool, so a non-bool result has not answered the
+        # approval question and must fail closed like the other unanswerable cases.
+        if not isinstance(maybe_result, bool):
+            return True
+        return maybe_result
     if strict:
         raise UserError(
             f"Invalid needs_approval value: expected a bool or callable, "
