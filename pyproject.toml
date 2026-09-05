@@ -12,13 +12,12 @@ dependencies = [
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
-    # urllib3 is pulled in transitively via requests; pin a safe floor so
-    # installs cannot resolve to a version exposed to the disclosed CVEs
-    # (highest fix 2.7.0, GHSA-qccp-gfcp-xxvc cross-origin header leak).
-    "urllib3>=2.7.0, <3",
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
     # Security floors for transitive runtime dependencies.
+    # cryptography enters the base graph via mcp -> pyjwt[crypto] (unpinned),
+    # so pin a safe floor (46.0.7 fixes the 9.8-critical GHSA-p423-j2cm-9vmq).
+    "cryptography>=46.0.7,<51",
     "httpx2>=2.12.0",
     "pyjwt>=2.13.0",
     "python-multipart>=0.0.31",
