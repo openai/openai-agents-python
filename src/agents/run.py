@@ -136,7 +136,8 @@ from .run_internal.session_persistence import (
     _session_get_items,
     admit_pending_input,
     commit_server_pending_input,
-    deferred_interrupted_session_prefix,
+    defer_interrupted_session_write,
+    extend_held_session_write,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -145,6 +146,7 @@ from .run_internal.session_persistence import (
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    take_held_session_write,
     update_run_state_after_resume,
 )
 from .run_internal.tool_use_tracker import (
@@ -152,7 +154,7 @@ from .run_internal.tool_use_tracker import (
     hydrate_tool_use_tracker,
     serialize_tool_use_tracker,
 )
-from .run_state import RunState
+from .run_state import RunState, _PendingSessionWrite
 from .sandbox.memory.rollouts import terminal_metadata_for_exception
 from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
@@ -964,10 +966,6 @@ class AgentRunner:
                     current_task_span.finish(reset_current=True)
                 raise
 
-            # The deferred prefix belongs to the resumed turn only: it is filled when that turn
-            # locates it and emptied once written, so later turns of the same run never
-            # re-send it.
-            deferred_session_prefix: list[RunItem] = []
             try:
                 while True:
                     validate_output_guardrails_with_server_managed_conversation(
@@ -1121,29 +1119,7 @@ class AgentRunner:
 
                             input_before_turn_rewrite = original_input
                             original_input = turn_result.original_input
-                            # Captured before ``update_run_state_after_resume`` replaces
-                            # ``_session_items``: the park-time list still holds the
-                            # current response's deferred items.
-                            base_session_items = (
-                                list(run_state._session_items) if run_state is not None else []
-                            )
                             generated_items, turn_session_items = resumed_turn_items(turn_result)
-                            deferred_session_prefix = await deferred_interrupted_session_prefix(
-                                session,
-                                base_session_items=base_session_items,
-                                persisted_count=(
-                                    run_state._current_turn_persisted_item_count
-                                    if run_state is not None
-                                    else 0
-                                ),
-                                session_start=resumed_response_boundary.session_start,
-                                reasoning_item_id_policy=(
-                                    run_state._reasoning_item_id_policy
-                                    if run_state is not None
-                                    else None
-                                ),
-                                wrapper=context_wrapper,
-                            )
                             session_items.extend(turn_session_items)
                             if run_state is not None:
                                 if turn_result.nested_history_owned_items is not None:
@@ -1178,37 +1154,62 @@ class AgentRunner:
                                     ]
 
                             if (
-                                session_persistence_enabled
-                                and turn_session_items
-                                and run_state is not None
+                                run_state is not None
                                 # A final output is persisted by the final-turn sweep
-                                # below, which receives the prefix through
-                                # ``final_turn_deferred_prefix``.
+                                # below, which claims the held batch itself.
                                 and not isinstance(turn_result.next_step, NextStepFinalOutput)
-                                and not (
-                                    isinstance(turn_result.next_step, NextStepInterruption)
-                                    and _should_defer_interrupted_session_items(
-                                        current_agent,
-                                        run_config,
-                                    )
-                                )
                             ):
-                                run_state._current_turn_persisted_item_count = (
-                                    await save_resumed_turn_items(
-                                        run_state=run_state,
-                                        session=session,
-                                        items=deferred_session_prefix + turn_session_items,
-                                        persisted_count=(
-                                            run_state._current_turn_persisted_item_count
-                                        ),
-                                        response_id=turn_result.model_response.response_id,
+                                if not session_persistence_enabled:
+                                    # A detached resume's save is a no-op, so the resolved
+                                    # items fold into the standing held batch and settle
+                                    # together at the reattach.
+                                    extend_held_session_write(
+                                        run_state,
+                                        run_items=turn_session_items,
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy
                                         ),
-                                        store=store_setting,
-                                        wrapper=context_wrapper,
                                     )
-                                )
+                                elif isinstance(
+                                    turn_result.next_step, NextStepInterruption
+                                ) and _should_defer_interrupted_session_items(
+                                    current_agent,
+                                    run_config,
+                                ):
+                                    # The re-park keeps deferring: the resolved items join
+                                    # the held batch instead of reaching the Session.
+                                    defer_interrupted_session_write(
+                                        run_state,
+                                        session,
+                                        run_items=turn_session_items,
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                        ),
+                                    )
+                                elif turn_session_items:
+                                    run_state._current_turn_persisted_item_count = (
+                                        await save_resumed_turn_items(
+                                            run_state=run_state,
+                                            session=session,
+                                            items=turn_session_items,
+                                            held_input=take_held_session_write(run_state),
+                                            persisted_count=(
+                                                run_state._current_turn_persisted_item_count
+                                            ),
+                                            response_id=turn_result.model_response.response_id,
+                                            reasoning_item_id_policy=(
+                                                run_state._reasoning_item_id_policy
+                                            ),
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
+                                    )
+                                else:
+                                    # An emptied resolved turn (a handoff input_filter can
+                                    # drop every item) discards the held batch: a call
+                                    # written without its output poisons the Session
+                                    # exactly as the orphaned output does.
+                                    take_held_session_write(run_state)
 
                             # After the resumed turn, treat subsequent turns as fresh so
                             # counters and input saving behave normally.
@@ -1262,9 +1263,6 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
-                                # Written above with the resolved turn's items; later turns
-                                # of this run must not re-send it.
-                                deferred_session_prefix = []
                                 continue
 
                             append_model_response_if_new(
@@ -1344,6 +1342,12 @@ class AgentRunner:
                                         blocked_message=blocked_message,
                                     )
                                     list.extend(session_items, retained_items)
+                                    # The redaction derives the sanitized response from the
+                                    # run-state boundary, so the raw held batch must not be
+                                    # fed into this save: it could resurrect preambles the
+                                    # redaction dropped. The declaration is discarded once
+                                    # the blocked outcome is decided.
+                                    take_held_session_write(run_state)
                                     try:
                                         await save_final_turn_items_after_guardrails(
                                             session=session,
@@ -1387,6 +1391,7 @@ class AgentRunner:
                                                 _attempt_input_guardrail_results()
                                             ),
                                             items=final_turn_items,
+                                            held_input=take_held_session_write(run_state),
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
@@ -1394,12 +1399,7 @@ class AgentRunner:
                                     raise
 
                                 final_turn_items = _final_turn_items_for_persistence(
-                                    # Same reason as the streamed path: with output
-                                    # guardrails this rebuilds the whole current response
-                                    # and would recover the deferred prefix, but WITHOUT
-                                    # them it returns these items verbatim — and a resume
-                                    # may run without the guardrails the park had.
-                                    deferred_session_prefix + list(turn_session_items),
+                                    list(turn_session_items),
                                     current_processed_response,
                                     run_state,
                                     current_agent,
@@ -1411,6 +1411,10 @@ class AgentRunner:
                                     session_persistence_enabled=session_persistence_enabled,
                                     input_guardrail_results=_attempt_input_guardrail_results(),
                                     items=final_turn_items,
+                                    # Safe even when the guardrail rebuild above already
+                                    # recovered the parked response: the save deduplicates
+                                    # the combined batch.
+                                    held_input=take_held_session_write(run_state),
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
@@ -2076,21 +2080,36 @@ class AgentRunner:
                                 run_state._current_step = None
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
-                            if session_persistence_enabled and not (
-                                _should_defer_interrupted_session_items(
+                            held_record: _PendingSessionWrite | None = None
+                            if session_persistence_enabled and not input_guardrails_triggered(
+                                _attempt_input_guardrail_results()
+                            ):
+                                # Persist session items but skip approval placeholders.
+                                input_items_for_save_interruption: list[TResponseInputItem] = (
+                                    session_input_items_for_persistence
+                                    if session_input_items_for_persistence is not None
+                                    else []
+                                )
+                                if _should_defer_interrupted_session_items(
                                     current_agent,
                                     run_config,
-                                )
-                            ):
-                                if not input_guardrails_triggered(
-                                    _attempt_input_guardrail_results()
                                 ):
-                                    # Persist session items but skip approval placeholders.
-                                    input_items_for_save_interruption: list[TResponseInputItem] = (
-                                        session_input_items_for_persistence
-                                        if session_input_items_for_persistence is not None
-                                        else []
+                                    # The gate withholds this write until the output
+                                    # guardrails decide; declaring the batch on the
+                                    # checkpoint lets a resume settle it at a gate-legal
+                                    # exit instead of losing it.
+                                    held_record = defer_interrupted_session_write(
+                                        run_state,
+                                        session,
+                                        input_items=input_items_for_save_interruption,
+                                        run_items=session_items_for_turn(turn_result),
+                                        reasoning_item_id_policy=(
+                                            run_state._reasoning_item_id_policy
+                                            if run_state is not None
+                                            else None
+                                        ),
                                     )
+                                else:
                                     await save_result_to_session(
                                         session,
                                         input_items_for_save_interruption,
@@ -2123,6 +2142,7 @@ class AgentRunner:
                             )
                             result = build_interruption_result(
                                 result_input=interruption_result_input2,
+                                held_session_write=held_record,
                                 session_items=session_items,
                                 model_responses=model_responses,
                                 current_agent=current_agent,

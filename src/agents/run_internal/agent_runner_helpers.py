@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import copy
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from openai.types.responses.response_usage import OutputTokensDetails
@@ -18,7 +19,7 @@ from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
-from ..run_state import RunState
+from ..run_state import RunState, _PendingSessionWrite
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span
 from ..tracing.config import TracingConfig
@@ -455,8 +456,13 @@ def build_interruption_result(
     generated_items: list[RunItem],
     run_state: RunState | None,
     original_input: str | list[TResponseInputItem],
+    held_session_write: _PendingSessionWrite | None = None,
 ) -> RunResult:
-    """Create a RunResult for an interruption path."""
+    """Create a RunResult for an interruption path.
+
+    ``held_session_write`` carries a held pending write registered by a park with no
+    live ``RunState``; with one, the record is read from the state itself.
+    """
     identity_root_agent = (
         run_state._starting_agent
         if run_state is not None and run_state._starting_agent is not None
@@ -487,6 +493,12 @@ def build_interruption_result(
     if run_state is not None:
         result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
         result._trace_state = run_state._trace_state
+        # The held pending write must survive the result checkpoint: a non-streamed
+        # caller serializes ``result.to_state()``, which has no live ``RunState`` to
+        # read the declaration from.
+        result._pending_session_write = copy.deepcopy(run_state._pending_session_write)
+    elif held_session_write is not None:
+        result._pending_session_write = copy.deepcopy(held_session_write)
     result._original_input = copy_input_items(original_input)
     return result
 
@@ -565,9 +577,15 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    held_input: Sequence[TResponseInputItem] | None = None,
 ) -> int:
-    """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
-    if not session_persistence_enabled or not items:
+    """Persist deferred final-turn items without skipping a partially persisted resumed turn.
+
+    ``held_input`` is a claimed held batch that must land ahead of the final items in
+    the same append. It is safe to pass even when the rebuilt final items already
+    contain the parked response: the save deduplicates the combined batch.
+    """
+    if not session_persistence_enabled or (not items and not held_input):
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
@@ -580,11 +598,12 @@ async def save_final_turn_items_after_guardrails(
             reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             store=store,
             wrapper=wrapper,
+            held_input=held_input,
         )
         return run_state._current_turn_persisted_item_count
     return await save_result_to_session(
         session,
-        [],
+        list(held_input) if held_input else [],
         list(items),
         run_state,
         response_id=response_id,
