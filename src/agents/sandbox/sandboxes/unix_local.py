@@ -133,18 +133,40 @@ def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInf
         ti.linkname = ""
         ti.size = os.stat(root / ti.name).st_size
         return ti
-    if ti.issym() and PurePosixPath(ti.linkname).is_absolute():
-        # normpath keeps a leading "//"; Linux resolves it as "/", so collapse it first.
-        normalized_target = Path("/" + os.path.normpath(ti.linkname).lstrip("/"))
-        link_dir = PurePosixPath(ti.name).parent
-        for candidate_root in (root, root.resolve(strict=False)):
-            try:
-                target_rel = normalized_target.relative_to(candidate_root)
-            except ValueError:
-                continue
-            ti.linkname = os.path.relpath(target_rel.as_posix() or ".", start=link_dir.as_posix())
-            break
+    if ti.issym() and ti.linkname.startswith("/"):
+        ti.linkname = _rebase_symlink_target(
+            ti.linkname, link_name=ti.name, roots=(root, root.resolve(strict=False))
+        )
     return ti
+
+
+def _rebase_symlink_target(linkname: str, *, link_name: str, roots: tuple[Path, ...]) -> str:
+    """Rewrite an absolute symlink target under the workspace root as a link-relative one.
+
+    Only the root prefix is replaced; the remaining components are kept verbatim (no
+    normalization), because ``..`` after a symlink component is resolved by the kernel
+    against the link target, so ``<root>/current/../config`` with ``current -> releases/v1``
+    names ``releases/config`` and must stay ``current/../config``. Absolute targets outside
+    the workspace are returned unchanged. A leading ``//`` is collapsed to ``/`` (Linux
+    treats them alike).
+    """
+
+    target = "/" + linkname.lstrip("/")
+    for candidate_root in roots:
+        prefix = candidate_root.as_posix().rstrip("/")
+        if target == prefix:
+            rest = ""
+        elif target.startswith(prefix + "/"):
+            rest = target[len(prefix) + 1 :]
+        else:
+            continue
+        # The link's own directory inside the archive holds no symlink components (the
+        # archive validator rejects members beneath a symlink), so climbing it is exact.
+        climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
+        if rest and climb:
+            return f"{climb}/{rest}"
+        return rest or climb or "."
+    return linkname
 
 
 def _restore_pty_child_signal_defaults() -> None:
