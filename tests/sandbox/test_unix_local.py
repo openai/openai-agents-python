@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import signal
 import tarfile
 import threading
@@ -468,6 +469,89 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class TestUnixLocalPersistWorkspaceRestorable:
+    """persist_workspace must only emit members that the strict hydrate extractor accepts."""
+
+    @staticmethod
+    def _workspace(tmp_path: Path) -> Path:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "a.txt").write_text("shared", encoding="utf-8")
+        os.link(workspace / "a.txt", workspace / "sub" / "hardlink.txt")
+        os.mkfifo(workspace / "dev.fifo")
+        (workspace / "abs_inside").symlink_to(workspace / "a.txt")
+        (workspace / "sub" / "abs_up").symlink_to(workspace / "a.txt")
+        (workspace / "rel").symlink_to("a.txt")
+        (workspace / "double_slash").symlink_to("/" + str(workspace / "a.txt"))
+        (workspace / "outside").symlink_to(tmp_path / "elsewhere.txt")
+        return workspace
+
+    @pytest.mark.asyncio
+    async def test_persist_emits_restorable_members(self, tmp_path: Path) -> None:
+        workspace = self._workspace(tmp_path)
+        session = _RecordingUnixLocalSession(workspace)
+
+        blob = await session.persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert "dev.fifo" not in members
+            hardlink = members["sub/hardlink.txt"]
+            assert hardlink.isreg() and hardlink.size == len("shared")
+            extracted = tar.extractfile(hardlink)
+            assert extracted is not None and extracted.read() == b"shared"
+            assert members["abs_inside"].linkname == "a.txt"
+            assert members["sub/abs_up"].linkname == "../a.txt"
+            assert members["rel"].linkname == "a.txt"
+            assert members["double_slash"].linkname == "a.txt"
+            assert members["outside"].linkname == str(tmp_path / "elsewhere.txt")
+
+    @pytest.mark.asyncio
+    async def test_rebased_symlink_keeps_parent_steps_after_symlink_components(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`<root>/current/../config` with `current -> releases/v1` names `releases/config`;
+        collapsing the `..` lexically would silently retarget the restored link."""
+        workspace = tmp_path / "workspace"
+        (workspace / "releases" / "v1").mkdir(parents=True)
+        (workspace / "releases" / "config").write_text("right", encoding="utf-8")
+        (workspace / "config").write_text("wrong", encoding="utf-8")
+        (workspace / "current").symlink_to("releases/v1")
+        (workspace / "abs_config").symlink_to(workspace / "current" / ".." / "config")
+        (workspace / "releases" / "v1" / "abs_up").symlink_to(
+            workspace / "current" / ".." / "config"
+        )
+        assert (workspace / "abs_config").read_text(encoding="utf-8") == "right"
+
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+        restored_root = tmp_path / "restored"
+        await _RecordingUnixLocalSession(restored_root).hydrate_workspace(blob)
+
+        assert os.readlink(restored_root / "abs_config") == "current/../config"
+        assert (
+            os.readlink(restored_root / "releases" / "v1" / "abs_up") == "../../current/../config"
+        )
+        assert (restored_root / "abs_config").read_text(encoding="utf-8") == "right"
+        assert (restored_root / "releases" / "v1" / "abs_up").read_text(encoding="utf-8") == "right"
+
+    @pytest.mark.asyncio
+    async def test_persisted_workspace_hydrates_into_a_new_root(self, tmp_path: Path) -> None:
+        workspace = self._workspace(tmp_path)
+        (workspace / "outside").unlink()  # hydrate rejects external targets by design
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+
+        restored_root = tmp_path / "restored"
+        restored = _RecordingUnixLocalSession(restored_root)
+        await restored.hydrate_workspace(blob)
+
+        assert (restored_root / "sub" / "hardlink.txt").read_text(encoding="utf-8") == "shared"
+        assert not (restored_root / "dev.fifo").exists()
+        assert os.readlink(restored_root / "abs_inside") == "a.txt"
+        assert (restored_root / "abs_inside").read_text(encoding="utf-8") == "shared"
+        assert (restored_root / "sub" / "abs_up").read_text(encoding="utf-8") == "shared"
 
 
 @pytest.mark.asyncio
