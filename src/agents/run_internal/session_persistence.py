@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..exceptions import UserError
 from ..items import (
     HandoffOutputItem,
@@ -781,6 +782,12 @@ async def save_resumed_turn_items(
     """
     if session is None or (not items and not held_input):
         return persisted_count
+    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
+        # The guardrail rebuild re-derived the whole current response, held requests
+        # included; feeding the batch again would duplicate its unkeyed companions.
+        # Resolved-turn saves never carry request kinds, so this only fires on the
+        # final sweep.
+        held_input = None
     if held_input:
         held_input = _held_items_safe_to_settle(
             held_input,
@@ -813,16 +820,62 @@ async def save_resumed_turn_items(
     return persisted_count + saved_count
 
 
+# Every supported approval family pairs a request kind with the output kind that
+# completes it; the identity is ``call_id`` except for hosted MCP approvals, whose
+# request carries ``id`` and whose response points back with ``approval_request_id``.
+_HELD_PAIR_OUTPUT_KIND = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "computer_call": "computer_call_output",
+    "local_shell_call": "local_shell_call_output",
+    "mcp_approval_request": "mcp_approval_response",
+}
+
+
+def _held_pair_identity(item: TResponseInputItem) -> tuple[str, str] | None:
+    """Return the pairing key a held request kind must find an output for."""
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type not in _HELD_PAIR_OUTPUT_KIND:
+        return None
+    if item_type == "mcp_approval_request":
+        identity = get_hosted_mcp_approval_request_identity(item)
+        request_id = identity.request_id if identity is not None else None
+        return (item_type, request_id) if request_id else None
+    call_id = item.get("call_id")
+    return (item_type, call_id) if isinstance(call_id, str) and call_id else None
+
+
+def _held_pair_output_identity(item: TResponseInputItem) -> tuple[str, str] | None:
+    """Return the key an output kind provides toward pairing its request."""
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type == "mcp_approval_response":
+        request_id = item.get("approval_request_id")
+        return (
+            ("mcp_approval_response", request_id)
+            if isinstance(request_id, str) and request_id
+            else None
+        )
+    if item_type not in set(_HELD_PAIR_OUTPUT_KIND.values()):
+        return None
+    call_id = item.get("call_id")
+    return (item_type, call_id) if isinstance(call_id, str) and call_id else None
+
+
 def _pending_approval_call_ids(run_state: RunState | None) -> set[str]:
-    """Return the call ids still awaiting approval on the state's current step."""
+    """Return the ids still awaiting approval on the state's current step."""
     if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
         return set()
     ids: set[str] = set()
     for approval in run_state._current_step.interruptions:
         raw = getattr(approval, "raw_item", None)
-        call_id = raw.get("call_id") if isinstance(raw, dict) else getattr(raw, "call_id", None)
-        if isinstance(call_id, str) and call_id:
-            ids.add(call_id)
+        for field in ("call_id", "id"):
+            value = raw.get(field) if isinstance(raw, dict) else getattr(raw, field, None)
+            if isinstance(value, str) and value:
+                ids.add(value)
     return ids
 
 
@@ -847,26 +900,52 @@ def _held_items_safe_to_settle(
     filter removed them, so they settle now and pair up at a later exit, exactly as a
     non-deferred park persists a call before its output exists.
     """
-    output_ids = {
-        item.get("call_id")
-        for item in held_items
-        if isinstance(item, dict) and item.get("type") == "function_call_output"
-    }
+    output_ids: set[str] = set()
+    for item in held_items:
+        key = _held_pair_output_identity(item)
+        if key is not None:
+            output_ids.add(key[1])
     if pending_call_ids:
         output_ids |= pending_call_ids
     for run_item in run_items:
         converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
-        if isinstance(converted, dict) and converted.get("type") == "function_call_output":
-            output_ids.add(converted.get("call_id"))
-    return [
-        item
-        for item in held_items
-        if not (
-            isinstance(item, dict)
-            and item.get("type") == "function_call"
-            and item.get("call_id") not in output_ids
-        )
-    ]
+        key = _held_pair_output_identity(converted) if converted is not None else None
+        if key is not None:
+            output_ids.add(key[1])
+    kept: list[TResponseInputItem] = []
+    for item in held_items:
+        key = _held_pair_identity(item)
+        if key is not None and key[1] not in output_ids:
+            continue
+        kept.append(item)
+    return kept
+
+
+def final_items_cover_held_batch(
+    items: Sequence[RunItem],
+    held_input: Sequence[TResponseInputItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> bool:
+    """Return whether the final batch already carries the held batch's requests.
+
+    With output guardrails the final sweep rebuilds the whole current response, held
+    requests included, and the deduplication cannot key the batch's unkeyed companions
+    (an assistant preamble, an id-less reasoning item), so feeding the batch again
+    would duplicate them. When every held request already appears in the final items
+    the whole batch is redundant; without guardrails the sweep returns the resolved
+    items verbatim, no held request appears there, and the batch must ride in.
+    """
+    final_ids: set[str] = set()
+    for run_item in items:
+        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        key = _held_pair_identity(converted) if converted is not None else None
+        if key is not None:
+            final_ids.add(key[1])
+    for item in held_input:
+        key = _held_pair_identity(item)
+        if key is not None and key[1] not in final_ids:
+            return False
+    return True
 
 
 def defer_interrupted_session_write(

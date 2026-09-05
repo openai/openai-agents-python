@@ -42,7 +42,11 @@ from .run_steps import (
     NextStepRunAgain,
     ProcessedResponse,
 )
-from .session_persistence import save_result_to_session, save_resumed_turn_items
+from .session_persistence import (
+    final_items_cover_held_batch,
+    save_result_to_session,
+    save_resumed_turn_items,
+)
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
 
@@ -582,6 +586,12 @@ async def save_final_turn_items_after_guardrails(
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
+    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
+        # The guardrail rebuild re-derived the whole current response, held requests
+        # included; feeding the batch again would duplicate its unkeyed companions.
+        # ``save_resumed_turn_items`` repeats this check for the paths that route
+        # through it; this copy covers the zero-count direct save below.
+        held_input = None
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
