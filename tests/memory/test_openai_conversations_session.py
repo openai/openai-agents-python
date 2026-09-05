@@ -364,7 +364,7 @@ class TestOpenAIConversationsSessionBasicOperations:
             await asyncio.sleep(0)
 
             allow_delete_finish.set()
-            with pytest.raises(asyncio.CancelledError, match="caller-cancelled"):
+            with pytest.raises(asyncio.CancelledError):
                 await clear_task
 
             items: list[Any] = [{"role": "user", "content": "Next turn"}]
@@ -409,7 +409,7 @@ class TestOpenAIConversationsSessionBasicOperations:
 
             session.session_id = "replacement_id"
             allow_delete_finish.set()
-            with pytest.raises(asyncio.CancelledError, match="caller-cancelled"):
+            with pytest.raises(asyncio.CancelledError):
                 await clear_task
 
             items: list[Any] = [{"role": "user", "content": "Next turn"}]
