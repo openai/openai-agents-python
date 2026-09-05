@@ -64,22 +64,29 @@ def _detect(
     head: str,
     *,
     extra_env: dict[str, str] | None = None,
-    command: list[str] | None = None,
+    bash_args: list[str] | None = None,
 ) -> bool:
+    if os.name == "nt":
+        # Resolve Git for Windows' Bash instead of the system WSL launcher.
+        git_exec_path = Path(_git(repo, "--exec-path"))
+        bash = str(git_exec_path.parents[2] / "bin/bash.exe")
+    else:
+        bash = shutil.which("bash")
+        assert bash is not None
     output = repo.parent / "github-output"
     output.write_text("", encoding="utf-8")
     env = _environment()
     env.update(extra_env or {})
-    env["GITHUB_OUTPUT"] = str(output)
+    env["GITHUB_OUTPUT"] = output.as_posix()
     result = subprocess.run(
-        command or ["bash", str(DETECTOR), mode, base, head],
+        [bash, *(bash_args or [DETECTOR.as_posix(), mode, base, head])],
         cwd=repo,
         env=env,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, (result.stdout, result.stderr)
     value = output.read_text(encoding="utf-8")
     assert value in ("run=true\n", "run=false\n"), (value, result.stderr)
     return value == "run=true\n"
@@ -228,13 +235,19 @@ def test_failed_diff_cannot_skip_checks_or_authorize_deployment(
         "fi\n"
         f'exec {shlex.quote(Path(git).as_posix())} "$@"\n',
         encoding="utf-8",
+        newline="\n",
     )
     shim.chmod(0o755)
-    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-
-    assert _detect(repo, "code", base, head, extra_env=env)
-    assert _detect(repo, "docs", base, head, extra_env=env)
-    assert not _detect(repo, "docs-only", base, head, extra_env=env)
+    # Set the shim's precedence after Git Bash's wrapper initializes PATH.
+    bash_args = [
+        "-c",
+        'export PATH="$(cd "$1" && pwd):$PATH"; shift; exec "$@"',
+        "bash",
+        bin_dir.as_posix(),
+        DETECTOR.as_posix(),
+    ]
+    for mode, expected in (("code", True), ("docs", True), ("docs-only", False)):
+        assert _detect(repo, mode, base, head, bash_args=[*bash_args, mode, base, head]) is expected
 
 
 def test_empty_diff_does_not_run_checks_or_deploy(change_repo: tuple[Path, str]) -> None:
@@ -292,11 +305,11 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
     shutil.copy2(DETECTOR, script)
     base = _commit(repo)
     head = _commit(repo, "docs/index.md")
-    command = ["bash", "-euo", "pipefail", "-c", detection["run"]]
+    bash_args = ["-euo", "pipefail", "-c", detection["run"]]
     assert _detect(
-        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, command=command
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
     )
     head = _commit(repo, "src/agents/run.py")
     assert not _detect(
-        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, command=command
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
     )
