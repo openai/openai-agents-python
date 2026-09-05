@@ -470,20 +470,28 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
         """Lazy-load and cache compaction candidates."""
-        if self._compaction_candidate_items is not None and self._session_items is not None:
-            return (self._compaction_candidate_items[:], self._session_items[:])
+        while True:
+            if self._compaction_candidate_items is not None and self._session_items is not None:
+                return (self._compaction_candidate_items[:], self._session_items[:])
 
-        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
-        candidates = select_compaction_candidate_items(history)
-        self._compaction_candidate_items = candidates
-        self._session_items = history
+            response_chain_generation = self._response_chain_generation
+            history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+            candidates = select_compaction_candidate_items(history)
 
-        logger.debug(
-            "candidates: initialized (history=%s, candidates=%s)",
-            len(history),
-            len(candidates),
-        )
-        return (candidates[:], history[:])
+            async with self._mutation_lock:
+                if response_chain_generation != self._response_chain_generation:
+                    continue
+                if self._compaction_candidate_items is not None and self._session_items is not None:
+                    return (self._compaction_candidate_items[:], self._session_items[:])
+                self._compaction_candidate_items = candidates
+                self._session_items = history
+
+                logger.debug(
+                    "candidates: initialized (history=%s, candidates=%s)",
+                    len(history),
+                    len(candidates),
+                )
+                return (candidates[:], history[:])
 
 
 def _strip_orphaned_assistant_ids(

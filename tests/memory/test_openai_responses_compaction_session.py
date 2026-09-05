@@ -226,9 +226,10 @@ class TestOpenAIResponsesCompactionSession:
                 self.allow_read = asyncio.Event()
 
             async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                snapshot = await super().get_items(limit)
                 self.read_started.set()
                 await self.allow_read.wait()
-                return await super().get_items(limit)
+                return snapshot
 
         underlying = GatedReadSession()
         mock_response = SimpleNamespace(output=[], usage=None)
@@ -252,6 +253,9 @@ class TestOpenAIResponsesCompactionSession:
 
         mock_client.responses.compact.assert_not_awaited()
         assert await underlying.get_items() == []
+
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+        assert mock_client.responses.compact.await_args.kwargs["input"] == []
 
     @pytest.mark.asyncio
     async def test_cancelled_committed_pop_invalidates_retained_response_chain(self) -> None:
