@@ -2722,8 +2722,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", marker = "extra == 'blaxel'", specifier = ">=3.12,<4" },
-    { name = "aiohttp", marker = "extra == 'cloudflare'", specifier = ">=3.12,<4" },
+    { name = "aiohttp", marker = "extra == 'blaxel'", specifier = ">=3.14.3,<4" },
+    { name = "aiohttp", marker = "extra == 'cloudflare'", specifier = ">=3.14.3,<4" },
     { name = "any-llm-sdk", marker = "python_full_version >= '3.11' and extra == 'any-llm'", specifier = ">=1.11.0,<2" },
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "blaxel", marker = "extra == 'blaxel'", specifier = ">=0.2.50" },
