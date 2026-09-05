@@ -2927,6 +2927,46 @@ async def test_websocket_model_reconnects_if_cached_connection_is_closed(monkeyp
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_websocket_model_retries_if_handshake_fails_before_request(monkeypatch):
+    client = DummyWSClient()
+
+    class InvalidMessage(Exception):
+        pass
+
+    InvalidMessage.__module__ = "websockets.exceptions"
+
+    ws = DummyWSConnection([_response_completed_frame("resp-retried", 1)])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 1:
+            raise InvalidMessage("did not receive a valid HTTP response")
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert response.response_id == "resp-retried"
+    assert open_calls == 2
+    assert len(ws.sent_messages) == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_websocket_model_does_not_retry_if_send_raises_after_writing_on_reused_connection(
     monkeypatch,
 ):
@@ -4199,6 +4239,30 @@ def test_websocket_get_retry_advice_marks_partial_nonstream_failure_unsafe() -> 
 def test_websocket_get_retry_advice_marks_connect_timeout_replay_safe() -> None:
     model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
     error = TimeoutError("Responses websocket connect timed out after 5.0 seconds.")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_handshake_failure_replay_safe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+
+    class InvalidMessage(Exception):
+        pass
+
+    InvalidMessage.__module__ = "websockets.exceptions"
+    error = InvalidMessage("did not receive a valid HTTP response")
 
     advice = model.get_retry_advice(
         ModelRetryAdviceRequest(
