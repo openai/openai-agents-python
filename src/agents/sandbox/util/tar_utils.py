@@ -7,7 +7,7 @@ import shutil
 import tarfile
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import cast
 
 
@@ -100,17 +100,35 @@ def safe_tar_member_rel_path(
     return Path(*rel.parts)
 
 
-def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase:
+def strip_tar_member_prefix(
+    data: io.IOBase,
+    *,
+    prefix: str | Path,
+    relativize_symlinks_under: str | PurePath | None = None,
+) -> io.IOBase:
     """Return a seekable tar stream after replacing a leading member prefix with `.`.
 
     For example, Docker archives a workspace copied to `/tmp/stage/workspace`
     as `workspace/...`; portable workspace snapshots should store the same
     files as `.` and `...`, independent of the source backend's root name.
+
+    The strict hydrate extractor refuses FIFOs, device nodes, and absolute symlink
+    targets, and a staged workspace copy (`cp -R`) legitimately carries the first two
+    kinds and absolute links into the workspace. FIFOs and device nodes are dropped, and
+    when `relativize_symlinks_under` names the workspace root, an absolute symlink target
+    under it is rebased onto the link's own directory with its components kept verbatim.
     """
 
     prefix_rel = _normalize_rel(prefix)
     if prefix_rel == Path():
         raise ValueError("tar member prefix must not be empty")
+    symlink_root: str | None = None
+    if relativize_symlinks_under is not None:
+        symlink_root = (
+            relativize_symlinks_under.as_posix()
+            if isinstance(relativize_symlinks_under, PurePath)
+            else relativize_symlinks_under
+        )
 
     out = tempfile.TemporaryFile()
     try:
@@ -118,6 +136,8 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
             with tarfile.open(fileobj=data, mode="r|*") as src:
                 with tarfile.open(fileobj=out, mode="w|") as dst:
                     for member in src:
+                        if member.isfifo() or member.ischr() or member.isblk():
+                            continue
                         rel_path = safe_tar_member_rel_path(
                             member,
                             allow_symlinks=True,
@@ -141,6 +161,13 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
                         rewritten.name = stripped_name
                         rewritten.pax_headers = dict(member.pax_headers)
                         rewritten.pax_headers.pop("path", None)
+                        if rewritten.issym() and symlink_root is not None:
+                            rewritten.linkname = rebase_symlink_target(
+                                rewritten.linkname, link_name=stripped_name, root=symlink_root
+                            )
+                            # A long source target lives in a PAX "linkpath" record that
+                            # would otherwise override the rewritten linkname.
+                            rewritten.pax_headers.pop("linkpath", None)
                         if member.isreg():
                             fileobj = src.extractfile(member)
                             if fileobj is None:
@@ -163,6 +190,35 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
     except Exception:
         out.close()
         raise
+
+
+def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
+    """Rewrite an absolute symlink target under `root` as a target relative to the link.
+
+    Only the root prefix is replaced by the climb out of the link's own archive directory;
+    the remaining components are kept verbatim, because the kernel resolves ``..`` after a
+    symlink component against that link's target: with ``alias -> sub/deep``,
+    ``/workspace/alias/../data.txt`` names ``sub/data.txt`` and must stay
+    ``alias/../data.txt``. Absolute targets outside the root are returned unchanged. A
+    leading ``//`` is collapsed to ``/`` (Linux treats them alike).
+    """
+
+    if not linkname.startswith("/"):
+        return linkname
+    target = "/" + linkname.lstrip("/")
+    prefix = "/" + root.strip("/")
+    if target == prefix:
+        rest = ""
+    elif target.startswith(prefix + "/"):
+        rest = target[len(prefix) + 1 :]
+    else:
+        return linkname
+    # Members beneath a symlink are rejected by the archive validator, so the link's
+    # archive directory holds no symlink components and climbing it is exact.
+    climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
+    if rest and climb:
+        return f"{climb}/{rest}"
+    return rest or climb or "."
 
 
 def _normalize_rel(prefix: str | Path) -> Path:

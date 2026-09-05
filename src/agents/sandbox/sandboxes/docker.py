@@ -1371,7 +1371,11 @@ class DockerSandboxSession(BaseSandboxSession):
                 staging_workspace,
                 cleanup_path=staging_parent,
             )
-            return strip_tar_member_prefix(root_prefixed_archive, prefix=staging_workspace.name)
+            return strip_tar_member_prefix(
+                root_prefixed_archive,
+                prefix=staging_workspace.name,
+                relativize_symlinks_under=root,
+            )
         except docker.errors.NotFound as e:
             raise WorkspaceArchiveReadError(path=error_root, cause=e, retryable=False) from e
         except docker.errors.APIError as e:
