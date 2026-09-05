@@ -46,7 +46,7 @@ from .run_internal.run_steps import (
     ProcessedResponse,
     QueueCompleteSentinel,
 )
-from .run_state import RunState
+from .run_state import RunState, _PendingSessionWrite
 from .stream_events import StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
@@ -153,6 +153,9 @@ def _populate_state_from_result(
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
         state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))
+        state._pending_session_write = copy.deepcopy(
+            getattr(result, "_pending_session_write", None)
+        )
         state._current_step = getattr(result, "_current_step_for_state", None)
     state._reasoning_item_id_policy = getattr(result, "_reasoning_item_id_policy", None)
 
@@ -364,6 +367,10 @@ class RunResultBase(abc.ABC):
         default_factory=list, init=False, repr=False
     )
     """Pending input preserved when a non-streaming result is converted back to RunState."""
+    _pending_session_write: _PendingSessionWrite | None = field(
+        default=None, init=False, repr=False
+    )
+    """Held pending Session write preserved when a non-streaming result becomes a RunState."""
     _current_step_for_state: Any = field(default=None, init=False, repr=False)
     """Current step preserved when a non-streaming result is converted back to RunState."""
 

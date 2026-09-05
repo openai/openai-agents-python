@@ -36,7 +36,7 @@ from openai.types.responses.response_output_item import (
     ProgramOutput,
 )
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
-from typing_extensions import TypedDict, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
@@ -168,12 +168,21 @@ RunStateValidationErrorFactory = Callable[
 
 
 class _PendingSessionWrite(TypedDict):
-    """One canonical resumed-output append awaiting acknowledgement."""
+    """One canonical resumed-output append awaiting acknowledgement.
+
+    ``held`` marks a batch the interruption park withheld because the agent's output
+    guardrails had not approved the turn yet. A held batch was never offered to the
+    Session, so ``before`` stays ``None`` until a gate-legal exit starts settling it;
+    from that point it is an ordinary pending write and the digest reconciliation
+    recovers a half-acknowledged append. Absent or ``False`` keeps the released
+    meaning: an append already approved for eager settlement on resume entry.
+    """
 
     session_id: str
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    held: NotRequired[bool]
 
 
 def _default_run_state_validation_error(
@@ -227,7 +236,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes."
+        "resume flows, including pending resumed Session writes and their held-at-interruption "
+        "variant."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4366,7 +4376,9 @@ async def _build_run_state_from_json(
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
+            or set(pending_write) - {"held"} != {"session_id", "items", "before", "persisted_count"}
+            or ("held" in pending_write and type(pending_write["held"]) is not bool)
+            or (pending_write.get("held") is True and pending_write.get("before") is not None)
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
             or not pending_write["items"]

@@ -174,6 +174,8 @@ from .session_persistence import (
     _session_get_items,
     admit_pending_input,
     commit_server_pending_input,
+    defer_interrupted_session_write,
+    extend_held_session_write,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
@@ -183,6 +185,7 @@ from .session_persistence import (
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    take_held_session_write,
     update_run_state_after_resume,
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
@@ -391,11 +394,19 @@ async def _save_resumed_stream_items(
         server_conversation_tracker=server_conversation_tracker,
         streamed_result=streamed_result,
     ):
+        if session is not None:
+            # Nothing of this run may persist (an input guardrail tripped), so the
+            # held batch must not outlive the run either; a detached run keeps it
+            # riding for the reattach instead.
+            take_held_session_write(run_state)
         return
     streamed_result._current_turn_persisted_item_count = await save_resumed_turn_items(
         run_state=run_state,
         session=session,
         items=items,
+        # An exit that saves nothing is not settling; the batch keeps riding (a
+        # re-park) or is discarded explicitly at the exit that owns that decision.
+        held_input=take_held_session_write(run_state) if items else None,
         persisted_count=streamed_result._current_turn_persisted_item_count,
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
@@ -558,6 +569,11 @@ async def _finalize_streamed_final_output(
             owner_starts=owner_starts,
             blocked_message=blocked_message,
         )
+        # The redaction derives the sanitized response from the run-state boundary, so
+        # the raw held batch must not be fed into this save: it could resurrect
+        # preambles the redaction dropped. The declaration is discarded once the
+        # blocked outcome is decided.
+        take_held_session_write(streamed_result._state)
         if retained_items:
             try:
                 await save_items(retained_items, response_id, store_setting)
@@ -1386,17 +1402,44 @@ async def start_streaming(
                                 *accepted_tool_output_guardrail_results,
                                 *turn_result.tool_output_guardrail_results,
                             ]
+                        # A resume can interrupt again (a partial approval of a
+                        # multi-approval response). If the gate still defers, the
+                        # resolved items join the held batch; a detached re-park folds
+                        # them the same way. An emptied resolved turn discards the
+                        # batch instead: a call written without its output poisons the
+                        # Session exactly as the orphaned output does. Mirrors the
+                        # non-streaming path.
+                        if session is None:
+                            extend_held_session_write(
+                                run_state,
+                                run_items=turn_session_items,
+                                reasoning_item_id_policy=(
+                                    streamed_result._reasoning_item_id_policy
+                                ),
+                            )
+                            reinterruption_items: list[RunItem] = []
+                        elif _should_defer_interrupted_session_items(
+                            current_agent,
+                            run_config,
+                        ):
+                            defer_interrupted_session_write(
+                                run_state,
+                                session,
+                                run_items=turn_session_items,
+                                reasoning_item_id_policy=(
+                                    streamed_result._reasoning_item_id_policy
+                                ),
+                            )
+                            reinterruption_items = []
+                        elif turn_session_items:
+                            reinterruption_items = list(turn_session_items)
+                        else:
+                            take_held_session_write(run_state)
+                            reinterruption_items = []
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
                             save_items=_save_resumed_items,
-                            items=(
-                                []
-                                if _should_defer_interrupted_session_items(
-                                    current_agent,
-                                    run_config,
-                                )
-                                else list(turn_session_items)
-                            ),
+                            items=reinterruption_items,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
                             interruptions=approvals_from_step(turn_result.next_step),
@@ -1418,8 +1461,23 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
+                        # A detached exit folds the resolved items into the held batch;
+                        # an emptied resolved turn (a handoff input_filter can drop
+                        # every item) discards the batch instead: a call written
+                        # without its output poisons the Session just as the orphaned
+                        # output does.
+                        if session is None:
+                            extend_held_session_write(
+                                run_state,
+                                run_items=turn_session_items,
+                                reasoning_item_id_policy=(
+                                    streamed_result._reasoning_item_id_policy
+                                ),
+                            )
+                        elif not turn_session_items:
+                            take_held_session_write(run_state)
                         await _save_resumed_items(
-                            list(turn_session_items),
+                            list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
                             store_setting,
                         )
@@ -1437,6 +1495,11 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
+                        if session is None:
+                            # A detached final output has no Session to settle against
+                            # and the run ends here, so the batch is discarded rather
+                            # than left to invalidate the completed run's checkpoint.
+                            take_held_session_write(run_state)
                         await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
@@ -1461,8 +1524,23 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
+                        # A detached exit folds the resolved items into the held batch;
+                        # an emptied resolved turn (a handoff input_filter can drop
+                        # every item) discards the batch instead: a call written
+                        # without its output poisons the Session just as the orphaned
+                        # output does.
+                        if session is None:
+                            extend_held_session_write(
+                                run_state,
+                                run_items=turn_session_items,
+                                reasoning_item_id_policy=(
+                                    streamed_result._reasoning_item_id_policy
+                                ),
+                            )
+                        elif not turn_session_items:
+                            take_held_session_write(run_state)
                         await _save_resumed_items(
-                            list(turn_session_items),
+                            list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
                             store_setting,
                         )
@@ -1900,6 +1978,12 @@ async def start_streaming(
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
+                    if session is None:
+                        # A detached completion has no Session to settle against and
+                        # the run ends here, so the batch is discarded rather than
+                        # left to invalidate the completed run's checkpoint. Mirrors
+                        # the resumed final exit.
+                        take_held_session_write(run_state)
                     await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
                         agent=current_agent,
@@ -1934,17 +2018,38 @@ async def start_streaming(
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
                         )
+                    parked_items_deferred = _should_defer_interrupted_session_items(
+                        current_agent,
+                        run_config,
+                    )
+                    if session is None:
+                        # A fresh park during a detached resume cannot write, but a
+                        # standing held declaration carries the session identity: the
+                        # new parked call folds into it so the reattach does not
+                        # settle its output orphaned.
+                        extend_held_session_write(
+                            run_state,
+                            run_items=turn_session_items,
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                        )
+                    elif parked_items_deferred and await _should_persist_stream_items(
+                        session=session,
+                        server_conversation_tracker=server_conversation_tracker,
+                        streamed_result=streamed_result,
+                    ):
+                        # The gate withholds this write until the output guardrails
+                        # decide; declaring the batch on the checkpoint lets a resume
+                        # settle it at a gate-legal exit instead of losing it.
+                        defer_interrupted_session_write(
+                            run_state,
+                            session,
+                            run_items=turn_session_items,
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                        )
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,
                         save_items=_save_stream_items_with_count,
-                        items=(
-                            []
-                            if _should_defer_interrupted_session_items(
-                                current_agent,
-                                run_config,
-                            )
-                            else turn_session_items
-                        ),
+                        items=([] if parked_items_deferred else turn_session_items),
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
                         interruptions=approvals_from_step(turn_result.next_step),

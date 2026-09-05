@@ -492,7 +492,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape", "held-shape", "held-with-before"])
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"
@@ -501,10 +501,34 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     payload = state.to_json()
     if invalid == "old-schema":
         payload["$schemaVersion"] = "1.16"
-    else:
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    elif invalid == "held-shape":
+        payload["pending_session_write"]["held"] = "yes"
+    else:
+        # A held batch was never offered to the Session, so recorded digests and the
+        # held marker cannot coexist on one record.
+        payload["pending_session_write"]["held"] = True
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_pending_session_write_without_the_held_key_keeps_its_meaning() -> None:
+    # A checkpoint written before the held marker existed still settles eagerly on
+    # resume entry, exactly as released 1.17 behavior specified.
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    assert "held" not in payload["pending_session_write"]
+    restored = await RunState.from_json(agent, payload)
+
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio
