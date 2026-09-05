@@ -32,6 +32,26 @@ class WorkspacePathCase:
     error_context: dict[str, str] | None = None
 
 
+def _symlink_or_skip(*args: Any, **kwargs: Any) -> None:
+    """Create a symlink, or skip the test where Windows forbids one.
+
+    Windows refuses symlink creation unless the process is elevated or Developer
+    Mode is enabled, so these tests cannot run for an ordinary Windows contributor.
+    CI runners hold the privilege, which is why this only shows up locally.
+
+    Only that specific failure is skipped. Any other OSError -- a missing parent,
+    an existing target, a full disk -- is re-raised, so a broken fixture cannot
+    quietly turn these path-policy and escape-rejection tests into passes. Mirrors
+    the helper of the same name in test_entries.py.
+    """
+    try:
+        os.symlink(*args, **kwargs)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires elevated privileges on Windows")
+        raise
+
+
 def _policy(root: Path | str = "/workspace") -> WorkspacePathPolicy:
     return WorkspacePathPolicy(root=root)
 
@@ -320,11 +340,11 @@ def test_normalize_path_with_symlink_resolution(tmp_path: Path) -> None:
 
     target = workspace / "target.txt"
     target.write_text("hello", encoding="utf-8")
-    os.symlink(target, workspace / "link.txt")
-    os.symlink(outside, workspace / "outside-link", target_is_directory=True)
+    _symlink_or_skip(target, workspace / "link.txt")
+    _symlink_or_skip(outside, workspace / "outside-link", target_is_directory=True)
 
     alias = tmp_path / "workspace-alias"
-    os.symlink(workspace, alias, target_is_directory=True)
+    _symlink_or_skip(workspace, alias, target_is_directory=True)
 
     test_cases = [
         WorkspacePathCase(
@@ -690,7 +710,7 @@ def test_host_io_rejects_write_under_resolved_read_only_extra_path_grant(
     grant_alias = tmp_path / "allowed-alias"
     workspace.mkdir()
     allowed.mkdir()
-    os.symlink(allowed, grant_alias, target_is_directory=True)
+    _symlink_or_skip(allowed, grant_alias, target_is_directory=True)
     target = allowed / "cache.db"
     grant = SandboxPathGrant(path=str(grant_alias), read_only=True)
     policy = WorkspacePathPolicy(
@@ -767,7 +787,7 @@ def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> Non
     workspace = tmp_path / "workspace"
     root_alias = tmp_path / "root-alias"
     workspace.mkdir()
-    os.symlink(Path("/"), root_alias, target_is_directory=True)
+    _symlink_or_skip(Path("/"), root_alias, target_is_directory=True)
     policy = WorkspacePathPolicy(
         root=workspace,
         extra_path_grants=(SandboxPathGrant(path=str(root_alias)),),
@@ -781,7 +801,7 @@ def test_host_io_rejects_extra_path_grant_symlink_to_root(tmp_path: Path) -> Non
 
 def test_host_path_grant_rejects_symlink_to_root(tmp_path: Path) -> None:
     root_alias = tmp_path / "root-alias"
-    os.symlink(Path("/"), root_alias, target_is_directory=True)
+    _symlink_or_skip(Path("/"), root_alias, target_is_directory=True)
     grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(root_alias))
 
     with pytest.raises(
@@ -795,11 +815,11 @@ def test_host_path_grant_returns_validated_resolved_source(tmp_path: Path) -> No
     source = tmp_path / "source"
     source.mkdir()
     source_alias = tmp_path / "source-alias"
-    os.symlink(source, source_alias, target_is_directory=True)
+    _symlink_or_skip(source, source_alias, target_is_directory=True)
     grant = SandboxPathGrant(path="/mnt/shared-data", host_path=str(source_alias))
 
     resolved_source = sandbox_path_grant_host_path(grant)
     source_alias.unlink()
-    os.symlink(Path("/"), source_alias, target_is_directory=True)
+    _symlink_or_skip(Path("/"), source_alias, target_is_directory=True)
 
     assert resolved_source == source.resolve()
