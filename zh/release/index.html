@@ -1,0 +1,2073 @@
+
+<!doctype html>
+<html lang="zh" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../repl/">
+      
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>发布流程/变更日志 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          跳转至
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="页眉">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              发布流程/变更日志
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="选择当前语言">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../release/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ja/release/" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ko/release/" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="搜索" placeholder="搜索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="查找">
+        
+        <button type="reset" class="md-search__icon md-icon" title="清空当前内容" aria-label="清空当前内容" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            正在初始化搜索引擎
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="导航栏" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    介绍
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速开始
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    配置
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    文档
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            文档
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    沙盒智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            沙盒智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    概念
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    沙箱客户端
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体记忆
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    实时智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            实时智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Realtime 智能体指南
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    语音智能体
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            语音智能体
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    快速入门
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    管线与工作流
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    追踪
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    模型
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    工具
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    安全防护措施
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体运行
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    流式传输
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体编排
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    任务转移
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    结果
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    人工介入
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_14" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_14" id="__nav_4_14_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    会话
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_14">
+            <span class="md-nav__icon md-icon"></span>
+            会话
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy 会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    高级 SQLite 会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    加密会话
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    上下文管理
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    使用量
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    追踪
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    测试
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    智能体可视化
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL 实用工具
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    发布流程/变更日志
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    发布流程/变更日志
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      次版本（Y）
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      补丁版本（Z）
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      破坏性变更日志
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="破坏性变更日志">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0220" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.22.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0210" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.21.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0200" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.20.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0190" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.19.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0180" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.18.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      次版本（Y）
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      补丁版本（Z）
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      破坏性变更日志
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="破坏性变更日志">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0220" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.22.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0210" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.21.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0200" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.20.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0190" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.19.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0180" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.18.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">发布流程/变更日志</h1>
+<p>本项目采用略作修改的语义化版本控制，格式为 <code>0.Y.Z</code>。开头的 <code>0</code> 表示 SDK 仍在快速演进。各部分按以下方式递增：</p>
+<h2 id="minor-y-versions">次版本（<code>Y</code>）</h2>
+<p>对于任何未标记为 beta 的公共接口发生的<strong>破坏性变更</strong>，我们会递增次版本 <code>Y</code>。例如，从 <code>0.0.x</code> 升级到 <code>0.1.x</code> 时可能包含破坏性变更。</p>
+<p>如果您不希望引入破坏性变更，建议在项目中固定使用 <code>0.0.x</code> 版本。</p>
+<h2 id="patch-z-versions">补丁版本（<code>Z</code>）</h2>
+<p>对于非破坏性变更，我们会递增 <code>Z</code>：</p>
+<ul>
+<li>错误修复</li>
+<li>新功能</li>
+<li>私有接口变更</li>
+<li>beta 功能更新</li>
+</ul>
+<h2 id="breaking-change-changelog">破坏性变更日志</h2>
+<h3 id="0220">0.22.0</h3>
+<p>版本 0.22.0 加强了多个现有 API 的失败处理和数据隔离。使用显式客户端构造 <code>OpenAIProvider</code>，同时还向提供商传递 <code>organization</code> 或 <code>project</code> 的应用程序，必须移除这些重复参数。</p>
+<p>要点：</p>
+<ul>
+<li>当智能体级输出安全防护措施阻止由终止函数工具直接生成的最终输出时，仅当经过验证的字段允许安全重建时，SDK 才会保留可用于重放的调用/输出对。原始 <code>function_call_output</code> 载荷会在会话历史记录、<code>RunState</code> 和流式结果状态中替换为固定文本 <code>"Output withheld by an output guardrail."</code>，而包含载荷的当前响应安全防护措施元数据会被清除或替换。如果当前响应包含推理内容或其他不受支持的结构，SDK 会改为丢弃完整的当前响应后缀。此前已接受的轮次和安全防护措施结果仍然可用。请参阅<a href="../guardrails/#output-guardrails">输出安全防护措施</a>。</li>
+<li>对于非流式 OpenAI Responses 调用，当返回响应的终止状态为 <code>failed</code> 或 <code>incomplete</code> 时，现在会引发 <code>ModelBehaviorError</code>，与现有的流式终止事件处理方式一致。这适用于 <code>OpenAIResponsesModel</code> 以及 <code>AnyLLMModel</code> 中的 Responses 路径。请参阅<a href="../running_agents/#exceptions">异常</a>。</li>
+<li>当 <code>openai_client</code> 与 <code>organization</code> 或 <code>project</code> 结合使用时，<a class="autorefs autorefs-internal" title="OpenAIProvider" href="../../ref/models/openai_provider/#agents.models.openai_provider.OpenAIProvider"><code>OpenAIProvider</code></a> 现在也会引发 <code>UserError</code>。与 <code>api_key</code>、<code>base_url</code> 和 <code>websocket_base_url</code> 的现有冲突保持不变。请改为在显式 <code>AsyncOpenAI</code> 客户端上配置这些值。请参阅 <a href="../config/#api-keys-and-clients">API 密钥和客户端</a>。</li>
+<li>每个 <code>RunResult.to_state()</code> 检查点现在都拥有独立的用量快照。恢复后的结果以检查点总量为起点，并累加自身的模型调用，而不会修改源结果或同级检查点。嵌套的 <code>Agent.as_tool()</code> 恢复仍会将恢复后的用量汇总到当前活跃的外层运行中。请参阅 <a href="../usage/#usage-in-runstate-checkpoints">RunState 检查点中的用量</a>。</li>
+<li>智能体可视化现在会递归展开通过 <code>handoff(agent)</code> 注册的目标所包含的工具、MCP服务器和下游任务转移，其行为与智能体 <code>handoffs</code> 列表中的直接 <code>Agent</code> 条目一致。请参阅<a href="../visualization/#generating-a-graph">图形生成</a>。</li>
+<li><code>Agent.clone()</code> 和 <code>RealtimeAgent.clone()</code> 的 API 指南现在准确说明了其现有的浅拷贝行为：未被覆盖的列表属性仍是相同的列表对象。如果克隆对象必须独立拥有该容器，请传入新列表。请参阅<a href="../agents/#cloningcopying-agents">智能体的克隆/复制</a>。</li>
+</ul>
+<h3 id="0210">0.21.0</h3>
+<p>版本 0.21.0 要求使用 <code>openai</code> v3，并将 Agents SDK的OpenAI HTTP 集成迁移到 HTTPX2。使用默认 OpenAI客户端的应用程序无需更改客户端设置，但自定义 OpenAI HTTP 层的应用程序可能需要迁移面向传输层的代码。</p>
+<p>要点：</p>
+<ul>
+<li>现在要求的 OpenAI依赖项为 <code>openai&gt;=3.0.0,&lt;4</code>。全新的核心安装使用 HTTPX2，并且不再将旧版 <code>httpx</code> 作为直接依赖项安装。</li>
+<li>默认 OpenAI提供商、语音提供商、Responses WebSocket 支持、追踪导出器和提供商重试规范化现在使用 HTTPX2。其现有的 Agents SDK公共配置和运行时行为保持不变。</li>
+<li>向 <code>AsyncOpenAI</code> 传递 <code>http_client=</code> 的应用程序，应将自定义客户端、传输、身份验证、事件钩子、模拟传输、超时值、URL、请求、响应和传输异常处理从 <code>httpx</code> 迁移到 <code>httpx2</code>。如果应用程序既需要 OpenAI客户端的默认设置，又需要自定义 HTTP 选项，请优先使用 OpenAI Python SDK的 <code>DefaultAsyncHttpx2Client</code>。请参阅<a href="../config/#custom-http-clients-with-openai-v3">使用 <code>openai</code> v3 的自定义 HTTP 客户端</a>。</li>
+<li>Agents SDK不会将任意旧版 HTTPX 对象转换为 HTTPX2。OpenAI Python SDK的临时旧版客户端兼容路径要求显式安装 <code>httpx</code>，并且应将其视为迁移过渡方案。</li>
+<li>本地 MCP HTTP 自定义继续遵循已安装的 MCP软件包：MCP Python SDK v1 提供并使用旧版 <code>httpx</code>，而 MCP Python SDK v2 使用 <code>httpx2</code>。普通 MCP连接无需更改应用程序。请参阅 <a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 和 v2</a>。</li>
+<li>公共的提供商中立测试实用工具现在无需依赖提供商或进程，即可覆盖智能体模型、沙箱会话、Realtime 会话和语音管线工作流。有关操作方法以及何时应保留真实提供商适配器或集成边界的指南，请参阅<a href="../testing/">测试</a>。</li>
+</ul>
+<h3 id="0200">0.20.0</h3>
+<p>版本 0.20.0 包含一项可能具有破坏性的 MCP依赖项迁移，影响自定义本地 MCP HTTP 传输的应用程序。它还更新了智能体或运行未显式选择模型时所使用的 SDK 默认模型。</p>
+<p>要点：</p>
+<ul>
+<li>SDK 默认模型现在是 <code>gpt-5.6-luna</code>，而不再是 <code>gpt-5.4-mini</code>。默认的 <code>reasoning.effort="none"</code> 和 <code>verbosity="low"</code> 设置保持不变。</li>
+<li>显式指定的智能体模型、运行级模型覆盖以及 <code>OPENAI_DEFAULT_MODEL</code> 环境变量仍然优先于 SDK 默认值。</li>
+<li>Realtime 输入转录设置现在可识别 <code>gpt-transcribe</code>、<code>gpt-live-transcribe</code> 和 <code>gpt-realtime-whisper</code>。对于低延迟 <code>gpt-live-transcribe</code> 会话，嵌套的 <code>audio.input.transcription</code> 设置可以提供 <code>prompt</code>、<code>keywords</code> 和多个预期的 <code>languages</code>。此 SDK 固定使用的 OpenAI客户端版本仅在搭配 <code>gpt-realtime-whisper</code> 时支持 <code>delay</code> 延迟/准确度级别。若要在提交音频轮次后进行转录，或获取检测到的语言输出，请通过 WebSocket 使用 <code>gpt-transcribe</code>。显式设置 <code>audio.input.turn_detection=None</code> 会禁用自动轮次检测。请参阅<a href="../realtime/guide/#input-transcription-settings">输入转录设置</a>。</li>
+<li>由 Agents SDK创建的本地 MCP连接现在支持 MCP Python SDK v2，同时通过 <code>mcp&gt;=1.19.0,&lt;3</code> 保持与 v1 的兼容性。Agents SDK会自动适配普通的 stdio、SSE 和 Streamable HTTP 连接。安装 MCP v2 后，这些连接会使用 <code>mcp.Client(mode="auto")</code> 探测最新受支持的协议，并针对旧版服务器回退到传统的 <code>initialize</code> 握手。如果依赖项解析选择了 MCP v2，则提供自定义 <code>httpx.Auth</code> 对象或 <code>httpx.AsyncClient</code> 工厂的应用程序必须将这些值迁移到 <code>httpx2</code>，或者固定使用 <code>mcp&lt;2</code> 以保留 v1 HTTP 栈。<code>MCPServerStreamableHttp</code> 的 <code>params["ignore_initialized_notification_failure"] = True</code> 选项也仍然仅支持 v1。有关迁移详情，请参阅 <a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 和 v2</a>。</li>
+<li>沙箱挂载验证现在会在产生沙箱或挂载辅助程序的副作用之前，拒绝不安全的凭证放置方式。受信任的应用程序可以针对容器内的确切挂载路径，确认挂载范围内或广泛的凭证暴露，而无需更改存储能力表。这些确认仅在运行时有效，序列化的沙箱状态本身绝不会授予凭证权限。在受保护的挂载边界处，SDK 会返回一个新的、已脱敏的异常。如果源异常是可明确识别的 SDK 沙箱错误，并且其获准的结构化字段通过验证，则替代异常会保留该子类型和经过验证的安全字段。可识别的 <code>MountConfigError</code> 也可以保留由 SDK 生成的安全验证消息。否则，SDK 会返回一个新的通用脱敏错误。由提供商控制或未经批准的消息、命令数据、注释、上下文、原因和源回溯状态均不会保留。请参阅<a href="../sandbox/clients/#mounts-and-remote-storage">挂载与远程存储</a>和<a href="../sandbox/guide/#resume-from-session-state">从会话状态恢复</a>。</li>
+<li>重试策略可以检查稳定的重放安全事实，并为提供商标记为不安全的非流式请求显式设置 <code>RetryDecision(approve_unsafe_replay=True)</code>。此批准不会绕过中止、已发出的流式输出，也不会绕过诸如程序化工具调用等单独的本地副作用否决。请参阅<a href="../models/#runner-managed-retries">由 Runner 管理的重试</a>。</li>
+<li>可恢复的 <code>RunState</code> 对象现在可以在下次模型调用之前，使用 <code>add_input()</code> 暂存持久化用户输入。暂存的输入可在序列化后保留，会经过输入安全防护措施，并在本地会话和服务器管理的对话中产生一次持久化 SDK 输入记录。显式批准的不安全重放仍可能向提供商重新发送输入，并重复提供商侧的工作。请参阅<a href="../results/#add-input-before-resuming">恢复前添加输入</a>。</li>
+<li>运行时可靠性修复统一了流式和非流式的<a href="../guardrails/#output-guardrails">输出安全防护措施会话持久化</a>，在复制和命名空间处理期间保留 <code>FunctionTool</code> 子类，并针对<a href="../models/#chat-completions-compatibility-options">不受支持的 Chat Completions 音频输出</a>引发显式错误，而不是静默完成空流。<code>OpenAIResponsesCompactionSession</code> 包装器会在取消操作到达调用方之前，尝试并等待<a href="../sessions/#auto-compaction-can-block-streaming">压缩前历史记录恢复</a>。<a href="../voice/pipeline/#results"><code>VoicePipeline</code></a> 使用方现在会在运行正常结束后收到转录会话关闭失败；如果某个轮次更早发生失败，则该失败的优先级高于之后的关闭失败。<code>RunState</code> 往返转换现在会保留本地 shell 输出、已确认的计算机安全检查、采用默认值的工具输出字段，以及遍历字典、列表或元组时遇到的 Pydantic 模型或数据类输出。MCP转换会保留自由形式的对象 schema 和图像输出，并将音频块、资源块等其他原始内容块序列化为有效的 JSON 文本。<code>MCPServerManager</code> 会对重叠的生命周期操作进行串行化，并为连接和清理应用有限的默认超时。模型重放会先从输出项中移除服务器拥有的 <code>created_by</code> 元数据，再将其用作输入。</li>
+</ul>
+<h3 id="0190">0.19.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更。次版本号递增是因为新增了一个重要的 OpenAI Responses 功能领域：程序化工具调用。</p>
+<p>要点：</p>
+<ul>
+<li>新增 <a class="autorefs autorefs-internal" title="ProgrammaticToolCallingTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ProgrammaticToolCallingTool"><code>ProgrammaticToolCallingTool</code></a>，支持的 OpenAI Responses模型可通过它生成 JavaScript，以协调符合程序化工具调用条件的工具。它支持每个工具的 <code>allowed_callers</code>、来自 <code>FunctionTool</code> 实例的 structured outputs，以及与 Runner 流式传输、安全防护措施、审批、会话和 <code>RunState</code> 的集成。有关设置和约束，请参阅<a href="../tools/#programmatic-tool-calling">程序化工具调用</a>。</li>
+<li>新增公共 <code>agents.decorators</code> 模块，并增加 <code>@tool</code>，作为现有 <code>@function_tool</code> 装饰器的较短别名，同时保留现有安全防护措施装饰器。<code>FunctionTool</code> 实例现在也支持异步可调用对象。</li>
+<li>现在，SDK 配置可在智能体、运行、模型、会话、沙箱和语音管线中一致地接受带类型的设置对象或字典，并会验证未知设置。</li>
+<li>强化了模型、工具、MCP、Realtime、会话、沙箱和追踪中的错误及诊断日志记录，在保留有用调试上下文的同时避免暴露原始敏感载荷。</li>
+<li>改进了 AnyLLM、LiteLLM 和 Chat Completions 的兼容性，在模型重试期间保留会话历史记录，并为响应开始前发生的 WebSocket 过载添加了提供商重试指南，使选择启用的 Runner 重试策略可以在获准时重放失败的尝试。</li>
+<li>通过 <code>VercelCloudBucketMountStrategy</code> 新增了<a href="../sandbox/clients/#mounts-and-remote-storage">仅能在创建 Vercel 沙箱时配置的 S3 挂载</a>。已挂载的会话会从工作区持久化中排除存储桶内容，并且有意不支持动态挂载变更或会话恢复。</li>
+</ul>
+<h3 id="0180">0.18.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更。次版本号递增仅用于更新 Realtime 智能体的默认模型。</p>
+<p>要点：</p>
+<ul>
+<li>Realtime 智能体现在使用 <code>gpt-realtime-2.1</code> 作为默认模型，因此新的 Realtime 设置无需额外配置即可使用最新的推荐模型。</li>
+</ul>
+<h3 id="0170">0.17.0</h3>
+<p>在此版本中，除非源路径由 <code>Manifest.extra_path_grants</code> 覆盖，否则沙箱本地源实体化会将 <code>LocalFile.src</code> 和 <code>LocalDir.src</code> 限制在实体化 <code>base_dir</code> 内。应用清单时，<code>base_dir</code> 是 SDK 进程的当前工作目录；相对本地源从该目录解析，而绝对本地源必须已经位于其中或位于显式授权的路径下。此变更修复了本地产物边界问题，但可能影响有意将该基础目录之外的受信任主机文件或目录复制到沙箱工作区的应用程序。</p>
+<p>若要迁移，请使用 <code>SandboxPathGrant</code> 在清单级别授予对受信任主机根目录的访问权限；如果沙箱只需读取这些文件，最好授予只读权限：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxPathGrant</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dir</span><span class="p">,</span> <span class="n">LocalDir</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="c1"># This is an absolute host path outside the SDK process base_dir.</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="n">TRUSTED_DOCS_ROOT</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/opt/my-app/docs&quot;</span><span class="p">)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">extra_path_grants</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="c1"># This host root is outside the SDK process base_dir, so the manifest must grant it.</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="n">SandboxPathGrant</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">),</span> <span class="n">read_only</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="p">),</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        <span class="c1"># No grant is needed for local sources that stay under the SDK process base_dir.</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        <span class="s2">&quot;fixtures&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;fixtures&quot;</span><span class="p">),</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Local test fixtures.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="c1"># This entry reads from the granted host root and copies it into the sandbox workspace.</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        <span class="s2">&quot;docs&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Trusted local documents.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        <span class="c1"># Dir creates a sandbox workspace directory; it does not read from the host filesystem.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>        <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;Generated artifacts.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="p">},</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>请将 <code>extra_path_grants</code> 视为受信任的应用程序配置。除非应用程序已批准这些主机路径，否则不要根据模型输出或其他不受信任的清单输入填充授权。</p>
+<h3 id="0160">0.16.0</h3>
+<p>在此版本中，SDK 默认模型现在是 <code>gpt-5.4-mini</code>，而不再是 <code>gpt-4.1</code>。这会影响未显式设置模型的智能体和运行。由于新的默认模型是 GPT-5 模型，隐式默认模型设置现在包括 <code>reasoning.effort="none"</code> 和 <code>verbosity="low"</code> 等 GPT-5 默认值。</p>
+<p>如果您需要保留之前的默认模型行为，请在智能体或运行配置中显式设置模型，或者设置 <code>OPENAI_DEFAULT_MODEL</code> 环境变量：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>要点：</p>
+<ul>
+<li><code>Runner.run</code>、<code>Runner.run_sync</code> 和 <code>Runner.run_streamed</code> 现在接受 <code>max_turns=None</code>，以禁用轮次限制。</li>
+<li>对于本地、Docker 和提供商支持的沙箱实现，沙箱工作区填充现在会拒绝包含指向归档根目录之外的符号链接的 tar 归档，其中也包括目标为绝对路径的符号链接。</li>
+</ul>
+<h3 id="0150">0.15.0</h3>
+<p>在此版本中，模型拒绝现在会显式呈现为 <code>ModelRefusalError</code>，而不会被视为空文本输出；对于 structured outputs，也不会再导致运行循环持续重试直至 <code>MaxTurnsExceeded</code>。</p>
+<p>这会影响此前预期仅包含拒绝的模型响应以 <code>final_output == ""</code> 完成的代码。若要处理拒绝而不引发异常，请提供 <code>model_refusal</code> 运行错误处理程序：</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="nb">input</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">error_handlers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;model_refusal&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">data</span><span class="p">:</span> <span class="n">data</span><span class="o">.</span><span class="n">error</span><span class="o">.</span><span class="n">refusal</span><span class="p">},</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>对于使用 structured outputs 的智能体，处理程序可以返回与智能体输出 schema 匹配的值，SDK 会像验证其他运行错误处理程序的最终输出一样验证该值。</p>
+<h3 id="0140">0.14.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更，但新增了一个重要的 beta 功能领域：沙箱智能体，以及在本地、容器化和托管环境中使用它们所需的运行时、后端和文档支持。</p>
+<p>要点：</p>
+<ul>
+<li>新增以 <code>SandboxAgent</code>、<code>Manifest</code> 和 <code>SandboxRunConfig</code> 为核心的 beta 沙箱运行时接口，使智能体能够在持久化的隔离工作区内处理文件、目录、Git 仓库、挂载和快照，并支持恢复。</li>
+<li>新增通过 <code>UnixLocalSandboxClient</code> 和 <code>DockerSandboxClient</code> 实现的本地及容器化开发沙箱执行后端，并通过 Python 软件包中的可选依赖 extras，为 Blaxel、Cloudflare、Daytona、E2B、Modal、Runloop 和 Vercel 提供托管提供商集成。</li>
+<li>新增沙箱记忆支持，使未来的运行能够复用以往运行中获得的经验，并提供渐进式披露、多轮分组、可配置的隔离边界，以及包括 S3 支持工作流在内的持久化记忆代码示例。</li>
+<li>新增更广泛的工作区和恢复模型，包括本地及合成工作区条目、S3/R2/GCS/Azure Blob Storage/S3 Files 的远程存储挂载、可移植快照，以及通过 <code>RunState</code>、<code>SandboxSessionState</code> 或已保存快照实现的恢复流程。</li>
+<li>在 <code>examples/sandbox/</code> 下新增大量沙箱代码示例和教程，涵盖使用技能、任务转移和记忆完成编码任务、提供商专用设置，以及代码审查、数据室问答和网站克隆等端到端工作流。</li>
+<li>扩展了核心运行时和追踪栈，新增沙箱感知的会话准备、能力绑定、状态序列化、统一追踪、提示词缓存键默认值，以及更安全的敏感 MCP输出脱敏。</li>
+</ul>
+<h3 id="0130">0.13.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更，但包含一项值得注意的 Realtime 默认值更新、新的 MCP能力以及运行时稳定性修复。</p>
+<p>要点：</p>
+<ul>
+<li>默认 websocket Realtime 模型现在是 <code>gpt-realtime-1.5</code>，因此新的 Realtime 智能体设置无需额外配置即可使用更新的模型。</li>
+<li><code>MCPServer</code> 现在公开 <code>list_resources()</code>、<code>list_resource_templates()</code> 和 <code>read_resource()</code>，而 <code>MCPServerStreamableHttp</code> 现在公开 <code>session_id</code>，因此使用 MCP Streamable HTTP 传输的会话可以在重新连接后或无状态工作进程之间恢复。</li>
+<li>Chat Completions 集成现在可以通过 <code>should_replay_reasoning_content</code> 选择重新发送现有推理内容，从而改善 LiteLLM/DeepSeek 等适配器中特定于提供商的推理/工具调用连续性。</li>
+<li>修复了多个运行时和会话边界情况，包括 <code>SQLAlchemySession</code> 中的并发首次写入、移除推理内容后带有孤立助手消息 ID 的压缩请求、<code>remove_all_tools()</code> 遗留 MCP/推理项，以及 <code>FunctionTool</code> 实例批处理执行器中的竞态条件。</li>
+</ul>
+<h3 id="0120">0.12.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更。有关主要新增功能，请查看<a href="https://github.com/openai/openai-agents-python/releases/tag/v0.12.0">发布说明</a>。</p>
+<h3 id="0110">0.11.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更。有关主要新增功能，请查看<a href="https://github.com/openai/openai-agents-python/releases/tag/v0.11.0">发布说明</a>。</p>
+<h3 id="0100">0.10.0</h3>
+<p>此次次版本发布<strong>不会</strong>引入破坏性变更，但为 OpenAI Responses用户新增了一个重要功能领域：Responses API 的 websocket 传输支持。</p>
+<p>要点：</p>
+<ul>
+<li>新增对 OpenAI Responses模型的 websocket 传输支持（选择启用；HTTP 仍是默认传输）。</li>
+<li>新增 <code>responses_websocket_session()</code> 辅助函数/<code>ResponsesWebSocketSession</code>，用于在多轮运行中复用支持 websocket 的共享提供商和 <code>RunConfig</code>。</li>
+<li>新增 websocket 流式传输代码示例（<code>examples/basic/stream_ws.py</code>），涵盖流式传输、工具、审批和后续轮次。</li>
+</ul>
+<h3 id="090">0.9.0</h3>
+<p>在此版本中，不再支持 Python 3.9，因为该主要版本已于三个月前终止支持。请升级到较新的运行时版本。</p>
+<p>此外，<code>Agent#as_tool()</code> 方法返回值的类型提示已从 <code>Tool</code> 收窄为 <code>FunctionTool</code>。此变更通常不会造成破坏性问题，但如果您的代码依赖更宽泛的联合类型，可能需要进行一些调整。</p>
+<h3 id="080">0.8.0</h3>
+<p>在此版本中，两项运行时行为变更可能需要迁移：</p>
+<ul>
+<li>包装<strong>同步</strong> Python 可调用对象的 <code>FunctionTool</code> 实例现在会通过 <code>asyncio.to_thread(...)</code> 在工作线程中执行，而不再在事件循环线程上运行。如果您的工具逻辑依赖线程局部状态或具有线程亲和性的资源，请迁移到异步工具实现，或在工具代码中显式指定线程亲和性。</li>
+<li>本地 MCP工具失败处理现在可以配置，并且默认行为可以返回模型可见的错误输出，而不是使整个运行失败。如果您依赖快速失败语义，请设置 <code>mcp_config={"failure_error_function": None}</code>。服务器级 <code>failure_error_function</code> 值会覆盖智能体级设置，因此请在每个具有显式处理程序的本地 MCP服务器上设置 <code>failure_error_function=None</code>。</li>
+</ul>
+<h3 id="070">0.7.0</h3>
+<p>在此版本中，有几项行为变更可能会影响现有应用程序：</p>
+<ul>
+<li>嵌套任务转移历史记录现在需要<strong>选择启用</strong>（默认禁用）。如果您依赖 v0.6.x 的默认嵌套行为，请显式设置 <code>RunConfig(nest_handoff_history=True)</code>。</li>
+<li><code>gpt-5.1</code>/<code>gpt-5.2</code> 的默认 <code>reasoning.effort</code> 已更改为 <code>"none"</code>（之前是由 SDK 默认值配置的 <code>"low"</code>）。如果您的提示词或质量/成本配置依赖 <code>"low"</code>，请在 <code>model_settings</code> 中显式设置它。</li>
+</ul>
+<h3 id="060">0.6.0</h3>
+<p>在此版本中，默认任务转移历史记录现在会封装为一条助手消息，而不再将用户和助手轮次作为单独消息传递，从而为下游智能体提供简洁且可预测的摘要
+- 现有的单消息任务转移记录现在默认会在 <code>&lt;CONVERSATION HISTORY&gt;</code> 块之前，以完全一致的字面文本 <code>For context, here is the conversation so far between the user and the previous agent:</code> 开头，以便下游智能体获得带有清晰标签的摘要</p>
+<h3 id="050">0.5.0</h3>
+<p>此版本不会引入任何可见的破坏性变更，但包含新功能和若干重要的底层更新：</p>
+<ul>
+<li>在 <code>RealtimeRunner</code> 中新增对处理 <a href="https://platform.openai.com/docs/guides/realtime-sip">SIP 协议连接</a>的支持。</li>
+<li>大幅修订了 <code>Runner#run_sync</code> 的内部逻辑，以兼容 Python 3.14</li>
+</ul>
+<h3 id="040">0.4.0</h3>
+<p>在此版本中，不再支持 <a href="https://pypi.org/project/openai/">openai</a> 软件包 v1.x 版本。请将 openai v2.x 与此 SDK 搭配使用。</p>
+<h3 id="030">0.3.0</h3>
+<p>在此版本中，Realtime API支持迁移到 gpt-realtime 模型及其 API 接口（GA 版本）。</p>
+<h3 id="020">0.2.0</h3>
+<p>在此版本中，之前有几处接受 <code>Agent</code> 作为参数的位置，现在改为接受 <code>AgentBase</code>。例如，这适用于 MCP服务器中的 <code>list_tools()</code> 方法签名。这只是类型方面的变更，您仍会收到 <code>Agent</code> 对象。若要更新，只需将 <code>Agent</code> 替换为 <code>AgentBase</code>，以修复类型错误。</p>
+<h3 id="010">0.1.0</h3>
+<p>在此版本中，<a class="autorefs autorefs-internal" title="MCPServer" href="../../ref/mcp/server/#agents.mcp.server.MCPServer"><code>MCPServer.list_tools()</code></a> 新增了两个参数：<code>run_context</code> 和 <code>agent</code>。您需要将这些参数添加到 <code>MCPServer</code> 子类中每个被重写的 <code>MCPServer.list_tools()</code> 方法。</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\u5df2\u590d\u5236", "clipboard.copy": "\u590d\u5236", "search.result.more.one": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.more.other": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 # \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.none": "\u6ca1\u6709\u627e\u5230\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.one": "\u627e\u5230 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.other": "# \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.placeholder": "\u952e\u5165\u4ee5\u5f00\u59cb\u641c\u7d22", "search.result.term.missing": "\u7f3a\u5c11", "select.version": "\u9009\u62e9\u5f53\u524d\u7248\u672c"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>

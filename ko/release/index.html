@@ -1,0 +1,2071 @@
+
+<!doctype html>
+<html lang="ko" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../repl/">
+      
+      
+      
+      <link rel="icon" href="../../images/favicon-platform.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.16">
+    
+    
+      
+        <title>릴리스 프로세스/변경 로그 - OpenAI Agents SDK</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.7e37652d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          콘텐츠로 이동
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="상단/헤더">
+    <a href="../" title="OpenAI Agents SDK" class="md-header__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            OpenAI Agents SDK
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              릴리스 프로세스/변경 로그
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="언어설정">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../release/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../ja/release/" hreflang="ja" class="md-select__link">
+              日本語
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="ko" class="md-select__link">
+              한국어
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/release/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="검색" placeholder="검색" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="검색">
+        
+        <button type="reset" class="md-search__icon md-icon" title="지우기" aria-label="지우기" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            검색 초기화
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/openai/openai-agents-python" title="저장소로 이동" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="네비게이션" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../" title="OpenAI Agents SDK" class="md-nav__button md-logo" aria-label="OpenAI Agents SDK" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    OpenAI Agents SDK
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/openai/openai-agents-python" title="저장소로 이동" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.0.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    openai-agents-python
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    소개
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    구성
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    문서
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            문서
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_2" id="__nav_4_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Sandbox 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_2">
+            <span class="md-nav__icon md-icon"></span>
+            Sandbox 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    개념
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    샌드박스 클라이언트
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sandbox/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 메모리
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_3" id="__nav_4_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    실시간 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_3">
+            <span class="md-nav__icon md-icon"></span>
+            실시간 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../realtime/guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    실시간 에이전트 가이드
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    음성 에이전트
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            음성 에이전트
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    빠른 시작
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    파이프라인 및 워크플로
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    트레이싱
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    모델
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    도구
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guardrails/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    가드레일
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 실행
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    스트리밍
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi_agent/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 오케스트레이션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    핸드오프
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    결과
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../human_in_the_loop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    휴먼인더루프 (HITL)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_14" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_14" id="__nav_4_14_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    세션
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_14">
+            <span class="md-nav__icon md-icon"></span>
+            세션
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/sqlalchemy_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    SQLAlchemy 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/advanced_sqlite_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    고급 SQLite 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/encrypted_session/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    암호화된 세션
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../context/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    컨텍스트 관리
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    사용량
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Model context protocol (MCP)
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    트레이싱
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    테스트
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    에이전트 시각화
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../repl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    REPL 유틸리티
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    릴리스 프로세스/변경 로그
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    릴리스 프로세스/변경 로그
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="목차">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      목차
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      마이너(Y) 버전
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      패치(Z) 버전
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      호환성을 깨는 변경 사항 로그
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="호환성을 깨는 변경 사항 로그">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0220" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.22.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0210" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.21.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0200" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.20.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0190" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.19.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0180" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.18.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="목차">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      목차
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#minor-y-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      마이너(Y) 버전
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#patch-z-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      패치(Z) 버전
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#breaking-change-changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      호환성을 깨는 변경 사항 로그
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="호환성을 깨는 변경 사항 로그">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#0220" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.22.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0210" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.21.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0200" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.20.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0190" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.19.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0180" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.18.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0170" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.17.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0160" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.16.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0150" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.15.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0140" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.14.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0130" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.13.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0120" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.12.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0110" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.11.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#0100" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.10.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#090" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.9.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#080" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.8.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#070" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.7.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.6.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.5.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.4.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.3.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.2.0
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010" class="md-nav__link">
+    <span class="md-ellipsis">
+      0.1.0
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">릴리스 프로세스/변경 로그</h1>
+<p>이 프로젝트는 <code>0.Y.Z</code> 형식을 사용하는, 약간 수정된 시맨틱 버저닝을 따릅니다. 앞의 <code>0</code>은 SDK가 여전히 빠르게 발전하고 있음을 나타냅니다. 각 구성 요소는 다음과 같이 증가합니다.</p>
+<h2 id="minor-y-versions">마이너(<code>Y</code>) 버전</h2>
+<p>베타로 표시되지 않은 공개 인터페이스에 <strong>호환성을 깨는 변경 사항</strong>이 있을 때 마이너 버전 <code>Y</code>을 증가시킵니다. 예를 들어 <code>0.0.x</code>에서 <code>0.1.x</code>로 변경될 때 호환성을 깨는 변경 사항이 포함될 수 있습니다.</p>
+<p>호환성을 깨는 변경 사항을 원하지 않는다면 프로젝트에서 <code>0.0.x</code> 버전으로 고정하는 것이 좋습니다.</p>
+<h2 id="patch-z-versions">패치(<code>Z</code>) 버전</h2>
+<p>호환성을 깨지 않는 다음 변경 사항에는 <code>Z</code>을 증가시킵니다.</p>
+<ul>
+<li>버그 수정</li>
+<li>새로운 기능</li>
+<li>비공개 인터페이스 변경</li>
+<li>베타 기능 업데이트</li>
+</ul>
+<h2 id="breaking-change-changelog">호환성을 깨는 변경 사항 로그</h2>
+<h3 id="0220">0.22.0</h3>
+<p>버전 0.22.0에서는 여러 기존 API의 실패 처리와 데이터 격리가 강화되었습니다. 명시적 클라이언트로 <code>OpenAIProvider</code>을 생성하면서 프로바이더에도 <code>organization</code> 또는 <code>project</code>을 전달하는 애플리케이션은 중복 인수를 제거해야 합니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>에이전트 수준 출력 가드레일이 종결 함수 도구에서 직접 생성된 최종 출력을 차단하면, SDK는 검증된 필드로 안전하게 재구성할 수 있는 경우에만 재실행에 유효한 호출/출력 쌍을 유지합니다. 원래 <code>function_call_output</code> 페이로드는 세션 기록, <code>RunState</code>, 스트리밍된 결과 상태에서 고정 텍스트 <code>"Output withheld by an output guardrail."</code>으로 대체되며, 페이로드가 포함된 현재 응답의 가드레일 메타데이터는 제거되거나 대체됩니다. 현재 응답에 추론 또는 지원되지 않는 다른 형태가 포함되어 있으면 SDK는 대신 현재 응답의 접미부 전체를 폐기합니다. 이전에 수락된 턴과 가드레일 결과는 계속 사용할 수 있습니다. <a href="../guardrails/#output-guardrails">출력 가드레일</a>을 참고하세요.</li>
+<li>이제 비스트리밍 OpenAI Responses 호출은 반환된 응답의 최종 상태가 <code>failed</code> 또는 <code>incomplete</code>이면 기존의 스트리밍 최종 이벤트 처리와 동일하게 <code>ModelBehaviorError</code>을 발생시킵니다. 이는 <code>OpenAIResponsesModel</code>과 <code>AnyLLMModel</code>의 Responses 경로에 적용됩니다. <a href="../running_agents/#exceptions">예외</a>를 참고하세요.</li>
+<li>이제 <a class="autorefs autorefs-internal" title="OpenAIProvider" href="../../ref/models/openai_provider/#agents.models.openai_provider.OpenAIProvider"><code>OpenAIProvider</code></a>은 <code>openai_client</code>가 <code>organization</code> 또는 <code>project</code>와 함께 사용될 때도 <code>UserError</code>을 발생시킵니다. <code>api_key</code>, <code>base_url</code>, <code>websocket_base_url</code>과의 기존 충돌은 변경되지 않습니다. 이러한 값은 명시적 <code>AsyncOpenAI</code> 클라이언트에 구성하세요. <a href="../config/#api-keys-and-clients">API 키와 클라이언트</a>를 참고하세요.</li>
+<li>이제 각 <code>RunResult.to_state()</code> 체크포인트는 독립적인 사용량 스냅샷을 소유합니다. 재개된 결과는 체크포인트 합계로 시작하고 자체 모델 호출을 추가하며, 원본 결과나 다른 체크포인트를 변경하지 않습니다. 중첩된 <code>Agent.as_tool()</code> 재개는 재개 이후의 사용량을 활성 외부 실행에 계속 집계합니다. <a href="../usage/#usage-in-runstate-checkpoints">RunState 체크포인트의 사용량</a>을 참고하세요.</li>
+<li>이제 에이전트 시각화는 <code>handoff(agent)</code>로 등록된 대상의 도구, MCP 서버, 이후 핸드오프를 재귀적으로 확장하며, 이는 에이전트의 <code>handoffs</code> 목록에 있는 직접적인 <code>Agent</code> 항목과 동일합니다. <a href="../visualization/#generating-a-graph">그래프 생성</a>을 참고하세요.</li>
+<li>이제 <code>Agent.clone()</code> 및 <code>RealtimeAgent.clone()</code> API 안내에는 기존의 얕은 복사 동작이 정확히 명시되어 있습니다. 재정의되지 않은 목록 속성은 동일한 목록 객체로 유지됩니다. 복제본이 컨테이너를 독립적으로 소유해야 한다면 새 목록을 전달하세요. <a href="../agents/#cloningcopying-agents">에이전트 복제/복사</a>를 참고하세요.</li>
+</ul>
+<h3 id="0210">0.21.0</h3>
+<p>버전 0.21.0에는 <code>openai</code> v3가 필요하며, Agents SDK의 OpenAI HTTP 통합이 HTTPX2로 이전되었습니다. 기본 OpenAI 클라이언트를 사용하는 애플리케이션은 클라이언트 설정을 변경할 필요가 없지만, OpenAI HTTP 계층을 사용자 지정하는 애플리케이션은 전송 계층 관련 코드를 마이그레이션해야 할 수 있습니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>이제 필수 OpenAI 의존성은 <code>openai&gt;=3.0.0,&lt;4</code>입니다. 코어를 새로 설치하면 HTTPX2를 사용하며, 더 이상 레거시 <code>httpx</code>을 직접 의존성으로 설치하지 않습니다.</li>
+<li>이제 기본 OpenAI 프로바이더, Voice 프로바이더, Responses WebSocket 지원, 트레이싱 익스포터, 프로바이더 재시도 정규화는 HTTPX2를 사용합니다. 기존 Agents SDK의 공개 구성과 런타임 동작은 변경되지 않습니다.</li>
+<li><code>AsyncOpenAI</code>에 <code>http_client=</code>을 전달하는 애플리케이션은 사용자 지정 클라이언트, 전송, 인증, 이벤트 훅, 모의 전송, 타임아웃 값, URL, 요청, 응답, 전송 예외 처리를 <code>httpx</code>에서 <code>httpx2</code>로 마이그레이션해야 합니다. 애플리케이션에 OpenAI 클라이언트의 기본값과 사용자 지정 HTTP 옵션이 모두 필요한 경우 OpenAI Python SDK의 <code>DefaultAsyncHttpx2Client</code>을 사용하는 것이 좋습니다. <a href="../config/#custom-http-clients-with-openai-v3"><code>openai</code> v3의 사용자 지정 HTTP 클라이언트</a>를 참고하세요.</li>
+<li>Agents SDK는 임의의 레거시 HTTPX 객체를 HTTPX2로 변환하지 않습니다. OpenAI Python SDK의 임시 레거시 클라이언트 호환성 경로에는 명시적인 <code>httpx</code> 설치가 필요하며, 이를 마이그레이션용 연결 경로로 간주해야 합니다.</li>
+<li>로컬 MCP HTTP 사용자 지정은 설치된 MCP 패키지를 계속 따릅니다. MCP Python SDK v1은 레거시 <code>httpx</code>을 제공하고 사용하며, MCP Python SDK v2는 <code>httpx2</code>을 사용합니다. 일반적인 MCP 연결에는 애플리케이션 변경이 필요하지 않습니다. <a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 및 v2</a>를 참고하세요.</li>
+<li>이제 공개된 프로바이더 중립적 테스트 유틸리티는 프로바이더나 프로세스 의존성 없이 에이전트 모델, 샌드박스 세션, Realtime 세션, Voice 파이프라인 워크플로를 지원합니다. 실제 프로바이더 어댑터 또는 통합 경계를 유지해야 하는 경우에 대한 방법과 안내는 <a href="../testing/">테스트</a>를 참고하세요.</li>
+</ul>
+<h3 id="0200">0.20.0</h3>
+<p>버전 0.20.0에는 로컬 MCP HTTP 전송을 사용자 지정하는 애플리케이션에 잠재적으로 호환성을 깨는 MCP 의존성 마이그레이션이 포함됩니다. 또한 에이전트 또는 실행에서 모델을 명시적으로 선택하지 않을 때 사용하는 SDK 기본 모델이 업데이트되었습니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>이제 SDK 기본 모델은 <code>gpt-5.4-mini</code> 대신 <code>gpt-5.6-luna</code>입니다. 기본 <code>reasoning.effort="none"</code> 및 <code>verbosity="low"</code> 설정은 변경되지 않습니다.</li>
+<li>명시적인 에이전트 모델, 실행 수준 모델 재정의, <code>OPENAI_DEFAULT_MODEL</code> 환경 변수는 계속 SDK 기본값보다 우선합니다.</li>
+<li>이제 Realtime 입력 전사 설정은 <code>gpt-transcribe</code>, <code>gpt-live-transcribe</code>, <code>gpt-realtime-whisper</code>를 인식합니다. 지연 시간이 짧은 <code>gpt-live-transcribe</code> 세션에서는 중첩된 <code>audio.input.transcription</code> 설정을 통해 <code>prompt</code>, <code>keywords</code>, 여러 개의 예상 <code>languages</code>을 제공할 수 있습니다. 이 SDK에서 고정한 OpenAI 클라이언트 버전은 <code>delay</code> 지연 시간/정확도 수준을 <code>gpt-realtime-whisper</code>에서만 지원합니다. 커밋된 오디오 턴 이후의 전사 또는 감지된 언어 출력을 위해서는 WebSocket에서 <code>gpt-transcribe</code>을 사용하세요. <code>audio.input.turn_detection=None</code>을 명시적으로 설정하면 자동 턴 감지가 비활성화됩니다. <a href="../realtime/guide/#input-transcription-settings">입력 전사 설정</a>을 참고하세요.</li>
+<li>이제 Agents SDK에서 생성한 로컬 MCP 연결은 <code>mcp&gt;=1.19.0,&lt;3</code>을 통해 v1 호환성을 유지하면서 MCP Python SDK v2를 지원합니다. Agents SDK는 일반적인 stdio, SSE, Streamable HTTP 연결을 자동으로 조정합니다. MCP v2가 설치된 경우 이러한 연결은 <code>mcp.Client(mode="auto")</code>을 사용해 지원되는 최신 프로토콜을 탐색하고, 이전 서버에서는 레거시 <code>initialize</code> 핸드셰이크로 대체합니다. 의존성 해석에서 MCP v2가 선택되면 사용자 지정 <code>httpx.Auth</code> 객체 또는 <code>httpx.AsyncClient</code> 팩토리를 제공하는 애플리케이션은 해당 값을 <code>httpx2</code>으로 마이그레이션하거나, v1 HTTP 스택을 유지하도록 <code>mcp&lt;2</code>을 고정해야 합니다. <code>MCPServerStreamableHttp</code>의 <code>params["ignore_initialized_notification_failure"] = True</code> 옵션도 계속 v1에서만 사용할 수 있습니다. 마이그레이션에 대한 자세한 내용은 <a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 및 v2</a>를 참고하세요.</li>
+<li>이제 샌드박스 마운트 검증은 샌드박스 또는 마운트 도우미의 부작용이 발생하기 전에 안전하지 않은 자격 증명 배치를 거부합니다. 신뢰할 수 있는 애플리케이션은 스토리지 기능 테이블을 변경하지 않고도 정확한 컨테이너 내부 마운트 경로에 대해 마운트 범위 또는 광범위한 자격 증명 노출을 확인할 수 있습니다. 이러한 확인은 런타임에만 적용되며, 직렬화된 샌드박스 상태 자체는 자격 증명 권한을 부여하지 않습니다. 보호된 마운트 경계에서 SDK는 새로 편집된 예외를 반환합니다. 원본 예외가 정확히 인식되는 SDK 샌드박스 오류이고 승인된 구조화 필드가 검증되면, 대체 예외는 해당 하위 유형과 검증된 안전한 필드를 유지합니다. 인식된 <code>MountConfigError</code>은 SDK가 생성한 안전한 검증 메시지도 유지할 수 있습니다. 그 외에는 SDK가 새로 편집된 일반 오류를 반환합니다. 프로바이더가 제어하거나 승인되지 않은 메시지, 명령 데이터, 참고 사항, 컨텍스트, 원인, 원본 트레이스백 상태는 유지되지 않습니다. <a href="../sandbox/clients/#mounts-and-remote-storage">마운트 및 원격 스토리지</a>와 <a href="../sandbox/guide/#resume-from-session-state">세션 상태에서 재개</a>를 참고하세요.</li>
+<li>재시도 정책은 안정적인 재실행 안전성 정보를 검사하고, 프로바이더가 안전하지 않다고 표시한 비스트리밍 요청에 대해 <code>RetryDecision(approve_unsafe_replay=True)</code>을 명시적으로 설정할 수 있습니다. 이 승인은 중단, 이미 내보낸 스트리밍 출력 또는 Programmatic Tool Calling과 같은 별도의 로컬 부작용 거부를 우회하지 않습니다. <a href="../models/#runner-managed-retries">Runner 관리형 재시도</a>를 참고하세요.</li>
+<li>이제 재개 가능한 <code>RunState</code> 객체는 다음 모델 호출 전에 <code>add_input()</code>을 사용해 영구 사용자 입력을 스테이징할 수 있습니다. 스테이징된 입력은 직렬화 후에도 유지되고 입력 가드레일을 통과하며, 로컬 세션과 서버 관리형 대화 전체에서 하나의 영구적인 SDK 입력 발생 기록을 생성합니다. 안전하지 않은 재실행을 명시적으로 승인하면 입력이 프로바이더에 다시 전송되고 프로바이더 측 작업이 반복될 수 있습니다. <a href="../results/#add-input-before-resuming">재개 전 입력 추가</a>를 참고하세요.</li>
+<li>런타임 안정성 수정으로 스트리밍 및 비스트리밍 <a href="../guardrails/#output-guardrails">출력 가드레일 세션 영속성</a>이 일치하고, 복사 및 네임스페이스 지정 중에 <code>FunctionTool</code> 하위 클래스가 보존되며, 지원되지 않는 <a href="../models/#chat-completions-compatibility-options">Chat Completions 오디오 출력</a>에 대해 빈 스트림을 조용히 완료하는 대신 명시적 오류가 발생합니다. <code>OpenAIResponsesCompactionSession</code> 래퍼는 취소가 호출자에게 전달되기 전에 <a href="../sessions/#auto-compaction-can-block-streaming">압축 전 기록 복구</a>를 시도하고 완료될 때까지 기다립니다. 이제 <a href="../voice/pipeline/#results"><code>VoicePipeline</code></a> 소비자는 실행이 정상적으로 끝난 후 전사 세션 종료 실패를 수신하며, 이전 턴의 실패가 이후 종료 실패보다 우선합니다. 이제 <code>RunState</code> 왕복 변환은 로컬 셸 출력, 확인된 컴퓨터 안전 검사, 기본값이 설정된 도구 출력 필드, 딕셔너리·목록·튜플을 순회하는 중 발견한 Pydantic 모델 또는 데이터클래스 출력을 보존합니다. MCP 변환은 자유 형식 객체 스키마와 이미지 출력을 보존하며, 오디오 및 리소스 블록과 같은 기타 raw 콘텐츠 블록을 유효한 JSON 텍스트로 직렬화합니다. <code>MCPServerManager</code>는 겹치는 수명 주기 작업을 직렬화하고 연결 및 정리에 유한한 기본 타임아웃을 적용합니다. 모델 재실행은 출력 항목을 입력으로 사용하기 전에 서버 소유 <code>created_by</code> 메타데이터를 제거합니다.</li>
+</ul>
+<h3 id="0190">0.19.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없습니다</strong>. 마이너 버전 증가는 OpenAI Responses의 중요한 새 기능 영역인 Programmatic Tool Calling을 반영합니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>지원되는 OpenAI Responses 모델이 Programmatic Tool Calling에 적합한 도구를 조정하기 위한 JavaScript를 생성할 수 있게 해주는 <a class="autorefs autorefs-internal" title="ProgrammaticToolCallingTool
+
+
+  
+      dataclass
+  " href="../../ref/tool/#agents.tool.ProgrammaticToolCallingTool"><code>ProgrammaticToolCallingTool</code></a>이 추가되었습니다. 도구별 <code>allowed_callers</code>, <code>FunctionTool</code> 인스턴스의 structured outputs, Runner 스트리밍, 가드레일, 승인, 세션, <code>RunState</code>과의 통합을 지원합니다. 설정 및 제약 조건은 <a href="../tools/#programmatic-tool-calling">Programmatic Tool Calling</a>을 참고하세요.</li>
+<li>공개 <code>agents.decorators</code> 모듈과 기존 <code>@function_tool</code> 데코레이터의 짧은 별칭인 <code>@tool</code>이 기존 가드레일 데코레이터와 함께 추가되었습니다. 이제 <code>FunctionTool</code> 인스턴스는 비동기 호출 가능 객체도 지원합니다.</li>
+<li>이제 SDK 구성은 에이전트, 실행, 모델, 세션, 샌드박스, Voice 파이프라인 전반에서 타입이 지정된 설정 객체 또는 딕셔너리를 일관되게 허용하며, 알 수 없는 설정을 검증합니다.</li>
+<li>유용한 디버깅 컨텍스트를 유지하면서 가공되지 않은 민감한 페이로드가 노출되지 않도록 모델, 도구, MCP, Realtime, 세션, 샌드박스, 트레이싱 전반의 오류 및 진단 로깅이 강화되었습니다.</li>
+<li>AnyLLM, LiteLLM, Chat Completions 호환성이 개선되고 모델 재시도 전반에서 세션 기록이 보존되며, 응답이 시작되기 전에 발생하는 WebSocket 과부하에 대한 프로바이더 재시도 안내가 추가되었습니다. 이에 따라 허용되는 경우 명시적으로 활성화한 Runner 재시도 정책이 실패한 시도를 재실행할 수 있습니다.</li>
+<li><code>VercelCloudBucketMountStrategy</code>을 통해 <a href="../sandbox/clients/#mounts-and-remote-storage">Vercel 샌드박스를 생성할 때만 구성할 수 있는 S3 마운트</a>가 추가되었습니다. 마운트된 세션은 워크스페이스 영속성에서 버킷 콘텐츠를 제외하며, 의도적으로 동적 마운트 변경이나 세션 재개를 지원하지 않습니다.</li>
+</ul>
+<h3 id="0180">0.18.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없습니다</strong>. 마이너 버전 증가는 Realtime 에이전트의 기본 모델 업데이트만을 위한 것입니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>이제 Realtime 에이전트는 <code>gpt-realtime-2.1</code>을 기본 모델로 사용하므로, 새로운 Realtime 설정에서는 별도 구성 없이 최신 권장 모델을 사용합니다.</li>
+</ul>
+<h3 id="0170">0.17.0</h3>
+<p>이 버전에서 샌드박스 로컬 소스 구체화는 소스 경로가 <code>Manifest.extra_path_grants</code>의 적용을 받지 않는 한 <code>LocalFile.src</code> 및 <code>LocalDir.src</code>을 구체화 <code>base_dir</code> 내부로 제한합니다. <code>base_dir</code>은 매니페스트가 적용될 때 SDK 프로세스의 현재 작업 디렉터리입니다. 상대 로컬 소스는 해당 디렉터리를 기준으로 해석되며, 절대 로컬 소스는 이미 그 내부에 있거나 명시적 허용 범위 아래에 있어야 합니다. 이 변경은 로컬 아티팩트 경계 문제를 해결하지만, 신뢰할 수 있는 호스트 파일이나 디렉터리를 해당 기본 디렉터리 외부에서 샌드박스 워크스페이스로 의도적으로 복사하는 애플리케이션에 영향을 줄 수 있습니다.</p>
+<p>마이그레이션하려면 매니페스트 수준에서 <code>SandboxPathGrant</code>을 사용해 신뢰할 수 있는 호스트 루트를 허용하세요. 샌드박스가 해당 파일을 읽기만 하면 되는 경우 읽기 전용으로 설정하는 것이 좋습니다.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxPathGrant</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dir</span><span class="p">,</span> <span class="n">LocalDir</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="c1"># This is an absolute host path outside the SDK process base_dir.</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="n">TRUSTED_DOCS_ROOT</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/opt/my-app/docs&quot;</span><span class="p">)</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">extra_path_grants</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="c1"># This host root is outside the SDK process base_dir, so the manifest must grant it.</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="n">SandboxPathGrant</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">),</span> <span class="n">read_only</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="p">),</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">entries</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>        <span class="c1"># No grant is needed for local sources that stay under the SDK process base_dir.</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>        <span class="s2">&quot;fixtures&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;fixtures&quot;</span><span class="p">),</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Local test fixtures.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="c1"># This entry reads from the granted host root and copies it into the sandbox workspace.</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>        <span class="s2">&quot;docs&quot;</span><span class="p">:</span> <span class="n">LocalDir</span><span class="p">(</span><span class="n">src</span><span class="o">=</span><span class="n">TRUSTED_DOCS_ROOT</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Trusted local documents.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>        <span class="c1"># Dir creates a sandbox workspace directory; it does not read from the host filesystem.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>        <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">Dir</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;Generated artifacts.&quot;</span><span class="p">),</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="p">},</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>extra_path_grants</code>을 신뢰할 수 있는 애플리케이션 구성으로 취급하세요. 애플리케이션에서 해당 호스트 경로를 이미 승인하지 않았다면 모델 출력이나 기타 신뢰할 수 없는 매니페스트 입력으로 허용 범위를 채우지 마세요.</p>
+<h3 id="0160">0.16.0</h3>
+<p>이 버전에서 SDK 기본 모델은 <code>gpt-4.1</code> 대신 <code>gpt-5.4-mini</code>입니다. 이는 모델을 명시적으로 설정하지 않은 에이전트와 실행에 영향을 줍니다. 새로운 기본값은 GPT-5 모델이므로 암시적 기본 모델 설정에는 이제 <code>reasoning.effort="none"</code> 및 <code>verbosity="low"</code>와 같은 GPT-5 기본값이 포함됩니다.</p>
+<p>이전 기본 모델 동작을 유지해야 한다면 에이전트 또는 실행 구성에 모델을 명시적으로 설정하거나 <code>OPENAI_DEFAULT_MODEL</code> 환경 변수를 설정하세요.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-4.1&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<p>주요 변경 사항:</p>
+<ul>
+<li>이제 <code>Runner.run</code>, <code>Runner.run_sync</code>, <code>Runner.run_streamed</code>은 턴 제한을 비활성화하는 <code>max_turns=None</code>을 허용합니다.</li>
+<li>이제 로컬, Docker, 프로바이더 기반 샌드박스 구현 전체에서 샌드박스 워크스페이스 하이드레이션은 절대 심볼릭 링크 대상을 포함해 아카이브 루트 외부를 가리키는 심볼릭 링크가 있는 tar 아카이브를 거부합니다.</li>
+</ul>
+<h3 id="0150">0.15.0</h3>
+<p>이 버전에서는 이제 모델 거부가 빈 텍스트 출력으로 처리되거나 structured outputs의 경우 실행 루프가 <code>MaxTurnsExceeded</code>까지 재시도하게 하는 대신 <code>ModelRefusalError</code>으로 명시적으로 노출됩니다.</p>
+<p>이는 이전에 거부만 포함된 모델 응답이 <code>final_output == ""</code>으로 완료될 것으로 예상했던 코드에 영향을 줍니다. 예외를 발생시키지 않고 거부를 처리하려면 <code>model_refusal</code> 실행 오류 핸들러를 제공하세요.</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="nb">input</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">error_handlers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;model_refusal&quot;</span><span class="p">:</span> <span class="k">lambda</span> <span class="n">data</span><span class="p">:</span> <span class="n">data</span><span class="o">.</span><span class="n">error</span><span class="o">.</span><span class="n">refusal</span><span class="p">},</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>structured outputs 에이전트의 경우 핸들러가 에이전트의 출력 스키마과 일치하는 값을 반환할 수 있으며, SDK는 이를 다른 실행 오류 핸들러의 최종 출력과 동일하게 검증합니다.</p>
+<h3 id="0140">0.14.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없지만</strong>, 주요한 새 베타 기능 영역인 샌드박스 에이전트와 로컬, 컨테이너화 및 호스팅 환경 전반에서 이를 사용하는 데 필요한 런타임, 백엔드, 문서 지원이 추가되었습니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li><code>SandboxAgent</code>, <code>Manifest</code>, <code>SandboxRunConfig</code>을 중심으로 한 새로운 베타 샌드박스 런타임 인터페이스가 추가되어, 에이전트가 파일, 디렉터리, Git 저장소, 마운트, 스냅샷, 재개 지원을 갖춘 영구 격리 워크스페이스 내에서 작업할 수 있습니다.</li>
+<li><code>UnixLocalSandboxClient</code> 및 <code>DockerSandboxClient</code>을 통한 로컬 및 컨테이너화 개발용 샌드박스 실행 백엔드와 Python 패키지의 선택적 의존성 extras를 통한 Blaxel, Cloudflare, Daytona, E2B, Modal, Runloop, Vercel 호스팅 프로바이더 통합이 추가되었습니다.</li>
+<li>향후 실행에서 이전 실행의 학습 내용을 재사용할 수 있도록 샌드박스 메모리 지원이 추가되었습니다. 여기에는 점진적 공개, 다중 턴 그룹화, 구성 가능한 격리 경계, S3 기반 워크플로를 포함한 영구 메모리 예제가 포함됩니다.</li>
+<li>로컬 및 합성 워크스페이스 항목, S3/R2/GCS/Azure Blob Storage/S3 Files용 원격 스토리지 마운트, 이식 가능한 스냅샷, <code>RunState</code>, <code>SandboxSessionState</code> 또는 저장된 스냅샷을 통한 재개 흐름을 포함하는 더 광범위한 워크스페이스 및 재개 모델이 추가되었습니다.</li>
+<li><code>examples/sandbox/</code> 아래에 스킬, 핸드오프, 메모리, 프로바이더별 설정을 활용한 코딩 작업과 코드 검토, 데이터룸 QA, 웹사이트 복제 같은 엔드투엔드 워크플로를 다루는 다양한 샌드박스 코드 예제 및 튜토리얼이 추가되었습니다.</li>
+<li>샌드박스를 인식하는 세션 준비, 기능 바인딩, 상태 직렬화, 통합 트레이싱, 프롬프트 캐시 키 기본값, 더 안전한 민감한 MCP 출력 편집을 통해 코어 런타임과 트레이싱 스택이 확장되었습니다.</li>
+</ul>
+<h3 id="0130">0.13.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없지만</strong>, 주목할 만한 Realtime 기본값 업데이트와 새로운 MCP 기능 및 런타임 안정성 수정이 포함됩니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>이제 기본 websocket Realtime 모델은 <code>gpt-realtime-1.5</code>이므로, 새로운 Realtime 에이전트 설정에서는 별도 구성 없이 최신 모델을 사용합니다.</li>
+<li>이제 <code>MCPServer</code>은 <code>list_resources()</code>, <code>list_resource_templates()</code>, <code>read_resource()</code>을 노출하고, <code>MCPServerStreamableHttp</code>은 <code>session_id</code>을 노출하므로 MCP Streamable HTTP 전송을 사용하는 세션을 재연결 또는 상태 비저장 워커 간에 재개할 수 있습니다.</li>
+<li>이제 Chat Completions 통합은 <code>should_replay_reasoning_content</code>을 통해 기존 추론 콘텐츠를 다시 전송하도록 선택할 수 있어 LiteLLM/DeepSeek 같은 어댑터의 프로바이더별 추론/도구 호출 연속성이 향상됩니다.</li>
+<li><code>SQLAlchemySession</code>의 동시 최초 쓰기, 추론 제거 후 고립된 어시스턴트 메시지 ID가 포함된 압축 요청, MCP/추론 항목을 남기는 <code>remove_all_tools()</code>, <code>FunctionTool</code> 인스턴스용 배치 실행기의 경쟁 상태를 포함한 여러 런타임 및 세션 경계 사례가 수정되었습니다.</li>
+</ul>
+<h3 id="0120">0.12.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없습니다</strong>. 주요 기능 추가 사항은 <a href="https://github.com/openai/openai-agents-python/releases/tag/v0.12.0">릴리스 노트</a>를 확인하세요.</p>
+<h3 id="0110">0.11.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없습니다</strong>. 주요 기능 추가 사항은 <a href="https://github.com/openai/openai-agents-python/releases/tag/v0.11.0">릴리스 노트</a>를 확인하세요.</p>
+<h3 id="0100">0.10.0</h3>
+<p>이 마이너 릴리스에는 호환성을 깨는 변경 사항이 <strong>없지만</strong>, OpenAI Responses 사용자를 위한 중요한 새 기능 영역인 Responses API의 websocket 전송 지원이 포함됩니다.</p>
+<p>주요 변경 사항:</p>
+<ul>
+<li>OpenAI Responses 모델에 대한 websocket 전송 지원이 추가되었습니다(선택 사항이며 HTTP가 계속 기본 전송입니다).</li>
+<li>여러 턴의 실행에서 공유 websocket 지원 프로바이더와 <code>RunConfig</code>을 재사용하기 위한 <code>responses_websocket_session()</code> 도우미 / <code>ResponsesWebSocketSession</code>가 추가되었습니다.</li>
+<li>스트리밍, 도구, 승인, 후속 턴을 다루는 새로운 websocket 스트리밍 예제(<code>examples/basic/stream_ws.py</code>)가 추가되었습니다.</li>
+</ul>
+<h3 id="090">0.9.0</h3>
+<p>이 버전에서는 주요 버전의 지원 종료(EOL) 후 3개월이 지났으므로 Python 3.9를 더 이상 지원하지 않습니다. 더 최신 런타임 버전으로 업그레이드하세요.</p>
+<p>또한 <code>Agent#as_tool()</code> 메서드에서 반환되는 값의 타입 힌트가 <code>Tool</code>에서 <code>FunctionTool</code>으로 좁혀졌습니다. 이 변경은 일반적으로 호환성을 깨는 문제를 일으키지 않지만, 코드가 더 넓은 유니온 타입에 의존하는 경우 일부 조정이 필요할 수 있습니다.</p>
+<h3 id="080">0.8.0</h3>
+<p>이 버전에서는 두 가지 런타임 동작 변경으로 인해 마이그레이션 작업이 필요할 수 있습니다.</p>
+<ul>
+<li><strong>동기식</strong> Python 호출 가능 객체를 래핑하는 <code>FunctionTool</code> 인스턴스는 이제 이벤트 루프 스레드에서 실행되는 대신 <code>asyncio.to_thread(...)</code>을 통해 워커 스레드에서 실행됩니다. 도구 로직이 스레드 로컬 상태 또는 특정 스레드에 종속된 리소스에 의존하는 경우 비동기 도구 구현으로 마이그레이션하거나 도구 코드에 스레드 종속성을 명시하세요.</li>
+<li>이제 로컬 MCP 도구 실패 처리를 구성할 수 있으며, 기본 동작은 전체 실행을 실패시키는 대신 모델에 표시되는 오류 출력을 반환할 수 있습니다. 즉시 실패하는 의미 체계에 의존한다면 <code>mcp_config={"failure_error_function": None}</code>을 설정하세요. 서버 수준 <code>failure_error_function</code> 값은 에이전트 수준 설정을 재정의하므로 명시적 핸들러가 있는 각 로컬 MCP 서버에 <code>failure_error_function=None</code>을 설정하세요.</li>
+</ul>
+<h3 id="070">0.7.0</h3>
+<p>이 버전에서는 기존 애플리케이션에 영향을 줄 수 있는 몇 가지 동작 변경이 있었습니다.</p>
+<ul>
+<li>이제 중첩된 핸드오프 기록은 <strong>명시적으로 활성화해야 합니다</strong>(기본적으로 비활성화됨). v0.6.x의 기본 중첩 동작에 의존했다면 <code>RunConfig(nest_handoff_history=True)</code>을 명시적으로 설정하세요.</li>
+<li><code>gpt-5.1</code> / <code>gpt-5.2</code>의 기본 <code>reasoning.effort</code>이 <code>"none"</code>으로 변경되었습니다(SDK 기본값으로 구성된 이전 기본값은 <code>"low"</code>). 프롬프트 또는 품질/비용 프로필이 <code>"low"</code>에 의존했다면 <code>model_settings</code>에서 명시적으로 설정하세요.</li>
+</ul>
+<h3 id="060">0.6.0</h3>
+<p>이 버전에서 기본 핸드오프 기록은 사용자와 어시스턴트 턴을 별도 메시지로 전달하는 대신 하나의 어시스턴트 메시지로 패키징되므로 이후 에이전트가 간결하고 예측 가능한 요약을 받습니다
+- 기존 단일 메시지 핸드오프 기록은 이제 기본적으로 <code>&lt;CONVERSATION HISTORY&gt;</code> 블록 앞에 정확한 리터럴 텍스트 <code>For context, here is the conversation so far between the user and the previous agent:</code>으로 시작하므로 이후 에이전트가 명확히 표시된 요약을 받습니다</p>
+<h3 id="050">0.5.0</h3>
+<p>이 버전에는 사용자에게 드러나는 호환성을 깨는 변경 사항이 없지만, 내부적으로 새로운 기능과 몇 가지 중요한 업데이트가 포함됩니다.</p>
+<ul>
+<li><code>RealtimeRunner</code>에 <a href="https://platform.openai.com/docs/guides/realtime-sip">SIP 프로토콜 연결</a> 처리 지원이 추가되었습니다.</li>
+<li>Python 3.14 호환성을 위해 <code>Runner#run_sync</code>의 내부 로직이 대폭 수정되었습니다.</li>
+</ul>
+<h3 id="040">0.4.0</h3>
+<p>이 버전에서는 <a href="https://pypi.org/project/openai/">openai</a> 패키지 v1.x 버전을 더 이상 지원하지 않습니다. 이 SDK와 함께 openai v2.x를 사용하세요.</p>
+<h3 id="030">0.3.0</h3>
+<p>이 버전에서 Realtime API 지원은 gpt-realtime 모델과 해당 API 인터페이스(GA 버전)로 마이그레이션됩니다.</p>
+<h3 id="020">0.2.0</h3>
+<p>이 버전에서는 이전에 <code>Agent</code>을 인수로 받던 몇몇 위치가 이제 <code>AgentBase</code>을 인수로 받습니다. 예를 들어 MCP 서버의 <code>list_tools()</code> 메서드 시그니처가 이에 해당합니다. 이는 순수한 타입 변경이며, 계속 <code>Agent</code> 객체를 받게 됩니다. 업데이트하려면 <code>Agent</code>을 <code>AgentBase</code>로 대체해 타입 오류를 수정하면 됩니다.</p>
+<h3 id="010">0.1.0</h3>
+<p>이 버전에서 <a class="autorefs autorefs-internal" title="MCPServer" href="../../ref/mcp/server/#agents.mcp.server.MCPServer"><code>MCPServer.list_tools()</code></a>에는 <code>run_context</code> 및 <code>agent</code>이라는 두 가지 새로운 매개변수가 추가되었습니다. <code>MCPServer</code>의 하위 클래스에서 재정의한 모든 <code>MCPServer.list_tools()</code> 메서드에 이 매개변수를 추가해야 합니다.</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "content.code.select", "navigation.path", "navigation.sections", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.d50fe291.min.js", "tags": null, "translations": {"clipboard.copied": "\ud074\ub9bd\ubcf4\ub4dc\uc5d0 \ubcf5\uc0ac\ub428", "clipboard.copy": "\ud074\ub9bd\ubcf4\ub4dc\ub85c \ubcf5\uc0ac", "search.result.more.one": "\uc774 \ubb38\uc11c\uc5d0\uc11c 1\uac1c\uc758 \uac80\uc0c9 \uacb0\uacfc \ub354 \ubcf4\uae30", "search.result.more.other": "\uc774 \ubb38\uc11c\uc5d0\uc11c #\uac1c\uc758 \uac80\uc0c9 \uacb0\uacfc \ub354 \ubcf4\uae30", "search.result.none": "\uac80\uc0c9\uc5b4\uc640 \uc77c\uce58\ud558\ub294 \ubb38\uc11c\uac00 \uc5c6\uc2b5\ub2c8\ub2e4", "search.result.one": "1\uac1c\uc758 \uc77c\uce58\ud558\ub294 \ubb38\uc11c", "search.result.other": "#\uac1c\uc758 \uc77c\uce58\ud558\ub294 \ubb38\uc11c", "search.result.placeholder": "\uac80\uc0c9\uc5b4\ub97c \uc785\ub825\ud558\uc138\uc694", "search.result.term.missing": "\ud3ec\ud568\ub418\uc9c0 \uc54a\uc740 \uac80\uc0c9\uc5b4", "select.version": "\ubc84\uc804 \uc120\ud0dd"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.50899def.min.js"></script>
+      
+    
+  </body>
+</html>
