@@ -214,6 +214,44 @@ class TestOpenAIResponsesCompactionSession:
         assert session._response_id == "resp-old"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [RuntimeError("clear failed after commit"), asyncio.CancelledError()],
+    )
+    async def test_clear_session_ambiguous_failure_invalidates_retained_response_chain(
+        self, failure: BaseException
+    ) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+
+        class CommitThenFailClearSession(SimpleListSession):
+            async def clear_session(self) -> None:
+                await super().clear_session()
+                raise failure
+
+        underlying = CommitThenFailClearSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+        await session.run_compaction({"response_id": "resp-old"})
+
+        with pytest.raises(type(failure)):
+            await session.clear_session()
+
+        assert await underlying.get_items() == []
+        assert session._response_id is None
+        with pytest.raises(ValueError, match="previous_response_id compaction"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_response_id_waiting_behind_pop_cannot_reclaim_invalidated_chain(self) -> None:
         item = cast(
             TResponseInputItem,

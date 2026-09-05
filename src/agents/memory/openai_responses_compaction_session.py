@@ -525,6 +525,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._compaction_candidate_items = None
                 self._session_items = None
                 self._history_generation += 1
+                self._invalidate_response_chain()
                 raise
             self._history_generation += 1
             self._compaction_candidate_items = []
