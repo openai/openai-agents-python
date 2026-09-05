@@ -15,6 +15,7 @@ import pytest
 
 import agents._debug as _debug
 from agents import trace
+from agents.exceptions import UserError
 from tests.testing_processor import fetch_events, fetch_ordered_spans, fetch_span_errors
 
 try:
@@ -1323,6 +1324,105 @@ async def test_voicepipeline_float32() -> None:
         "session_ended",
     ]
     await fake_tts.verify_audio("out_1", audio_chunks[0], dtype=np.float32)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dtype_spelling", "expected_dtype"),
+    [
+        ("float32", np.float32),
+        ("int16", np.int16),
+        ("f4", np.float32),
+        (np.dtype("float32"), np.float32),
+    ],
+    ids=["float32-string", "int16-string", "alias-spelling", "already-supported-spelling"],
+)
+async def test_voicepipeline_accepts_numpy_dtype_spellings(
+    dtype_spelling: npt.DTypeLike, expected_dtype: type[np.int16] | type[np.float32]
+) -> None:
+    """Dictionary settings carry ``dtype`` as the spelling NumPy resolves, not the type object.
+
+    The string cases are the ones that fail before this change, and the alias holds the
+    property the fix rests on: the value is resolved the way NumPy resolves it rather than
+    matched against a fixed set of names. The resolved-dtype case is a pin on the spelling
+    that already worked rather than new coverage, since every accepted spelling now resolves
+    to the same dtype and takes the same branch.
+    """
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
+    pipeline = VoicePipeline(
+        workflow=workflow,
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={"tts_settings": {"buffer_size": 1, "dtype": dtype_spelling}},
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    events: list[str] = []
+    audio_dtypes: list[np.dtype[Any]] = []
+    async for event in result.stream():
+        if isinstance(event, VoiceStreamEventAudio):
+            assert event.data is not None
+            audio_dtypes.append(event.data.dtype)
+            events.append("audio")
+        elif isinstance(event, VoiceStreamEventLifecycle):
+            events.append(event.event)
+
+    assert events == ["turn_started", "audio", "turn_ended", "session_ended"]
+    assert audio_dtypes == [np.dtype(expected_dtype)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dtype_spelling", "expected_cause"),
+    [
+        ("int32", None),
+        ({"names": ["x"], "formats": []}, ValueError),
+        ("not-a-dtype", TypeError),
+        (np.dtype(np.int16).newbyteorder("S"), None),
+    ],
+    ids=[
+        "resolvable-but-unsupported",
+        "unresolvable-structured-dtype",
+        "unparseable-string",
+        "non-native-byte-order",
+    ],
+)
+async def test_voicepipeline_rejects_unsupported_output_dtype(
+    dtype_spelling: npt.DTypeLike, expected_cause: type[Exception] | None
+) -> None:
+    """An unsupported dtype keeps the SDK error, whether or not NumPy can parse it.
+
+    A non-native byte order is rejected on purpose. The emitted samples are read from the
+    PCM stream in native order, so honoring a byte-swapped request would need the samples
+    converted rather than relabeled, and returning them as they are would hand back
+    different values than the caller asked to read. That case is swapped from the running
+    host's own order so the expectation holds on a big-endian machine too.
+
+    A value NumPy cannot parse keeps the parse failure attached as the cause, since it names
+    the spelling that failed. A value NumPy resolves to an unsupported dtype has no cause,
+    because nothing was raised on the way to rejecting it.
+    """
+    fake_stt = QueuedSTTModel(["first"])
+    workflow = QueuedVoiceWorkflow([["out_1"]])
+    fake_tts = ZeroPcmTTSModel()
+    pipeline = VoicePipeline(
+        workflow=workflow,
+        stt_model=fake_stt,
+        tts_model=fake_tts,
+        config={"tts_settings": {"buffer_size": 1, "dtype": dtype_spelling}},
+    )
+    result = await pipeline.run(AudioInput(buffer=np.zeros(2, dtype=np.int16)))
+
+    with pytest.raises(UserError, match="Invalid output dtype") as raised:
+        async for _ in result.stream():
+            pass
+
+    if expected_cause is None:
+        assert raised.value.__cause__ is None
+    else:
+        assert isinstance(raised.value.__cause__, expected_cause)
 
 
 @pytest.mark.asyncio
