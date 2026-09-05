@@ -73,24 +73,28 @@ _SESSION_ID_TYPE = String().with_variant(
 _MYSQL_FAMILY_DIALECTS = frozenset({"mysql", "mariadb"})
 
 
-def _validate_mysql_session_id(session_id: str, dialect_name: str, *, created_schema: bool) -> None:
-    """Reject session IDs that the MySQL-family column cannot keep distinct.
+def _validate_mysql_session_id(session_id: str, dialect_name: str) -> None:
+    """Reject session IDs that a MySQL-family column cannot keep distinct.
 
     ``utf8mb4_bin`` is a PAD SPACE collation, so MySQL and MariaDB ignore
     trailing spaces when comparing ``VARCHAR`` values. ``"a"`` and ``"a "``
-    would therefore resolve to the same primary key and silently share one
-    conversation history, while SQLite and PostgreSQL keep them apart. That
-    merge is silent and corrupts stored history, so it is rejected regardless
-    of who owns the schema: any MySQL-family collation that ignores trailing
-    spaces produces it, and a caller-managed column cannot opt out of the
-    comparison semantics its own collation defines.
+    therefore resolve to the same primary key and two ``SQLAlchemySession``
+    instances silently read and write one shared conversation history, while
+    SQLite and PostgreSQL keep them apart.
 
-    The length bound is different: it describes only the column this module
-    creates. A caller-managed schema may declare a wider ``session_id`` (for
-    example ``VARCHAR(255)``) that stores longer IDs correctly, and the dialect
-    name alone does not reveal the real column width, so the bound is checked
-    only when this module created the schema. Otherwise the caller-owned schema
-    enforces its own constraint.
+    The database never reports this: there is no error to surface, only two
+    sessions whose stored history has been merged. That is persistent
+    corruption of one session's history by another, so it is rejected up front
+    rather than left to a rejection that never comes.
+
+    Length is deliberately not checked here. MySQL authoritatively rejects an
+    over-long value with ``ERROR 1406`` under the strict ``sql_mode`` that is
+    the modern default, and a caller-managed schema may declare a wider
+    ``session_id`` (for example ``VARCHAR(255)``) that stores it correctly. The
+    dialect name does not reveal the real column width, and ``create_tables``
+    only requests idempotent creation -- ``create_all`` uses ``checkfirst`` and
+    leaves an existing table untouched -- so neither is evidence of the width
+    this module generates.
 
     Only MySQL and MariaDB are checked: other backends store the unbounded,
     space-significant type and keep their existing behavior.
@@ -100,15 +104,10 @@ def _validate_mysql_session_id(session_id: str, dialect_name: str, *, created_sc
     if session_id != session_id.rstrip(" "):
         raise ValueError(
             "session_id must not end with a space on MySQL or MariaDB: "
-            f"{session_id!r}. The session_id column uses the utf8mb4_bin "
-            "collation, which ignores trailing spaces when comparing values, "
-            "so this ID would share stored history with "
-            f"{session_id.rstrip(' ')!r}."
-        )
-    if created_schema and len(session_id) > _MYSQL_SESSION_ID_MAX_LENGTH:
-        raise ValueError(
-            f"session_id must be at most {_MYSQL_SESSION_ID_MAX_LENGTH} characters on "
-            f"MySQL or MariaDB, got {len(session_id)}: {session_id!r}."
+            f"{session_id!r}. MySQL-family collations such as the utf8mb4_bin "
+            "used by the generated schema ignore trailing spaces when "
+            "comparing values, so this ID would silently share stored history "
+            f"with {session_id.rstrip(' ')!r}."
         )
 
 
@@ -228,7 +227,7 @@ class SQLAlchemySession(SessionABC):
             else SessionSettings()
         )
         self._engine = engine
-        _validate_mysql_session_id(session_id, engine.dialect.name, created_schema=create_tables)
+        _validate_mysql_session_id(session_id, engine.dialect.name)
         self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
         self._init_lock = (
