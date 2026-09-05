@@ -18,6 +18,11 @@ dependencies = [
     "urllib3>=2.7.0, <3",
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
+    # cryptography enters the base graph transitively via mcp -> pyjwt[crypto],
+    # whose own requirement is unpinned; pin a safe floor so a base install
+    # cannot retain a version exposed to the disclosed CVE (46.0.7 fixes the
+    # 9.8-critical GHSA-p423-j2cm-9vmq buffer overflow).
+    "cryptography>=46.0.7, <47",
 ]
 classifiers = [
     "Typing :: Typed",

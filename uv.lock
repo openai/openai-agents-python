@@ -2728,6 +2728,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "blaxel", marker = "extra == 'blaxel'", specifier = ">=0.2.50" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
+    { name = "cryptography", specifier = ">=46.0.7,<47" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=46.0.7,<47" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.155.0" },
