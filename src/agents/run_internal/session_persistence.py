@@ -803,7 +803,7 @@ async def save_resumed_turn_items(
 
 
 def _held_items_safe_to_settle(
-    held_items: list[TResponseInputItem],
+    held_items: Sequence[TResponseInputItem],
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
 ) -> list[TResponseInputItem]:
