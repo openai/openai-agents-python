@@ -260,6 +260,54 @@ class TestOpenAIResponsesCompactionSession:
         assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
 
     @pytest.mark.asyncio
+    async def test_response_id_update_waits_for_final_history_replacement(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+
+        class FinalReadGatedSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[item])
+                self.read_count = 0
+                self.final_read_started = asyncio.Event()
+                self.allow_final_read = asyncio.Event()
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                self.read_count += 1
+                if self.read_count == 2:
+                    self.final_read_started.set()
+                    await self.allow_final_read.wait()
+                return await super().get_items(limit)
+
+        underlying = FinalReadGatedSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[item], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        older = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-old", "force": True})
+        )
+        await underlying.final_read_started.wait()
+        newer = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-new", "force": True})
+        )
+        await asyncio.sleep(0)
+
+        assert session._response_id == "resp-old"
+        underlying.allow_final_read.set()
+        await older
+        await newer
+        assert session._response_id == "resp-new"
+
+    @pytest.mark.asyncio
     async def test_pop_item_during_candidate_load_prevents_stale_compaction(self) -> None:
         item = cast(
             TResponseInputItem,

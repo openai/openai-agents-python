@@ -186,27 +186,45 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         When a run context is provided, the billed compaction request contributes to
         that run's usage totals.
         """
-        if args and args.get("response_id"):
-            next_response_id = args["response_id"]
-            if next_response_id != self._response_id:
-                self._response_id = next_response_id
-                self._response_chain_generation += 1
         requested_mode = args.get("compaction_mode") if args else None
-        if args and "store" in args:
-            store = args["store"]
-            if store is False and self._response_id:
-                self._last_unstored_response_id = self._response_id
-            elif store is True and self._response_id == self._last_unstored_response_id:
-                self._last_unstored_response_id = None
+        store: bool | None
+        response_id: str | None
+        response_chain_generation: int
+        resolved_mode: _ResolvedCompactionMode
+        if args and args.get("response_id"):
+            async with self._mutation_lock:
+                next_response_id = args["response_id"]
+                if next_response_id != self._response_id:
+                    self._response_id = next_response_id
+                    self._response_chain_generation += 1
+                store = args.get("store")
+                if store is False and self._response_id:
+                    self._last_unstored_response_id = self._response_id
+                elif store is True and self._response_id == self._last_unstored_response_id:
+                    self._last_unstored_response_id = None
+                response_id = self._response_id
+                response_chain_generation = self._response_chain_generation
+                resolved_mode = self._resolve_compaction_mode_for_response(
+                    response_id=response_id,
+                    store=store,
+                    requested_mode=requested_mode,
+                )
         else:
-            store = None
-        response_id = self._response_id
-        response_chain_generation = self._response_chain_generation
-        resolved_mode = self._resolve_compaction_mode_for_response(
-            response_id=response_id,
-            store=store,
-            requested_mode=requested_mode,
-        )
+            if args and "store" in args:
+                store = args["store"]
+                if store is False and self._response_id:
+                    self._last_unstored_response_id = self._response_id
+                elif store is True and self._response_id == self._last_unstored_response_id:
+                    self._last_unstored_response_id = None
+            else:
+                store = None
+            response_id = self._response_id
+            response_chain_generation = self._response_chain_generation
+            resolved_mode = self._resolve_compaction_mode_for_response(
+                response_id=response_id,
+                store=store,
+                requested_mode=requested_mode,
+            )
 
         if resolved_mode == "previous_response_id" and not response_id:
             raise ValueError(
