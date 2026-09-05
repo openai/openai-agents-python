@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from typing import Any
 
 from ..exceptions import UserError
@@ -72,6 +72,7 @@ class StreamedAudioResult:
         self._first_byte_received = False
         self._generation_start_time: str | None = None
         self._completed_session = False
+        self._terminal_event_enqueued = False
         self._stored_exception: BaseException | None = None
         self._tracing_span: Span[SpeechGroupSpanData] | None = None
 
@@ -95,6 +96,22 @@ class StreamedAudioResult:
     def _enqueue_audio_segment(self, local_queue: asyncio.Queue[VoiceStreamEvent | None]) -> None:
         self._ordered_tasks.append(local_queue)
         self._dispatcher_event.set()
+
+    def _create_audio_task(
+        self,
+        text: str,
+        local_queue: asyncio.Queue[VoiceStreamEvent | None],
+        finish_turn: bool = False,
+    ) -> None:
+        task = asyncio.create_task(self._stream_audio(text, local_queue, finish_turn))
+        self._tasks.append(task)
+
+        # A task cancelled before its coroutine starts cannot run _stream_audio's body. Complete
+        # its queue from the done callback so the ordered dispatcher can always advance.
+        def release_queue(_: asyncio.Task[Any]) -> None:
+            local_queue.put_nowait(None)
+
+        task.add_done_callback(release_queue)
 
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
@@ -226,9 +243,7 @@ class StreamedAudioResult:
         if combined_sentences:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._enqueue_audio_segment(local_queue)
-            self._tasks.append(
-                asyncio.create_task(self._stream_audio(combined_sentences, local_queue))
-            )
+            self._create_audio_task(combined_sentences, local_queue)
             if self._dispatcher_task is None:
                 self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
 
@@ -236,11 +251,7 @@ class StreamedAudioResult:
         if self._text_buffer:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
             self._enqueue_audio_segment(local_queue)
-            self._tasks.append(
-                asyncio.create_task(
-                    self._stream_audio(self._text_buffer, local_queue, finish_turn=True)
-                )
-            )
+            self._create_audio_task(self._text_buffer, local_queue, finish_turn=True)
             self._text_buffer = ""
         elif self._started_processing_turn:
             local_queue = asyncio.Queue()
@@ -273,6 +284,44 @@ class StreamedAudioResult:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
         await self._wait_for_completion()
 
+    async def _cancel(self) -> None:
+        """Cancel synthesis while preserving ordered terminal delivery."""
+        self._completed_session = True
+        self._dispatcher_event.set()
+
+        audio_tasks = [
+            task for task in self._tasks if task is not self._dispatcher_task and not task.done()
+        ]
+        for task in audio_tasks:
+            task.cancel()
+
+        try:
+            if audio_tasks:
+                await self._await_cleanup(asyncio.gather(*audio_tasks, return_exceptions=True))
+
+            # A cancellation delivered through _wait_for_completion() may already have cancelled
+            # its dispatcher. Wait for that task to settle, then replace it if it did not publish
+            # the terminal event.
+            while not self._terminal_event_enqueued:
+                dispatcher = self._dispatcher_task
+                if dispatcher is None or dispatcher.done():
+                    dispatcher = asyncio.create_task(self._dispatch_audio())
+                    self._dispatcher_task = dispatcher
+                await self._await_cleanup(asyncio.gather(dispatcher, return_exceptions=True))
+        finally:
+            # The producer still owns the enclosing trace while cancellation cleanup runs.
+            self._finish_turn()
+
+    async def _await_cleanup(self, awaitable: Awaitable[Any]) -> None:
+        """Wait for one cleanup future through repeated cancellation."""
+        cleanup_task = asyncio.ensure_future(awaitable)
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                continue
+            return
+
     async def _dispatch_audio(self):
         # Dispatch audio chunks from each segment in the order they were added
         while True:
@@ -296,8 +345,10 @@ class StreamedAudioResult:
                         self._finish_turn()
                         break
                     if chunk.event == "session_ended":
+                        self._terminal_event_enqueued = True
                         return
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
+        self._terminal_event_enqueued = True
 
     async def _wait_for_completion(self):
         tasks: list[asyncio.Task[Any]] = self._tasks
@@ -367,6 +418,7 @@ class StreamedAudioResult:
             primary_exception = exc
             raise
         finally:
+            consumer_finalization_exception: BaseException | None = None
             producer_exception: BaseException | None = None
             cleanup_exception: BaseException | None = None
 
@@ -379,9 +431,17 @@ class StreamedAudioResult:
             # that session down mid-close.
             if saw_terminal_event and self.text_generation_task is not None:
                 try:
-                    await asyncio.shield(self.text_generation_task)
+                    # asyncio.wait() completes without propagating the producer outcome. A
+                    # cancellation raised by this shield therefore belongs to the consumer on
+                    # every supported Python version.
+                    await asyncio.shield(asyncio.wait((self.text_generation_task,)))
                 except BaseException as exc:
-                    producer_exception = exc
+                    consumer_finalization_exception = exc
+                else:
+                    try:
+                        producer_exception = self.text_generation_task.exception()
+                    except asyncio.CancelledError as exc:
+                        producer_exception = exc
 
             try:
                 await self._cleanup_tasks()
@@ -397,14 +457,16 @@ class StreamedAudioResult:
             exception_to_raise: BaseException | None = None
             if isinstance(primary_exception, asyncio.CancelledError):
                 pass
-            elif isinstance(producer_exception, asyncio.CancelledError):
-                exception_to_raise = producer_exception
+            elif isinstance(consumer_finalization_exception, asyncio.CancelledError):
+                exception_to_raise = consumer_finalization_exception
             elif isinstance(cleanup_exception, asyncio.CancelledError):
                 exception_to_raise = cleanup_exception
             elif preserve_primary_exception:
                 pass
             elif producer_exception is not None:
                 exception_to_raise = producer_exception
+            elif consumer_finalization_exception is not None:
+                exception_to_raise = consumer_finalization_exception
             elif cleanup_exception is not None:
                 exception_to_raise = cleanup_exception
 
@@ -416,7 +478,11 @@ class StreamedAudioResult:
                 and not isinstance(exc, asyncio.CancelledError)
                 and exc is not exception_to_raise
                 and exc is not primary_exception
-                for exc in (producer_exception, cleanup_exception)
+                for exc in (
+                    consumer_finalization_exception,
+                    producer_exception,
+                    cleanup_exception,
+                )
             )
             if finalization_exception_was_suppressed:
                 try:
