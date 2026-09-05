@@ -104,7 +104,9 @@ class StreamedAudioResult:
             # np.int16 needs 2-byte alignment; pad odd-length chunks safely.
             combined_buffer += b"\x00"
 
-        np_array = np.frombuffer(combined_buffer, dtype=np.int16)
+        # Provider PCM16 is little-endian regardless of host byte order. Decode it
+        # explicitly, then normalize to native int16 before exposing it to callers.
+        np_array = np.frombuffer(combined_buffer, dtype=np.dtype("<i2")).astype(np.int16, copy=False)
 
         if output_dtype == np.int16:
             return np_array
