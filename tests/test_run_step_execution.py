@@ -784,7 +784,44 @@ async def test_rejected_tool_function_span_output_respects_sensitive_data_settin
     function_spans = _function_spans()
 
     assert len(function_spans) == 1
-    assert function_spans[0]["span_data"]["output"] is None
+    exported = function_spans[0]
+    assert exported["span_data"]["output"] is None
+    error = exported["error"]
+    assert error["message"] == "Tool execution rejected"
+    assert error["data"]["tool_name"] == "approval_tool"
+    assert error["data"]["error"] == "Tool execution for 1 was manually rejected by user."
+    assert "secret-denial-456" not in json.dumps(exported, default=str)
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_function_span_keeps_rejection_message_when_sensitive_data_included():
+    agent = Agent(name="test", tools=[_make_approval_function_tool()])
+    tool_call = get_function_tool_call("approval_tool", "{}", call_id="1")
+    response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(None)
+    reject_tool_call(
+        context_wrapper,
+        agent,
+        tool_call,
+        tool_name="approval_tool",
+        rejection_message="denied-by-policy",
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    exported = function_spans[0]
+    assert exported["span_data"]["output"] == "denied-by-policy"
+    assert exported["error"]["message"] == "denied-by-policy"
 
 
 @pytest.mark.asyncio

@@ -1971,7 +1971,13 @@ class _FunctionToolBatchExecutor:
         )
         span_fn.set_error(
             SpanError(
-                message=rejection_message,
+                # The rejection message is app-supplied text, so it reaches the exported span
+                # under the same sensitive-data gate as the tool output above.
+                message=_error_tracing.get_trace_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=rejection_message,
+                    redacted_message="Tool execution rejected",
+                ),
                 data={
                     "tool_name": func_tool.name,
                     "error": (
