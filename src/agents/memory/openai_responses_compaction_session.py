@@ -530,7 +530,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._history_generation += 1
             self._compaction_candidate_items = []
             self._session_items = []
-            self._deferred_response_id = None
+            self._invalidate_response_chain()
 
     async def _ensure_compaction_candidates(
         self,
