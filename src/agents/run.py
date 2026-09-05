@@ -2101,16 +2101,28 @@ class AgentRunner:
                                         run_config,
                                     )
                                 ):
-                                    # The gate withholds this write until the output
-                                    # guardrails decide; declaring the batch on the
-                                    # checkpoint lets a resume settle it at a gate-legal
-                                    # exit instead of losing it. This runner always
-                                    # builds a RunState, so the narrowing never skips a
-                                    # real park.
+                                    # The gate withholds the interrupted response, not
+                                    # the user's accepted input: any input still
+                                    # unsaved (the sandbox runtime defers the pre-turn
+                                    # save) persists here exactly as the non-deferred
+                                    # arm would, so the held batch never carries the
+                                    # Session's only copy of the input. Declaring the
+                                    # response batch on the checkpoint lets a resume
+                                    # settle it at a gate-legal exit instead of losing
+                                    # it. This runner always builds a RunState, so the
+                                    # narrowing never skips a real park.
+                                    if input_items_for_save_interruption:
+                                        await save_result_to_session(
+                                            session,
+                                            input_items_for_save_interruption,
+                                            [],
+                                            run_state,
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
                                     defer_interrupted_session_write(
                                         run_state,
                                         session,
-                                        input_items=input_items_for_save_interruption,
                                         run_items=session_items_for_turn(turn_result),
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy

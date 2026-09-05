@@ -591,6 +591,7 @@ async def save_final_turn_items_after_guardrails(
             reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             store=store,
             wrapper=wrapper,
+            run_state=run_state,
             held_input=held_input,
         )
         return run_state._current_turn_persisted_item_count
@@ -603,6 +604,9 @@ async def save_final_turn_items_after_guardrails(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        # A settling held batch always registers, so a crash inside this append fails
+        # closed with the batch recorded instead of silently losing it.
+        resumed_write_state=run_state if held_input else None,
     )
 
 

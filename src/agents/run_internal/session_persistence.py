@@ -800,7 +800,13 @@ async def save_resumed_turn_items(
         resumed_write_state=(
             run_state
             if run_state is not None
-            and isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+            and (
+                isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+                # A settling held batch always registers, so a crash inside the append
+                # fails closed with the batch recorded instead of silently losing the
+                # only copy of an approved tool's call and output.
+                or bool(held_input)
+            )
             else None
         ),
     )
@@ -867,7 +873,6 @@ def defer_interrupted_session_write(
     run_state: RunState,
     session: Session | None,
     *,
-    input_items: Sequence[TResponseInputItem] | None = None,
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> None:
@@ -886,19 +891,15 @@ def defer_interrupted_session_write(
     conversion, so counting the raw run items would corrupt the persisted count. A
     detached re-park has no Session and takes its ``session_id`` from the standing
     declaration.
+
+    The batch carries only the withheld response: run input is never registered here,
+    because the gate withholds model output, not the user's accepted input, and a
+    tripwire discards the batch without inspecting it.
     """
     pending = run_state._pending_session_write
     if pending is not None and not pending.get("held"):
         raise UserError("Resolve the pending Session write before saving another batch")
 
-    converted_input: list[TResponseInputItem] = []
-    if input_items:
-        converted_input = normalize_input_items_for_api(
-            [
-                ensure_input_item_format(item)
-                for item in ItemHelpers.input_to_new_input_list(list(input_items))
-            ]
-        )
     converted_run_items: list[TResponseInputItem] = []
     for run_item in run_items:
         as_input = run_item_to_input_item(run_item, reasoning_item_id_policy)
@@ -907,9 +908,7 @@ def defer_interrupted_session_write(
         converted_run_items.append(ensure_input_item_format(as_input))
 
     base_items = list(pending["items"]) if pending is not None else []
-    items = deduplicate_input_items_preferring_latest(
-        base_items + converted_input + converted_run_items
-    )
+    items = deduplicate_input_items_preferring_latest(base_items + converted_run_items)
     if isinstance(session, OpenAIConversationsSession):
         items = [_sanitize_openai_conversation_item(item) for item in items]
         items = [item for item in items if not _is_unpersistable_for_openai_conversation(item)]
@@ -1014,7 +1013,18 @@ async def resume_pending_session_write(
             return
         # The entry settle offers the batch with no accompanying resolved items, so the
         # pairing contract applies against the batch alone: a call whose output a
-        # detached handoff filter dropped must not land dangling here either.
+        # detached handoff filter dropped must not land dangling here either. A batch
+        # extended while detached also missed the Conversations-specific sanitization,
+        # so the attached backend's invariant is restored before the direct append.
+        if isinstance(session, OpenAIConversationsSession):
+            pending["items"] = [
+                _sanitize_openai_conversation_item(item) for item in pending["items"]
+            ]
+            pending["items"] = [
+                item
+                for item in pending["items"]
+                if not _is_unpersistable_for_openai_conversation(item)
+            ]
         pending["items"] = _held_items_safe_to_settle(pending["items"], [], None)
         if not pending["items"]:
             run_state._pending_session_write = None
