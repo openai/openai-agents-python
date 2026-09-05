@@ -44,6 +44,7 @@ from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
 from ..run_state import RunState, _PendingSessionWrite
 from .items import (
+    _TOOL_CALL_TO_OUTPUT_TYPE,
     NestedHistoryOwnedItem,
     NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
@@ -817,49 +818,29 @@ async def save_resumed_turn_items(
             else None
         ),
     )
-    return persisted_count + saved_count
+    # Settled held items are this turn's persisted items too. Leaving them uncounted
+    # would let a later gate-enabled resume pass the resumed-safety validation with a
+    # zero count and re-append the stored calls through the final sweep; counting them
+    # makes that resume fail fast on the existing persisted-items refusal instead.
+    return persisted_count + saved_count + len(held_input or [])
 
 
-# Every supported approval family pairs a request kind with the output kind that
-# completes it; the identity is ``call_id`` except for hosted MCP approvals, whose
-# request carries ``id`` and whose response points back with ``approval_request_id``.
-_HELD_PAIR_OUTPUT_KIND = {
-    "function_call": "function_call_output",
-    "custom_tool_call": "custom_tool_call_output",
-    "computer_call": "computer_call_output",
-    "local_shell_call": "local_shell_call_output",
-    "mcp_approval_request": "mcp_approval_response",
-}
+def _held_pair_identity(item: TResponseInputItem | None) -> tuple[str, str] | None:
+    """Return the pairing key a held request kind must find an output for.
 
-
-def _held_pair_identity(item: TResponseInputItem) -> tuple[str, str] | None:
-    """Return the pairing key a held request kind must find an output for."""
+    The tool-call families come from the canonical ``_TOOL_CALL_TO_OUTPUT_TYPE`` map
+    in ``run_internal.items``, which owns the call-to-output pairing rule; hosted MCP
+    approvals pair outside that map, keyed by the canonical request identity with the
+    response pointing back via ``approval_request_id``.
+    """
     if not isinstance(item, dict):
         return None
     item_type = item.get("type")
-    if item_type not in _HELD_PAIR_OUTPUT_KIND:
-        return None
     if item_type == "mcp_approval_request":
         identity = get_hosted_mcp_approval_request_identity(item)
         request_id = identity.request_id if identity is not None else None
         return (item_type, request_id) if request_id else None
-    call_id = item.get("call_id")
-    return (item_type, call_id) if isinstance(call_id, str) and call_id else None
-
-
-def _held_pair_output_identity(item: TResponseInputItem) -> tuple[str, str] | None:
-    """Return the key an output kind provides toward pairing its request."""
-    if not isinstance(item, dict):
-        return None
-    item_type = item.get("type")
-    if item_type == "mcp_approval_response":
-        request_id = item.get("approval_request_id")
-        return (
-            ("mcp_approval_response", request_id)
-            if isinstance(request_id, str) and request_id
-            else None
-        )
-    if item_type not in set(_HELD_PAIR_OUTPUT_KIND.values()):
+    if item_type not in _TOOL_CALL_TO_OUTPUT_TYPE:
         return None
     call_id = item.get("call_id")
     return (item_type, call_id) if isinstance(call_id, str) and call_id else None
@@ -900,24 +881,44 @@ def _held_items_safe_to_settle(
     filter removed them, so they settle now and pair up at a later exit, exactly as a
     non-deferred park persists a call before its output exists.
     """
-    output_ids: set[str] = set()
-    for item in held_items:
-        key = _held_pair_output_identity(item)
-        if key is not None:
-            output_ids.add(key[1])
-    if pending_call_ids:
-        output_ids |= pending_call_ids
-    for run_item in run_items:
-        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
-        key = _held_pair_output_identity(converted) if converted is not None else None
-        if key is not None:
-            output_ids.add(key[1])
-    kept: list[TResponseInputItem] = []
+    pending_call_ids = pending_call_ids or set()
+    working: list[TResponseInputItem] = list(held_items)
+    # A call whose approval is still open is exempt from the orphan prune; the prune
+    # only understands outputs, so the exemption rides in as a placeholder output that
+    # is discarded with the rest of the context below.
     for item in held_items:
         key = _held_pair_identity(item)
-        if key is not None and key[1] not in output_ids:
-            continue
-        kept.append(item)
+        if key is not None and key[1] in pending_call_ids and key[0] != "mcp_approval_request":
+            working.append(
+                cast(
+                    TResponseInputItem,
+                    {"type": _TOOL_CALL_TO_OUTPUT_TYPE[key[0]], "call_id": key[1]},
+                )
+            )
+    for run_item in run_items:
+        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        if converted is not None:
+            working.append(converted)
+    pruned = drop_orphan_function_calls(working)
+    surviving = {id(item) for item in pruned}
+
+    # Hosted MCP approvals pair outside the canonical map: a request settles only with
+    # its response present or its approval still open.
+    mcp_response_ids = {
+        item.get("approval_request_id")
+        for item in working
+        if isinstance(item, dict) and item.get("type") == "mcp_approval_response"
+    } | pending_call_ids
+
+    kept: list[TResponseInputItem] = []
+    for item in held_items:
+        if isinstance(item, dict) and item.get("type") == "mcp_approval_request":
+            key = _held_pair_identity(item)
+            if key is not None and key[1] not in mcp_response_ids:
+                continue
+            kept.append(item)
+        elif id(item) in surviving:
+            kept.append(item)
     return kept
 
 
@@ -979,6 +980,11 @@ def defer_interrupted_session_write(
     if pending is not None and not pending.get("held"):
         raise UserError("Resolve the pending Session write before saving another batch")
 
+    # The normal persistence path forces the reasoning-id policy to ``None`` for a
+    # Conversations backend so a server-identified reasoning item stays persistable;
+    # the registration conversion must match or the sanitization later drops it.
+    if isinstance(session, OpenAIConversationsSession):
+        reasoning_item_id_policy = None
     converted_run_items: list[TResponseInputItem] = []
     for run_item in run_items:
         as_input = run_item_to_input_item(run_item, reasoning_item_id_policy)
