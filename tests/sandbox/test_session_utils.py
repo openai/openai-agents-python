@@ -23,6 +23,7 @@ from agents.sandbox.session import SandboxSessionStartEvent
 from agents.sandbox.session.base_sandbox_session import (
     _READ_PATH_PROBE_SCRIPT,
     _READ_PATH_PROBE_TIMEOUT_S,
+    _RM_ACCESS_CHECK_SCRIPT,
     BaseSandboxSession,
 )
 from agents.sandbox.session.events import SandboxSessionFinishEvent, validate_sandbox_session_event
@@ -235,6 +236,52 @@ async def test_check_mkdir_with_exec_runs_non_destructive_probe_as_user() -> Non
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
     assert session.last_command[4:6] == ("sh", "-lc")
     assert session.last_command[-2:] == ("/workspace/nested/dir", "1")
+
+
+def _run_rm_access_check(target: Path, *, recursive: bool = False) -> int:
+    return subprocess.run(
+        ["sh", "-c", _RM_ACCESS_CHECK_SCRIPT, "sh", str(target), "1" if recursive else "0"],
+        check=False,
+    ).returncode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell access probe")
+def test_rm_access_check_allows_own_entries_in_a_writable_directory(tmp_path: Path) -> None:
+    (tmp_path / "own.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "link").symlink_to("/nonexistent")
+
+    assert _run_rm_access_check(tmp_path / "own.txt") == 0
+    assert _run_rm_access_check(tmp_path / "link") == 0  # dangling symlink is still an entry
+    assert _run_rm_access_check(tmp_path / "missing") == 1
+    assert _run_rm_access_check(tmp_path / "missing", recursive=True) == 0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() != 0,
+    reason="needs root to stage a sticky directory owned by another user",
+)
+def test_rm_access_check_enforces_sticky_directory_ownership(tmp_path: Path) -> None:
+    """In a sticky directory owned by someone else, only entries we own may be removed."""
+    other_uid = 65534  # nobody
+    sticky = tmp_path / "sticky"
+    sticky.mkdir()
+    os.chown(sticky, other_uid, other_uid)
+    sticky.chmod(0o1777)
+    theirs = sticky / "theirs.txt"
+    theirs.write_text("x", encoding="utf-8")
+    os.chown(theirs, other_uid, other_uid)
+    their_link = sticky / "their-link"
+    their_link.symlink_to("/etc/hostname")
+    os.lchown(their_link, other_uid, other_uid)
+    ours = sticky / "ours.txt"
+    ours.write_text("x", encoding="utf-8")
+    our_link = sticky / "our-link"
+    our_link.symlink_to("/etc/hostname")
+
+    assert _run_rm_access_check(theirs) == 1
+    assert _run_rm_access_check(their_link) == 1
+    assert _run_rm_access_check(ours) == 0
+    assert _run_rm_access_check(our_link) == 0
 
 
 @pytest.mark.asyncio
