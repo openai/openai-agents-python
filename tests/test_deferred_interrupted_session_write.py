@@ -793,3 +793,134 @@ async def test_a_failed_settle_of_the_held_batch_is_recovered_on_the_next_resume
     assert _orphaned_outputs(items) == []
     assert _parked_pair(items) == _EXPECTED_PAIR
     assert "pending_session_write" not in result.to_state().to_json()
+
+
+def _make_two_park_agent() -> Agent:
+    """Two approval-required calls on consecutive turns, so a resume can park again."""
+    return Agent(
+        name="deferred repro (two parks)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(output=[function_call("write_thing", {"query": "a"}, call_id="call_A")]),
+                ModelStep(output=[function_call("write_other", {"query": "b"}, call_id="call_B")]),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing, write_other],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_new_park_during_a_detached_resume_joins_the_held_batch(
+    streamed: bool,
+) -> None:
+    # A detached resume resolves the first approval and parks a second call on the next
+    # turn. That fresh park cannot write anything, but the standing declaration carries
+    # the session identity, so the new call must fold into the held batch or the
+    # reattach settles its output orphaned.
+    session = SimpleListSession()
+    agent = _make_two_park_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+
+    detached = await _run(agent, state, None, streamed=streamed)
+    assert len(detached.interruptions) == 1
+    state = await _serialized_round_trip(detached, agent)
+    state.approve(state.get_interruptions()[0])
+
+    reattached = await _run(agent, state, session, streamed=streamed)
+    assert reattached.final_output == "done"
+
+    items = await session.get_items()
+    assert _orphaned_outputs(items) == []
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert calls == outputs
+    assert {"call_A", "call_B"} <= calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_gate_off_reinterruption_keeps_the_still_pending_call(streamed: bool) -> None:
+    # Approving one of two held calls and resuming with the default behavior turns the
+    # gate off, so the re-interruption exit settles the batch mid-run. The unapproved
+    # call's output does not exist yet because it is still pending, not because a
+    # filter removed it; dropping it there orphans its output on the final resume.
+    session = SimpleListSession()
+    resume_agent = _make_multi_approval_agent(tool_use_behavior="run_llm_again")
+
+    first = await _run(_make_multi_approval_agent(), "go", session, streamed=streamed)
+    assert len(first.interruptions) == 2
+    state = await _serialized_round_trip(first, resume_agent)
+    state.approve(
+        next(
+            interruption
+            for interruption in state.get_interruptions()
+            if getattr(interruption.raw_item, "call_id", None) == "call_PARKED"
+        )
+    )
+
+    second = await _run(resume_agent, state, session, streamed=streamed)
+    assert len(second.interruptions) == 1
+    state = await _serialized_round_trip(second, resume_agent)
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    final = await _run(resume_agent, state, session, streamed=streamed)
+    assert final.final_output == "done"
+
+    items = await session.get_items()
+    assert _orphaned_outputs(items) == []
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert calls == outputs
+    assert {"call_PARKED", "call_PARKED_2"} <= calls
+
+
+@pytest.mark.asyncio
+async def test_entry_settle_drops_a_held_call_the_filter_unpaired() -> None:
+    # A detached resume of the partial-filter handoff folds the post-filter items into
+    # the batch, the handoff normalizes the checkpoint to run-again, and an after-turn
+    # cancellation stops the run there. The reattach settles at entry, where the same
+    # pairing contract applies: the filtered call must not land dangling. Cancellation
+    # only exists on the streaming runner, and this checkpoint shape resumes from the
+    # live state.
+    session = SimpleListSession()
+    agent = _make_partial_filter_handoff_agent()
+    first = await _run(agent, "go", session, streamed=True)
+    state = await _serialized_round_trip(first, agent)
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+
+    detached = Runner.run_streamed(agent, state, session=None)
+    detached.cancel(mode="after_turn")
+    async for _ in detached.stream_events():
+        pass
+
+    reattached = Runner.run_streamed(agent, detached.to_state(), session=session)
+    async for _ in reattached.stream_events():
+        pass
+
+    items = await session.get_items()
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
+    assert outputs - calls == set(), f"orphaned outputs: {sorted(map(str, outputs - calls))}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_detached_completion_clears_the_held_record(streamed: bool) -> None:
+    # A detached resume that runs to completion has no Session to settle against and
+    # the fresh final exit ends the run; a held record left standing would invalidate
+    # the completed run's checkpoint and diverge between the runners.
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+
+    detached = await _run(agent, state, None, streamed=streamed)
+    assert detached.final_output == "done"
+    assert "pending_session_write" not in detached.to_state().to_json()
+    assert state._pending_session_write is None

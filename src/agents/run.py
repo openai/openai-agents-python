@@ -1924,6 +1924,12 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            if session is None and run_state is not None:
+                                # A detached completion has no Session to settle against
+                                # and the run ends here, so the batch is discarded
+                                # rather than left to invalidate the completed run's
+                                # checkpoint. Mirrors the resumed final exit.
+                                take_held_session_write(run_state)
                             if run_state is not None and _has_output_guardrails(
                                 current_agent, run_config
                             ):
@@ -2120,6 +2126,16 @@ class AgentRunner:
                                         store=store_setting,
                                         wrapper=context_wrapper,
                                     )
+                            elif session is None and run_state is not None:
+                                # A fresh park during a detached resume cannot write,
+                                # but a standing held declaration carries the session
+                                # identity: the new parked call folds into it so the
+                                # reattach does not settle its output orphaned.
+                                extend_held_session_write(
+                                    run_state,
+                                    run_items=session_items_for_turn(turn_result),
+                                    reasoning_item_id_policy=(run_state._reasoning_item_id_policy),
+                                )
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response
                             )

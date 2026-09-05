@@ -782,7 +782,12 @@ async def save_resumed_turn_items(
     if session is None or (not items and not held_input):
         return persisted_count
     if held_input:
-        held_input = _held_items_safe_to_settle(held_input, items, reasoning_item_id_policy)
+        held_input = _held_items_safe_to_settle(
+            held_input,
+            items,
+            reasoning_item_id_policy,
+            pending_call_ids=_pending_approval_call_ids(run_state),
+        )
     saved_count = await save_result_to_session(
         session,
         list(held_input) if held_input else [],
@@ -802,10 +807,25 @@ async def save_resumed_turn_items(
     return persisted_count + saved_count
 
 
+def _pending_approval_call_ids(run_state: RunState | None) -> set[str]:
+    """Return the call ids still awaiting approval on the state's current step."""
+    if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
+        return set()
+    ids: set[str] = set()
+    for approval in run_state._current_step.interruptions:
+        raw = getattr(approval, "raw_item", None)
+        call_id = raw.get("call_id") if isinstance(raw, dict) else getattr(raw, "call_id", None)
+        if isinstance(call_id, str) and call_id:
+            ids.add(call_id)
+    return ids
+
+
 def _held_items_safe_to_settle(
     held_items: Sequence[TResponseInputItem],
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+    *,
+    pending_call_ids: set[str] | None = None,
 ) -> list[TResponseInputItem]:
     """Drop held calls whose outputs did not survive into the settling batch.
 
@@ -815,12 +835,19 @@ def _held_items_safe_to_settle(
     Pairing is the safety predicate. The paired part of the batch still settles, which
     honors the filter's decision symmetrically: a dropped output takes its call with it,
     and a kept output keeps its call.
+
+    ``pending_call_ids`` names calls whose approvals are still open on the current
+    step: their outputs are missing because they have not run yet, not because a
+    filter removed them, so they settle now and pair up at a later exit, exactly as a
+    non-deferred park persists a call before its output exists.
     """
     output_ids = {
         item.get("call_id")
         for item in held_items
         if isinstance(item, dict) and item.get("type") == "function_call_output"
     }
+    if pending_call_ids:
+        output_ids |= pending_call_ids
     for run_item in run_items:
         converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
         if isinstance(converted, dict) and converted.get("type") == "function_call_output":
@@ -984,6 +1011,13 @@ async def resume_pending_session_write(
                 "Resume the pending Session write with the original Session and session ID"
             )
         if session is None or not isinstance(run_state._current_step, NextStepRunAgain):
+            return
+        # The entry settle offers the batch with no accompanying resolved items, so the
+        # pairing contract applies against the batch alone: a call whose output a
+        # detached handoff filter dropped must not land dangling here either.
+        pending["items"] = _held_items_safe_to_settle(pending["items"], [], None)
+        if not pending["items"]:
+            run_state._pending_session_write = None
             return
         pending.pop("held", None)
     if run_state._session_write_in_progress:

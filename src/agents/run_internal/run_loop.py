@@ -1978,6 +1978,12 @@ async def start_streaming(
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
+                    if session is None:
+                        # A detached completion has no Session to settle against and
+                        # the run ends here, so the batch is discarded rather than
+                        # left to invalidate the completed run's checkpoint. Mirrors
+                        # the resumed final exit.
+                        take_held_session_write(run_state)
                     await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
                         agent=current_agent,
@@ -2016,7 +2022,17 @@ async def start_streaming(
                         current_agent,
                         run_config,
                     )
-                    if parked_items_deferred and await _should_persist_stream_items(
+                    if session is None:
+                        # A fresh park during a detached resume cannot write, but a
+                        # standing held declaration carries the session identity: the
+                        # new parked call folds into it so the reattach does not
+                        # settle its output orphaned.
+                        extend_held_session_write(
+                            run_state,
+                            run_items=turn_session_items,
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                        )
+                    elif parked_items_deferred and await _should_persist_stream_items(
                         session=session,
                         server_conversation_tracker=server_conversation_tracker,
                         streamed_result=streamed_result,
