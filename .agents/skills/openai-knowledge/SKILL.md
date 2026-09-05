@@ -1,6 +1,6 @@
 ---
 name: openai-knowledge
-description: Use when working with the OpenAI API (Responses API) or OpenAI platform features (tools, streaming, Realtime API, auth, models, rate limits, MCP) and you need authoritative, up-to-date documentation (schemas, examples, limits, edge cases). Prefer the OpenAI Developer Documentation MCP server tools when available; otherwise guide the user to enable `openaiDeveloperDocs`.
+description: Retrieve authoritative OpenAI API and platform documentation when an integration or claim needs current external evidence.
 ---
 
 # OpenAI Knowledge

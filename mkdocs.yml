@@ -88,7 +88,6 @@ plugins:
                 - Testing: testing.md
                 - Agent visualization: visualization.md
                 - REPL utility: repl.md
-                - Examples: examples.md
                 - Release process/changelog: release.md
 
             - API Reference:
@@ -241,7 +240,6 @@ plugins:
                 - テスト: testing.md
                 - visualization.md
                 - repl.md
-                - コード例: examples.md
                 - release.md
         - locale: ko
           name: 한국어
@@ -285,7 +283,6 @@ plugins:
                 - 테스트: testing.md
                 - visualization.md
                 - repl.md
-                - 코드 예제: examples.md
                 - release.md
         - locale: zh
           name: 简体中文
@@ -329,7 +326,6 @@ plugins:
                 - 测试: testing.md
                 - visualization.md
                 - repl.md
-                - 示例: examples.md
                 - release.md
 extra:
   # Remove material generation message in footer

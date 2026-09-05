@@ -1,6 +1,6 @@
 # Doc Coverage Checklist
 
-Use this checklist to scan the selected scope (main = comprehensive, or current-branch diff) and validate documentation coverage.
+Use this checklist within the requested topic or diff. A comprehensive inventory requires a comprehensive audit request; the current branch does not determine the scope. Released-documentation corrections remain in scope even when unrelated to that branch.
 
 ## Feature inventory targets
 
@@ -26,7 +26,7 @@ Use this checklist to scan the selected scope (main = comprehensive, or current-
 
 ## Evidence capture
 
-- Record the main-branch file path and symbol/setting name.
+- Record the inspected revision, file path, and symbol/setting name for the requested scope.
 - Note defaults or behavior-critical details for accuracy checks.
 - Avoid large code dumps; a short identifier is enough.
 
@@ -35,7 +35,7 @@ Use this checklist to scan the selected scope (main = comprehensive, or current-
 - Option names/types no longer exist or differ from code.
 - Default values or allowed ranges do not match implementation.
 - Features removed in code but still documented.
-- New behaviors introduced without corresponding docs updates.
+- Released behaviors missing necessary guidance. Apply the repository's Documentation Release Timing policy before proposing documentation for unreleased behavior.
 
 ## When to propose structural changes
 
@@ -43,7 +43,7 @@ Use this checklist to scan the selected scope (main = comprehensive, or current-
 - Multiple pages duplicate the same concept without cross-links.
 - New feature areas have no obvious home in the nav structure.
 
-## Diff mode guidance (current branch vs main)
+## Diff mode guidance (only for branch-scoped requests)
 
 - Focus only on changed behavior: new exports/options, modified defaults, removed features, or renamed settings.
 - Use `git diff main...HEAD` (or equivalent) to constrain analysis.

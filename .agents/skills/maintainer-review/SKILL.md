@@ -1,6 +1,6 @@
 ---
 name: maintainer-review
-description: Assess an openai-agents-python GitHub issue or pull request as a maintainer. Use to verify the claimed need and practical impact, compare supported alternatives or competing approaches, separate code quality from repository readiness, recommend the maintainer action, and draft a copy-ready comment when evidence, changes, or closure should be requested.
+description: Assess a GitHub issue or PR for demonstrated need, supported alternatives, correctness, and maintainer action. Desk review only.
 ---
 
 # Maintainer Review
