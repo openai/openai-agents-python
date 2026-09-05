@@ -32,6 +32,7 @@ from agents.extensions.models.litellm_provider import LitellmProvider
 from agents.items import TResponseStreamEvent
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing
+from agents.tracing import get_current_span, trace
 
 
 @pytest.mark.allow_call_model_methods
@@ -827,7 +828,9 @@ def _patch_fetch_response(monkeypatch, provider_stream: _ClosableChatStream) -> 
     monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
 
 
-def _stream_response(model: Model) -> AsyncIterator[TResponseStreamEvent]:
+def _stream_response(
+    model: Model, tracing: ModelTracing = ModelTracing.DISABLED
+) -> AsyncIterator[TResponseStreamEvent]:
     return model.stream_response(
         system_instructions=None,
         input="",
@@ -835,11 +838,63 @@ def _stream_response(model: Model) -> AsyncIterator[TResponseStreamEvent]:
         tools=[],
         output_schema=None,
         handoffs=[],
-        tracing=ModelTracing.DISABLED,
+        tracing=tracing,
         previous_response_id=None,
         conversation_id=None,
         prompt=None,
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_usage", [False, True], ids=["no-usage", "detailed-usage"])
+@pytest.mark.parametrize("tracing", [ModelTracing.ENABLED, ModelTracing.ENABLED_WITHOUT_DATA])
+async def test_stream_span_is_populated_before_yielding_completed(
+    monkeypatch, with_usage: bool, tracing: ModelTracing
+) -> None:
+    """Record exact trace data even when a consumer closes at the completed event."""
+    chunk = _text_chunk("Hello")
+    if with_usage:
+        chunk.usage = CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        )
+    provider_stream = _ClosableChatStream([chunk])
+    _patch_fetch_response(monkeypatch, provider_stream)
+    model = LitellmProvider().get_model("gpt-4")
+
+    with trace(workflow_name="litellm-terminal-span"):
+        stream_agen = cast(Any, _stream_response(model, tracing))
+        try:
+            async for event in stream_agen:
+                if event.type == "response.completed":
+                    generation = get_current_span()
+                    assert generation is not None
+                    assert generation.span_data.usage == {
+                        "requests": 1,
+                        "input_tokens": 7 if with_usage else 0,
+                        "output_tokens": 5 if with_usage else 0,
+                        "total_tokens": 12 if with_usage else 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 2 if with_usage else 0,
+                            "cache_write_tokens": 0,
+                        },
+                        "output_tokens_details": {"reasoning_tokens": 3 if with_usage else 0},
+                    }
+                    assert generation.span_data.output == (
+                        [event.response.model_dump()] if tracing == ModelTracing.ENABLED else None
+                    )
+                    assert (event.response.usage is not None) == with_usage
+                    break
+            else:
+                pytest.fail("The stream did not yield a completed response.")
+        finally:
+            await stream_agen.aclose()
+
+    assert provider_stream.aclose_calls == 1
 
 
 @pytest.mark.allow_call_model_methods

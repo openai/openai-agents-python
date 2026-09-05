@@ -34,14 +34,12 @@ from ..tracing.spans import Span
 from ..usage import (
     Usage,
     _raw_usage_snapshot,
-    _requests_for_response_without_usage,
-    model_usage_to_span_usage,
 )
 from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
-from ._trace import model_config_for_trace
+from ._trace import model_config_for_trace, populate_generation_span
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -535,30 +533,7 @@ class OpenAIChatCompletionsModel(Model):
         final_response: Response,
         tracing: ModelTracing,
     ) -> None:
-        if tracing.include_data():
-            span_generation.span_data.output = [final_response.model_dump()]
-
-        if final_response.usage is not None:
-            span_generation.span_data.usage = {
-                "requests": 1,
-                "input_tokens": final_response.usage.input_tokens,
-                "output_tokens": final_response.usage.output_tokens,
-                "total_tokens": final_response.usage.total_tokens,
-                "input_tokens_details": (
-                    final_response.usage.input_tokens_details.model_dump()
-                    if final_response.usage.input_tokens_details is not None
-                    else {"cached_tokens": 0, "cache_write_tokens": 0}
-                ),
-                "output_tokens_details": (
-                    final_response.usage.output_tokens_details.model_dump()
-                    if final_response.usage.output_tokens_details is not None
-                    else {"reasoning_tokens": 0}
-                ),
-            }
-        elif _requests_for_response_without_usage(final_response):
-            # Keep streamed tracing aligned with the non-streaming path, which records the
-            # request even when the provider reports no usage.
-            span_generation.span_data.usage = model_usage_to_span_usage(Usage(requests=1))
+        populate_generation_span(span_generation, final_response, tracing)
 
     def _handle_unsupported_server_managed_conversation_state(
         self,

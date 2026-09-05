@@ -16,7 +16,11 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
-from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -2075,6 +2079,59 @@ class _CloseSignalingStream(_ClosableStream):
         self._close_started.set()
         await self._release.wait()
         self.aclose_completed += 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_usage", [False, True], ids=["no-usage", "detailed-usage"])
+@pytest.mark.parametrize("tracing", [ModelTracing.ENABLED, ModelTracing.ENABLED_WITHOUT_DATA])
+async def test_any_llm_chat_stream_preserves_trace_data_at_completed(
+    monkeypatch, with_usage: bool, tracing: ModelTracing
+) -> None:
+    """Exercise real chat stream conversion while the adapter is suspended at its terminal yield."""
+    chunk = _chat_chunk("Hello")
+    if with_usage:
+        chunk.usage = CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        )
+    stream = _ClosableStream([chunk])
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    spans = _capture_spans(monkeypatch, module, "generation_span")
+
+    with trace(workflow_name="any-llm-chat-terminal-span"):
+        stream_agen = _stream_events(model, tracing)
+        try:
+            async for event in stream_agen:
+                if event.type == "response.completed":
+                    [span] = spans
+                    assert span.span_data.usage == {
+                        "requests": 1,
+                        "input_tokens": 7 if with_usage else 0,
+                        "output_tokens": 5 if with_usage else 0,
+                        "total_tokens": 12 if with_usage else 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 2 if with_usage else 0,
+                            "cache_write_tokens": 0,
+                        },
+                        "output_tokens_details": {"reasoning_tokens": 3 if with_usage else 0},
+                    }
+                    assert span.span_data.output == (
+                        [event.response.model_dump()] if tracing == ModelTracing.ENABLED else None
+                    )
+                    assert (event.response.usage is not None) == with_usage
+                    break
+            else:
+                pytest.fail("The stream did not yield a completed response.")
+        finally:
+            await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
 
 
 @pytest.mark.allow_call_model_methods
