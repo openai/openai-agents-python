@@ -56,9 +56,13 @@ async def test_schema_create_all_compiles_for_mysql_family(dialect_url: str):
     try:
         session._metadata.create_all(engine)
         for table in tables:
+            # CHARACTER SET must be emitted with the collation: a column given
+            # only a collation inherits the database character set, and the
+            # server rejects utf8mb4_bin against a non-utf8mb4 set with
+            # ERROR 1253, failing create_all() on e.g. a latin1 MySQL 5.7.
             assert (
                 table.c.session_id.type.compile(dialect=engine.dialect)
-                == "VARCHAR(190) COLLATE utf8mb4_bin"
+                == "VARCHAR(190) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
             )
     finally:
         await session.engine.dispose()

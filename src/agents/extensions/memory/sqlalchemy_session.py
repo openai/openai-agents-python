@@ -48,6 +48,7 @@ from sqlalchemy import (
     text as sql_text,
     update,
 )
+from sqlalchemy.dialects import mysql as mysql_dialect
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -64,8 +65,18 @@ _T = TypeVar("_T")
 
 # MySQL-family dialects require a bounded VARCHAR for indexed string columns.
 _MYSQL_SESSION_ID_MAX_LENGTH = 190
+# ``CHARACTER SET`` is declared alongside the collation: a column given only a
+# collation inherits the database character set, and the server rejects
+# ``utf8mb4_bin`` against a non-utf8mb4 inherited set with
+# "ERROR 1253 COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET '<set>'".
+# A MySQL 5.7 install defaulting to latin1 would otherwise fail in
+# ``create_all()`` before either table exists.
 _SESSION_ID_TYPE = String().with_variant(
-    String(_MYSQL_SESSION_ID_MAX_LENGTH, collation="utf8mb4_bin"),
+    mysql_dialect.VARCHAR(
+        _MYSQL_SESSION_ID_MAX_LENGTH,
+        charset="utf8mb4",
+        collation="utf8mb4_bin",
+    ),
     "mysql",
     "mariadb",
 )
