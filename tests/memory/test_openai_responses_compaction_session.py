@@ -198,6 +198,7 @@ class TestOpenAIResponsesCompactionSession:
         await session.run_compaction({"response_id": "resp-old"})
         assert await session.pop_item() is None
         await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.await_args is not None
         assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-old"
 
     @pytest.mark.asyncio
@@ -255,6 +256,7 @@ class TestOpenAIResponsesCompactionSession:
         await older
 
         assert mock_client.responses.compact.await_count == 1
+        assert mock_client.responses.compact.await_args is not None
         assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
 
     @pytest.mark.asyncio
@@ -300,6 +302,7 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == []
 
         await session.run_compaction({"force": True, "compaction_mode": "input"})
+        assert mock_client.responses.compact.await_args is not None
         assert mock_client.responses.compact.await_args.kwargs["input"] == []
 
     @pytest.mark.asyncio
@@ -352,6 +355,7 @@ class TestOpenAIResponsesCompactionSession:
         await add_task
         await compaction_task
 
+        assert mock_client.responses.compact.await_args is not None
         assert mock_client.responses.compact.await_args.kwargs["input"] == [old_item, new_item]
         assert await underlying.get_items() == [old_item, new_item]
 
