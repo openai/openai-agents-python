@@ -165,6 +165,72 @@ async def test_cache_invalidation_during_refresh_is_preserved(
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
 @patch("mcp.client.session.ClientSession.list_tools")
+async def test_older_concurrent_refresh_does_not_overwrite_newer_cache(
+    mock_list_tools: AsyncMock,
+    mock_initialize: AsyncMock,
+    mock_stdio_client,
+):
+    first_refresh_started = asyncio.Event()
+    release_first_refresh = asyncio.Event()
+    request_count = 0
+
+    async def list_tools():
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            first_refresh_started.set()
+            await release_first_refresh.wait()
+            return ListToolsResult(
+                tools=[
+                    MCPTool(
+                        name="tool1",
+                        description="first-started",
+                        inputSchema={"required": ["old"]},
+                    ),
+                ],
+            )
+        return ListToolsResult(
+            tools=[
+                MCPTool(
+                    name="tool1",
+                    description="second-started",
+                    inputSchema={"required": ["latest"]},
+                ),
+            ],
+        )
+
+    mock_list_tools.side_effect = list_tools
+    server = MCPServerStdio(
+        params={"command": tee},
+        cache_tools_list=True,
+    )
+
+    async with server:
+        first_refresh = asyncio.create_task(server.list_tools())
+        try:
+            await asyncio.wait_for(first_refresh_started.wait(), timeout=1)
+            second_result = await asyncio.wait_for(server.list_tools(), timeout=1)
+            assert second_result[0].description == "second-started"
+            assert (server.cached_tools or [])[0].description == "second-started"
+
+            release_first_refresh.set()
+            first_result = await asyncio.wait_for(first_refresh, timeout=1)
+        finally:
+            release_first_refresh.set()
+            if not first_refresh.done():
+                first_refresh.cancel()
+            await asyncio.gather(first_refresh, return_exceptions=True)
+
+        assert first_result[0].description == "first-started"
+        assert (server.cached_tools or [])[0].description == "second-started"
+        assert (server.cached_tools or [])[0].input_schema == {"required": ["latest"]}
+        assert request_count == 2
+
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
 async def test_paginated_tools_are_cached_before_filtering(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):

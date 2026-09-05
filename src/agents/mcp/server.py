@@ -966,6 +966,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_cache_generation = 0
+        self._tools_refresh_sequence = 0
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
@@ -1450,6 +1451,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 tools = self._tools_list
             else:
                 refresh_generation = self._tools_cache_generation
+                self._tools_refresh_sequence += 1
+                refresh_sequence = self._tools_refresh_sequence
                 tools = []
                 cursor: str | None = None
                 seen_cursors: set[str | None] = set()
@@ -1498,7 +1501,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 cursor = None
                 seen_cursors.clear()
                 del fetch_pages
-                if refresh_generation == self._tools_cache_generation:
+                if (
+                    refresh_generation == self._tools_cache_generation
+                    and refresh_sequence == self._tools_refresh_sequence
+                ):
                     self._tools_list = tools
                     self._cache_dirty = False
 
