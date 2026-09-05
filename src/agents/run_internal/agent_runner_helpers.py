@@ -19,7 +19,7 @@ from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
-from ..run_state import RunState, _PendingSessionWrite
+from ..run_state import RunState
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span
 from ..tracing.config import TracingConfig
@@ -456,13 +456,8 @@ def build_interruption_result(
     generated_items: list[RunItem],
     run_state: RunState | None,
     original_input: str | list[TResponseInputItem],
-    held_session_write: _PendingSessionWrite | None = None,
 ) -> RunResult:
-    """Create a RunResult for an interruption path.
-
-    ``held_session_write`` carries a held pending write registered by a park with no
-    live ``RunState``; with one, the record is read from the state itself.
-    """
+    """Create a RunResult for an interruption path."""
     identity_root_agent = (
         run_state._starting_agent
         if run_state is not None and run_state._starting_agent is not None
@@ -497,8 +492,6 @@ def build_interruption_result(
         # caller serializes ``result.to_state()``, which has no live ``RunState`` to
         # read the declaration from.
         result._pending_session_write = copy.deepcopy(run_state._pending_session_write)
-    elif held_session_write is not None:
-        result._pending_session_write = copy.deepcopy(held_session_write)
     result._original_input = copy_input_items(original_input)
     return result
 

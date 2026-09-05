@@ -154,7 +154,7 @@ from .run_internal.tool_use_tracker import (
     hydrate_tool_use_tracker,
     serialize_tool_use_tracker,
 )
-from .run_state import RunState, _PendingSessionWrite
+from .run_state import RunState
 from .sandbox.memory.rollouts import terminal_metadata_for_exception
 from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
@@ -2080,7 +2080,6 @@ class AgentRunner:
                                 run_state._current_step = None
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
-                            held_record: _PendingSessionWrite | None = None
                             if session_persistence_enabled and not input_guardrails_triggered(
                                 _attempt_input_guardrail_results()
                             ):
@@ -2098,7 +2097,7 @@ class AgentRunner:
                                     # guardrails decide; declaring the batch on the
                                     # checkpoint lets a resume settle it at a gate-legal
                                     # exit instead of losing it.
-                                    held_record = defer_interrupted_session_write(
+                                    defer_interrupted_session_write(
                                         run_state,
                                         session,
                                         input_items=input_items_for_save_interruption,
@@ -2142,7 +2141,6 @@ class AgentRunner:
                             )
                             result = build_interruption_result(
                                 result_input=interruption_result_input2,
-                                held_session_write=held_record,
                                 session_items=session_items,
                                 model_responses=model_responses,
                                 current_agent=current_agent,

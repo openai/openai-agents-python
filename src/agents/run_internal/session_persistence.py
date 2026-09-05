@@ -801,13 +801,13 @@ async def save_resumed_turn_items(
 
 
 def defer_interrupted_session_write(
-    run_state: RunState | None,
+    run_state: RunState,
     session: Session | None,
     *,
     input_items: Sequence[TResponseInputItem] | None = None,
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
-) -> _PendingSessionWrite | None:
+) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
     Registering is not writing: this touches only the checkpoint, never the Session,
@@ -820,11 +820,11 @@ def defer_interrupted_session_write(
 
     Items are converted and deduplicated with the same helpers the real save uses, and
     the count is taken over the converted items: approval placeholders drop out in
-    conversion, so counting the raw run items would corrupt the persisted count.
-    Returns the record so a caller without a live ``RunState`` (a fresh non-streamed
-    park) can attach it to its result checkpoint.
+    conversion, so counting the raw run items would corrupt the persisted count. A
+    detached re-park has no Session and takes its ``session_id`` from the standing
+    declaration.
     """
-    pending = run_state._pending_session_write if run_state is not None else None
+    pending = run_state._pending_session_write
     if pending is not None and not pending.get("held"):
         raise UserError("Resolve the pending Session write before saving another batch")
 
@@ -853,7 +853,7 @@ def defer_interrupted_session_write(
             item for item in items if not _is_unpersistable_for_openai_conversation(item)
         ]
     if not items:
-        return None
+        return
 
     session_id = (
         session.session_id
@@ -861,20 +861,17 @@ def defer_interrupted_session_write(
         else (pending["session_id"] if pending is not None else None)
     )
     if session_id is None:
-        return None
+        return
     record: _PendingSessionWrite = {
         "session_id": session_id,
         "items": copy.deepcopy(items),
         "before": None,
         "persisted_count": (
-            run_state._current_turn_persisted_item_count if run_state is not None else 0
-        )
-        + len(converted_run_items),
+            run_state._current_turn_persisted_item_count + len(converted_run_items)
+        ),
         "held": True,
     }
-    if run_state is not None:
-        run_state._pending_session_write = record
-    return record
+    run_state._pending_session_write = record
 
 
 def extend_held_session_write(
