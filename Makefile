@@ -77,6 +77,10 @@ tests-review: tests-parallel-review
 tests-asyncio-stability:
 	bash .github/scripts/run-asyncio-teardown-stability.sh
 
+.PHONY: tests-repo-skills
+tests-repo-skills:
+	env -u OPENAI_API_KEY uv run --no-project --python 3.11 python .github/scripts/run_repo_skill_tests.py
+
 .PHONY: tests-parallel
 tests-parallel:
 	uv run pytest -n "$${PYTEST_XDIST_AUTO_NUM_WORKERS:-auto}" $(if $(PYTEST_XDIST_AUTO_NUM_WORKERS),,--maxprocesses=9) --dist worksteal -m "not serial"
