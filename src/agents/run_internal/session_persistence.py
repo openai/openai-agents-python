@@ -781,6 +781,8 @@ async def save_resumed_turn_items(
     """
     if session is None or (not items and not held_input):
         return persisted_count
+    if held_input:
+        held_input = _held_items_safe_to_settle(held_input, items, reasoning_item_id_policy)
     saved_count = await save_result_to_session(
         session,
         list(held_input) if held_input else [],
@@ -798,6 +800,40 @@ async def save_resumed_turn_items(
         ),
     )
     return persisted_count + saved_count
+
+
+def _held_items_safe_to_settle(
+    held_items: list[TResponseInputItem],
+    run_items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> list[TResponseInputItem]:
+    """Drop held calls whose outputs did not survive into the settling batch.
+
+    A handoff ``input_filter`` may drop some resolved outputs while keeping others, so
+    the settling batch being non-empty does not make it safe: a held ``function_call``
+    settled without its output poisons the Session exactly as the orphaned output does.
+    Pairing is the safety predicate. The paired part of the batch still settles, which
+    honors the filter's decision symmetrically: a dropped output takes its call with it,
+    and a kept output keeps its call.
+    """
+    output_ids = {
+        item.get("call_id")
+        for item in held_items
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    for run_item in run_items:
+        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        if isinstance(converted, dict) and converted.get("type") == "function_call_output":
+            output_ids.add(converted.get("call_id"))
+    return [
+        item
+        for item in held_items
+        if not (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("call_id") not in output_ids
+        )
+    ]
 
 
 def defer_interrupted_session_write(
@@ -934,12 +970,19 @@ async def resume_pending_session_write(
         # A held batch is the write the interruption park withheld under the
         # output-guardrail gate, and resume entry is not a gate-legal settle point, so
         # the declaration rides the checkpoint untouched; in particular a detached
-        # resume must not fail the boot over a batch it cannot settle. The exception
-        # is a run-again checkpoint: the parked response's outputs already went back
-        # to the model, which only happens after the gate stopped applying to that
-        # response, so the batch settles here, before the next model call. This is
-        # also the only settle point such a checkpoint will ever reach, because the
-        # run-again turn's saves never arm ``resumed_write_state``.
+        # resume must not fail the boot over a batch it cannot settle. An attached
+        # Session must still be the declared one, and must fail here at boot: letting
+        # the run proceed would execute the approved tool and settle the batch into
+        # the wrong conversation. The exception to riding is a run-again checkpoint:
+        # the parked response's outputs already went back to the model, which only
+        # happens after the gate stopped applying to that response, so the batch
+        # settles here, before the next model call. This is also the only settle
+        # point such a checkpoint will ever reach, because the run-again turn's saves
+        # never arm ``resumed_write_state``.
+        if session is not None and session.session_id != pending["session_id"]:
+            raise UserError(
+                "Resume the pending Session write with the original Session and session ID"
+            )
         if session is None or not isinstance(run_state._current_step, NextStepRunAgain):
             return
         pending.pop("held", None)
