@@ -48,13 +48,14 @@ class SessionSettings:
             if isinstance(override, dict)
             else None
         )
-        override = _coerce_session_settings(override, settings_type=type(self))
+        if type(override) is not SessionSettings:
+            override = _coerce_session_settings(override, settings_type=type(self))
 
         changes = {
-            field.name: getattr(override, field.name)
+            field.name: getattr(override, field.name, None)
             for field in fields(self)
             if (override_fields is None or field.name in override_fields)
-            and getattr(override, field.name) is not None
+            and getattr(override, field.name, None) is not None
         }
 
         return replace(self, **changes)
