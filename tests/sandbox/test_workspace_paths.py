@@ -33,16 +33,23 @@ class WorkspacePathCase:
 
 
 def _symlink_or_skip(*args: Any, **kwargs: Any) -> None:
-    """Create a symlink, or skip the test where the platform forbids one.
+    """Create a symlink, or skip the test where Windows forbids one.
 
     Windows refuses symlink creation unless the process is elevated or Developer
     Mode is enabled, so these tests cannot run for an ordinary Windows contributor.
     CI runners hold the privilege, which is why this only shows up locally.
+
+    Only that specific failure is skipped. Any other OSError -- a missing parent,
+    an existing target, a full disk -- is re-raised, so a broken fixture cannot
+    quietly turn these path-policy and escape-rejection tests into passes. Mirrors
+    the helper of the same name in test_entries.py.
     """
     try:
         os.symlink(*args, **kwargs)
     except OSError as exc:
-        pytest.skip(f"Can't create symlinks: {exc}")
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires elevated privileges on Windows")
+        raise
 
 
 def _policy(root: Path | str = "/workspace") -> WorkspacePathPolicy:
