@@ -447,7 +447,8 @@ class WorkspacePathPolicy:
         if (
             follow_leaf_symlink
             or absolute_path.name in ("", ".", "..")
-            or absolute_path == Path(self._normalized_root().as_posix())
+            or PurePosixPath(posixpath.normpath(absolute_path.as_posix()))
+            == self._normalized_root()
         ):
             resolved = absolute_path.resolve(strict=False)
         else:

@@ -644,6 +644,8 @@ class TestUnixLocalRmSymlinks:
 
         assert session._rm_target_path(".") == real_root
         assert session._rm_target_path(str(root_link)) == real_root
+        # The configured (noncanonical) spelling itself must also name the root.
+        assert session._rm_target_path(str(tmp_path / "dummy" / ".." / "ws-link")) == real_root
 
     @pytest.mark.asyncio
     async def test_rm_as_user_checks_the_symlink_entry_and_keeps_its_target(
