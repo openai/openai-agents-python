@@ -783,6 +783,11 @@ async def save_resumed_turn_items(
     """
     if session is None or (not items and not held_input):
         return persisted_count
+    # Whether this settle is claiming a held batch at all, captured before the dedup
+    # below can empty it: the recovery registration must stay armed even when the
+    # guardrail rebuild already carries the batch, because the append still lands the
+    # approved call and output and a crash inside it must reconcile on retry.
+    settling_held = bool(held_input)
     if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
         # The guardrail rebuild re-derived the whole current response, held requests
         # included; feeding the batch again would duplicate its unkeyed companions.
@@ -813,7 +818,7 @@ async def save_resumed_turn_items(
                 # A settling held batch always registers, so a crash inside the append
                 # fails closed with the batch recorded instead of silently losing the
                 # only copy of an approved tool's call and output.
-                or bool(held_input)
+                or settling_held
             )
             else None
         ),

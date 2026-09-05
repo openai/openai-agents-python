@@ -43,6 +43,8 @@ from .run_steps import (
     ProcessedResponse,
 )
 from .session_persistence import (
+    _held_items_safe_to_settle,
+    _pending_approval_call_ids,
     final_items_cover_held_batch,
     save_result_to_session,
     save_resumed_turn_items,
@@ -586,13 +588,13 @@ async def save_final_turn_items_after_guardrails(
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
-    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
-        # The guardrail rebuild re-derived the whole current response, held requests
-        # included; feeding the batch again would duplicate its unkeyed companions.
-        # ``save_resumed_turn_items`` repeats this check for the paths that route
-        # through it; this copy covers the zero-count direct save below.
-        held_input = None
+    # Whether a held batch is being claimed at all, captured before any dedup empties
+    # it: the recovery registration below must stay armed even when the guardrail
+    # rebuild already carries the batch.
+    settling_held = bool(held_input)
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
+        # save_resumed_turn_items owns the dedup, pairing, and recovery arming; the raw
+        # held batch rides in so it can arm from its own pre-dedup view.
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
             items=items,
@@ -605,6 +607,17 @@ async def save_final_turn_items_after_guardrails(
             held_input=held_input,
         )
         return run_state._current_turn_persisted_item_count
+    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
+        # The guardrail rebuild re-derived the whole current response, held requests
+        # included; feeding the batch again would duplicate its unkeyed companions.
+        held_input = None
+    if held_input:
+        held_input = _held_items_safe_to_settle(
+            held_input,
+            items,
+            reasoning_item_id_policy,
+            pending_call_ids=_pending_approval_call_ids(run_state),
+        )
     return await save_result_to_session(
         session,
         list(held_input) if held_input else [],
@@ -615,8 +628,9 @@ async def save_final_turn_items_after_guardrails(
         store=store,
         wrapper=wrapper,
         # A settling held batch always registers, so a crash inside this append fails
-        # closed with the batch recorded instead of silently losing it.
-        resumed_write_state=run_state if held_input else None,
+        # closed with the batch recorded instead of silently losing it, even when the
+        # payload was deduplicated from the append.
+        resumed_write_state=run_state if settling_held else None,
     )
 
 
