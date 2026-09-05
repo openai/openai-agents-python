@@ -139,9 +139,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
+        self._response_chain_generation = 0
+        self._history_generation = 0
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
+
+    def _invalidate_response_chain(self) -> None:
+        self._response_id = None
+        self._deferred_response_id = None
+        self._last_unstored_response_id = None
+        self._response_chain_generation += 1
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -178,35 +186,72 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         When a run context is provided, the billed compaction request contributes to
         that run's usage totals.
         """
-        if args and args.get("response_id"):
-            self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
-        if args and "store" in args:
-            store = args["store"]
-            if store is False and self._response_id:
-                self._last_unstored_response_id = self._response_id
-            elif store is True and self._response_id == self._last_unstored_response_id:
-                self._last_unstored_response_id = None
+        store: bool | None
+        response_id: str | None
+        response_chain_generation: int
+        resolved_mode: _ResolvedCompactionMode
+        if args and args.get("response_id"):
+            pre_lock_response_chain_generation = self._response_chain_generation
+            async with self._mutation_lock:
+                if pre_lock_response_chain_generation != self._response_chain_generation:
+                    logger.debug("skip: response chain changed while waiting for mutation lock")
+                    return
+                next_response_id = args["response_id"]
+                if next_response_id != self._response_id:
+                    self._response_id = next_response_id
+                    self._response_chain_generation += 1
+                store = args.get("store")
+                if store is False and self._response_id:
+                    self._last_unstored_response_id = self._response_id
+                elif store is True and self._response_id == self._last_unstored_response_id:
+                    self._last_unstored_response_id = None
+                response_id = self._response_id
+                response_chain_generation = self._response_chain_generation
+                resolved_mode = self._resolve_compaction_mode_for_response(
+                    response_id=response_id,
+                    store=store,
+                    requested_mode=requested_mode,
+                )
         else:
-            store = None
-        resolved_mode = self._resolve_compaction_mode_for_response(
-            response_id=self._response_id,
-            store=store,
-            requested_mode=requested_mode,
-        )
+            if args and "store" in args:
+                store = args["store"]
+                if store is False and self._response_id:
+                    self._last_unstored_response_id = self._response_id
+                elif store is True and self._response_id == self._last_unstored_response_id:
+                    self._last_unstored_response_id = None
+            else:
+                store = None
+            response_id = self._response_id
+            response_chain_generation = self._response_chain_generation
+            resolved_mode = self._resolve_compaction_mode_for_response(
+                response_id=response_id,
+                store=store,
+                requested_mode=requested_mode,
+            )
 
-        if resolved_mode == "previous_response_id" and not self._response_id:
+        if resolved_mode == "previous_response_id" and not response_id:
             raise ValueError(
                 "OpenAIResponsesCompactionSession.run_compaction requires a response_id "
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        (
+            compaction_candidate_items,
+            session_items,
+            history_generation,
+        ) = await self._ensure_compaction_candidates()
+        if (
+            response_chain_generation != self._response_chain_generation
+            or history_generation != self._history_generation
+        ):
+            logger.debug("skip: session ownership changed while preparing compaction")
+            return
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
             {
-                "response_id": self._response_id,
+                "response_id": response_id,
                 "compaction_mode": resolved_mode,
                 "compaction_candidate_items": compaction_candidate_items,
                 "session_items": session_items,
@@ -216,7 +261,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if not should_compact:
             logger.debug(
                 "skip: decision hook declined compaction for %s (mode=%s)",
-                self._response_id,
+                response_id,
                 resolved_mode,
             )
             return
@@ -224,14 +269,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
-            self._response_id,
+            response_id,
             self.model,
             resolved_mode,
         )
 
         compact_kwargs: dict[str, Any] = {"model": self.model}
         if resolved_mode == "previous_response_id":
-            compact_kwargs["previous_response_id"] = self._response_id
+            compact_kwargs["previous_response_id"] = response_id
         else:
             compact_kwargs["input"] = session_items
 
@@ -246,17 +291,28 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
         async with self._mutation_lock:
+            if (
+                response_chain_generation != self._response_chain_generation
+                or history_generation != self._history_generation
+            ):
+                logger.debug(
+                    "skip: session ownership changed while compaction request was in flight"
+                )
+                return
             previous_items = await self._get_all_underlying_session_items()
-            await self._replace_underlying_session_items(
-                output_items=output_items,
-                previous_items=previous_items,
-            )
+            try:
+                await self._replace_underlying_session_items(
+                    output_items=output_items,
+                    previous_items=previous_items,
+                )
+            finally:
+                self._history_generation += 1
             self._compaction_candidate_items = select_compaction_candidate_items(output_items)
             self._session_items = output_items
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
-            self._response_id,
+            response_id,
             resolved_mode,
             len(output_items),
             len(self._compaction_candidate_items or []),
@@ -386,7 +442,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        response_chain_generation = self._response_chain_generation
+        (
+            compaction_candidate_items,
+            session_items,
+            history_generation,
+        ) = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
@@ -400,7 +461,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "session_items": session_items,
             }
         )
-        if should_compact:
+        if not should_compact:
+            return
+        async with self._mutation_lock:
+            if (
+                response_chain_generation != self._response_chain_generation
+                or history_generation != self._history_generation
+                or self._deferred_response_id is not None
+            ):
+                return
             self._deferred_response_id = response_id
 
     def _get_deferred_compaction_response_id(self) -> str | None:
@@ -418,7 +487,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 # authoritative history before compaction instead of retaining a stale cache.
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._history_generation += 1
                 raise
+            self._history_generation += 1
             if self._compaction_candidate_items is not None:
                 new_items = _normalize_compaction_session_items(items)
                 new_candidates = select_compaction_candidate_items(new_items)
@@ -429,37 +500,72 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
-            popped = await self.underlying_session.pop_item()
+            try:
+                popped = await self.underlying_session.pop_item()
+            except asyncio.CancelledError:
+                # Built-in destructive session mutations may settle before cancellation
+                # is re-raised, so retained server-side chain state is no longer safe.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._history_generation += 1
+                self._invalidate_response_chain()
+                raise
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._history_generation += 1
+                self._invalidate_response_chain()
             return popped
 
     async def clear_session(self) -> None:
         async with self._mutation_lock:
-            await self.underlying_session.clear_session()
+            try:
+                await self.underlying_session.clear_session()
+            except (Exception, asyncio.CancelledError):
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._history_generation += 1
+                self._invalidate_response_chain()
+                raise
+            self._history_generation += 1
             self._compaction_candidate_items = []
             self._session_items = []
-            self._deferred_response_id = None
+            self._invalidate_response_chain()
 
     async def _ensure_compaction_candidates(
         self,
-    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
-        """Lazy-load and cache compaction candidates."""
-        if self._compaction_candidate_items is not None and self._session_items is not None:
-            return (self._compaction_candidate_items[:], self._session_items[:])
+    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], int]:
+        """Lazy-load candidates with the history generation that owns the snapshot."""
+        while True:
+            history_generation = self._history_generation
+            if self._compaction_candidate_items is not None and self._session_items is not None:
+                candidates = self._compaction_candidate_items[:]
+                session_items = self._session_items[:]
+                if history_generation == self._history_generation:
+                    return (candidates, session_items, history_generation)
+                continue
 
-        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
-        candidates = select_compaction_candidate_items(history)
-        self._compaction_candidate_items = candidates
-        self._session_items = history
+            history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+            candidates = select_compaction_candidate_items(history)
 
-        logger.debug(
-            "candidates: initialized (history=%s, candidates=%s)",
-            len(history),
-            len(candidates),
-        )
-        return (candidates[:], history[:])
+            async with self._mutation_lock:
+                if history_generation != self._history_generation:
+                    continue
+                if self._compaction_candidate_items is not None and self._session_items is not None:
+                    return (
+                        self._compaction_candidate_items[:],
+                        self._session_items[:],
+                        history_generation,
+                    )
+                self._compaction_candidate_items = candidates
+                self._session_items = history
+
+                logger.debug(
+                    "candidates: initialized (history=%s, candidates=%s)",
+                    len(history),
+                    len(candidates),
+                )
+                return (candidates[:], history[:], history_generation)
 
 
 def _strip_orphaned_assistant_ids(
