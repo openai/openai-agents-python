@@ -232,9 +232,16 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-        if response_chain_generation != self._response_chain_generation:
-            logger.debug("skip: response chain changed while preparing compaction")
+        (
+            compaction_candidate_items,
+            session_items,
+            history_generation,
+        ) = await self._ensure_compaction_candidates()
+        if (
+            response_chain_generation != self._response_chain_generation
+            or history_generation != self._history_generation
+        ):
+            logger.debug("skip: session ownership changed while preparing compaction")
             return
 
         force = args.get("force", False) if args else False
@@ -280,8 +287,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
         async with self._mutation_lock:
-            if response_chain_generation != self._response_chain_generation:
-                logger.debug("skip: response chain changed while compaction request was in flight")
+            if (
+                response_chain_generation != self._response_chain_generation
+                or history_generation != self._history_generation
+            ):
+                logger.debug(
+                    "skip: session ownership changed while compaction request was in flight"
+                )
                 return
             previous_items = await self._get_all_underlying_session_items()
             try:
@@ -426,7 +438,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        response_chain_generation = self._response_chain_generation
+        (
+            compaction_candidate_items,
+            session_items,
+            history_generation,
+        ) = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
             store=store,
@@ -440,7 +457,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "session_items": session_items,
             }
         )
-        if should_compact:
+        if not should_compact:
+            return
+        async with self._mutation_lock:
+            if (
+                response_chain_generation != self._response_chain_generation
+                or history_generation != self._history_generation
+                or self._deferred_response_id is not None
+            ):
+                return
             self._deferred_response_id = response_id
 
     def _get_deferred_compaction_response_id(self) -> str | None:
@@ -504,13 +529,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _ensure_compaction_candidates(
         self,
-    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
-        """Lazy-load and cache compaction candidates."""
+    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], int]:
+        """Lazy-load candidates with the history generation that owns the snapshot."""
         while True:
-            if self._compaction_candidate_items is not None and self._session_items is not None:
-                return (self._compaction_candidate_items[:], self._session_items[:])
-
             history_generation = self._history_generation
+            if self._compaction_candidate_items is not None and self._session_items is not None:
+                candidates = self._compaction_candidate_items[:]
+                session_items = self._session_items[:]
+                if history_generation == self._history_generation:
+                    return (candidates, session_items, history_generation)
+                continue
+
             history = _normalize_compaction_session_items(await self.underlying_session.get_items())
             candidates = select_compaction_candidate_items(history)
 
@@ -518,7 +547,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 if history_generation != self._history_generation:
                     continue
                 if self._compaction_candidate_items is not None and self._session_items is not None:
-                    return (self._compaction_candidate_items[:], self._session_items[:])
+                    return (
+                        self._compaction_candidate_items[:],
+                        self._session_items[:],
+                        history_generation,
+                    )
                 self._compaction_candidate_items = candidates
                 self._session_items = history
 
@@ -527,7 +560,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     len(history),
                     len(candidates),
                 )
-                return (candidates[:], history[:])
+                return (candidates[:], history[:], history_generation)
 
 
 def _strip_orphaned_assistant_ids(
