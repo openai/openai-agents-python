@@ -379,7 +379,7 @@ class CloudflareSandboxSessionState(SandboxSessionState):
 class _CloudflarePtyProcessEntry:
     """Per-process state for a Cloudflare WebSocket PTY session."""
 
-    ws: aiohttp.ClientWebSocketResponse
+    ws: aiohttp.ClientWebSocketResponse[bool]
     tty: bool
     last_used: float = field(default_factory=time.monotonic)
     output_chunks: deque[bytes] = field(default_factory=deque)
@@ -1114,7 +1114,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
     async def _cleanup_unregistered_pty(
         self,
         entry: _CloudflarePtyProcessEntry | None,
-        ws: aiohttp.ClientWebSocketResponse | None,
+        ws: aiohttp.ClientWebSocketResponse[bool] | None,
         registered: bool,
     ) -> None:
         """Best-effort cleanup of a PTY WebSocket or entry that was never registered."""
@@ -1138,7 +1138,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         command_text = shlex.join(str(part) for part in sanitized_command)
 
-        ws: aiohttp.ClientWebSocketResponse | None = None
+        ws: aiohttp.ClientWebSocketResponse[bool] | None = None
         entry: _CloudflarePtyProcessEntry | None = None
         registered = False
         pruned_entry: _CloudflarePtyProcessEntry | None = None

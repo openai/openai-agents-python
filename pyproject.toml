@@ -12,8 +12,17 @@ dependencies = [
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
+    # urllib3 is pulled in transitively via requests; pin a safe floor so
+    # installs cannot resolve to a version exposed to the disclosed CVEs
+    # (highest fix 2.7.0, GHSA-qccp-gfcp-xxvc cross-origin header leak).
+    "urllib3>=2.7.0, <3",
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
+    # cryptography enters the base graph transitively via mcp -> pyjwt[crypto],
+    # whose own requirement is unpinned; pin a safe floor so a base install
+    # cannot retain a version exposed to the disclosed CVE (46.0.7 fixes the
+    # 9.8-critical GHSA-p423-j2cm-9vmq buffer overflow).
+    "cryptography>=46.0.7, <47",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -40,14 +49,14 @@ litellm = ["litellm>=1.83.0"]
 any-llm = ["any-llm-sdk>=1.11.0, <2; python_version >= '3.11'"]
 realtime = ["websockets>=15.0, <17"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
-encrypt = ["cryptography>=45.0, <46"]
+encrypt = ["cryptography>=46.0.7, <47"]
 redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 mongodb = ["pymongo>=4.14"]
 docker = ["docker>=6.1"]
-blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
+blaxel = ["blaxel>=0.2.50", "aiohttp>=3.14.3,<4"]
 daytona = ["daytona>=0.155.0"]
-cloudflare = ["aiohttp>=3.12,<4"]
+cloudflare = ["aiohttp>=3.14.3,<4"]
 e2b = ["e2b==2.31.0", "e2b-code-interpreter==2.8.1"]
 modal = ["modal==1.4.3"]
 runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
@@ -84,7 +93,7 @@ dev = [
   "eval-type-backport>=0.2.2",
   "fastapi >= 0.110.0, <1",
   "aiosqlite>=0.21.0",
-  "cryptography>=45.0, <46",
+  "cryptography>=46.0.7, <47",
   "fakeredis>=2.31.3",
   "dapr>=1.14.0",
   "grpcio>=1.60.0",
