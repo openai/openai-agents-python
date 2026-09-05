@@ -368,11 +368,15 @@ class WorkspacePathPolicy:
         *,
         for_write: bool = False,
         resolve_symlinks: bool = False,
+        follow_leaf_symlink: bool = True,
     ) -> Path:
         """Return a validated absolute path under the workspace or an extra grant.
 
         `resolve_symlinks` follows symlinks on the host filesystem. Use it only when the sandbox
         workspace is a real local host directory, such as UnixLocalSandboxSession.
+        With `follow_leaf_symlink=False`, only the parent directories are resolved and the
+        final path component is kept as the entry itself, so an operation on a symlink (such as
+        removing it) is validated at the link's own location rather than at its target.
         """
 
         if resolve_symlinks:
@@ -382,7 +386,9 @@ class WorkspacePathPolicy:
                     raise self._invalid_path_error(windows_path)
             else:
                 original = Path(path)
-            result, grant = self._resolved_host_path_and_grant(original)
+            result, grant = self._resolved_host_path_and_grant(
+                original, follow_leaf_symlink=follow_leaf_symlink
+            )
         else:
             if (windows_path := windows_absolute_path(path)) is not None:
                 native_path = _native_path_from_windows_absolute(windows_path)
@@ -427,13 +433,26 @@ class WorkspacePathPolicy:
     def _resolved_host_path_and_grant(
         self,
         original: Path,
+        *,
+        follow_leaf_symlink: bool = True,
     ) -> tuple[Path, SandboxPathGrant | None]:
         workspace_root = self._root.resolve(strict=False)
         if original.is_absolute():
-            resolved = original.resolve(strict=False)
+            absolute_path = original
         else:
             absolute = self._absolute_workspace_posix_path(coerce_posix_path(original))
-            resolved = Path(str(absolute)).resolve(strict=False)
+            absolute_path = Path(str(absolute))
+        # The workspace root itself is always addressed through its resolved form, so a
+        # symlinked root alias stays authorized; only entries below it keep their leaf.
+        if (
+            follow_leaf_symlink
+            or absolute_path.name in ("", ".", "..")
+            or PurePosixPath(posixpath.normpath(absolute_path.as_posix()))
+            == self._normalized_root()
+        ):
+            resolved = absolute_path.resolve(strict=False)
+        else:
+            resolved = absolute_path.parent.resolve(strict=False) / absolute_path.name
 
         if self._is_under(resolved, workspace_root):
             return resolved, None

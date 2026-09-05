@@ -949,6 +949,21 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    def _rm_target_path(self, path: Path | str) -> Path:
+        """Return the workspace entry ``rm`` removes without following a leaf symlink.
+
+        ``normalize_path`` resolves every symlink, so for a symlink it names the link target.
+        ``rm`` on the target deleted the real file or directory tree and left the link dangling,
+        and a link that pointed outside the workspace (or nowhere) could not be removed at all.
+        POSIX ``rm`` and the exec-backed sessions remove the link itself, so validate the entry
+        at its own location: parents are resolved, the leaf is kept, and the workspace root,
+        extra grants (longest match) and read-only grants apply to that location.
+        """
+
+        return self._workspace_path_policy().normalize_path(
+            path, for_write=True, resolve_symlinks=True, follow_leaf_symlink=False
+        )
+
     async def rm(
         self,
         path: Path | str,
@@ -956,10 +971,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         recursive: bool = False,
         user: str | User | None = None,
     ) -> None:
+        normalized = self._rm_target_path(path)
         if user is not None:
-            normalized = await self._check_rm_with_exec(path, recursive=recursive, user=user)
-        else:
-            normalized = self.normalize_path(path, for_write=True)
+            await self._check_rm_access_with_exec(normalized, recursive=recursive, user=user)
         try:
             if normalized.is_dir() and not normalized.is_symlink():
                 if recursive:
