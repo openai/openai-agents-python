@@ -207,9 +207,12 @@ class CodexExec:
         finally:
             if cancel_task is not None and not cancel_task.done():
                 cancel_task.cancel()
-            await stderr_task
             if process.returncode is None:
                 process.kill()
+            try:
+                await stderr_task
+            finally:
+                await process.wait()
 
     def _build_env(self, args: CodexExecArgs) -> dict[str, str]:
         # Respect env overrides when provided; otherwise copy from os.environ.

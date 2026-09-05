@@ -423,6 +423,59 @@ async def test_codex_exec_run_handles_large_single_line_events(
 
 
 @pytest.mark.asyncio
+async def test_codex_exec_run_closes_live_process_before_draining_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr_eof = asyncio.Event()
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            await stderr_eof.wait()
+            return b""
+
+    class LiveProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = FakeStdout(["line\n"])
+            self.stderr = BlockingStderr()
+            self.returncode: int | None = None
+            self.killed = False
+            self.wait_called = False
+
+        async def wait(self) -> None:
+            self.wait_called = True
+            await stderr_eof.wait()
+            self.returncode = -9
+
+        def kill(self) -> None:
+            self.killed = True
+            stderr_eof.set()
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate() should not be used when the stream is closed")
+
+    process = LiveProcess()
+
+    async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> LiveProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello"))
+
+    assert await anext(stream) == "line"
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.sleep(0)
+    killed_before_stderr_eof = process.killed
+    stderr_eof.set()
+    await close_task
+
+    assert killed_before_stderr_eof is True
+    assert process.wait_called is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enabled", "expected_config"),
     [
