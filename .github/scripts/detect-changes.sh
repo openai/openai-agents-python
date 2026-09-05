@@ -65,7 +65,7 @@ fi
 docs_pattern='^(docs/|mkdocs\.yml$)'
 case "$mode" in
   code)
-    pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish)\.yml$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
+    pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills)\.yml$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs|docs-only)
     pattern="$docs_pattern"

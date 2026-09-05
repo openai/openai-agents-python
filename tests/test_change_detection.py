@@ -111,6 +111,7 @@ def _detect(
         (".github/workflows/tests.yml", True, False, False),
         (".github/workflows/docs.yml", True, False, False),
         (".github/workflows/publish.yml", True, False, False),
+        (".github/workflows/repo-skills.yml", True, False, False),
         ("pyproject.toml", True, False, False),
         ("uv.lock", True, False, False),
         ("Makefile", True, False, False),
