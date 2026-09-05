@@ -80,46 +80,6 @@ _SESSION_ID_TYPE = String().with_variant(
     "mysql",
     "mariadb",
 )
-# Dialect names that receive the bounded, utf8mb4_bin variant above.
-_MYSQL_FAMILY_DIALECTS = frozenset({"mysql", "mariadb"})
-
-
-def _validate_mysql_session_id(session_id: str, dialect_name: str) -> None:
-    """Reject session IDs that a MySQL-family column cannot keep distinct.
-
-    ``utf8mb4_bin`` is a PAD SPACE collation, so MySQL and MariaDB ignore
-    trailing spaces when comparing ``VARCHAR`` values. ``"a"`` and ``"a "``
-    therefore resolve to the same primary key and two ``SQLAlchemySession``
-    instances silently read and write one shared conversation history, while
-    SQLite and PostgreSQL keep them apart.
-
-    The database never reports this: there is no error to surface, only two
-    sessions whose stored history has been merged. That is persistent
-    corruption of one session's history by another, so it is rejected up front
-    rather than left to a rejection that never comes.
-
-    Length is deliberately not checked here. MySQL authoritatively rejects an
-    over-long value with ``ERROR 1406`` under the strict ``sql_mode`` that is
-    the modern default, and a caller-managed schema may declare a wider
-    ``session_id`` (for example ``VARCHAR(255)``) that stores it correctly. The
-    dialect name does not reveal the real column width, and ``create_tables``
-    only requests idempotent creation -- ``create_all`` uses ``checkfirst`` and
-    leaves an existing table untouched -- so neither is evidence of the width
-    this module generates.
-
-    Only MySQL and MariaDB are checked: other backends store the unbounded,
-    space-significant type and keep their existing behavior.
-    """
-    if dialect_name not in _MYSQL_FAMILY_DIALECTS:
-        return
-    if session_id != session_id.rstrip(" "):
-        raise ValueError(
-            "session_id must not end with a space on MySQL or MariaDB: "
-            f"{session_id!r}. MySQL-family collations such as the utf8mb4_bin "
-            "used by the generated schema ignore trailing spaces when "
-            "comparing values, so this ID would silently share stored history "
-            f"with {session_id.rstrip(' ')!r}."
-        )
 
 
 class SQLAlchemySession(SessionABC):
@@ -238,7 +198,6 @@ class SQLAlchemySession(SessionABC):
             else SessionSettings()
         )
         self._engine = engine
-        _validate_mysql_session_id(session_id, engine.dialect.name)
         self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
         self._init_lock = (
