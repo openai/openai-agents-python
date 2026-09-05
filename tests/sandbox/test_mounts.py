@@ -889,6 +889,36 @@ async def test_s3_mount_direct_mountpoint_fields_override_pattern_options() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mount_cls", [S3Mount, GCSMount])
+@pytest.mark.parametrize(
+    ("entry_prefix", "expected_prefix"),
+    [("", None), (None, "pattern-prefix/")],
+)
+async def test_mountpoint_prefix_uses_none_as_inheritance_sentinel(
+    mount_cls: type[S3Mount] | type[GCSMount],
+    entry_prefix: str | None,
+    expected_prefix: str | None,
+) -> None:
+    pattern = MountpointMountPattern(
+        options=MountpointMountPattern.MountpointOptions(prefix="pattern-prefix/")
+    )
+    mount = mount_cls(
+        bucket="bucket",
+        prefix=entry_prefix,
+        mount_strategy=InContainerMountStrategy(pattern=pattern),
+    )
+    session = _MountpointApplySession()
+
+    await mount.apply(session, Path("/workspace/remote"), Path("/workspace"))
+
+    mount_command = session.exec_calls[-1][2]
+    if expected_prefix is None:
+        assert "--prefix" not in mount_command
+    else:
+        assert f"--prefix {expected_prefix}" in mount_command
+
+
+@pytest.mark.asyncio
 async def test_s3_mount_builds_prefixed_rclone_remote_path() -> None:
     session_id = uuid.uuid4()
     pattern = RcloneMountPattern()

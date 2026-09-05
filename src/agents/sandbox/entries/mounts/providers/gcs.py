@@ -142,7 +142,7 @@ class GCSMount(_ConfiguredMount):
                 access_key_id=self.access_id,
                 secret_access_key=self.secret_access_key,
                 session_token=None,
-                prefix=self.prefix or options.prefix,
+                prefix=self.prefix if self.prefix is not None else options.prefix,
                 region=self.region or options.region,
                 endpoint_url=(
                     self.endpoint_url or options.endpoint_url or "https://storage.googleapis.com"
