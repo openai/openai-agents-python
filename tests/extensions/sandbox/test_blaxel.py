@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import shlex
+import sys
 import tarfile
 import time
 import uuid
@@ -1745,6 +1746,157 @@ class _FakeAiohttp:
 
 
 class TestPtyExec:
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_cancellation_closes_unregistered_http_session(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        connect_started = asyncio.Event()
+
+        class _BlockingSession:
+            def __init__(self) -> None:
+                self._closed = False
+
+            async def ws_connect(self, url: str) -> None:
+                _ = url
+                connect_started.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                self._closed = True
+
+        class _BlockingAiohttp:
+            WSMsgType = _FakeAiohttp.WSMsgType
+
+            def __init__(self) -> None:
+                self.session: _BlockingSession | None = None
+
+            def ClientSession(self) -> _BlockingSession:
+                self.session = _BlockingSession()
+                return self.session
+
+        fake_aiohttp = _BlockingAiohttp()
+        session = _make_session(fake_sandbox)
+
+        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
+            task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
+            await connect_started.wait()
+            task.cancel("connect-cancel")
+
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+
+            if sys.version_info >= (3, 11):
+                assert exc_info.value.args == ("connect-cancel",)
+            assert task.cancelled()
+
+        assert fake_aiohttp.session is not None
+        assert fake_aiohttp.session._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_preserves_cancellation_during_cleanup(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        cleanup_started = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+
+        class _TimeoutSession:
+            def __init__(self) -> None:
+                self._closed = False
+
+            async def ws_connect(self, url: str) -> None:
+                _ = url
+                raise asyncio.TimeoutError()
+
+            async def close(self) -> None:
+                cleanup_started.set()
+                await allow_cleanup.wait()
+                self._closed = True
+
+        class _TimeoutAiohttp:
+            WSMsgType = _FakeAiohttp.WSMsgType
+
+            def __init__(self) -> None:
+                self.session: _TimeoutSession | None = None
+
+            def ClientSession(self) -> _TimeoutSession:
+                self.session = _TimeoutSession()
+                return self.session
+
+        fake_aiohttp = _TimeoutAiohttp()
+        session = _make_session(fake_sandbox)
+
+        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
+            task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
+            await cleanup_started.wait()
+            task.cancel("cleanup-cancel")
+            allow_cleanup.set()
+
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+
+            if sys.version_info >= (3, 11):
+                assert exc_info.value.args == ("cleanup-cancel",)
+        assert fake_aiohttp.session is not None
+        assert fake_aiohttp.session._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_pty_exec_start_preserves_cancellation_when_cleanup_fails(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel import sandbox as mod
+
+        cleanup_started = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+
+        class _FailingCleanupSession:
+            def __init__(self) -> None:
+                self._closed = False
+
+            async def ws_connect(self, url: str) -> None:
+                _ = url
+                raise asyncio.TimeoutError()
+
+            async def close(self) -> None:
+                cleanup_started.set()
+                await allow_cleanup.wait()
+                self._closed = True
+                raise RuntimeError("synthetic cleanup failure")
+
+        class _FailingCleanupAiohttp:
+            WSMsgType = _FakeAiohttp.WSMsgType
+
+            def __init__(self) -> None:
+                self.session: _FailingCleanupSession | None = None
+
+            def ClientSession(self) -> _FailingCleanupSession:
+                self.session = _FailingCleanupSession()
+                return self.session
+
+        fake_aiohttp = _FailingCleanupAiohttp()
+        session = _make_session(fake_sandbox)
+
+        with patch.object(mod, "_import_aiohttp", return_value=fake_aiohttp):
+            task = asyncio.create_task(session.pty_exec_start("echo", "hello"))
+            await cleanup_started.wait()
+            task.cancel()
+            allow_cleanup.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert fake_aiohttp.session is not None
+        assert fake_aiohttp.session._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
+
     @pytest.mark.parametrize(
         ("messages", "expected_output"),
         [

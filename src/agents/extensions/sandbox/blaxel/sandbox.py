@@ -51,6 +51,7 @@ from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
     PtyExecUpdate,
+    _settle_pty_cleanup,
     allocate_pty_process_id,
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
@@ -839,11 +840,18 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                await self._terminate_pty_entry(entry)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
+        except asyncio.CancelledError as cancellation:
+            if not registered:
+                await _settle_pty_cleanup(
+                    self._terminate_pty_entry(entry),
+                    initial_cancellation=cancellation,
+                )
+            raise
         except Exception as e:
             if not registered:
-                await self._terminate_pty_entry(entry)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
         if pruned is not None:

@@ -354,7 +354,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     env=env,
                     preexec_fn=_preexec,
                 )
-            except Exception:
+            except BaseException:
                 with suppress(OSError):
                     os.close(primary_fd)
                 with suppress(OSError):

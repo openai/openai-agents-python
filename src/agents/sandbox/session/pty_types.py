@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import random
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 
 from ..util.token_truncation import formatted_truncate_text_with_token_count
@@ -16,6 +17,32 @@ PTY_PROCESSES_PROTECTED_RECENT = 8
 
 PTY_PROCESS_ID_MIN = 1_000
 PTY_PROCESS_ID_MAX_EXCLUSIVE = 100_000
+
+
+async def _settle_pty_cleanup(
+    cleanup: Awaitable[None],
+    *,
+    initial_cancellation: asyncio.CancelledError | None = None,
+) -> None:
+    cleanup_task = asyncio.ensure_future(cleanup)
+    completion = asyncio.create_task(asyncio.wait((cleanup_task,)))
+    cancellation = initial_cancellation
+    while not completion.done():
+        try:
+            await asyncio.shield(completion)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+
+    completion.result()
+    try:
+        cleanup_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation from None
 
 
 @dataclass(frozen=True)

@@ -217,6 +217,34 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 @pytest.mark.review_optional
 class TestUnixLocalPty:
     @pytest.mark.asyncio
+    async def test_tty_start_cancellation_closes_open_file_descriptors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+        close_calls: list[int] = []
+
+        def openpty() -> tuple[int, int]:
+            return 101, 102
+
+        async def create_subprocess(*args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(unix_local_module.os, "openpty", openpty)
+        monkeypatch.setattr(unix_local_module.os, "close", close_calls.append)
+        monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.pty_exec_start("echo", "hello", shell=False, tty=True)
+
+        assert close_calls == [101, 102]
+
+    @pytest.mark.asyncio
     async def test_tty_fd_close_is_owned_without_blocking_termination(
         self,
         tmp_path: Path,
