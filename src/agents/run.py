@@ -2089,14 +2089,18 @@ class AgentRunner:
                                     if session_input_items_for_persistence is not None
                                     else []
                                 )
-                                if _should_defer_interrupted_session_items(
-                                    current_agent,
-                                    run_config,
+                                if run_state is not None and (
+                                    _should_defer_interrupted_session_items(
+                                        current_agent,
+                                        run_config,
+                                    )
                                 ):
                                     # The gate withholds this write until the output
                                     # guardrails decide; declaring the batch on the
                                     # checkpoint lets a resume settle it at a gate-legal
-                                    # exit instead of losing it.
+                                    # exit instead of losing it. This runner always
+                                    # builds a RunState, so the narrowing never skips a
+                                    # real park.
                                     defer_interrupted_session_write(
                                         run_state,
                                         session,
@@ -2104,8 +2108,6 @@ class AgentRunner:
                                         run_items=session_items_for_turn(turn_result),
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy
-                                            if run_state is not None
-                                            else None
                                         ),
                                     )
                                 else:
