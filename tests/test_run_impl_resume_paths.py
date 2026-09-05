@@ -492,9 +492,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "invalid", ["old-schema", "batch-shape", "held-shape", "held-with-before"]
-)
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape", "held-shape", "held-with-before"])
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"

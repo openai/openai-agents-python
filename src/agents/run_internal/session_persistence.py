@@ -849,9 +849,7 @@ def defer_interrupted_session_write(
     )
     if isinstance(session, OpenAIConversationsSession):
         items = [_sanitize_openai_conversation_item(item) for item in items]
-        items = [
-            item for item in items if not _is_unpersistable_for_openai_conversation(item)
-        ]
+        items = [item for item in items if not _is_unpersistable_for_openai_conversation(item)]
     if not items:
         return
 
