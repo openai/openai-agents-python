@@ -227,7 +227,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes."
+        "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -878,6 +878,13 @@ class RunState(Generic[TContext, TAgent]):
     _session_write_in_progress: bool = field(default=False, repr=False)
     """Live ownership guard; independent serialized copies require caller serialization."""
 
+    _terminal_unrecoverable: bool = field(default=False, repr=False)
+    """Set once a final output, its guardrails, and its terminal hooks have all completed.
+
+    It closes the state for the window where the run owns an accepted result that no resume can
+    reproduce, and it is cleared only once that turn is fully persisted.
+    """
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -920,6 +927,7 @@ class RunState(Generic[TContext, TAgent]):
         self._schema_version = CURRENT_SCHEMA_VERSION
         self._pending_session_write = None
         self._session_write_in_progress = False
+        self._terminal_unrecoverable = False
         from .agent_tool_state import get_agent_tool_state_scope
 
         self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
@@ -1909,6 +1917,8 @@ class RunState(Generic[TContext, TAgent]):
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
         if self._pending_session_write is not None:
             result["pending_session_write"] = copy.deepcopy(self._pending_session_write)
+        if self._terminal_unrecoverable:
+            result["terminal_unrecoverable"] = True
         result["trace"] = self._serialize_trace_data(
             include_tracing_api_key=include_tracing_api_key
         )
@@ -4383,6 +4393,13 @@ async def _build_run_state_from_json(
         ):
             raise validation_error_factory("Run state pending Session write is invalid", UserError)
         state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))
+    terminal_unrecoverable = state_json.get("terminal_unrecoverable")
+    if terminal_unrecoverable is not None:
+        # An older label never wrote this marker, so honoring one would let a snapshot claim a
+        # resume boundary the schema it declares does not have.
+        if (schema_major, schema_minor) < (1, 17) or terminal_unrecoverable is not True:
+            raise validation_error_factory("Run state terminal marker is invalid", UserError)
+        state._terminal_unrecoverable = True
     serialized_policy = state_json.get("reasoning_item_id_policy")
     if serialized_policy in {"preserve", "omit"}:
         state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
@@ -5172,6 +5189,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
+        "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "

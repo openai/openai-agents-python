@@ -9,7 +9,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, Runner, function_tool, handoff
+from agents import Agent, GuardrailFunctionOutput, Runner, function_tool, handoff, output_guardrail
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
@@ -37,6 +37,7 @@ from agents.run_internal.run_loop import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.tool_guardrails import (
@@ -65,8 +66,14 @@ class _FailingResumeSession(SimpleListSession):
         self.block_next_add = False
         self.add_started = asyncio.Event()
         self.release_add = asyncio.Event()
+        self.fail_on_output: str | None = None
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self.fail_on_output is not None and any(
+            self.fail_on_output in json.dumps(item, default=str) for item in items
+        ):
+            self.fail_on_output = None
+            raise self.error
         failure, self.failure = self.failure, None
         if failure == "before":
             raise self.error
@@ -1221,3 +1228,270 @@ async def test_resumed_handoff_session_append_is_recovered_before_next_model(
     assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
     assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
     assert "pending_session_write" not in result.to_state().to_json()
+
+
+class _TerminalLifecycleHooks(RunHooks[Any]):
+    """Count the agent lifecycle hooks an application can attach its own effects to."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.ends: list[str] = []
+
+    async def on_agent_start(self, context: Any, agent: Agent[Any]) -> None:
+        self.starts += 1
+
+    async def on_agent_end(self, context: Any, agent: Agent[Any], output: Any) -> None:
+        self.ends.append(str(output))
+
+
+async def _terminal_output_session_state(
+    streamed: bool,
+    session: Session | None = None,
+    hooks: RunHooks[Any] | None = None,
+):
+    """Pause on an approval whose tool output becomes the terminal agent output."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = session if session is not None else _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_terminal_session_append_failure_rejects_every_later_resume(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    """An accepted terminal output whose append failed is not resumable, and never replayed."""
+    hooks = _TerminalLifecycleHooks()
+    agent, model, session, state, effects = await _terminal_output_session_state(
+        failing_streamed, hooks=hooks
+    )
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed, hooks=hooks)
+    assert error.value is session.error
+
+    # The output, its guardrails, and its terminal hooks all completed exactly once.
+    assert effects == [7]
+    assert len(model.calls) == 1
+    assert hooks.ends == ["receipt-7"]
+    starts_after_failure = hooks.starts
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    # Every later resume fails closed, including a second one.
+    for _ in range(2):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, state, session, retry_streamed, hooks=hooks)
+        assert len(model.calls) == 1
+        assert effects == [7]
+        assert hooks.starts == starts_after_failure
+        assert hooks.ends == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_unrecoverable_terminal_state_rejects_before_any_resumed_work(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection precedes Session reconciliation and sandbox preparation."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    async def _fail_get_items(*args: Any, **kwargs: Any) -> list[TResponseInputItem]:
+        raise AssertionError("Session reconciliation must not run for a rejected terminal state")
+
+    async def _fail_prepare_agent(*args: Any, **kwargs: Any):
+        raise AssertionError("sandbox preparation must not run for a rejected terminal state")
+
+    monkeypatch.setattr(type(session), "get_items", _fail_get_items)
+    monkeypatch.setattr(SandboxRuntime, "prepare_agent", _fail_prepare_agent)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await _run_session_resume(agent, restored, session, not streamed)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_terminal_marker_is_cleared_once_the_turn_is_persisted(streamed: bool) -> None:
+    """A terminal turn that persists cleanly leaves a normal, unmarked result."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    result = await _run_session_resume(agent, state, session, streamed)
+
+    assert result.final_output == "receipt-7"
+    assert effects == [7]
+    assert "terminal_unrecoverable" not in result.to_state().to_json()
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_rejects_an_older_schema_label() -> None:
+    """The marker is only honored on the schema boundary that introduced it."""
+    agent, _, session, state, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["$schemaVersion"] = "1.16"
+    with pytest.raises(UserError, match="terminal marker is invalid"):
+        await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_result_checkpoint_keeps_the_terminal_marker() -> None:
+    """A checkpoint taken from a failed streamed run stays closed to resumes.
+
+    A streamed result exists before its terminal append does, so `to_state()` is reachable on the
+    failed attempt. If that snapshot dropped the marker it would look like an ordinary resumable
+    state and bypass the rejection entirely.
+    """
+    agent, model, session, state, effects = await _terminal_output_session_state(True)
+    session.failure = "before"
+    streamed = Runner.run_streamed(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError, match="session append failed"):
+        async for _ in streamed.stream_events():
+            pass
+
+    checkpoint = streamed.to_state()
+    assert checkpoint.to_json()["terminal_unrecoverable"] is True
+
+    restored = await RunState.from_json(agent, checkpoint.to_json())
+    for candidate in (checkpoint, restored):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, candidate, session, False)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_handler_output_is_marked_before_it_is_persisted() -> None:
+    """The max-turns fallback is a final output too, so its failed append closes the state."""
+    handler_calls: list[str] = []
+    hooks = _TerminalLifecycleHooks()
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("unused")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(
+        agent, "charge 7", session=session, run_config=config, max_turns=1, hooks=hooks
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    def _handler(_data: Any) -> str:
+        handler_calls.append("handled")
+        return "max-turns-output"
+
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+
+    # The handler and its end hook each ran exactly once before the append failed.
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_guardrail_failure_leaves_the_state_retryable() -> None:
+    """A handler output that never passed its guardrails must not close the state.
+
+    `finalize_max_turns_handler_output()` drives the same save callback from its guardrail-error
+    path. Marking there would reject every later resume for an output the caller never received,
+    which is a worse outcome than the replay the marker exists to prevent.
+    """
+    guardrail_calls: list[str] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    @output_guardrail
+    async def exploding(context: Any, agent: Agent[Any], output: Any) -> GuardrailFunctionOutput:
+        guardrail_calls.append(str(output))
+        raise RuntimeError("guardrail exploded")
+
+    model = ScriptedModel([[get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")]])
+    agent = Agent(name="payment", model=model, tools=[charge], output_guardrails=[exploding])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "charge 7", session=session, run_config=config, max_turns=1)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    handlers: dict[str, Any] = {"max_turns": lambda _data: "max-turns-output"}
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)
+
+    assert guardrail_calls == ["max-turns-output"]
+    assert "terminal_unrecoverable" not in state.to_json()
+
+    # The retry reports the real guardrail failure rather than a fail-closed rejection.
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)

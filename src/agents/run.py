@@ -70,6 +70,7 @@ from .run_internal.agent_runner_helpers import (
     finalize_conversation_tracking,
     get_unsent_tool_call_ids_for_interrupted_state,
     input_guardrails_triggered,
+    reject_unrecoverable_terminal_state,
     resolve_processed_response,
     resolve_resumed_context,
     resolve_trace_settings,
@@ -635,6 +636,7 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -1367,6 +1369,11 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                # The output, its guardrails, and its terminal hooks are all
+                                # complete, so from here until the turn is persisted this run owns
+                                # a result no resume can reproduce.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = True
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,
@@ -1377,6 +1384,10 @@ class AgentRunner:
                                     store=store_setting,
                                     wrapper=context_wrapper,
                                 )
+                                # The append and any post-append maintenance both succeeded,
+                                # so the turn is durable and the state is open again.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = False
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
@@ -1550,7 +1561,16 @@ class AgentRunner:
                             include_in_history=include_in_history,
                         )
                         if include_in_history and not handler_output_recorded:
+                            # Only reachable once the handler output cleared its guardrails and
+                            # ran its end hooks, so this append carries an accepted result like
+                            # any other terminal one. The callback itself stays unmarked because
+                            # finalize_max_turns_handler_output() also drives it from its
+                            # guardrail-error path, where no output was ever accepted.
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await _save_max_turns_handler_output([synthesized_item])
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
@@ -1994,6 +2014,8 @@ class AgentRunner:
                                 current_agent,
                                 run_config,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await save_final_turn_items_after_guardrails(
                                 session=session,
                                 run_state=run_state,
@@ -2004,6 +2026,8 @@ class AgentRunner:
                                 store=store_setting,
                                 wrapper=context_wrapper,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (
