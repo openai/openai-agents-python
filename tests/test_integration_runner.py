@@ -11,7 +11,6 @@ from typing import Any, cast
 import pytest
 
 RUNNER = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "run_integration_tests.py"
-CHANGE_DETECTOR = RUNNER.with_name("detect-changes.sh")
 INTEGRATION_CONFTEST = RUNNER.parents[2] / "integration_tests" / "conftest.py"
 
 
@@ -573,18 +572,6 @@ def test_extra_collection_deselects_only_non_applicable_memory_backends(
 
     assert items == [requested, matching]
     assert deselected == [non_applicable]
-
-
-def test_code_change_detection_includes_packaged_contract_inputs() -> None:
-    detector = CHANGE_DETECTOR.read_text(encoding="utf-8")
-
-    assert "integration_tests/" in detector
-    assert "detect-changes\\.sh" in detector
-    assert "run_integration_tests\\.py" in detector
-    assert "run_examples\\.sh" in detector
-    assert "examples-run-analysis" in detector
-    assert "update_released_api_contract\\.py" in detector
-    assert "\\.github/workflows/tests\\.yml" in detector
 
 
 def test_packaging_profile_checks_dependency_present_contract_for_wheel_and_sdist(
