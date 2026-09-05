@@ -8,6 +8,7 @@ import shlex
 import tarfile
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -1974,6 +1975,95 @@ class TestPtyExec:
         assert len(session._pty_sessions) == 0
         assert len(session._reserved_pty_process_ids) == 0
         assert ws._closed
+
+    @pytest.mark.asyncio
+    async def test_pty_terminate_all_settles_after_registry_clear(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
+
+        session = _make_session(fake_sandbox)
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        class _BlockingCloseWS(_FakeWS):
+            async def close(self) -> None:
+                close_started.set()
+                await release_close.wait()
+                self._closed = True
+
+        first_ws = _BlockingCloseWS()
+        second_ws = _FakeWS()
+        first_http = _FakeHTTPSession(first_ws)
+        second_http = _FakeHTTPSession(second_ws)
+        first = _BlaxelPtySessionEntry("first", first_ws, first_http)
+        second = _BlaxelPtySessionEntry("second", second_ws, second_http)
+        session._pty_sessions.update({1: first, 2: second})
+        session._reserved_pty_process_ids.update({1, 2})
+
+        task = asyncio.create_task(session.pty_terminate_all())
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=5)
+
+            # Ownership has already left the registry before cleanup finishes.
+            assert session._pty_sessions == {}
+            assert session._reserved_pty_process_ids == set()
+
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # Exercise repeated caller cancellation.
+            await asyncio.sleep(0)
+            assert not first_ws._closed
+            assert not second_ws._closed
+
+            release_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_close.set()
+            if not task.done():
+                task.cancel()
+            with suppress(BaseException):
+                await task
+
+        assert first_ws._closed and first_http._closed
+        assert second_ws._closed and second_http._closed
+        assert session._pty_sessions == {}
+
+    @pytest.mark.asyncio
+    async def test_pty_terminate_all_continues_after_cleanup_failure(
+        self, fake_sandbox: _FakeSandboxInstance
+    ) -> None:
+        from agents.extensions.sandbox.blaxel.sandbox import _BlaxelPtySessionEntry
+
+        session = _make_session(fake_sandbox)
+        first_ws = _FakeWS()
+        second_ws = _FakeWS()
+        first_http = _FakeHTTPSession(first_ws)
+        second_http = _FakeHTTPSession(second_ws)
+        first = _BlaxelPtySessionEntry("first", first_ws, first_http)
+        second = _BlaxelPtySessionEntry("second", second_ws, second_http)
+        session._pty_sessions.update({1: first, 2: second})
+        session._reserved_pty_process_ids.update({1, 2})
+        cleanup_calls: list[str] = []
+
+        original_terminate = session._terminate_pty_entry
+
+        async def terminate(entry: _BlaxelPtySessionEntry) -> None:
+            cleanup_calls.append(entry.ws_session_id)
+            if entry is first:
+                raise RuntimeError("first cleanup failed")
+            await original_terminate(entry)
+
+        with patch.object(session, "_terminate_pty_entry", side_effect=terminate):
+            with pytest.raises(RuntimeError, match="first cleanup failed"):
+                await session.pty_terminate_all()
+
+        assert cleanup_calls == ["first", "second"]
+        assert second_ws._closed
+        assert second_http._closed
+        assert session._pty_sessions == {}
+        assert session._reserved_pty_process_ids == set()
 
     @pytest.mark.asyncio
     async def test_pty_ws_reader_error_message(self, fake_sandbox: _FakeSandboxInstance) -> None:
