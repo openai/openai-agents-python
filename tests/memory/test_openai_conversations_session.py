@@ -261,7 +261,7 @@ class TestOpenAIConversationsSessionBasicOperations:
         assert [cast(dict[str, int], item)["item_id"] for item in items] == list(range(1, 102))
         assert yielded_item_ids == list(range(101, 0, -1))
         mock_openai_client.conversations.items.list.assert_called_once_with(
-            conversation_id="test_id", limit=100, order="desc"
+            conversation_id="test_id", order="desc"
         )
 
     @pytest.mark.asyncio
