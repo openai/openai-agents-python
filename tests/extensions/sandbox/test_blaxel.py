@@ -1940,7 +1940,7 @@ class TestPtyExec:
                 patch.object(
                     session,
                     "_collect_pty_output",
-                    new=AsyncMock(return_value=(b"", None)),
+                    new=AsyncMock(return_value=(b"", None, False)),
                 ),
             ):
                 update = await session.pty_write_stdin(
@@ -2048,6 +2048,7 @@ class TestPtyExec:
             entry=entry,
             output=b"done output",
             original_token_count=None,
+            output_closed=True,
         )
         assert result.process_id is None
         assert result.exit_code == 0
@@ -2413,10 +2414,11 @@ class TestCollectPtyOutputEdgeCases:
             done=True,
         )
         entry.output_chunks.append(b"final output")
-        output, token_count = await session._collect_pty_output(
+        output, token_count, output_closed = await session._collect_pty_output(
             entry=entry, yield_time_ms=100, max_output_tokens=None
         )
         assert b"final output" in output
+        assert output_closed is True
 
     @pytest.mark.asyncio
     async def test_collect_output_timeout_path(self, fake_sandbox: _FakeSandboxInstance) -> None:
@@ -2429,10 +2431,11 @@ class TestCollectPtyOutputEdgeCases:
             http_session=None,
         )
         # Very short yield time, no output, not done.
-        output, token_count = await session._collect_pty_output(
+        output, token_count, output_closed = await session._collect_pty_output(
             entry=entry, yield_time_ms=1, max_output_tokens=None
         )
         assert output == b""
+        assert output_closed is False
 
 
 # ---------------------------------------------------------------------------
@@ -2817,10 +2820,11 @@ class TestFinalCoverageGaps:
         entry.output_chunks.append(b"some data")
 
         # yield_time_ms=1 means very short deadline, should hit deadline break.
-        output, _ = await session._collect_pty_output(
+        output, _, output_closed = await session._collect_pty_output(
             entry=entry, yield_time_ms=1, max_output_tokens=None
         )
         assert b"some data" in output
+        assert output_closed is False
 
     @pytest.mark.asyncio
     async def test_collect_output_done_with_remaining_chunks(
@@ -2840,11 +2844,12 @@ class TestFinalCoverageGaps:
         entry.output_chunks.append(b"chunk1")
         entry.output_chunks.append(b"chunk2")
 
-        output, _ = await session._collect_pty_output(
+        output, _, output_closed = await session._collect_pty_output(
             entry=entry, yield_time_ms=5000, max_output_tokens=None
         )
         assert b"chunk1" in output
         assert b"chunk2" in output
+        assert output_closed is True
 
 
 # ---------------------------------------------------------------------------

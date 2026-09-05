@@ -4501,6 +4501,306 @@ async def test_modal_pty_start_drains_all_buffered_output_after_exit(
 
 
 @pytest.mark.asyncio
+async def test_modal_pty_keeps_session_live_until_delayed_exit_tail_reaches_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    release_tail = asyncio.Event()
+
+    class _DelayedStream:
+        def __init__(self, *, tail: bytes | None) -> None:
+            self._tail = tail
+            self._returned_tail = False
+
+        def __aiter__(self) -> _DelayedStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if self._tail is not None and not self._returned_tail:
+                await release_tail.wait()
+                self._returned_tail = True
+                return self._tail
+            raise StopAsyncIteration
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _DelayedStream(tail=b"tail")
+            self.stderr = _DelayedStream(tail=None)
+            self.poll = _with_aio(lambda: 0)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-delayed-tail"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.01)
+
+    assert started.process_id is not None
+    assert started.exit_code is None
+    assert started.output == b""
+
+    release_tail.set()
+    finished = await session.pty_write_stdin(
+        session_id=started.process_id,
+        chars="",
+        yield_time_s=0.01,
+    )
+
+    assert finished.process_id is None
+    assert finished.exit_code == 0
+    assert finished.output == b"tail"
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_closes_failed_stream_after_known_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FailedStream:
+        def __aiter__(self) -> _FailedStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise RuntimeError("stream failed")
+
+    class _EmptyStream:
+        def __aiter__(self) -> _EmptyStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise StopAsyncIteration
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _FailedStream()
+            self.stderr = _EmptyStream()
+            self.poll = _with_aio(lambda: 0)
+            self.terminate = _with_aio(lambda: None)
+
+    class _FakeSandbox:
+        object_id = "sb-failed-stream"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    finished = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.01)
+
+    assert finished.process_id is None
+    assert finished.exit_code == 0
+    assert finished.output == b""
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_does_not_poll_status_after_yield_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    pending = asyncio.Event()
+    poll_calls = 0
+
+    class _PendingStream:
+        def __aiter__(self) -> _PendingStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            await pending.wait()
+            raise StopAsyncIteration
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _PendingStream()
+            self.stderr = _PendingStream()
+            self.terminate = _with_aio(lambda: None)
+
+            def poll() -> None:
+                return None
+
+            async def poll_aio() -> None:
+                nonlocal poll_calls
+                poll_calls += 1
+                await asyncio.sleep(0.2)
+
+            poll.aio = poll_aio  # type: ignore[attr-defined]
+            self.poll = poll
+
+    class _FakeSandbox:
+        object_id = "sb-slow-poll"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.25)
+
+    assert started.process_id is not None
+    assert started.exit_code is None
+    assert poll_calls == 1
+
+    await session.pty_terminate_all()
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_skips_status_when_fallback_reads_cross_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+    poll_calls = 0
+
+    class _SlowReadStream:
+        def __init__(self) -> None:
+            def read(_size: int) -> bytes:
+                return b""
+
+            async def read_aio(_size: int) -> bytes:
+                await asyncio.sleep(0.2)
+                return b""
+
+            read.aio = read_aio  # type: ignore[attr-defined]
+            self.read = read
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _SlowReadStream()
+            self.stderr = _SlowReadStream()
+            self.terminate = _with_aio(lambda: None)
+
+            def poll() -> None:
+                return None
+
+            async def poll_aio() -> None:
+                nonlocal poll_calls
+                poll_calls += 1
+                await asyncio.sleep(0.2)
+
+            poll.aio = poll_aio  # type: ignore[attr-defined]
+            self.poll = poll
+
+    class _FakeSandbox:
+        object_id = "sb-slow-read"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    started = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.25)
+
+    assert started.process_id is not None
+    assert started.exit_code is None
+    assert poll_calls == 0
+
+    await session.pty_terminate_all()
+
+
+@pytest.mark.asyncio
+async def test_modal_pty_keeps_pre_exit_empty_fallback_read_live_for_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
+
+    class _FallbackStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.read = _with_aio(self._read)
+
+        def _read(self, _size: int) -> bytes:
+            return self._chunks.pop(0) if self._chunks else b""
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = _FallbackStream([b"", b"tail", b""])
+            self.stderr = _FallbackStream([b"", b"", b""])
+            self._poll_results: list[int | None] = [None, 0]
+            self.poll = _with_aio(self._poll)
+            self.terminate = _with_aio(lambda: None)
+
+        def _poll(self) -> int | None:
+            return self._poll_results.pop(0) if self._poll_results else 0
+
+    class _FakeSandbox:
+        object_id = "sb-fallback-tail"
+
+        def __init__(self) -> None:
+            self.process = _FakeProcess()
+            self.exec = _with_aio(self._exec)
+
+        def _exec(self, *command: object, **kwargs: object) -> object:
+            _ = (command, kwargs)
+            return self.process
+
+    sandbox = _FakeSandbox()
+    state = modal_module.ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=modal_module.resolve_snapshot(None, "snapshot"),
+        app_name="sandbox-tests",
+        sandbox_id=sandbox.object_id,
+    )
+    session = modal_module.ModalSandboxSession.from_state(state, sandbox=sandbox)
+
+    finished = await session.pty_exec_start("python3", shell=False, tty=True, yield_time_s=0.25)
+
+    assert finished.process_id is None
+    assert finished.exit_code == 0
+    assert finished.output == b"tail"
+
+
+@pytest.mark.asyncio
 async def test_modal_pty_start_wraps_startup_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
