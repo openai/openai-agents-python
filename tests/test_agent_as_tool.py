@@ -37,6 +37,7 @@ from agents import (
     function_tool,
     tool_namespace,
 )
+from agents._run_state_agent_identity import _build_agent_map
 from agents._tool_identity import resolve_tool_name_collisions
 from agents.agent_tool_input import StructuredToolInputBuilderOptions
 from agents.agent_tool_state import (
@@ -46,7 +47,6 @@ from agents.agent_tool_state import (
     set_agent_tool_state_scope,
 )
 from agents.run_context import _ApprovalRecord
-from agents.run_state import _build_agent_map
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.testing import ScriptedModel
 from agents.tool_context import ToolContext
