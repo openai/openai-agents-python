@@ -221,7 +221,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             return
 
-        self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
             self._response_id,
@@ -253,6 +252,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             self._compaction_candidate_items = select_compaction_candidate_items(output_items)
             self._session_items = output_items
+
+        # Clear the deferred marker only now that compaction has actually settled. Clearing it
+        # before the fallible API call/replacement above would let a failed forced compaction
+        # silently lose its "this must be forced" signal: a later retry recomputes `force` from
+        # this marker, so an early clear makes the retry decline work that was still owed.
+        self._deferred_response_id = None
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",

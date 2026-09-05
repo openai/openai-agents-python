@@ -1209,6 +1209,58 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_run_compaction_retains_deferred_marker_when_api_call_fails(self) -> None:
+        """A forced compaction driven by a previously-deferred response must not lose that
+        "this must be forced" signal if the compact API call itself fails: a later retry needs
+        _deferred_response_id to still be set so it recomputes force=True, not force=False.
+        """
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        call_count = 0
+
+        async def compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("compact API blew up")
+            response = MagicMock()
+            response.output = []
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+        # Simulate a prior turn (e.g. a handoff with local tool outputs) having deferred
+        # compaction for this response, the way _defer_compaction() would.
+        session._deferred_response_id = "resp-handoff"
+
+        with pytest.raises(RuntimeError, match="compact API blew up"):
+            await session.run_compaction(
+                {
+                    "response_id": "resp-delegate",
+                    "force": session._get_deferred_compaction_response_id() is not None,
+                }
+            )
+        assert session._get_deferred_compaction_response_id() == "resp-handoff"
+
+        # Retry, recomputing force the same way the checkpoint-recovery code does.
+        await session.run_compaction(
+            {
+                "response_id": "resp-delegate",
+                "force": session._get_deferred_compaction_response_id() is not None,
+            }
+        )
+        assert call_count == 2
+        assert session._get_deferred_compaction_response_id() is None
+
+    @pytest.mark.asyncio
     async def test_run_compaction_suppresses_model_dump_warnings(self) -> None:
         mock_session = self.create_mock_session()
         mock_session.get_items.return_value = [
