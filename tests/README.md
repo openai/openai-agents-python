@@ -1,6 +1,6 @@
 # Tests
 
-Before running any tests, make sure you have `uv` installed (and ideally run `make sync` after).
+Use `uv` for test commands. Run `make sync` for a fresh checkout, changed dependencies, or a dependency-resolution failure; do not repeat setup before every check.
 
 ## Running tests
 
@@ -14,9 +14,9 @@ make tests
 
 The `serial` marker means that a test needs exclusive execution after every xdist worker exits, not merely ordered execution within one worker. Use it for shared external resources, process-wide state, or timing-sensitive lifecycle tests that have demonstrated interference under xdist. Tests that use their own subprocess, random port, or temporary directory do not need `serial` solely for that reason; prove them under xdist instead.
 
-`make tests-review` omits tests marked `review_optional`. These are slow subsystem-specific integration, subprocess, or multiprocessing checks that remain mandatory in the final `make tests` verification. Use the review target only as a preliminary check during an iterative implementation review when the task-owned paths do not affect any marked test or its owning subsystem. Inspect the current owners with `rg -n "review_optional" tests` when deciding; if the boundary is uncertain, run `make tests`.
+`make tests-review` omits tests marked `review_optional`. These slow subsystem-specific integration, subprocess, or multiprocessing checks remain mandatory in final `make tests` verification. This broad subset is not a replacement for the focused checks used during implementation review or for the final suite.
 
-Choose review-round coverage by impact. For a leaf subsystem change, run `make tests-review` plus the owning subsystem's complete test file or directory without a marker filter, so its `review_optional` cases are restored. For cross-cutting runtime changes such as runner orchestration, agent or item flow, shared persistence, or test infrastructure, run `make tests` during review. Prefer the full suite whenever the affected boundary is ambiguous. This selection changes only iterative feedback; the final verification always runs `make tests`.
+During iterative implementation review, run focused tests for the changed behavior and relevant subsystem boundaries, including applicable `review_optional` cases without filtering them away. Resolve uncertain coverage by tracing affected callers and dependencies and selecting the needed focused checks. Follow [implementation-final-review](../.agents/skills/implementation-final-review/SKILL.md) for review sequencing; defer broad `make tests-review`, `make tests`, and repository-wide type checking until clean review. Then follow [code-change-verification](../.agents/skills/code-change-verification/SKILL.md) for the complete final SDK stack. Explicit requests to run a suite outside an implementation review remain supported.
 
 `make typecheck` runs mypy and pyright concurrently. Mypy checks `src`, while Pyright checks the `src` and `tests` paths configured in `pyrightconfig.json`. Pyright uses four analysis threads by default; set `PYRIGHT_THREADS` to a positive integer to override the local thread count.
 

@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Analyze main branch implementation and configuration to find missing, incorrect, or outdated documentation in docs/. Use when asked to audit doc coverage, sync docs with code, or propose doc updates/structure changes. Only update English docs under docs/** and never touch translated docs under docs/ja, docs/ko, or docs/zh. Provide a report and ask for approval before editing docs.
+description: Audit or update English SDK documentation against the requested implementation scope.
 ---
 
 # Docs Sync
@@ -9,17 +9,21 @@ description: Analyze main branch implementation and configuration to find missin
 
 Identify doc coverage gaps and inaccuracies by comparing main branch features and configuration options against the current docs structure, then propose targeted improvements.
 
+## Authorization and scope
+
+For an audit or proposal-only request, report findings without editing. When the user requests updates or has already approved a plan, complete those local edits and applicable checks without asking again. Ask only about unresolved scope, behavior, release timing, or additional authority. Keep generated translations untouched. Apply the repository's Documentation Release Timing policy before including unreleased behavior in `docs/`.
+
 ## Workflow
 
 1. Confirm scope and base branch
    - Identify the current branch and default branch (usually `main`).
    - Prefer analyzing the current branch to keep work aligned with in-flight changes.
-   - If the current branch is not `main`, analyze only the diff vs `main` to scope doc updates.
+   - Use a branch diff only for a branch-scoped request. A requested topic or released-doc correction remains in scope even when it is unrelated to the current branch diff.
    - Avoid switching branches if it would disrupt local changes. Prefer read-only inspection such as `git show main:<path>`. If a separate checkout is genuinely required, stop and obtain the explicit approval required by `AGENTS.md` before creating or switching a worktree.
 
 2. Build a feature inventory from the selected scope
-   - If on `main`: inventory the full surface area and review docs comprehensively.
-   - If not on `main`: inventory only changes vs `main` (feature additions/changes/removals).
+   - Bound the inventory to the requested topic or diff. Inventory the full surface only for an explicitly comprehensive audit.
+   - For branch-scoped work, inspect feature additions, changes, and removals relative to the intended base.
    - Focus on user-facing behavior: public exports, configuration options, environment variables, CLI commands, default values, and documented runtime behaviors.
    - Capture evidence for each item (file path + symbol/setting).
    - Use targeted search to find option types and feature flags (for example: `rg "Settings"`, `rg "Config"`, `rg "os.environ"`, `rg "OPENAI_"`).
@@ -42,11 +46,11 @@ Identify doc coverage gaps and inaccuracies by comparing main branch features an
    - **Incorrect/outdated**: names, defaults, or behaviors that diverge from main.
    - **Structural issues** (optional): pages overloaded, missing overviews, or mis-grouped topics.
 
-6. Produce a Docs Sync Report and ask for approval
-   - Provide a clear report with evidence, suggested doc locations, and proposed edits.
-   - Ask the user whether to proceed with doc updates.
+6. Report findings or continue authorized updates
+   - For audit-only work, provide evidence, suggested locations, and proposed edits, then stop.
+   - For an update request, use the findings to complete the authorized edits.
 
-7. If approved, apply changes (English only)
+7. Apply authorized changes (English only)
    - Edit only English docs in `docs/**`.
    - Do **not** edit `docs/ja`, `docs/ko`, or `docs/zh`.
    - Keep changes aligned with the existing docs style and navigation.
@@ -70,7 +74,7 @@ Docs Sync Report
   - Proposed change + rationale
 - Proposed edits
   - Doc file -> concise change summary
-- Questions for the user
+- Unresolved decisions, only when needed
 
 ## References
 

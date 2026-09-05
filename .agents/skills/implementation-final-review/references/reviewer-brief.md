@@ -12,7 +12,7 @@ Generate review state only from two consecutive identical repository observation
 
 Use this template to prepare one self-contained, factual snapshot packet per fingerprint round. Fill every field or mark it explicitly `none` or `not applicable`; do not dispatch an incomplete packet. Fill it once, reuse the shared body byte-for-byte for every reviewer, and vary only the final specialty assignment. Keep this control-plane brief near 12 KB when practical. Store larger evidence in indexed files and reference each file by exact path and SHA-256 digest. Do not omit decision-relevant evidence merely to meet the soft size target. Do not include implementer conclusions, suspected bugs, prior findings, or intended fixes.
 
-The verified final-gate type-erasure and base-advance closures defined in `SKILL.md` step 20 do not create a fingerprint round, reviewer packet, or reviewer assignment. For a type-erasure closure, record its exact delta, before and after fingerprints, final-gate failure, runtime-identity basis, and focused verification in the task-global ledger and final verification evidence. For a base-advance closure, record the old and new base, head, fingerprints, byte-identical task and component workspace evidence, identical tracked-diff digest, complete upstream changed-path list and diff digest, exact dependency-input pathspecs, and focused integration checks. If every condition for the applicable exception is not mechanically established, prepare the normal delta-review packet instead.
+The verified final-gate type-erasure and base-advance closures defined in [high-risk-review.md](high-risk-review.md) step 20 do not create a fingerprint round, reviewer packet, or reviewer assignment. For a type-erasure closure, record its exact delta, before and after fingerprints, final-gate failure, runtime-identity basis, and focused verification in the task-global ledger and final verification evidence. For a base-advance closure, record the old and new base, head, fingerprints, byte-identical task and component workspace evidence, identical tracked-diff digest, complete upstream changed-path list and diff digest, exact dependency-input pathspecs, and focused integration checks. If every condition for the applicable exception is not mechanically established, prepare the normal delta-review packet instead.
 
 ## Shared evidence
 
@@ -26,7 +26,7 @@ The verified final-gate type-erasure and base-advance closures defined in `SKILL
 - Resolved merge base:
 - HEAD:
 - Latest release boundary when relevant:
-- Risk tier and reason:
+- Risk tier and reason (high risk; encode `task.risk_tier` as `"elevated"`):
 - Task-global ledger path, task identity, current round, and remaining authorized budget:
 - Canonical root-cause ledger (`ID | open/closed | inventory IDs | contract evidence IDs`):
 - Canonical task manifest (an exact normalized file entry remains authoritative when ignored; directory and glob entries do not promote ignored files):
