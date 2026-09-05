@@ -440,7 +440,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             await self.underlying_session.clear_session()
             self._compaction_candidate_items = []
             self._session_items = []
+            self._response_id = None
             self._deferred_response_id = None
+            self._last_unstored_response_id = None
 
     async def _ensure_compaction_candidates(
         self,
