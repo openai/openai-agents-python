@@ -73,15 +73,24 @@ _SESSION_ID_TYPE = String().with_variant(
 _MYSQL_FAMILY_DIALECTS = frozenset({"mysql", "mariadb"})
 
 
-def _validate_mysql_session_id(session_id: str, dialect_name: str) -> None:
+def _validate_mysql_session_id(session_id: str, dialect_name: str, *, created_schema: bool) -> None:
     """Reject session IDs that the MySQL-family column cannot keep distinct.
 
     ``utf8mb4_bin`` is a PAD SPACE collation, so MySQL and MariaDB ignore
     trailing spaces when comparing ``VARCHAR`` values. ``"a"`` and ``"a "``
     would therefore resolve to the same primary key and silently share one
-    conversation history, while SQLite and PostgreSQL keep them apart. IDs
-    longer than the column would also be truncated or rejected by the server
-    only at write time.
+    conversation history, while SQLite and PostgreSQL keep them apart. That
+    merge is silent and corrupts stored history, so it is rejected regardless
+    of who owns the schema: any MySQL-family collation that ignores trailing
+    spaces produces it, and a caller-managed column cannot opt out of the
+    comparison semantics its own collation defines.
+
+    The length bound is different: it describes only the column this module
+    creates. A caller-managed schema may declare a wider ``session_id`` (for
+    example ``VARCHAR(255)``) that stores longer IDs correctly, and the dialect
+    name alone does not reveal the real column width, so the bound is checked
+    only when this module created the schema. Otherwise the caller-owned schema
+    enforces its own constraint.
 
     Only MySQL and MariaDB are checked: other backends store the unbounded,
     space-significant type and keep their existing behavior.
@@ -96,7 +105,7 @@ def _validate_mysql_session_id(session_id: str, dialect_name: str) -> None:
             "so this ID would share stored history with "
             f"{session_id.rstrip(' ')!r}."
         )
-    if len(session_id) > _MYSQL_SESSION_ID_MAX_LENGTH:
+    if created_schema and len(session_id) > _MYSQL_SESSION_ID_MAX_LENGTH:
         raise ValueError(
             f"session_id must be at most {_MYSQL_SESSION_ID_MAX_LENGTH} characters on "
             f"MySQL or MariaDB, got {len(session_id)}: {session_id!r}."
@@ -204,7 +213,8 @@ class SQLAlchemySession(SessionABC):
             create_tables (bool, optional): Whether to automatically create the required
                 tables and indexes. Defaults to False for production use. Set to True for
                 development and testing when migrations aren't used. Automatically created
-                MySQL and MariaDB schemas store session IDs in VARCHAR(190) columns.
+                MySQL and MariaDB schemas store session IDs in VARCHAR(190) columns, and
+                session IDs longer than that are rejected only for those schemas.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
@@ -218,7 +228,7 @@ class SQLAlchemySession(SessionABC):
             else SessionSettings()
         )
         self._engine = engine
-        _validate_mysql_session_id(session_id, engine.dialect.name)
+        _validate_mysql_session_id(session_id, engine.dialect.name, created_schema=create_tables)
         self._ensure_ascii = ensure_ascii
         self._configure_sqlite_engine(engine)
         self._init_lock = (

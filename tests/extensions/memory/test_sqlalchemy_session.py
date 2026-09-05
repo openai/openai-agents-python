@@ -8,7 +8,9 @@ from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -274,7 +276,8 @@ async def test_session_ids_are_case_sensitive():
 
 
 @pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
-async def test_mysql_session_id_rejects_trailing_space(dialect_name: str):
+@pytest.mark.parametrize("created_schema", [True, False])
+async def test_mysql_session_id_rejects_trailing_space(dialect_name: str, created_schema: bool):
     """utf8mb4_bin is PAD SPACE, so a trailing space would collide on MySQL.
 
     MySQL and MariaDB ignore trailing spaces when comparing VARCHAR values
@@ -282,30 +285,66 @@ async def test_mysql_session_id_rejects_trailing_space(dialect_name: str):
     primary key and share one history. SQLite keeps them apart (asserted in
     test_session_ids_keep_trailing_spaces_on_sqlite), so accepting the ID would
     make the same code diverge per backend.
+
+    The merge is silent and corrupts stored history, so it is rejected for
+    caller-managed schemas too: the collation defines the comparison, and a
+    caller cannot opt out of it by owning the table.
     """
     with pytest.raises(ValueError, match="must not end with a space"):
-        _validate_mysql_session_id("tenant ", dialect_name)
+        _validate_mysql_session_id("tenant ", dialect_name, created_schema=created_schema)
 
 
 @pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
 async def test_non_mysql_dialects_still_accept_trailing_space(dialect_name: str):
     """Other backends keep the unbounded, space-significant column."""
-    _validate_mysql_session_id("tenant ", dialect_name)
+    _validate_mysql_session_id("tenant ", dialect_name, created_schema=True)
 
 
 @pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
-async def test_mysql_session_id_rejects_ids_longer_than_the_column(dialect_name: str):
-    """The bounded VARCHAR(190) cannot store a longer ID without truncation."""
+async def test_mysql_session_id_rejects_ids_longer_than_the_created_column(dialect_name: str):
+    """The VARCHAR(190) this module creates cannot store a longer ID."""
     with pytest.raises(ValueError, match="at most 190 characters"):
-        _validate_mysql_session_id("a" * 191, dialect_name)
+        _validate_mysql_session_id("a" * 191, dialect_name, created_schema=True)
 
-    _validate_mysql_session_id("a" * 190, dialect_name)
+    _validate_mysql_session_id("a" * 190, dialect_name, created_schema=True)
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+async def test_caller_managed_schema_keeps_its_own_session_id_length(dialect_name: str):
+    """A caller-owned schema may declare a wider column, so the bound must not apply.
+
+    With ``create_tables=False`` the caller owns the table and may have declared
+    ``session_id VARCHAR(255)``, which stores a 191-character ID correctly. The
+    dialect name alone does not reveal the real column width, so rejecting the
+    ID here would break a schema that worked before this change.
+    """
+    _validate_mysql_session_id("a" * 191, dialect_name, created_schema=False)
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+async def test_constructor_defers_session_id_length_to_caller_managed_schema(dialect_name: str):
+    """Construction with create_tables=False must not impose the generated column width.
+
+    Exercised through the public constructor rather than the helper, because the
+    constructor is the boundary a caller with an existing ``VARCHAR(255)`` schema
+    actually crosses. A trailing-space ID is still rejected on the same path,
+    since that collides under the column's own collation regardless of owner.
+    """
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name=dialect_name)
+    long_id = "a" * 191
+
+    session = SQLAlchemySession(long_id, engine=engine, create_tables=False)
+    assert session.session_id == long_id
+
+    with pytest.raises(ValueError, match="must not end with a space"):
+        SQLAlchemySession("tenant ", engine=engine, create_tables=False)
 
 
 @pytest.mark.parametrize("session_id", ["  leading", "mid dle", "tenant"])
 async def test_mysql_session_id_allows_spaces_that_do_not_pad(session_id: str):
     """Only trailing spaces are collation-significant; the rest stay valid."""
-    _validate_mysql_session_id(session_id, "mysql")
+    _validate_mysql_session_id(session_id, "mysql", created_schema=True)
 
 
 async def test_session_ids_keep_trailing_spaces_on_sqlite():
