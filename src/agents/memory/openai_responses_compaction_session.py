@@ -192,7 +192,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         response_chain_generation: int
         resolved_mode: _ResolvedCompactionMode
         if args and args.get("response_id"):
+            pre_lock_response_chain_generation = self._response_chain_generation
             async with self._mutation_lock:
+                if pre_lock_response_chain_generation != self._response_chain_generation:
+                    logger.debug("skip: response chain changed while waiting for mutation lock")
+                    return
                 next_response_id = args["response_id"]
                 if next_response_id != self._response_id:
                     self._response_id = next_response_id

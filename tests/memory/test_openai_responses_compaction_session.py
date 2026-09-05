@@ -214,6 +214,53 @@ class TestOpenAIResponsesCompactionSession:
         assert session._response_id == "resp-old"
 
     @pytest.mark.asyncio
+    async def test_response_id_waiting_behind_pop_cannot_reclaim_invalidated_chain(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+
+        class GatedPopSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[item])
+                self.pop_started = asyncio.Event()
+                self.allow_pop = asyncio.Event()
+
+            async def pop_item(self) -> TResponseInputItem | None:
+                self.pop_started.set()
+                await self.allow_pop.wait()
+                return await super().pop_item()
+
+        underlying = GatedPopSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[item], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+        session._response_id = "resp-old"
+        session._response_chain_generation = 1
+
+        pop_task = asyncio.create_task(session.pop_item())
+        await underlying.pop_started.wait()
+        compaction_task = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-old", "force": True})
+        )
+        await asyncio.sleep(0)
+
+        underlying.allow_pop.set()
+        assert await pop_task == item
+        await compaction_task
+
+        mock_client.responses.compact.assert_not_awaited()
+        assert await underlying.get_items() == []
+        assert session._response_id is None
+
+    @pytest.mark.asyncio
     async def test_new_response_id_invalidates_older_compaction_snapshot(self) -> None:
         item = cast(
             TResponseInputItem,
