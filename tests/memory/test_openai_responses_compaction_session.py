@@ -258,6 +258,59 @@ class TestOpenAIResponsesCompactionSession:
         assert mock_client.responses.compact.await_args.kwargs["input"] == []
 
     @pytest.mark.asyncio
+    async def test_add_item_during_candidate_load_reloads_snapshot(self) -> None:
+        old_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"}
+        )
+        new_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "new"}
+        )
+
+        class GatedAddSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[old_item])
+                self.add_started = asyncio.Event()
+                self.allow_add = asyncio.Event()
+                self.read_started = asyncio.Event()
+
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                self.add_started.set()
+                await self.allow_add.wait()
+                await super().add_items(items)
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                snapshot = await super().get_items(limit)
+                self.read_started.set()
+                return snapshot
+
+        underlying = GatedAddSession()
+        mock_client = MagicMock()
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(output=list(kwargs["input"]), usage=None)
+
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+
+        add_task = asyncio.create_task(session.add_items([new_item]))
+        await underlying.add_started.wait()
+        compaction_task = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await underlying.read_started.wait()
+        underlying.allow_add.set()
+        await add_task
+        await compaction_task
+
+        assert mock_client.responses.compact.await_args.kwargs["input"] == [old_item, new_item]
+        assert await underlying.get_items() == [old_item, new_item]
+
+    @pytest.mark.asyncio
     async def test_cancelled_committed_pop_invalidates_retained_response_chain(self) -> None:
         item = cast(
             TResponseInputItem,

@@ -140,6 +140,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
         self._response_chain_generation = 0
+        self._history_generation = 0
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
@@ -262,10 +263,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 logger.debug("skip: response chain changed while compaction request was in flight")
                 return
             previous_items = await self._get_all_underlying_session_items()
-            await self._replace_underlying_session_items(
-                output_items=output_items,
-                previous_items=previous_items,
-            )
+            try:
+                await self._replace_underlying_session_items(
+                    output_items=output_items,
+                    previous_items=previous_items,
+                )
+            finally:
+                self._history_generation += 1
             self._compaction_candidate_items = select_compaction_candidate_items(output_items)
             self._session_items = output_items
 
@@ -433,7 +437,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 # authoritative history before compaction instead of retaining a stale cache.
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._history_generation += 1
                 raise
+            self._history_generation += 1
             if self._compaction_candidate_items is not None:
                 new_items = _normalize_compaction_session_items(items)
                 new_candidates = select_compaction_candidate_items(new_items)
@@ -451,17 +457,26 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 # is re-raised, so retained server-side chain state is no longer safe.
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._history_generation += 1
                 self._invalidate_response_chain()
                 raise
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._history_generation += 1
                 self._invalidate_response_chain()
             return popped
 
     async def clear_session(self) -> None:
         async with self._mutation_lock:
-            await self.underlying_session.clear_session()
+            try:
+                await self.underlying_session.clear_session()
+            except (Exception, asyncio.CancelledError):
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._history_generation += 1
+                raise
+            self._history_generation += 1
             self._compaction_candidate_items = []
             self._session_items = []
             self._deferred_response_id = None
@@ -474,12 +489,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if self._compaction_candidate_items is not None and self._session_items is not None:
                 return (self._compaction_candidate_items[:], self._session_items[:])
 
-            response_chain_generation = self._response_chain_generation
+            history_generation = self._history_generation
             history = _normalize_compaction_session_items(await self.underlying_session.get_items())
             candidates = select_compaction_candidate_items(history)
 
             async with self._mutation_lock:
-                if response_chain_generation != self._response_chain_generation:
+                if history_generation != self._history_generation:
                     continue
                 if self._compaction_candidate_items is not None and self._session_items is not None:
                     return (self._compaction_candidate_items[:], self._session_items[:])
