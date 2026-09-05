@@ -187,7 +187,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         that run's usage totals.
         """
         if args and args.get("response_id"):
-            self._response_id = args["response_id"]
+            next_response_id = args["response_id"]
+            if next_response_id != self._response_id:
+                self._response_id = next_response_id
+                self._response_chain_generation += 1
         requested_mode = args.get("compaction_mode") if args else None
         if args and "store" in args:
             store = args["store"]

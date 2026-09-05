@@ -213,6 +213,51 @@ class TestOpenAIResponsesCompactionSession:
         assert session._response_id == "resp-old"
 
     @pytest.mark.asyncio
+    async def test_new_response_id_invalidates_older_compaction_snapshot(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+
+        class FirstReadGatedSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__(history=[item])
+                self.read_count = 0
+                self.first_read_started = asyncio.Event()
+                self.allow_first_read = asyncio.Event()
+
+            async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+                snapshot = await super().get_items(limit)
+                self.read_count += 1
+                if self.read_count == 1:
+                    self.first_read_started.set()
+                    await self.allow_first_read.wait()
+                return snapshot
+
+        underlying = FirstReadGatedSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        older = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-old", "force": True})
+        )
+        await underlying.first_read_started.wait()
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        underlying.allow_first_read.set()
+        await older
+
+        assert mock_client.responses.compact.await_count == 1
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
     async def test_pop_item_during_candidate_load_prevents_stale_compaction(self) -> None:
         item = cast(
             TResponseInputItem,
