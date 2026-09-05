@@ -233,6 +233,38 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_applies_large_limit_after_provider_pagination(
+        self, mock_openai_client
+    ):
+        class ConversationItem:
+            def __init__(self, item_id: int) -> None:
+                self.item_id = item_id
+
+            def model_dump(self, *, exclude_unset: bool) -> dict[str, int]:
+                assert exclude_unset is True
+                return {"item_id": self.item_id}
+
+        yielded_item_ids: list[int] = []
+
+        async def descending_items():
+            for item_id in range(101, -1, -1):
+                yielded_item_ids.append(item_id)
+                yield ConversationItem(item_id)
+
+        mock_openai_client.conversations.items.list = MagicMock(return_value=descending_items())
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        items = await session.get_items(limit=101)
+
+        assert [cast(dict[str, int], item)["item_id"] for item in items] == list(range(1, 102))
+        assert yielded_item_ids == list(range(101, 0, -1))
+        mock_openai_client.conversations.items.list.assert_called_once_with(
+            conversation_id="test_id", limit=100, order="desc"
+        )
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
