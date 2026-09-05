@@ -48,6 +48,7 @@ from sqlalchemy import (
     text as sql_text,
     update,
 )
+from sqlalchemy.dialects import mysql as mysql_dialect
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -61,6 +62,24 @@ from ...memory.session_settings import (
 from ...memory.sqlite_session import _await_mutation
 
 _T = TypeVar("_T")
+
+# MySQL-family dialects require a bounded VARCHAR for indexed string columns.
+_MYSQL_SESSION_ID_MAX_LENGTH = 190
+# ``CHARACTER SET`` is declared alongside the collation: a column given only a
+# collation inherits the database character set, and the server rejects
+# ``utf8mb4_bin`` against a non-utf8mb4 inherited set with
+# "ERROR 1253 COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET '<set>'".
+# A MySQL 5.7 install defaulting to latin1 would otherwise fail in
+# ``create_all()`` before either table exists.
+_SESSION_ID_TYPE = String().with_variant(
+    mysql_dialect.VARCHAR(
+        _MYSQL_SESSION_ID_MAX_LENGTH,
+        charset="utf8mb4",
+        collation="utf8mb4_bin",
+    ),
+    "mysql",
+    "mariadb",
+)
 
 
 class SQLAlchemySession(SessionABC):
@@ -163,7 +182,9 @@ class SQLAlchemySession(SessionABC):
                 'mysql+aiomysql://', or 'sqlite+aiosqlite://').
             create_tables (bool, optional): Whether to automatically create the required
                 tables and indexes. Defaults to False for production use. Set to True for
-                development and testing when migrations aren't used.
+                development and testing when migrations aren't used. Automatically created
+                MySQL and MariaDB schemas store session IDs in VARCHAR(190) columns, and
+                session IDs longer than that are rejected only for those schemas.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
@@ -189,7 +210,7 @@ class SQLAlchemySession(SessionABC):
         self._sessions = Table(
             sessions_table,
             self._metadata,
-            Column("session_id", String, primary_key=True),
+            Column("session_id", _SESSION_ID_TYPE, primary_key=True),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
@@ -211,7 +232,7 @@ class SQLAlchemySession(SessionABC):
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column(
                 "session_id",
-                String,
+                _SESSION_ID_TYPE,
                 ForeignKey(f"{sessions_table}.session_id", ondelete="CASCADE"),
                 nullable=False,
             ),

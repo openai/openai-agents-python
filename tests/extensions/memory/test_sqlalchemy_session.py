@@ -8,7 +8,9 @@ from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -17,7 +19,8 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import event, insert, select, text, update
+from sqlalchemy import create_mock_engine, event, insert, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -33,6 +36,60 @@ pytestmark = pytest.mark.asyncio
 
 # Use in-memory SQLite for tests
 DB_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@pytest.mark.parametrize("dialect_url", ["mysql://", "mariadb://"])
+async def test_schema_create_all_compiles_for_mysql_family(dialect_url: str):
+    """MySQL-family schema creation includes both tables and the session-time index."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+    tables = (session._sessions, session._messages)
+    statements: list[str] = []
+
+    def record(statement: Any, *args: Any, **kwargs: Any) -> None:
+        statements.append(str(statement.compile(dialect=engine.dialect)))
+
+    engine = create_mock_engine(dialect_url, record)
+
+    try:
+        session._metadata.create_all(engine)
+        for table in tables:
+            # CHARACTER SET must be emitted with the collation: a column given
+            # only a collation inherits the database character set, and the
+            # server rejects utf8mb4_bin against a non-utf8mb4 set with
+            # ERROR 1253, failing create_all() on e.g. a latin1 MySQL 5.7.
+            assert (
+                table.c.session_id.type.compile(dialect=engine.dialect)
+                == "VARCHAR(190) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+            )
+    finally:
+        await session.engine.dispose()
+
+    assert any("CREATE TABLE agent_sessions" in statement for statement in statements)
+    messages_ddl = next(
+        statement for statement in statements if "CREATE TABLE agent_messages" in statement
+    )
+    assert (
+        "FOREIGN KEY(session_id) REFERENCES agent_sessions (session_id) ON DELETE CASCADE"
+        in messages_ddl
+    )
+    assert any(
+        "CREATE INDEX idx_agent_messages_session_time "
+        "ON agent_messages (session_id, created_at)" in statement
+        for statement in statements
+    )
+
+
+async def test_schema_keeps_unbounded_session_ids_for_sqlite_and_postgresql():
+    """SQLite and PostgreSQL retain the pre-existing unbounded string type."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+
+    try:
+        for table in (session._sessions, session._messages):
+            session_id_type = table.c.session_id.type
+            assert session_id_type.compile(dialect=postgresql.dialect()) == "VARCHAR"
+            assert session_id_type.compile(dialect=sqlite.dialect()) == "VARCHAR"
+    finally:
+        await session.engine.dispose()
 
 
 def _make_message_item(item_id: str, text_value: str) -> TResponseInputItem:
@@ -201,6 +258,63 @@ async def test_session_isolation(agent: Agent):
     result = await Runner.run(agent, "What animal did I say I like?", session=session1)
     assert "cats" in result.final_output.lower()
     assert "dogs" not in result.final_output.lower()
+
+
+async def test_session_ids_are_case_sensitive():
+    """Session IDs that differ only by case retain separate histories."""
+    engine = create_async_engine(DB_URL)
+    upper = SQLAlchemySession("Foo", engine=engine, create_tables=True)
+    lower = SQLAlchemySession("foo", engine=engine, create_tables=True)
+
+    try:
+        await upper.add_items([{"role": "user", "content": "upper"}])
+        await lower.add_items([{"role": "user", "content": "lower"}])
+
+        assert await upper.get_items() == [{"role": "user", "content": "upper"}]
+        assert await lower.get_items() == [{"role": "user", "content": "lower"}]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+@pytest.mark.parametrize("create_tables", [True, False])
+async def test_constructor_does_not_impose_generated_mysql_schema_constraints(
+    dialect_name: str, create_tables: bool
+):
+    """Caller-managed MySQL schemas remain authoritative.
+
+    ``create_tables=True`` only asks SQLAlchemy to create missing tables. Its
+    default ``checkfirst`` behavior leaves an existing table untouched, so the
+    flag does not prove that this module owns either the column width or its
+    collation. A caller-managed table may use ``VARCHAR(255)`` and a NO PAD
+    collation, making both a 191-character ID and a trailing-space ID valid.
+
+    The constructor is therefore deliberately neutral for both values of
+    ``create_tables``. The generated schema itself is covered by the DDL tests
+    above; a live database remains the authority for an existing schema.
+    """
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name=dialect_name)
+
+    for session_id in ("a" * 191, "tenant "):
+        session = SQLAlchemySession(session_id, engine=engine, create_tables=create_tables)
+        assert session.session_id == session_id
+
+
+async def test_session_ids_keep_trailing_spaces_on_sqlite():
+    """SQLite stores trailing-space IDs as distinct values."""
+    engine = create_async_engine(DB_URL)
+    bare = SQLAlchemySession("tenant", engine=engine, create_tables=True)
+    padded = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+
+    try:
+        await bare.add_items([{"role": "user", "content": "bare"}])
+        await padded.add_items([{"role": "user", "content": "padded"}])
+
+        assert await bare.get_items() == [{"role": "user", "content": "bare"}]
+        assert await padded.get_items() == [{"role": "user", "content": "padded"}]
+    finally:
+        await engine.dispose()
 
 
 async def test_get_items_with_limit(agent: Agent):
