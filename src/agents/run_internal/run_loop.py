@@ -43,6 +43,7 @@ from ..exceptions import (
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _mark_error_data_redacted,
+    _mark_error_to_drain_stream_events,
     _prepare_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
@@ -418,6 +419,7 @@ async def _save_stream_items(
     response_id: str | None,
     update_persisted_count: bool,
     store: bool | None = None,
+    resumed_write_state: RunState | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -433,6 +435,7 @@ async def _save_stream_items(
         response_id=response_id,
         store=store,
         wrapper=streamed_result.context_wrapper,
+        resumed_write_state=resumed_write_state,
     )
     if update_persisted_count and streamed_result._state is not None:
         streamed_result._current_turn_persisted_item_count = (
@@ -1152,6 +1155,12 @@ async def start_streaming(
                 response_id=response_id,
                 update_persisted_count=False,
                 store=store_setting,
+                resumed_write_state=(
+                    run_state
+                    if run_state is not None
+                    and isinstance(run_state._current_step, NextStepRunAgain)
+                    else None
+                ),
             )
 
         async def _save_max_turns_items(
@@ -1879,23 +1888,34 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
-                    await _save_stream_items_without_count(
-                        turn_session_items,
-                        turn_result.model_response.response_id,
-                        store_setting,
-                    )
+                    # Resolve any still-in-flight parallel input guardrail before committing the
+                    # handoff transition, so a tripwire or guardrail exception is surfaced instead
+                    # of the state (current_agent, run_state, published events) racing ahead of an
+                    # input guardrail that was still validating the original input.
+                    await input_guardrail_tripwire_triggered_for_stream(streamed_result)
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
                     _publish_streamed_result_agent(streamed_result, current_agent)
-                    current_span.finish(reset_current=True)
-                    current_span = None
-                    should_run_agent_start_hooks = True
+                    if streamed_result._state is not None:
+                        streamed_result._state._current_step = NextStepRunAgain()
+                    # Queue the agent-transition event before the fallible session append so
+                    # stream consumers observe the transition even if the append later raises.
                     streamed_result._event_queue.put_nowait(
                         AgentUpdatedStreamEvent(new_agent=current_agent)
                     )
-                    if streamed_result._state is not None:
-                        streamed_result._state._current_step = NextStepRunAgain()
+                    try:
+                        await _save_stream_items_without_count(
+                            turn_session_items,
+                            turn_result.model_response.response_id,
+                            store_setting,
+                        )
+                    except BaseException as session_persistence_error:
+                        _mark_error_to_drain_stream_events(session_persistence_error)
+                        raise
+                    current_span.finish(reset_current=True)
+                    current_span = None
+                    should_run_agent_start_hooks = True
 
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
