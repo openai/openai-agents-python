@@ -20,22 +20,27 @@ import pytest
 from pydantic import BaseModel, Field
 from typing_extensions import Required, TypeAliasType, TypedDict
 
-import integration_tests._contract_support as contract_support
+import integration_tests._contract_surface as contract_surface
 from integration_tests._contract_support import (
+    _validate_voice_public_class_contract_policy,
+    build_released_api_contract,
+)
+from integration_tests._contract_surface import (
     OptionalDependencyInstallation,
     SubmoduleExportPolicy,
     _callable_contract,
     _default_contract,
     _parameter_contract,
     _public_class_member_contract,
+    load_api_contract,
+    load_submodule_export_policy,
+)
+from integration_tests._contract_validation import (
     _validate_parameter_contract,
     _validate_public_class_contract,
     _validate_public_property_contract,
     _validate_public_type_alias_contract,
     _validate_public_typed_dict_contract,
-    build_released_api_contract,
-    load_api_contract,
-    load_submodule_export_policy,
     validate_released_api_contract,
 )
 
@@ -131,11 +136,11 @@ def test_optional_dependency_for_module_import_uses_canonical_bindings() -> None
     }
 
     assert (
-        contract_support._optional_dependency_for_module_import(contract, "agents.voice.pipeline")
+        contract_surface._optional_dependency_for_module_import(contract, "agents.voice.pipeline")
         == "numpy"
     )
     assert (
-        contract_support._optional_dependency_for_binding(
+        contract_surface._optional_dependency_for_binding(
             contract, "agents.voice.pipeline", "VoicePipeline"
         )
         == "numpy"
@@ -468,7 +473,7 @@ def test_curated_public_property_contract_supports_factory_return_surfaces(
     }
     testing_module = SimpleNamespace(scripted_session=scripted_session)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda _module_name, _agents_module: testing_module,
     )
@@ -503,7 +508,7 @@ def test_curated_public_type_alias_contract_records_and_validates_members(
         "agents.aliases": aliases_module,
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: modules[module_name],
     )
@@ -902,7 +907,7 @@ def test_originless_alias_facade_requires_unambiguous_package_provenance(
         module.__package__ = package_name
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(
-        contract_support.inspect,
+        contract_surface.inspect,
         "getsource",
         lambda module: sources[module.__name__],
     )
@@ -941,7 +946,7 @@ def test_module_binding_visitor_ignores_type_parameter_bindings() -> None:
         "    return value\n"
     )
 
-    bindings = contract_support._ModuleBindingVisitor("PublicAlias")
+    bindings = contract_surface._ModuleBindingVisitor("PublicAlias")
     bindings.visit(module_tree)
 
     assert bindings.count == 1
@@ -1128,7 +1133,7 @@ def test_lazy_type_alias_evaluation_exception_boundary(error_type: type[BaseExce
 
     if error_type is RuntimeError:
         with pytest.raises(ValueError) as exc_info:
-            contract_support._public_type_alias_contract(policy_entries, agents_module)
+            contract_surface._public_type_alias_contract(policy_entries, agents_module)
         assert str(exc_info.value) == (
             "Cannot promote public type alias agents.Public: "
             "cannot resolve public type alias Public at runtime: "
@@ -1136,7 +1141,7 @@ def test_lazy_type_alias_evaluation_exception_boundary(error_type: type[BaseExce
         )
     else:
         with pytest.raises(error_type, match="alias evaluation failed"):
-            contract_support._public_type_alias_contract(policy_entries, agents_module)
+            contract_surface._public_type_alias_contract(policy_entries, agents_module)
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 requires Python 3.12+")
@@ -1200,7 +1205,7 @@ def test_curated_public_typed_dict_contract_detects_field_shape_drift(
     }
     testing_module = SimpleNamespace(ReleasedState=ReleasedState)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda _module_name, _agents_module: testing_module,
     )
@@ -1244,12 +1249,12 @@ def test_typed_dict_requiredness_annotation_contract_is_python_version_independe
 ) -> None:
     annotation = object()
     monkeypatch.setattr(
-        contract_support.inspect,
+        contract_surface.inspect,
         "formatannotation",
         lambda value: formatted if value is annotation else repr(value),
     )
 
-    assert contract_support._annotation_contract(annotation) == expected
+    assert contract_surface._annotation_contract(annotation) == expected
 
 
 def test_curated_public_property_contract_honors_optional_dependency_availability(
@@ -1277,17 +1282,17 @@ def test_curated_public_property_contract_honors_optional_dependency_availabilit
     agents_module = SimpleNamespace(__all__=[])
     optional_module = SimpleNamespace(OptionalClient=OptionalClient)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else optional_module
         ),
     )
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: False)
 
     assert _validate_public_property_contract(contract, agents_module) == []
 
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
 
     assert _validate_public_property_contract(contract, agents_module) == [
         "agents.optional.OptionalClient.status removed or changed a released public property"
@@ -1569,7 +1574,7 @@ def test_qualified_submodule_callable_contract_detects_signature_change(
     agents_module = SimpleNamespace(__all__=[])
     submodule = SimpleNamespace(released=incompatible)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -1598,7 +1603,7 @@ def test_release_contract_update_freezes_submodule_only_callable(
     agents_module = SimpleNamespace(__all__=[])
     submodule = SimpleNamespace(helper=helper)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -1726,7 +1731,7 @@ def test_public_api_contract_requires_released_submodule_exports(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -1791,7 +1796,7 @@ def test_public_api_contract_allows_declared_platform_import_error(
         raise ImportError("Backend is not supported on Windows. Use another backend.")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_import_contract_module", raise_platform_error)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", raise_platform_error)
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
 
@@ -1830,7 +1835,7 @@ def test_public_api_contract_allows_binding_with_unavailable_canonical_module(
         raise ImportError("Backend is not supported on Windows. Use another backend.")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_import_contract_module", import_platform_module)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", import_platform_module)
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
 
@@ -1859,7 +1864,7 @@ def test_public_api_contract_rejects_unexpected_platform_import_error(
         raise ImportError("Unexpected dependency failure")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_import_contract_module", raise_unexpected_error)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", raise_unexpected_error)
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
         "Failed to import released module agents.platform_specific: "
@@ -1892,7 +1897,7 @@ def test_public_api_contract_rejects_same_named_foreign_platform_error(
         raise foreign_import_error("Backend is not supported on Windows.")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_import_contract_module", raise_foreign_error)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", raise_foreign_error)
 
     errors = validate_released_api_contract(contract, agents_module=agents_module)
     assert len(errors) == 1
@@ -2136,7 +2141,7 @@ def test_release_contract_update_promotes_selected_submodule_exports(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -2192,7 +2197,7 @@ def test_release_contract_update_freezes_new_sdk_submodule_callable_without_cano
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -2258,7 +2263,7 @@ def test_release_contract_update_skips_new_third_party_submodule_callable(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -2303,9 +2308,9 @@ def test_release_contract_update_preserves_tracked_submodule_callable_on_unsuppo
         "callables": {"agents.optional_parent.OptionalPublic": callable_contract},
     }
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: False)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -2376,7 +2381,7 @@ def test_release_contract_update_preserves_tracked_submodule_callable_on_platfor
         raise ImportError("Backend is not supported on Windows.")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_import_contract_module", import_platform_module)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", import_platform_module)
 
     updated = build_released_api_contract(
         contract,
@@ -2420,10 +2425,10 @@ def test_release_contract_policy_preserves_new_optional_export_in_core_install(
     def import_module(module_name: str, _agents_module: object) -> object:
         return agents_module if module_name == "agents" else imported_submodule
 
-    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", import_module)
     dependency_available = True
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_optional_dependency_is_available",
         lambda _module_name: dependency_available,
     )
@@ -2499,7 +2504,7 @@ def test_release_contract_policy_promotes_curated_public_state_surfaces(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: modules[module_name],
     )
@@ -2645,7 +2650,7 @@ def test_release_contract_promotion_rejects_new_public_voice_implementation_with
         ),
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: modules[module_name],
     )
@@ -2728,7 +2733,7 @@ def test_typed_dict_only_promotion_updates_baseline_commit(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: {
             "agents": agents_module,
@@ -2808,8 +2813,8 @@ def test_release_contract_policy_honors_unsupported_platform_during_promotion(
         raise AssertionError(f"Unexpected import: {module_name}")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
-    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: False)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", import_module)
 
     updated = build_released_api_contract(
         contract,
@@ -2860,7 +2865,7 @@ def test_release_contract_policy_rejects_new_callable_on_unsupported_platform(
     }
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: False)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: False)
 
     with pytest.raises(
         ValueError,
@@ -2928,7 +2933,7 @@ def test_release_contract_policy_promotes_new_uninspectable_canonical_surface(
         "agents.submodule.impl": submodule,
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: modules[module_name],
     )
@@ -2993,7 +2998,7 @@ def test_release_contract_policy_keeps_existing_uninspectable_canonical_surface(
         "agents.submodule.impl": submodule,
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: modules[module_name],
     )
@@ -3040,9 +3045,9 @@ def test_public_api_contract_skips_optional_surface_on_frozen_unsupported_platfo
         "callables": {"agents.submodule.OptionalBackend": _callable_contract(OptionalBackend)},
     }
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3081,9 +3086,9 @@ def test_public_api_contract_allows_present_optional_surface_on_unsupported_plat
         "callables": {},
     }
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3113,9 +3118,9 @@ def test_public_api_contract_rejects_dangling_optional_export_on_unsupported_pla
         "callables": {},
     }
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3149,9 +3154,9 @@ def test_public_api_contract_rejects_dangling_optional_binding_on_unsupported_pl
         "callables": {},
     }
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3185,9 +3190,9 @@ def test_public_api_contract_requires_optional_surface_on_supported_platform(
         "callables": {},
     }
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(contract_support, "_optional_dependency_is_available", lambda _name: True)
+    monkeypatch.setattr(contract_surface, "_optional_dependency_is_available", lambda _name: True)
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3214,12 +3219,12 @@ def test_release_contract_policy_rejects_unavailable_dependency_module(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_optional_dependency_is_available",
         lambda _module_name: False,
     )
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3262,12 +3267,12 @@ def test_release_contract_policy_adds_new_public_optional_module(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_optional_dependency_is_available",
         lambda _module_name: True,
     )
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -3644,7 +3649,7 @@ def test_repository_release_policy_declares_public_optional_modules() -> None:
 
 def test_repository_release_policy_declares_public_state_surfaces() -> None:
     policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
-    contract_support._validate_voice_public_class_contract_policy(policy, None)
+    _validate_voice_public_class_contract_policy(policy, None)
     expected_modules = {
         "agents.realtime.testing",
         "agents.testing",
@@ -3802,7 +3807,7 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
         (cast(str, entry["module"]), cast(str, entry["name"])): cast(
             dict[str, Any], entry["definition"]
         )
-        for entry in contract_support._public_type_alias_contract(policy.public_type_aliases, None)
+        for entry in contract_surface._public_type_alias_contract(policy.public_type_aliases, None)
     }
     tts_voice = type_aliases[("agents.voice.model", "TTSVoice")]
     assert tts_voice["kind"] == "union"
@@ -4085,7 +4090,7 @@ def test_public_api_contract_allows_declared_optional_submodule_binding(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4121,7 +4126,7 @@ def test_public_api_contract_skips_fully_optional_unimportable_submodule(
             return agents_module
         raise ImportError("The optional dependency is unavailable.")
 
-    monkeypatch.setattr(contract_support, "_import_contract_module", import_module)
+    monkeypatch.setattr(contract_surface, "_import_contract_module", import_module)
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
 
@@ -4145,7 +4150,7 @@ def test_public_api_contract_allows_declared_optional_submodule_export(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4174,7 +4179,7 @@ def test_public_api_contract_rejects_optional_export_that_remains_in_all(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4207,7 +4212,7 @@ def test_public_api_contract_rejects_optional_binding_absent_from_all(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4241,7 +4246,7 @@ def test_public_api_contract_requires_available_optional_submodule_export(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4275,7 +4280,7 @@ def test_public_api_contract_treats_loaded_dependency_without_spec_as_available(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4326,7 +4331,7 @@ def test_public_api_contract_rejects_malformed_optional_dependency_declarations(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule
@@ -4360,7 +4365,7 @@ def test_release_contract_update_rejects_new_submodule_export_without_binding(
         "callables": {},
     }
     monkeypatch.setattr(
-        contract_support,
+        contract_surface,
         "_import_contract_module",
         lambda module_name, _agents_module: (
             agents_module if module_name == "agents" else submodule

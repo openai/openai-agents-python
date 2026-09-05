@@ -22,7 +22,7 @@ from agents.sandbox.session import (
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
-from integration_tests._contract_support import _redaction_observables
+from integration_tests._contract_state import _redaction_observables
 
 pytestmark = pytest.mark.security
 
