@@ -428,3 +428,43 @@ async def test_apply_patch_create_rejects_an_existing_file() -> None:
         )
 
     assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_does_not_record_a_failed_read_span(tmp_path: Path) -> None:
+    """The absence probe must not make every successful create look like a failed read."""
+    import uuid
+
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxSessionState
+    from agents.sandbox.session import SandboxSession
+    from agents.sandbox.snapshot import LocalSnapshot
+    from agents.tracing import trace
+    from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
+    from tests.testing_processor import fetch_ordered_spans
+
+    workspace = tmp_path / "workspace"
+    inner = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path),
+        )
+    )
+
+    with trace("apply_patch_create_span_test"):
+        async with SandboxSession(inner) as session:
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="create_file",
+                    path="brand-new.txt",
+                    diff="+hello\n",
+                )
+            )
+
+    assert (workspace / "brand-new.txt").read_text() == "hello"
+
+    read_span_errors = [
+        span.error
+        for span in fetch_ordered_spans()
+        if span.span_data.export().get("name") == "sandbox.read"
+    ]
+    assert read_span_errors and all(error is None for error in read_span_errors)

@@ -188,8 +188,18 @@ class WorkspaceEditor:
             handle.close()
 
     async def _ensure_absent(self, destination: Path, *, display_path: str) -> None:
+        # A missing destination is the success case here, so the probe must not mark the
+        # child sandbox.read span as failed on every successful create. Imported locally
+        # because the session package imports this module.
+        from .session.sandbox_session import _read_with_expected_span_errors
+
         try:
-            handle = await self._session.read(destination, user=self._user)
+            handle = await _read_with_expected_span_errors(
+                self._session,
+                destination,
+                user=self._user,
+                expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
+            )
         except (FileNotFoundError, WorkspaceReadNotFoundError):
             return
         handle.close()
