@@ -411,3 +411,20 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
         )
 
     assert session.files[Path("/workspace/old.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_rejects_an_existing_file() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/notes.txt")] = b"alpha\n"
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="create_file",
+                path="notes.txt",
+                diff="+beta\n",
+            )
+        )
+
+    assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
