@@ -24,6 +24,7 @@ from openai.types.completion_usage import (
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
 )
@@ -116,7 +117,7 @@ def _import_any_llm_module(
     return module, create_calls
 
 
-def _chat_completion(text: str) -> ChatCompletion:
+def _chat_completion(text: str | None) -> ChatCompletion:
     return ChatCompletion(
         id="chatcmpl_123",
         created=0,
@@ -593,6 +594,41 @@ def _content_filtered_chat_completion(content: str) -> ChatCompletion:
     return completion
 
 
+def _chat_completion_with_message(
+    message: ChatCompletionMessage, finish_reason: str
+) -> ChatCompletion:
+    completion = _chat_completion(message.content or "")
+    completion.choices[0].message = message
+    completion.choices[0].finish_reason = finish_reason
+    return completion
+
+
+def _chat_completion_with_finish_reason(content: str | None, finish_reason: str) -> ChatCompletion:
+    return _chat_completion_with_message(
+        ChatCompletionMessage(role="assistant", content=content), finish_reason
+    )
+
+
+async def _get_any_llm_chat_response(
+    monkeypatch: pytest.MonkeyPatch, chat_response: ChatCompletion
+) -> Any:
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=chat_response)
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    return await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_any_llm_chat_path_surfaces_content_filter_refusal(monkeypatch) -> None:
@@ -661,6 +697,77 @@ async def test_any_llm_chat_path_content_filter_keeps_real_content(monkeypatch) 
     ]
     assert not refusals
     assert response.output[0].content[0].text == "here is the answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [None, ""], ids=["none", "empty-string"])
+async def test_any_llm_chat_path_raises_on_truncated_empty_turn(
+    monkeypatch, content: str | None
+) -> None:
+    """An empty length-truncated turn must not be returned as a successful empty response."""
+    provider = FakeAnyLLMProvider(
+        supports_responses=False,
+        chat_response=_chat_completion_with_finish_reason(content, "length"),
+    )
+    module, _create_calls = _import_any_llm_module(monkeypatch, provider)
+    spans = _capture_spans(monkeypatch, module, "generation_span")
+
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+
+    assert len(spans) == 1
+    assert spans[0].span_data.usage["requests"] == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_preserves_nonempty_truncated_output(monkeypatch) -> None:
+    response = await _get_any_llm_chat_response(
+        monkeypatch, _chat_completion_with_finish_reason("partial", "length")
+    )
+
+    assert response.output[0].content[0].text == "partial"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_preserves_truncated_refusal(monkeypatch) -> None:
+    response = await _get_any_llm_chat_response(
+        monkeypatch,
+        _chat_completion_with_message(
+            ChatCompletionMessage(role="assistant", content=None, refusal="provider refusal"),
+            "length",
+        ),
+    )
+
+    refusal = response.output[0].content[0]
+    assert isinstance(refusal, ResponseOutputRefusal)
+    assert refusal.refusal == "provider refusal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_chat_path_preserves_truncated_tool_call(monkeypatch) -> None:
+    chat_response = _chat_completion_with_tool_call(thought_signature="sig_123")
+    chat_response.choices[0].finish_reason = "length"
+    chat_response.choices[0].message.content = None
+
+    response = await _get_any_llm_chat_response(monkeypatch, chat_response)
+
+    assert any(isinstance(item, ResponseFunctionToolCall) for item in response.output)
 
 
 @pytest.mark.allow_call_model_methods

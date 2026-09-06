@@ -667,6 +667,22 @@ class AnyLLMModel(Model):
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
+            # A completion truncated before any visible token (finish_reason="length")
+            # is a token- or reasoning-budget exhaustion, not a policy refusal.
+            # Surface it as a model behavior error rather than returning an empty output.
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "length"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+            ):
+                raise ModelBehaviorError(
+                    "Chat Completions response terminated with finish_reason='length' "
+                    "but produced no assistant text, tool call, or refusal."
+                )
+
             provider_data: dict[str, Any] = {"model": self.model}
             if message is not None and hasattr(response, "id"):
                 provider_data["response_id"] = response.id
