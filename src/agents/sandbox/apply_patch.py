@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
@@ -111,9 +112,23 @@ class WorkspaceEditor:
 
             moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
-            await self._write_text(moved_destination, updated_text)
-            if moved_destination != destination:
+            # A sandbox filesystem that folds case stores notes.txt and Notes.txt as one file, so
+            # removing the source after the write would delete the text that was just written.
+            # Removing the source first renames the file on a case-folding filesystem and on a
+            # case-sensitive one. Every other rename keeps the write-then-remove order so a failed
+            # write leaves the source intact.
+            if _is_case_only_rename(destination, moved_destination):
                 await self._session.rm(destination, user=self._user)
+                await self._write_moved_text(
+                    moved_destination,
+                    updated_text,
+                    restore_destination=destination,
+                    restore_text=original_text,
+                )
+            else:
+                await self._write_text(moved_destination, updated_text)
+                if moved_destination != destination:
+                    await self._session.rm(destination, user=self._user)
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
@@ -209,6 +224,28 @@ class WorkspaceEditor:
             path=op_path,
         )
 
+    async def _write_moved_text(
+        self,
+        destination: Path,
+        text: str,
+        *,
+        restore_destination: Path,
+        restore_text: str,
+    ) -> None:
+        """Write a rename destination whose source was already removed, restoring it on failure.
+
+        The source is gone while this write is in flight, so a sandbox write that fails partway
+        through, for example on a dropped connection to a remote session, would otherwise leave
+        the file in neither place. The original text is still in memory, so put it back before
+        the failure propagates.
+        """
+        try:
+            await self._write_text(destination, text)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._write_text(restore_destination, restore_text)
+            raise
+
     async def _write_text(self, destination: Path, text: str) -> None:
         await self._session.mkdir(destination.parent, parents=True, user=self._user)
         await self._session.write(
@@ -216,6 +253,16 @@ class WorkspaceEditor:
             io.BytesIO(text.encode("utf-8")),
             user=self._user,
         )
+
+
+def _is_case_only_rename(source: Path, destination: Path) -> bool:
+    """Return whether two sandbox paths are distinct and differ only in character case."""
+
+    source_posix = source.as_posix()
+    destination_posix = destination.as_posix()
+    if source_posix == destination_posix:
+        return False
+    return source_posix.casefold() == destination_posix.casefold()
 
 
 def _coerce_operations(

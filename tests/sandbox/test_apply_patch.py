@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import cast
 
 import pytest
 
@@ -14,7 +15,10 @@ from agents.sandbox.errors import (
 )
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
+    CaseFoldingApplyPatchSession,
+    PosixHostApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
+    WriteFailureApplyPatchSession,
 )
 
 
@@ -245,6 +249,61 @@ async def test_apply_patch_normalizes_backslashes_in_move_to() -> None:
 
     assert session.files[Path("/workspace/nested/moved.txt")] == b"beta\n"
     assert Path("/workspace/source.txt") not in session.files
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_keeps_file_on_case_folding_filesystem() -> None:
+    """A case-folding filesystem stores both names as one file, which the removal must keep."""
+    session = CaseFoldingApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_moves_file_on_case_sensitive_filesystem() -> None:
+    """A case-sensitive filesystem keeps the names apart, so the source must still be removed."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_restores_source_when_write_fails() -> None:
+    """The source is removed before the write, so a failed write must put the file back."""
+    session = WriteFailureApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    with pytest.raises(ConnectionError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="Notes.txt",
+            )
+        )
+
+    assert session.files == {PurePosixPath("/workspace/notes.txt"): b"alpha\nbeta\n"}
 
 
 @pytest.mark.asyncio
