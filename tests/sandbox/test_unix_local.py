@@ -560,3 +560,31 @@ async def test_unix_local_read_and_write_refuse_a_fifo_instead_of_blocking(
         os.close(peer_fd)
 
     assert fifo.is_fifo()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+async def test_unix_local_refuses_a_fifo_without_a_peer_and_a_directory_read(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fifo = workspace / "pipe"
+    os.mkfifo(fifo)
+    (workspace / "dir").mkdir()
+
+    async with await UnixLocalSandboxClient().create(
+        manifest=Manifest(root=str(workspace)), snapshot=None, options=None
+    ) as session:
+        # No peer holds the pipe open: a blocking open would never return.
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await asyncio.wait_for(session.write(Path("pipe"), io.BytesIO(b"payload")), 5)
+        with pytest.raises(WorkspaceArchiveReadError) as read_error:
+            await asyncio.wait_for(session.read(Path("pipe")), 5)
+        assert read_error.value.context["reason"] == "not a regular file: fifo"
+
+        with pytest.raises(WorkspaceArchiveReadError) as dir_error:
+            await session.read(Path("dir"))
+        assert isinstance(dir_error.value.__cause__, IsADirectoryError)
+
+    assert fifo.is_fifo()

@@ -161,24 +161,68 @@ _SPECIAL_FILE_KINDS: tuple[tuple[Callable[[int], bool], str], ...] = (
 )
 
 
-def _raise_if_special_file(workspace_path: Path, *, path: Path, for_write: bool) -> None:
-    """Refuse to open a FIFO, socket, or device node as a workspace file.
+def _special_file_kind(mode: int) -> str | None:
+    return next((name for predicate, name in _SPECIAL_FILE_KINDS if predicate(mode)), None)
+
+
+def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> int:
+    """Open a workspace file for in-process I/O, refusing FIFOs, sockets, and device nodes.
 
     `open()` on a FIFO with no peer blocks the calling thread, and this session performs
     file I/O synchronously on the event loop, so such an open would stall the whole
-    process. Missing paths and directories keep their existing `open()` error handling.
+    process. The descriptor is opened non-blocking and classified with `fstat()` so a
+    concurrent replacement of the entry cannot slip past the check. Missing paths keep
+    their existing error handling; a directory is reported like the blocking `open()` did.
+    """
+    flags = os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    if for_write:
+        flags |= os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    else:
+        flags |= os.O_RDONLY
+    fd = os.open(workspace_path, flags, 0o666)
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISDIR(mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(workspace_path))
+        kind = _special_file_kind(mode)
+        if kind is not None:
+            context = {"reason": f"not a regular file: {kind}"}
+            if for_write:
+                raise WorkspaceArchiveWriteError(path=path, context=context)
+            raise WorkspaceArchiveReadError(path=path, context=context)
+        # Regular files ignore O_NONBLOCK; clear it anyway so the handle behaves like open().
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _raise_if_existing_special_file(workspace_path: Path) -> None:
+    """Refuse a user-scoped write whose existing target is a FIFO, socket, or device node.
+
+    The write itself runs as the requested user (`cat > "$1"`), which would block on a
+    FIFO. Opening the current entry non-blocking classifies it without blocking: a FIFO
+    or socket without a peer fails with ENXIO, anything else is judged by `fstat()`.
     """
     try:
-        mode = workspace_path.stat().st_mode
-    except OSError:
+        fd = os.open(workspace_path, os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
         return
-    kind = next((name for predicate, name in _SPECIAL_FILE_KINDS if predicate(mode)), None)
-    if kind is None:
-        return
-    context = {"reason": f"not a regular file: {kind}"}
-    if for_write:
-        raise WorkspaceArchiveWriteError(path=path, context=context)
-    raise WorkspaceArchiveReadError(path=path, context=context)
+    except OSError as e:
+        if e.errno == errno.ENXIO:
+            raise WorkspaceArchiveWriteError(
+                path=workspace_path, context={"reason": "not a regular file: fifo or socket"}
+            ) from e
+        return  # let the user-scoped exec report permission and type errors
+    try:
+        kind = _special_file_kind(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+    if kind is not None:
+        raise WorkspaceArchiveWriteError(
+            path=workspace_path, context={"reason": f"not a regular file: {kind}"}
+        )
 
 
 class UnixLocalSandboxSession(BaseSandboxSession):
@@ -1013,13 +1057,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await self._check_read_with_exec(path, user=user)
 
         workspace_path = self.normalize_path(path)
-        _raise_if_special_file(workspace_path, path=path, for_write=False)
         try:
-            return workspace_path.open("rb")
+            fd = _open_regular_file(workspace_path, path=path, for_write=False)
         except FileNotFoundError as e:
             raise WorkspaceReadNotFoundError(path=path, cause=e) from e
         except OSError as e:
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
+        return os.fdopen(fd, "rb")
 
     async def write(
         self,
@@ -1031,14 +1075,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         payload = coerce_write_payload(path=path, data=data)
 
         workspace_path = self.normalize_path(path, for_write=True)
-        _raise_if_special_file(workspace_path, path=workspace_path, for_write=True)
         if user is not None:
+            _raise_if_existing_special_file(workspace_path)
             await self._write_stream_with_exec(workspace_path, payload.stream, user=user)
             return
 
         try:
             workspace_path.parent.mkdir(parents=True, exist_ok=True)
-            with workspace_path.open("wb") as f:
+            fd = _open_regular_file(workspace_path, path=workspace_path, for_write=True)
+            with os.fdopen(fd, "wb") as f:
                 shutil.copyfileobj(payload.stream, f)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
