@@ -7,6 +7,7 @@ import pytest
 
 from agents.sandbox.session.pty_output import (
     collect_pty_output,
+    drain_pty_output_chunks,
     incomplete_utf8_tail_length,
 )
 
@@ -121,8 +122,39 @@ async def test_collect_pty_output_flushes_an_incomplete_sequence_when_done() -> 
         (b"ok \xf0\x9f", 2),
         (b"\xb8\xad", 0),  # stray continuation bytes are invalid, not incomplete
         (b"\xff", 0),  # invalid lead byte
+        (b"\xc0", 0),  # overlong two-byte leaders are never valid
+        (b"\xc1", 0),
+        (b"\xf5", 0),  # beyond U+10FFFF
+        (b"\xe0\x80", 0),  # overlong three-byte form
+        (b"\xf4\x90", 0),  # past U+10FFFF
+        (b"\xf0\x80", 0),  # overlong four-byte form
         (b"\xe4\xb8\xad\xe4", 1),
     ],
 )
 def test_incomplete_utf8_tail_length(data: bytes, expected: int) -> None:
     assert incomplete_utf8_tail_length(data) == expected
+
+
+@pytest.mark.asyncio
+async def test_collect_pty_output_returns_an_invalid_leader_immediately() -> None:
+    output_chunks: deque[bytes] = deque([b"\xc0"])
+
+    output, _ = await collect_pty_output(
+        output_chunks=output_chunks,
+        output_lock=asyncio.Lock(),
+        output_notify=asyncio.Event(),
+        is_done=lambda: False,
+        yield_time_ms=10,
+        max_output_tokens=None,
+    )
+    assert output == "\ufffd".encode()
+    assert not output_chunks
+
+
+@pytest.mark.asyncio
+async def test_drain_pty_output_chunks_takes_everything_queued() -> None:
+    output_chunks: deque[bytes] = deque([b"\xe4\xb8", b"\xad\n"])
+
+    assert await drain_pty_output_chunks(output_chunks, asyncio.Lock()) == "中\n".encode()
+    assert not output_chunks
+    assert await drain_pty_output_chunks(output_chunks, asyncio.Lock()) == b""

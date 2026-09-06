@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import time
 from collections import deque
 from collections.abc import Callable
@@ -60,24 +61,27 @@ async def collect_pty_output(
 
 
 def incomplete_utf8_tail_length(data: bytes | bytearray) -> int:
-    """Return how many trailing bytes start a UTF-8 sequence that is not yet complete.
+    """Return how many trailing bytes form a valid but not yet complete UTF-8 sequence.
 
-    Only a well-formed prefix counts: a lead byte followed by fewer continuation bytes
-    than it announces. Invalid bytes are left alone so they decode as replacement
-    characters immediately rather than being held forever.
+    Python's incremental decoder decides what counts as a valid prefix, so invalid
+    leaders (``0xC0``, ``0xC1``, ``0xF5`` and up) and ill-formed second bytes (overlong
+    forms, surrogates, code points past U+10FFFF) are not held back: they decode to
+    replacement characters immediately, as before. A pending sequence is at most three
+    bytes long, so only the tail needs to be inspected.
     """
-    limit = min(len(data), 3)
-    for offset in range(1, limit + 1):
-        byte = data[-offset]
-        if byte & 0xC0 == 0x80:
-            continue  # continuation byte; keep looking for the lead byte
-        if byte & 0xE0 == 0xC0:
-            expected = 2
-        elif byte & 0xF0 == 0xE0:
-            expected = 3
-        elif byte & 0xF8 == 0xF0:
-            expected = 4
-        else:
-            return 0  # ASCII or an invalid lead byte
-        return offset if offset < expected else 0
-    return 0
+    tail = bytes(data[-3:])
+    if not tail:
+        return 0
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    decoder.decode(tail, final=False)
+    pending, _ = decoder.getstate()
+    return len(pending)
+
+
+async def drain_pty_output_chunks(output_chunks: deque[bytes], output_lock: asyncio.Lock) -> bytes:
+    """Take every queued chunk, including bytes a collection held back."""
+    output = bytearray()
+    async with output_lock:
+        while output_chunks:
+            output.extend(output_chunks.popleft())
+    return bytes(output)

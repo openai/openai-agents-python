@@ -318,6 +318,33 @@ class TestUnixLocalPty:
         assert b"".join(chunks).decode("utf-8") == "中\n"
 
     @pytest.mark.asyncio
+    async def test_finalize_pty_update_flushes_bytes_held_back_when_the_process_exited(
+        self, tmp_path: Path
+    ) -> None:
+        session = _RecordingUnixLocalSession(tmp_path / "workspace")
+        process = await asyncio.create_subprocess_exec("true")
+        await process.wait()
+        # The process has exited but the output pump has not marked output closed yet,
+        # so the previous collection held the partial sequence back in the queue.
+        entry = unix_local_module._UnixPtyProcessEntry(process=process, tty=False)
+        entry.output_chunks.extend([b"\xe4\xb8", b"\xad\n"])
+        process_id = 4242
+        async with session._pty_lock:
+            session._pty_processes[process_id] = entry
+
+        update = await session._finalize_pty_update(
+            process_id=process_id,
+            entry=entry,
+            output=b"prefix ",
+            original_token_count=None,
+        )
+
+        assert update.exit_code == 0
+        assert update.process_id is None
+        assert update.output == "prefix 中\n".encode()
+        assert not entry.output_chunks
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_native_macos_sandbox
     async def test_pty_ctrl_c_interrupts_long_running_process(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()

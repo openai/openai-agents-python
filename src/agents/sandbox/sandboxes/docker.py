@@ -55,7 +55,7 @@ from ..session import SandboxSession, SandboxSessionState
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
-from ..session.pty_output import collect_pty_output
+from ..session.pty_output import collect_pty_output, drain_pty_output_chunks
 from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -1267,6 +1267,11 @@ class DockerSandboxSession(BaseSandboxSession):
         live_process_id: int | None = process_id
 
         if exit_code is not None:
+            # The collector may have held back a partial UTF-8 sequence for a later poll;
+            # there is none once the entry is removed, so flush whatever is still queued.
+            deferred = await drain_pty_output_chunks(entry.output_chunks, entry.output_lock)
+            if deferred:
+                output += deferred.decode("utf-8", errors="replace").encode("utf-8")
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
