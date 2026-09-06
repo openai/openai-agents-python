@@ -15,13 +15,14 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import tarfile
 import tempfile
 import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -150,6 +151,34 @@ class _UnixPtyProcessEntry:
     output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     pump_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     wait_task: asyncio.Task[None] | None = None
+
+
+_SPECIAL_FILE_KINDS: tuple[tuple[Callable[[int], bool], str], ...] = (
+    (stat.S_ISFIFO, "fifo"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISCHR, "character device"),
+    (stat.S_ISBLK, "block device"),
+)
+
+
+def _raise_if_special_file(workspace_path: Path, *, path: Path, for_write: bool) -> None:
+    """Refuse to open a FIFO, socket, or device node as a workspace file.
+
+    `open()` on a FIFO with no peer blocks the calling thread, and this session performs
+    file I/O synchronously on the event loop, so such an open would stall the whole
+    process. Missing paths and directories keep their existing `open()` error handling.
+    """
+    try:
+        mode = workspace_path.stat().st_mode
+    except OSError:
+        return
+    kind = next((name for predicate, name in _SPECIAL_FILE_KINDS if predicate(mode)), None)
+    if kind is None:
+        return
+    context = {"reason": f"not a regular file: {kind}"}
+    if for_write:
+        raise WorkspaceArchiveWriteError(path=path, context=context)
+    raise WorkspaceArchiveReadError(path=path, context=context)
 
 
 class UnixLocalSandboxSession(BaseSandboxSession):
@@ -984,6 +1013,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await self._check_read_with_exec(path, user=user)
 
         workspace_path = self.normalize_path(path)
+        _raise_if_special_file(workspace_path, path=path, for_write=False)
         try:
             return workspace_path.open("rb")
         except FileNotFoundError as e:
@@ -1001,6 +1031,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         payload = coerce_write_payload(path=path, data=data)
 
         workspace_path = self.normalize_path(path, for_write=True)
+        _raise_if_special_file(workspace_path, path=workspace_path, for_write=True)
         if user is not None:
             await self._write_stream_with_exec(workspace_path, payload.stream, user=user)
             return

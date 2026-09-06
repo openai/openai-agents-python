@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import signal
 import tarfile
 import threading
@@ -13,7 +14,11 @@ from typing import cast
 import pytest
 
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import (
+    PtySessionNotFoundError,
+    WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -513,3 +518,45 @@ async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     # the workspace root are only released once nothing is still writing to them.
     assert events == ["extract-start", "extract-end"]
     assert not buf.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+async def test_unix_local_read_and_write_refuse_a_fifo_instead_of_blocking(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fifo = workspace / "pipe"
+    os.mkfifo(fifo)
+    # Keep both ends of the pipe open so the previous behaviour (opening the FIFO) returns
+    # instead of blocking the event loop, letting the assertions below fail cleanly.
+    peer_fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        async with await UnixLocalSandboxClient().create(
+            manifest=Manifest(root=str(workspace)), snapshot=None, options=None
+        ) as session:
+            with pytest.raises(WorkspaceArchiveReadError) as read_error:
+                await session.read(Path("pipe"))
+            assert read_error.value.context["reason"] == "not a regular file: fifo"
+
+            with pytest.raises(WorkspaceArchiveWriteError) as write_error:
+                await session.write(Path("pipe"), io.BytesIO(b"payload"))
+            assert write_error.value.context["reason"] == "not a regular file: fifo"
+
+            # A link to the FIFO resolves to the same entry and is refused the same way.
+            (workspace / "pipe_link").symlink_to(fifo)
+            with pytest.raises(WorkspaceArchiveReadError):
+                await session.read(Path("pipe_link"))
+
+            # Regular-file behaviour is unchanged.
+            await session.write(Path("plain.txt"), io.BytesIO(b"hello"))
+            handle = await session.read(Path("plain.txt"))
+            try:
+                assert handle.read() == b"hello"
+            finally:
+                handle.close()
+    finally:
+        os.close(peer_fd)
+
+    assert fifo.is_fifo()
