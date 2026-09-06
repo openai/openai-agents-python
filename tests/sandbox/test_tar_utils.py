@@ -214,6 +214,7 @@ def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
         add_symlink(tar, "workspace/sub/abs_up", "/workspace/a.txt")
         add_symlink(tar, "workspace/rel", "a.txt")
         add_symlink(tar, "workspace/double_slash", "//workspace/a.txt")
+        add_symlink(tar, "workspace/double_sep", "/workspace//a.txt")
         # `alias/..` resolves against the alias target (sub/deep), so this names sub/data.txt.
         add_symlink(tar, "workspace/alias", "sub/deep")
         add_symlink(tar, "workspace/abs_alias", "/workspace/alias/../data.txt")
@@ -240,6 +241,7 @@ def test_strip_tar_member_prefix_rewrites_members_hydrate_refuses() -> None:
         assert members["sub/abs_up"].linkname == "../a.txt"
         assert members["rel"].linkname == "a.txt"
         assert members["double_slash"].linkname == "a.txt"
+        assert members["double_sep"].linkname == "a.txt"
         # Components after the root prefix are kept verbatim; `..` is not collapsed.
         assert members["abs_alias"].linkname == "alias/../data.txt"
         long_link = members["long_link"]

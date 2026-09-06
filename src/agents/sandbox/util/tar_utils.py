@@ -210,7 +210,9 @@ def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
     if target == prefix:
         rest = ""
     elif target.startswith(prefix + "/"):
-        rest = target[len(prefix) + 1 :]
+        # Consume the whole separator run at the boundary (`/workspace//a.txt`), keeping
+        # every later component, including `..`, untouched.
+        rest = target[len(prefix) :].lstrip("/")
     else:
         return linkname
     # Members beneath a symlink are rejected by the archive validator, so the link's
