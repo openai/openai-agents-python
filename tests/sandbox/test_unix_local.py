@@ -12,7 +12,9 @@ from typing import cast
 
 import pytest
 
+from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
+from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.errors import (
     InvalidManifestPathError,
     PtySessionNotFoundError,
@@ -475,6 +477,50 @@ class TestUnixLocalUserScopedFilesystem:
 
 
 class TestUnixLocalRmSymlinks:
+    @pytest.mark.asyncio
+    async def test_apply_patch_delete_file_removes_symlink_not_its_target(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("keep", encoding="utf-8")
+        link = workspace / "alias"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(type="delete_file", path="alias")
+        )
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_apply_patch_move_from_symlink_removes_link_not_its_target(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("old\n", encoding="utf-8")
+        link = workspace / "alias"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="alias",
+                diff="@@\n-old\n+new\n",
+                move_to="moved.txt",
+            )
+        )
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "old\n"
+        assert (workspace / "moved.txt").read_text(encoding="utf-8") == "new\n"
+
     @pytest.mark.asyncio
     async def test_rm_removes_file_symlink_not_its_target(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"

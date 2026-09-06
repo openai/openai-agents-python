@@ -75,7 +75,9 @@ class WorkspaceEditor:
 
         if operation.type == "delete_file":
             await self._ensure_exists(destination, display_path=display_path)
-            await self._session.rm(destination, user=self._user)
+            # Remove the workspace entry the model named, not the file it resolves to:
+            # `destination` follows symlinks, so a link would otherwise lose its target.
+            await self._session.rm(relative_path, user=self._user)
             return ApplyPatchResult(output=f"Deleted {display_path}")
 
         if operation.diff is None:
@@ -113,7 +115,7 @@ class WorkspaceEditor:
             moved_destination = self._session.normalize_path(moved_relative_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
-                await self._session.rm(destination, user=self._user)
+                await self._session.rm(relative_path, user=self._user)
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
