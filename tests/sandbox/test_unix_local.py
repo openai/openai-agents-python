@@ -287,6 +287,38 @@ class TestUnixLocalPty:
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_macos_sandbox
+    async def test_pty_output_keeps_a_utf8_sequence_split_across_yields_whole(
+        self, tmp_path: Path
+    ) -> None:
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(tmp_path / "workspace"))
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            # Emit the three bytes of U+4E2D across two writes with a pause in between so the
+            # first yield window closes in the middle of the sequence.
+            started = await session.pty_exec_start(
+                "sh",
+                "-c",
+                "printf '\\344\\270'; sleep 0.4; printf '\\255\\n'",
+                shell=False,
+                tty=False,
+                yield_time_s=0.1,
+            )
+            assert started.process_id is not None
+            chunks = [started.output]
+            exit_code = started.exit_code
+            while exit_code is None:
+                update = await session.pty_write_stdin(
+                    session_id=started.process_id, chars="", yield_time_s=0.1
+                )
+                chunks.append(update.output)
+                exit_code = update.exit_code
+
+        assert exit_code == 0
+        assert b"".join(chunks).decode("utf-8") == "中\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
     async def test_pty_ctrl_c_interrupts_long_running_process(self, tmp_path: Path) -> None:
         client = UnixLocalSandboxClient()
         manifest = Manifest(root=str(tmp_path / "workspace"))

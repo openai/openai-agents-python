@@ -45,6 +45,39 @@ async def collect_pty_output(
             break
         output_notify.clear()
 
+    if not is_done():
+        # A multibyte UTF-8 sequence can straddle two yield windows (the producer wrote
+        # part of it before the deadline). Hold the incomplete tail back for the next
+        # collection instead of emitting replacement characters on both sides.
+        tail_length = incomplete_utf8_tail_length(output)
+        if tail_length:
+            async with output_lock:
+                output_chunks.appendleft(bytes(output[-tail_length:]))
+            del output[-tail_length:]
     text = output.decode("utf-8", errors="replace")
     truncated, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
     return truncated.encode("utf-8", errors="replace"), original_token_count
+
+
+def incomplete_utf8_tail_length(data: bytes | bytearray) -> int:
+    """Return how many trailing bytes start a UTF-8 sequence that is not yet complete.
+
+    Only a well-formed prefix counts: a lead byte followed by fewer continuation bytes
+    than it announces. Invalid bytes are left alone so they decode as replacement
+    characters immediately rather than being held forever.
+    """
+    limit = min(len(data), 3)
+    for offset in range(1, limit + 1):
+        byte = data[-offset]
+        if byte & 0xC0 == 0x80:
+            continue  # continuation byte; keep looking for the lead byte
+        if byte & 0xE0 == 0xC0:
+            expected = 2
+        elif byte & 0xF0 == 0xE0:
+            expected = 3
+        elif byte & 0xF8 == 0xF0:
+            expected = 4
+        else:
+            return 0  # ASCII or an invalid lead byte
+        return offset if offset < expected else 0
+    return 0
