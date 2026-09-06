@@ -485,6 +485,7 @@ class TestUnixLocalPersistWorkspaceRestorable:
         (workspace / "sub" / "abs_up").symlink_to(workspace / "a.txt")
         (workspace / "rel").symlink_to("a.txt")
         (workspace / "double_slash").symlink_to("/" + str(workspace / "a.txt"))
+        (workspace / "double_sep").symlink_to(str(workspace) + "//a.txt")
         (workspace / "outside").symlink_to(tmp_path / "elsewhere.txt")
         return workspace
 
@@ -506,6 +507,7 @@ class TestUnixLocalPersistWorkspaceRestorable:
             assert members["sub/abs_up"].linkname == "../a.txt"
             assert members["rel"].linkname == "a.txt"
             assert members["double_slash"].linkname == "a.txt"
+            assert members["double_sep"].linkname == "a.txt"
             assert members["outside"].linkname == str(tmp_path / "elsewhere.txt")
 
     @pytest.mark.asyncio

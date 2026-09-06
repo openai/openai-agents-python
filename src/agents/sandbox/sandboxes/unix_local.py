@@ -157,7 +157,9 @@ def _rebase_symlink_target(linkname: str, *, link_name: str, roots: tuple[Path, 
         if target == prefix:
             rest = ""
         elif target.startswith(prefix + "/"):
-            rest = target[len(prefix) + 1 :]
+            # Consume the whole separator run at the boundary (`<root>//a.txt`), keeping
+            # every later component, including `..`, untouched.
+            rest = target[len(prefix) :].lstrip("/")
         else:
             continue
         # The link's own directory inside the archive holds no symlink components (the
