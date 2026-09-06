@@ -109,6 +109,8 @@ _BLAXEL_S3FS_OPTION_FIELDS_BY_MOUNT_TYPE: dict[str, tuple[str, ...]] = {
     "r2_mount": ("custom_domain", "account_id"),
     "s3_mount": ("endpoint_url", "region"),
 }
+# S3 Files renders these fields (plus extra_options) into a single comma-joined `mount -o` string.
+_S3_FILES_JOINED_OPTION_FIELDS: tuple[str, ...] = ("mount_target_ip", "access_point", "region")
 # Every free-form value interpolated into an rclone configuration line must remain a single line.
 # Keep this table aligned with the built-in providers' ``_rclone_required_lines`` methods.
 _RCLONE_CONFIG_VALUE_FIELDS_BY_MOUNT_TYPE: dict[str, tuple[str, ...]] = {
@@ -889,6 +891,39 @@ def _configured_blaxel_s3fs_option_fields(
     )
 
 
+def _mapping_contains_s3fs_option_delimiter(options: object) -> bool:
+    if not isinstance(options, Mapping):
+        return False
+    return any(
+        _value_contains_s3fs_option_delimiter(key) or _value_contains_s3fs_option_delimiter(value)
+        for key, value in options.items()
+    )
+
+
+def _configured_s3_files_option_delimiter_fields(mount: Mount) -> tuple[str, ...]:
+    """S3 Files joins helper options into one `mount -o` list. Commas become extra options."""
+    mount_type = _canonical_mount_type(type(mount)) or mount.type
+    if mount_type != "s3_files_mount":
+        return ()
+
+    fields: list[str] = []
+    for name in _S3_FILES_JOINED_OPTION_FIELDS:
+        if _value_contains_s3fs_option_delimiter(getattr(mount, name, None)):
+            fields.append(name)
+    if _mapping_contains_s3fs_option_delimiter(getattr(mount, "extra_options", None)):
+        fields.append("extra_options")
+
+    pattern = getattr(getattr(mount, "mount_strategy", None), "pattern", None)
+    if isinstance(pattern, S3FilesMountPattern):
+        options = pattern.options
+        for name in _S3_FILES_JOINED_OPTION_FIELDS:
+            if _value_contains_s3fs_option_delimiter(getattr(options, name, None)):
+                fields.append(f"mount_strategy.pattern.options.{name}")
+        if _mapping_contains_s3fs_option_delimiter(options.extra_options):
+            fields.append("mount_strategy.pattern.options.extra_options")
+    return tuple(dict.fromkeys(fields))
+
+
 def _configured_unknown_strategy_fields(strategy: MountStrategyBase) -> tuple[str, ...]:
     if _strategy_classification(strategy)[0] != "unknown":
         return ()
@@ -1491,7 +1526,10 @@ def _mount_boundary_error(
                 "configuration_fields": invalid_rclone_fields,
             },
         )
-    invalid_s3fs_fields = _configured_blaxel_s3fs_option_fields(mount, mount_type)
+    invalid_s3fs_fields = (
+        _configured_blaxel_s3fs_option_fields(mount, mount_type)
+        + _configured_s3_files_option_delimiter_fields(mount)
+    )
     if invalid_s3fs_fields:
         return MountConfigError(
             message="cloud mount configuration values must not contain s3fs option delimiters",

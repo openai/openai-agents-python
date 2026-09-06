@@ -1459,6 +1459,62 @@ def test_s3_files_require_broad_acknowledgement_before_ambient_iam_can_be_used()
 
 
 @pytest.mark.parametrize(
+    ("mount", "field_name"),
+    [
+        (
+            S3FilesMount(
+                file_system_id="fs-123",
+                extra_options={"mounttargetip": "10.0.0.1,ro"},
+                mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+            ),
+            "extra_options",
+        ),
+        (
+            S3FilesMount(
+                file_system_id="fs-123",
+                extra_options={"foo,ro": "1"},
+                mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+            ),
+            "extra_options",
+        ),
+        (
+            S3FilesMount(
+                file_system_id="fs-123",
+                mount_target_ip="10.0.0.1,subdir=/",
+                mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+            ),
+            "mount_target_ip",
+        ),
+        (
+            S3FilesMount(
+                file_system_id="fs-123",
+                mount_strategy=InContainerMountStrategy(
+                    pattern=S3FilesMountPattern(
+                        options=S3FilesMountPattern.S3FilesOptions(
+                            extra_options={"accesspoint": "ap-1,ro"}
+                        )
+                    )
+                ),
+            ),
+            "mount_strategy.pattern.options.extra_options",
+        ),
+    ],
+)
+def test_rejects_s3_files_mount_option_delimiter_injection(
+    mount: S3FilesMount,
+    field_name: str,
+) -> None:
+    """S3 Files joins helper options into one `mount -o` string. A comma is a new option."""
+    manifest = Manifest(entries={"data": mount})
+    acknowledged = manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")
+
+    with pytest.raises(MountConfigError, match="must not contain s3fs option delimiters") as exc:
+        validate_manifest_mount_credential_boundaries(acknowledged)
+
+    assert exc.value.context["configuration_fields"] == (field_name,)
+
+
+@pytest.mark.parametrize(
     "mount",
     [
         AzureBlobMount(
