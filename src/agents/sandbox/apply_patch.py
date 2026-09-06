@@ -119,6 +119,7 @@ class WorkspaceEditor:
             )
 
         if operation.type == "create_file":
+            await self._ensure_absent(destination, display_path=display_path)
             try:
                 created_text = format_impl.apply_diff("", operation.diff, mode="create")
             except ValueError as exc:
@@ -185,6 +186,20 @@ class WorkspaceEditor:
             raise ApplyPatchFileNotFoundError(path=Path(display_path), cause=exc) from exc
         else:
             handle.close()
+
+    async def _ensure_absent(self, destination: Path, *, display_path: str) -> None:
+        try:
+            handle = await self._session.read(destination, user=self._user)
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
+            return
+        handle.close()
+        raise ApplyPatchDiffError(
+            message=(
+                f"apply_patch cannot create {display_path} because it already exists. "
+                "Use an update_file operation to change an existing file."
+            ),
+            path=display_path,
+        )
 
     async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
         try:
