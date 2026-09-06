@@ -106,9 +106,19 @@ class StreamedAudioResult:
 
         np_array = np.frombuffer(combined_buffer, dtype=np.int16)
 
-        if output_dtype == np.int16:
+        # Resolve the configured dtype the way NumPy does so that every spelling of a supported
+        # dtype is accepted, including the strings that dictionary-based settings carry. NumPy
+        # reports an unparseable dtype as either TypeError or ValueError. Both are answered with
+        # the SDK-owned error, keeping the NumPy cause attached because it names the spelling
+        # that failed to parse.
+        try:
+            resolved_dtype = np.dtype(output_dtype)
+        except (TypeError, ValueError) as error:
+            raise UserError("Invalid output dtype") from error
+
+        if resolved_dtype == np.int16:
             return np_array
-        elif output_dtype == np.float32:
+        elif resolved_dtype == np.float32:
             return (np_array.astype(np.float32) / 32767.0).reshape(-1, 1)
         else:
             raise UserError("Invalid output dtype")
