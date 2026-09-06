@@ -194,11 +194,12 @@ _RM_ACCESS_CHECK_SCRIPT = (
     'parent=$(dirname "$target")\n'
     '[ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ] || exit 1\n'
     # A sticky directory (e.g. /tmp) lets only the entry's owner or the directory's owner
-    # unlink an entry, even with write access to the directory. `find -maxdepth 0` reads the
-    # entry itself, so a symlink is judged by the link's owner, not its target's.
-    # root (CAP_FOWNER) may unlink anything it can reach, so the ownership rule is skipped.
+    # unlink an entry, even with write access to the directory. `stat` without -L reports
+    # the entry itself (GNU `-c`, BSD/macOS `-f`), so a symlink is judged by the link's
+    # owner, not its target's. root (CAP_FOWNER) may unlink anything it can reach.
     'if [ "$(id -u)" != 0 ] && [ -k "$parent" ] && [ ! -O "$parent" ]; then\n'
-    '    [ -n "$(find "$target" -maxdepth 0 -user "$(id -un)" 2>/dev/null)" ]\n'
+    '    owner=$(stat -c %u "$target" 2>/dev/null || stat -f %u "$target" 2>/dev/null)\n'
+    '    [ -n "$owner" ] && [ "$owner" = "$(id -u)" ]\n'
     "fi\n"
 )
 
