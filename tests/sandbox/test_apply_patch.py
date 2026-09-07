@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -430,6 +431,7 @@ async def test_apply_patch_create_rejects_an_existing_file() -> None:
     assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="UnixLocalSandbox is Unix-only")
 @pytest.mark.asyncio
 async def test_apply_patch_create_does_not_record_a_failed_read_span(tmp_path: Path) -> None:
     """The absence probe must not make every successful create look like a failed read."""
