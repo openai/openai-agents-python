@@ -595,3 +595,28 @@ class TestUnixLocalApplyPatchRename:
 
             assert await session.same_file(workspace / "one.txt", workspace / "one.txt") is True
             assert await session.same_file(workspace / "one.txt", workspace / "two.txt") is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
+    async def test_same_file_does_not_follow_symlinks_when_asked_not_to(
+        self, tmp_path: Path
+    ) -> None:
+        """A symlink and its target are one file and two directory entries.
+
+        `test -ef` follows the link, so it calls them the same file. A caller deciding whether
+        removing one destroys the other needs the other answer, and this is shell code, so run
+        a real shell against a real symlink.
+        """
+        workspace = tmp_path / "workspace"
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(workspace))
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            await session.write(Path("target.txt"), io.BytesIO(b"alpha\n"))
+            (workspace / "link.txt").symlink_to(workspace / "target.txt")
+
+            link = workspace / "link.txt"
+            target = workspace / "target.txt"
+            assert await session.same_file(link, target) is True
+            assert await session.same_file(link, target, follow_symlinks=False) is False
+            assert await session.same_file(target, target, follow_symlinks=False) is True

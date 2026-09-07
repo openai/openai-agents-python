@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from agents.sandbox.errors import (
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
 )
+from agents.sandbox.session.sandbox_session import SandboxSession
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     CaseFoldingApplyPatchSession,
@@ -307,8 +309,10 @@ async def test_apply_patch_move_to_leaves_the_source_alone_when_the_write_fails(
 
     assert session.files == {PurePosixPath("/workspace/notes.txt"): b"alpha\nbeta\n"}
     # The file surviving is not enough. The refused implementation removed the source and then
-    # wrote it back, which also ends here. Nothing may be removed at all.
-    assert session.rm_calls == []
+    # wrote it back, which also ends here. The source may not be removed at all, and the only
+    # path this is allowed to remove is the staging file it was in the middle of writing.
+    assert PurePosixPath("/workspace/notes.txt") not in [path for path, _ in session.rm_calls]
+    assert all(path.name.startswith(".apply_patch-") for path, _ in session.rm_calls)
 
 
 @pytest.mark.asyncio
@@ -410,6 +414,100 @@ async def test_apply_patch_move_to_commits_the_destination_before_removing_the_s
     assert staging.name.endswith(".tmp")
     assert moved_to == PurePosixPath("/workspace/Notes.txt")
     assert session.rm_calls == [(cast(Path, PurePosixPath("/workspace/notes.txt")), False)]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_removes_a_source_symlink_pointing_at_the_destination() -> None:
+    """`test -ef` follows symlinks, and the removal decision must not.
+
+    A symlink and its target are one file by device and inode, and two directory entries.
+    Removing the symlink leaves the target alone, so a rename that reads them as the same file
+    leaves the old name behind pointing at the new one.
+    """
+    session = PosixHostApplyPatchSession()
+    link = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    target = cast(Path, PurePosixPath("/workspace/Notes.txt"))
+    session.files[link] = b"alpha\nbeta\n"
+    session.files[target] = b"alpha\nbeta\n"
+    session.symlinks[link] = target
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {target: b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_forwards_follow_symlinks_to_the_inner_session() -> None:
+    """The editor always talks to the instrumented wrapper, never to the session underneath.
+
+    `BaseSandboxSession.apply_patch` builds the editor around `self`, and every client hands
+    out a `SandboxSession`. A wrapper that accepts `follow_symlinks` and drops it leaves the
+    inner session running the plain `-ef` test, and every test above uses a session double that
+    never crosses the wrapper, so nothing else here would notice.
+    """
+    inner = MagicMock()
+    inner.same_file = AsyncMock(return_value=True)
+    session = SandboxSession(inner)
+
+    await session.same_file("/workspace/link.txt", "/workspace/target.txt", follow_symlinks=False)
+
+    # .get, not [], so a wrapper that drops the argument fails on the value rather than
+    # raising KeyError from the assertion itself.
+    assert inner.same_file.await_args.kwargs.get("follow_symlinks") is False
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_the_same_path_writes_in_place() -> None:
+    """A `move_to` that names the path it already has is an update, not a rename.
+
+    Committing it through a staging file would replace the inode, and with it the mode and the
+    extended attributes, for an operation that moves nothing.
+    """
+    session = PosixHostApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="notes.txt",
+        )
+    )
+
+    assert session.files == {source: b"alpha\ngamma\n"}
+    assert session.mv_calls == []
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_a_long_name_keeps_the_staging_name_within_the_limit() -> None:
+    """A staging name built from the destination name overflows the 255-byte basename limit."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+    long_name = "n" * 250 + ".txt"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to=long_name,
+        )
+    )
+
+    assert len(session.mv_calls) == 1
+    staging, _ = session.mv_calls[0]
+    assert len(staging.name.encode("utf-8")) <= 255
+    assert session.files == {PurePosixPath(f"/workspace/{long_name}"): b"alpha\ngamma\n"}
 
 
 @pytest.mark.asyncio

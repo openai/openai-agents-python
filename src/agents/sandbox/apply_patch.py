@@ -228,20 +228,39 @@ class WorkspaceEditor:
 
         So neither path is written or removed until the new content is committed somewhere else:
         the text goes to a staging file, a single `mv` puts it at the destination, and only then
-        is the source removed, and only if the filesystem says it is a different file. Before
+        is the source removed, and only if the filesystem says it is a different entry. Before
         that `mv` the original is untouched; after it the new content exists. There is no moment
         where the only copy is in memory, and nothing is restored after the fact, so a file that
         another writer creates at the source path while this runs is never overwritten.
+
+        The staging file is a new inode, so a rename the filesystem folds onto the source path
+        replaces the original's mode and extended attributes. Carrying those across would mean
+        reading and reapplying them per backend; committing the content in a single `mv` is
+        worth more than the mode bits.
+
+        The staging name is a fixed length rather than a decoration of the destination name,
+        because a destination basename near the filesystem's 255-byte limit would make the
+        decorated name exceed it and the write would fail with ENAMETOOLONG.
         """
-        staging = moved_destination.with_name(f".{moved_destination.name}.{uuid4().hex[:8]}.tmp")
-        await self._write_text(staging, text)
+        if source == moved_destination:
+            # Not a rename, so nothing needs committing elsewhere. Writing in place is what an
+            # update without `move_to` does, and it keeps the inode, the mode and the xattrs.
+            await self._write_text(source, text)
+            return
+
+        staging = moved_destination.with_name(f".apply_patch-{uuid4().hex}.tmp")
         try:
+            await self._write_text(staging, text)
             await self._session.mv(staging, moved_destination, user=self._user)
         except BaseException:
             with contextlib.suppress(Exception):
                 await self._session.rm(staging, user=self._user)
             raise
-        if not await self._session.same_file(source, moved_destination, user=self._user):
+        # A symlink is its own directory entry: removing it leaves the file it points at, so
+        # the source still has to go. `-ef` follows symlinks, so ask without following.
+        if not await self._session.same_file(
+            source, moved_destination, follow_symlinks=False, user=self._user
+        ):
             await self._session.rm(source, user=self._user)
 
     async def _write_text(self, destination: Path, text: str) -> None:

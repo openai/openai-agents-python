@@ -655,9 +655,10 @@ class SandboxSession(BaseSandboxSession):
         left: Path | str,
         right: Path | str,
         *,
+        follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
-        return await self._inner.same_file(left, right, user=user)
+        return await self._inner.same_file(left, right, follow_symlinks=follow_symlinks, user=user)
 
     async def mkdir(
         self,

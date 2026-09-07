@@ -505,9 +505,17 @@ class _ScriptedSandboxSession(ScriptedSandboxSession):
         left: Path | str,
         right: Path | str,
         *,
+        follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
-        return cast(bool, await self._invoke("same_file", (left, right), {"user": user}))
+        return cast(
+            bool,
+            await self._invoke(
+                "same_file",
+                (left, right),
+                {"follow_symlinks": follow_symlinks, "user": user},
+            ),
+        )
 
     async def apply_patch(
         self,

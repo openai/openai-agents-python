@@ -1194,6 +1194,7 @@ class BaseSandboxSession(abc.ABC):
         left: Path | str,
         right: Path | str,
         *,
+        follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
         """Return whether two paths name the same file on the sandbox filesystem.
@@ -1205,8 +1206,15 @@ class BaseSandboxSession(abc.ABC):
         No string comparison can answer this, and neither can the host that is driving the
         session, which may not be the kind of system the sandbox is running on.
 
+        `test -ef` resolves symlinks, so a symlink and the file it points at are the same
+        file by this test while being two directory entries: removing the symlink leaves the
+        file alone. Pass ``follow_symlinks=False`` when the answer is going to decide whether
+        removing one path destroys the other, which makes a symlink on either side answer no.
+
         :param left: First path to compare.
         :param right: Second path to compare.
+        :param follow_symlinks: If false, a symlink on either side is not the same file as
+                its target.
         :param user: Optional sandbox user to compare as.
         :returns: True when both paths resolve to the same file.
         """
@@ -1215,7 +1223,10 @@ class BaseSandboxSession(abc.ABC):
 
         left_arg = sandbox_path_str(left)
         right_arg = sandbox_path_str(right)
-        cmd = ("sh", "-lc", '[ "$1" -ef "$2" ]', "sh", left_arg, right_arg)
+        test = '[ "$1" -ef "$2" ]'
+        if not follow_symlinks:
+            test = '[ ! -L "$1" ] && [ ! -L "$2" ] && ' + test
+        cmd = ("sh", "-lc", test, "sh", left_arg, right_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if result.exit_code == 0:
             return True

@@ -24,6 +24,8 @@ class ApplyPatchSession(BaseSandboxSession):
         self.mkdir_calls: list[tuple[Path, bool]] = []
         self.rm_calls: list[tuple[Path, bool]] = []
         self.mv_calls: list[tuple[Path, Path]] = []
+        # Link path -> target path, for the paths a test declares to be symlinks.
+        self.symlinks: dict[Path, Path] = {}
         self.directories: set[Path] = set()
 
     def _stored_path(self, path: Path | str) -> Path:
@@ -133,10 +135,25 @@ class ApplyPatchSession(BaseSandboxSession):
         left: Path | str,
         right: Path | str,
         *,
+        follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
         _ = user
-        return self._stored_path(left) == self._stored_path(right)
+        if not follow_symlinks and (
+            self._stored_path(left) in self.symlinks or self._stored_path(right) in self.symlinks
+        ):
+            return False
+        return self._resolved_path(left) == self._resolved_path(right)
+
+    def _resolved_path(self, path: Path | str) -> Path:
+        # `-ef` resolves the whole chain, so a fake that follows one hop would answer False
+        # where a real filesystem answers True. The seen set stops a cycle.
+        stored = self._stored_path(path)
+        seen: set[Path] = set()
+        while stored in self.symlinks and stored not in seen:
+            seen.add(stored)
+            stored = self._stored_path(self.symlinks[stored])
+        return stored
 
 
 class PosixHostApplyPatchSession(ApplyPatchSession):
@@ -351,7 +368,8 @@ class UserRecordingApplyPatchSession(ApplyPatchSession):
         left: Path | str,
         right: Path | str,
         *,
+        follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
         self.same_file_users.append(self._user_name(user))
-        return await super().same_file(left, right)
+        return await super().same_file(left, right, follow_symlinks=follow_symlinks)
