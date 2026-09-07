@@ -25,6 +25,7 @@ from agents import (
     Runner,
     Tool,
     ToolSearchTool,
+    WebSearchTool,
     __version__,
     function_tool,
     handoff,
@@ -173,6 +174,79 @@ async def test_unpaired_function_output_preserved_in_responses_request(
             await model.get_response(**request_kwargs)
 
     assert [body["input"] for body in request_bodies] == [[expected_input]]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
+@pytest.mark.parametrize(
+    "tool_options, expected_include",
+    [
+        ({}, []),
+        ({"search_content_types": ["text"]}, []),
+        (
+            {
+                "search_content_types": ["image", "text"],
+                "image_settings": {"max_results": 3, "caption": False},
+            },
+            ["web_search_call.results"],
+        ),
+    ],
+    ids=["default", "text_only", "image_and_text"],
+)
+async def test_web_search_image_options_reach_responses_request(
+    stream: bool, tool_options: dict[str, Any], expected_include: list[str]
+) -> None:
+    """Inspect the provider wire payload, including fields not yet typed by openai-python."""
+    request_bodies: list[dict[str, Any]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        request_bodies.append(json.loads(request.content))
+        if stream:
+            event = _response_completed_frame("resp-id", sequence_number=0)
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {event}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=get_response_obj([]).model_dump_json(),
+            headers={"content-type": "application/json"},
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
+        model = OpenAIResponsesModel(
+            model="gpt-5.6",
+            openai_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+        )
+        request_kwargs: dict[str, Any] = {
+            "system_instructions": None,
+            "input": "Find images of the Golden Gate Bridge.",
+            "model_settings": ModelSettings(),
+            "tools": [WebSearchTool(**tool_options)],
+            "output_schema": None,
+            "handoffs": [],
+            "tracing": ModelTracing.DISABLED,
+        }
+        if stream:
+            async for _ in model.stream_response(**request_kwargs):
+                pass
+        else:
+            await model.get_response(**request_kwargs)
+
+    assert len(request_bodies) == 1
+    body = request_bodies[0]
+    assert body["tools"] == [
+        {
+            "type": "web_search",
+            "filters": None,
+            "user_location": None,
+            "search_context_size": "medium",
+            **tool_options,
+        }
+    ]
+    assert body.get("include", []) == expected_include
 
 
 class DummyWSConnection:

@@ -59,6 +59,7 @@ from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     with_ephemeral_mounts_removed,
 )
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -67,7 +68,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -1033,34 +1033,15 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if entry.output_closed.is_set():
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+    ) -> tuple[bytes, int | None, bool]:
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _finalize_pty_update(
         self,
@@ -1069,10 +1050,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = entry.exit_code if entry.output_closed.is_set() else None
+        exit_code = entry.exit_code if output_closed else None
         live_process_id: int | None = process_id
-        if entry.output_closed.is_set():
+        if output_closed:
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -1220,7 +1202,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -1230,6 +1212,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -1253,7 +1236,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms,
@@ -1267,6 +1250,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:

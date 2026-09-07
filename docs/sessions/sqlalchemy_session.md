@@ -4,10 +4,18 @@
 
 ## Installation
 
-SQLAlchemy sessions require the `sqlalchemy` optional-dependency extra from the `openai-agents` package:
+SQLAlchemy sessions require the `sqlalchemy` optional-dependency extra and an async database driver that matches your database URL.
+
+For the SQLite examples below (`sqlite+aiosqlite://`), install `aiosqlite` alongside the extra:
 
 ```bash
-pip install openai-agents[sqlalchemy]
+pip install 'openai-agents[sqlalchemy]' aiosqlite
+```
+
+The extra already includes `asyncpg` for PostgreSQL URLs that start with `postgresql+asyncpg://`. For MySQL URLs that start with `mysql+aiomysql://`, install `aiomysql` alongside the extra. The driver's `rsa` extra supplies dependencies for MySQL's SHA-256 authentication methods:
+
+```bash
+pip install 'openai-agents[sqlalchemy]' 'aiomysql[rsa]'
 ```
 
 ## Quick start

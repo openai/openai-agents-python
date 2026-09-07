@@ -2189,9 +2189,18 @@ class Converter:
             }
             if tool.external_web_access is not None:
                 web_search_tool["external_web_access"] = tool.external_web_access
+            if tool.search_content_types is not None:
+                web_search_tool["search_content_types"] = list(tool.search_content_types)
+            if tool.image_settings is not None:
+                web_search_tool["image_settings"] = dict(tool.image_settings)
+            web_search_include: ResponseIncludable | None = (
+                "web_search_call.results"
+                if tool.search_content_types is not None and "image" in tool.search_content_types
+                else None
+            )
             return (
                 _require_responses_tool_param(web_search_tool),
-                None,
+                web_search_include,
             )
         elif isinstance(tool, FileSearchTool):
             file_search_tool_param: FileSearchToolParam = {

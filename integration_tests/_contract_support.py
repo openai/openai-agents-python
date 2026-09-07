@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from typing import Any
 
+import typing_extensions
+
 from integration_tests import _contract_surface as surface, _contract_validation as validation
 
 
@@ -235,6 +237,28 @@ def build_released_api_contract(
     released_exports = set(released_export_order)
     current_export_names = set(current_exports)
     if release_policy is not None:
+        promoted_top_level_typed_dicts = {
+            entry["class_name"]: set(entry["names"])
+            for entry in release_policy.public_typed_dicts
+            if entry["module"] == "agents"
+        }
+        for name in sorted(current_export_names - released_exports):
+            value = getattr(agents, name)
+            if not typing_extensions.is_typeddict(value):
+                continue
+            if name not in promoted_top_level_typed_dicts:
+                raise ValueError(
+                    f"Cannot promote new top-level TypedDict agents.{name} without a "
+                    "public_typed_dicts policy entry for module 'agents'"
+                )
+            missing_fields = sorted(
+                set(value.__annotations__) - promoted_top_level_typed_dicts[name]
+            )
+            if missing_fields:
+                raise ValueError(
+                    f"Cannot promote new top-level TypedDict agents.{name} without "
+                    f"public_typed_dicts policy fields: {missing_fields!r}"
+                )
         promoted_top_level_type_aliases = {
             entry["name"]
             for entry in release_policy.public_type_aliases

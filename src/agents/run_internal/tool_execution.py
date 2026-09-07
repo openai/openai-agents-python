@@ -1852,7 +1852,12 @@ class _FunctionToolBatchExecutor:
                 raise UserError(f"Error running tool {func_tool.name}: {e}") from e
 
             if self.config.trace_include_sensitive_data:
-                span_fn.span_data.output = result
+                # Approval short-circuits return the FunctionToolResult wrapper rather than the
+                # tool's own output, so read the output off it the way every other consumer of
+                # this value does (see `_build_function_tool_results`).
+                span_fn.span_data.output = (
+                    result.output if isinstance(result, FunctionToolResult) else result
+                )
             return result
 
     async def _maybe_execute_tool_approval(
@@ -1966,7 +1971,13 @@ class _FunctionToolBatchExecutor:
         )
         span_fn.set_error(
             SpanError(
-                message=rejection_message,
+                # The rejection message is app-supplied text, so it reaches the exported span
+                # under the same sensitive-data gate as the tool output above.
+                message=_error_tracing.get_trace_error(
+                    trace_include_sensitive_data=self.config.trace_include_sensitive_data,
+                    error_message=rejection_message,
+                    redacted_message="Tool execution rejected",
+                ),
                 data={
                     "tool_name": func_tool.name,
                     "error": (
@@ -1975,7 +1986,6 @@ class _FunctionToolBatchExecutor:
                 },
             )
         )
-        span_fn.span_data.output = rejection_message
         return FunctionToolResult(
             tool=func_tool,
             output=rejection_message,

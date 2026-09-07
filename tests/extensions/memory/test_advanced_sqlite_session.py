@@ -3442,6 +3442,46 @@ async def test_store_run_usage_survives_unrelated_branch_deletion(usage_data: Us
         session.close()
 
 
+async def test_store_run_usage_skips_when_current_branch_has_no_turn(usage_data: Usage):
+    """A branch without any turn rows has no turn to attribute a run's usage to, so
+    store_run_usage skips the write instead of recording a phantom turn 0.
+    """
+    session = AdvancedSQLiteSession(session_id="usage_no_turn_test", create_tables=True)
+
+    try:
+        # A fresh session has no turn on the current branch.
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert await session.get_turn_usage() == []
+
+        # A branch whose only turn was popped away has no turn either.
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        await session.pop_item()
+        await session.pop_item()
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert _count_rows(session, "turn_usage") == 0
+
+        # Once a real turn exists, usage is recorded against it.
+        await session.add_items([{"role": "user", "content": "u2"}])
+        second_usage = Usage(requests=2, input_tokens=20, output_tokens=5, total_tokens=25)
+        await session.store_run_usage(create_mock_run_result(second_usage))
+        session_usage = await session.get_session_usage()
+        assert session_usage is not None
+        assert session_usage["requests"] == 2
+        assert session_usage["total_turns"] == 1
+        turn_usage = await session.get_turn_usage()
+        assert isinstance(turn_usage, list)
+        assert [row["user_turn_number"] for row in turn_usage] == [1]
+    finally:
+        session.close()
+
+
 async def test_clear_session_resets_current_branch_to_main():
     """Regression: clear_session must reset the in-memory branch pointer to 'main'
     (inside the locked operation) since every branch was removed.
