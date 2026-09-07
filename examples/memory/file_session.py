@@ -47,7 +47,7 @@ class FileSession(Session):
         session_id = await self._ensure_session_id()
         items = await self._read_items(session_id)
         if limit is not None and limit >= 0:
-            return items[-limit:]
+            return items[-limit:] if limit else []
         return items
 
     async def add_items(self, items: list[Any]) -> None:
