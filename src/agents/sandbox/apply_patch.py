@@ -4,6 +4,7 @@ import contextlib
 import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from uuid import uuid4
 
 from ..apply_diff import ApplyDiffMode, apply_diff
 from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
@@ -112,23 +113,11 @@ class WorkspaceEditor:
 
             moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
-            # A sandbox filesystem that folds case stores notes.txt and Notes.txt as one file, so
-            # removing the source after the write would delete the text that was just written.
-            # Removing the source first renames the file on a case-folding filesystem and on a
-            # case-sensitive one. Every other rename keeps the write-then-remove order so a failed
-            # write leaves the source intact.
-            if _is_case_only_rename(destination, moved_destination):
-                await self._session.rm(destination, user=self._user)
-                await self._write_moved_text(
-                    moved_destination,
-                    updated_text,
-                    restore_destination=destination,
-                    restore_text=original_text,
-                )
-            else:
-                await self._write_text(moved_destination, updated_text)
-                if moved_destination != destination:
-                    await self._session.rm(destination, user=self._user)
+            await self._move_updated_text(
+                source=destination,
+                moved_destination=moved_destination,
+                text=updated_text,
+            )
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
@@ -224,27 +213,36 @@ class WorkspaceEditor:
             path=op_path,
         )
 
-    async def _write_moved_text(
+    async def _move_updated_text(
         self,
-        destination: Path,
-        text: str,
         *,
-        restore_destination: Path,
-        restore_text: str,
+        source: Path,
+        moved_destination: Path,
+        text: str,
     ) -> None:
-        """Write a rename destination whose source was already removed, restoring it on failure.
+        """Apply an update that renames the file, without a window in which it does not exist.
 
-        The source is gone while this write is in flight, so a sandbox write that fails partway
-        through, for example on a dropped connection to a remote session, would otherwise leave
-        the file in neither place. The original text is still in memory, so put it back before
-        the failure propagates.
+        Writing the destination and then removing the source destroys the file whenever the two
+        paths are one file on disk, which is what a case-only rename is on a filesystem that
+        folds case. Removing the source first destroys it whenever the replacement write fails.
+
+        So neither path is written or removed until the new content is committed somewhere else:
+        the text goes to a staging file, a single `mv` puts it at the destination, and only then
+        is the source removed, and only if the filesystem says it is a different file. Before
+        that `mv` the original is untouched; after it the new content exists. There is no moment
+        where the only copy is in memory, and nothing is restored after the fact, so a file that
+        another writer creates at the source path while this runs is never overwritten.
         """
+        staging = moved_destination.with_name(f".{moved_destination.name}.{uuid4().hex[:8]}.tmp")
+        await self._write_text(staging, text)
         try:
-            await self._write_text(destination, text)
+            await self._session.mv(staging, moved_destination, user=self._user)
         except BaseException:
             with contextlib.suppress(Exception):
-                await self._write_text(restore_destination, restore_text)
+                await self._session.rm(staging, user=self._user)
             raise
+        if not await self._session.same_file(source, moved_destination, user=self._user):
+            await self._session.rm(source, user=self._user)
 
     async def _write_text(self, destination: Path, text: str) -> None:
         await self._session.mkdir(destination.parent, parents=True, user=self._user)
@@ -253,16 +251,6 @@ class WorkspaceEditor:
             io.BytesIO(text.encode("utf-8")),
             user=self._user,
         )
-
-
-def _is_case_only_rename(source: Path, destination: Path) -> bool:
-    """Return whether two sandbox paths are distinct and differ only in character case."""
-
-    source_posix = source.as_posix()
-    destination_posix = destination.as_posix()
-    if source_posix == destination_posix:
-        return False
-    return source_posix.casefold() == destination_posix.casefold()
 
 
 def _coerce_operations(

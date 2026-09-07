@@ -286,7 +286,7 @@ Each matching Sandbox call consumes the next step in one global FIFO sequence. A
 | `error` | The method should raise a specific exception |
 | `match` | The call should be rejected before producing its outcome unless the matcher returns a value other than `False` |
 
-The supported scripted method names are `apply_patch`, `exec`, `ls`, `mkdir`, `pty_exec_start`, `pty_write_stdin`, `read`, `rm`, and `write`. Only configured model-facing capabilities are exposed. The two PTY methods are exposed together when either PTY method is configured because they form one interactive-shell capability, but calls still consume the global FIFO script.
+The supported scripted method names are `apply_patch`, `exec`, `ls`, `mkdir`, `mv`, `pty_exec_start`, `pty_write_stdin`, `read`, `rm`, `same_file`, and `write`. Only configured model-facing capabilities are exposed. The two PTY methods are exposed together when either PTY method is configured because they form one interactive-shell capability, but calls still consume the global FIFO script.
 
 `sandbox.calls` contains detached `SandboxCall` snapshots with zero-based `call_index`, `method`, positional `args`, and read-only `kwargs`. Static results are also snapshotted when the script is created. `io.BytesIO` and `io.StringIO` values are supported; use a custom Sandbox session for other live stream objects or lifecycle behavior.
 

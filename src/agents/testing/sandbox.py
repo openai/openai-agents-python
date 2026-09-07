@@ -27,10 +27,12 @@ SandboxMethod = Literal[
     "exec",
     "ls",
     "mkdir",
+    "mv",
     "pty_exec_start",
     "pty_write_stdin",
     "read",
     "rm",
+    "same_file",
     "write",
 ]
 SandboxStepReason = Literal["invalid_input", "unknown_method", "invalid_matcher", "invalid_outcome"]
@@ -488,6 +490,24 @@ class _ScriptedSandboxSession(ScriptedSandboxSession):
         user: str | User | None = None,
     ) -> None:
         await self._invoke("mkdir", (path,), {"parents": parents, "user": user})
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await self._invoke("mv", (source, destination), {"user": user})
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> bool:
+        return cast(bool, await self._invoke("same_file", (left, right), {"user": user}))
 
     async def apply_patch(
         self,

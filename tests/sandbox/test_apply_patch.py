@@ -16,6 +16,8 @@ from agents.sandbox.errors import (
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     CaseFoldingApplyPatchSession,
+    ConcurrentWriterApplyPatchSession,
+    NormalizationFoldingApplyPatchSession,
     PosixHostApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
     WriteFailureApplyPatchSession,
@@ -288,8 +290,8 @@ async def test_apply_patch_case_only_move_to_moves_file_on_case_sensitive_filesy
 
 
 @pytest.mark.asyncio
-async def test_apply_patch_case_only_move_to_restores_source_when_write_fails() -> None:
-    """The source is removed before the write, so a failed write must put the file back."""
+async def test_apply_patch_move_to_leaves_the_source_alone_when_the_write_fails() -> None:
+    """Nothing is removed until the replacement is committed, so a failed write changes nothing."""
     session = WriteFailureApplyPatchSession()
     session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
 
@@ -304,6 +306,110 @@ async def test_apply_patch_case_only_move_to_restores_source_when_write_fails() 
         )
 
     assert session.files == {PurePosixPath("/workspace/notes.txt"): b"alpha\nbeta\n"}
+    # The file surviving is not enough. The refused implementation removed the source and then
+    # wrote it back, which also ends here. Nothing may be removed at all.
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_does_not_overwrite_a_concurrent_writer_after_a_failure() -> None:
+    """A failed move must not restore the original over a file another writer just created.
+
+    The operation cannot finish once the move fails. The question is what it leaves behind. An
+    implementation that kept the original text in memory and wrote it back at the source path
+    would destroy whatever arrived there in the meantime.
+    """
+    session = ConcurrentWriterApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+    session.concurrent_source = source
+
+    with pytest.raises(ConnectionError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="Notes.txt",
+            )
+        )
+
+    assert session.files[source] == b"written by someone else\n"
+    assert PurePosixPath("/workspace/Notes.txt") not in session.files
+    assert not [path for path in session.files if path.name.endswith(".tmp")]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_keeps_the_file_when_only_unicode_normalization_changes() -> None:
+    """APFS folds NFC against NFD, so the two spellings of one accented name are one file.
+
+    `str.casefold` does not normalize, so any fix that compares folded strings sends this pair
+    down the path that destroys it. Asking the filesystem covers it without naming the case.
+    """
+    session = NormalizationFoldingApplyPatchSession()
+    decomposed = "/workspace/cafe\u0301.txt"
+    composed = "/workspace/caf\u00e9.txt"
+    session.files[cast(Path, PurePosixPath(decomposed))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path=decomposed,
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to=composed,
+        )
+    )
+
+    assert session.files == {PurePosixPath(composed): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_an_existing_directory_keeps_the_source() -> None:
+    """`mv` moves a file into a directory destination and calls that success.
+
+    The source would then be removed on the strength of that success, and the operation would
+    report a move that did not happen. `move_to` comes from the model, so this is reachable.
+    """
+    session = PosixHostApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+    session.directories.add(cast(Path, PurePosixPath("/workspace/docs")))
+
+    with pytest.raises(IsADirectoryError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="docs",
+            )
+        )
+
+    assert session.files[source] == b"alpha\nbeta\n"
+    assert not [path for path in session.files if path.name.endswith(".tmp")]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_commits_the_destination_before_removing_the_source() -> None:
+    """The order is the fix. Assert it directly, so a future reordering fails here."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert len(session.mv_calls) == 1
+    staging, moved_to = session.mv_calls[0]
+    assert staging.parent == PurePosixPath("/workspace")
+    assert staging.name.endswith(".tmp")
+    assert moved_to == PurePosixPath("/workspace/Notes.txt")
+    assert session.rm_calls == [(cast(Path, PurePosixPath("/workspace/notes.txt")), False)]
 
 
 @pytest.mark.asyncio

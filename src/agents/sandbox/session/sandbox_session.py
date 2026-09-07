@@ -641,6 +641,24 @@ class SandboxSession(BaseSandboxSession):
     ) -> None:
         await self._inner.rm(path, recursive=recursive, user=user)
 
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await self._inner.mv(source, destination, user=user)
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> bool:
+        return await self._inner.same_file(left, right, user=user)
+
     async def mkdir(
         self,
         path: Path | str,

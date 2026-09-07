@@ -1146,6 +1146,89 @@ class BaseSandboxSession(abc.ABC):
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
 
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Rename a path, replacing the destination if it exists.
+
+        This is a rename, not `mv`'s other behavior. Given an existing directory as the
+        destination, `mv` puts the source inside it and reports success, which for a caller
+        that then removes the source is a way to delete a file while believing it moved. The
+        destination is checked in the same shell invocation as the move, which keeps the
+        check and the move in one round trip. It does not make them one syscall.
+
+        `mv -T` would say this directly and is GNU-only, so it is unavailable on the BSD
+        userland this also has to run against.
+
+        :param source: Path to move.
+        :param destination: Path to move it to.
+        :param user: Optional sandbox user to move as.
+        :raises ExecNonZeroError: If the destination is an existing directory, or the move
+                fails.
+        """
+        source = await self._validate_path_access(source, for_write=True)
+        destination = await self._validate_path_access(destination, for_write=True)
+
+        source_arg = sandbox_path_str(source)
+        destination_arg = sandbox_path_str(destination)
+        cmd = (
+            "sh",
+            "-lc",
+            'if [ -d "$2" ]; then exit 3; fi\nmv -f -- "$1" "$2"',
+            "sh",
+            source_arg,
+            destination_arg,
+        )
+        result = await self.exec(*cmd, shell=False, user=user)
+        if not result.ok():
+            raise ExecNonZeroError(
+                result, command=("sh", "-lc", "<mv>", source_arg, destination_arg)
+            )
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> bool:
+        """Return whether two paths name the same file on the sandbox filesystem.
+
+        This asks the filesystem, through `test -ef`, which compares device and inode. Two
+        paths that differ as strings can be one file: a filesystem that folds case stores
+        `notes.txt` and `Notes.txt` as a single entry, and APFS folds Unicode normalization
+        as well, so the NFC and NFD spellings of one accented name are also a single entry.
+        No string comparison can answer this, and neither can the host that is driving the
+        session, which may not be the kind of system the sandbox is running on.
+
+        :param left: First path to compare.
+        :param right: Second path to compare.
+        :param user: Optional sandbox user to compare as.
+        :returns: True when both paths resolve to the same file.
+        """
+        left = await self._validate_path_access(left)
+        right = await self._validate_path_access(right)
+
+        left_arg = sandbox_path_str(left)
+        right_arg = sandbox_path_str(right)
+        cmd = ("sh", "-lc", '[ "$1" -ef "$2" ]', "sh", left_arg, right_arg)
+        result = await self.exec(*cmd, shell=False, user=user)
+        if result.exit_code == 0:
+            return True
+        # `[` answers "different file" with 1 and reports its own failures with 2, and a
+        # missing shell exits 127. Only 1 is an answer; anything else is the session
+        # failing to tell us, and a caller about to delete a file on the strength of this
+        # must not read that as "different".
+        if result.exit_code == 1:
+            return False
+        raise ExecNonZeroError(
+            result, command=("sh", "-lc", "<same_file_check>", left_arg, right_arg)
+        )
+
     async def mkdir(
         self,
         path: Path | str,
