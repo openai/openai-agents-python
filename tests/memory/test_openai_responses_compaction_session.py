@@ -2383,3 +2383,88 @@ async def test_manual_old_response_compaction_queued_behind_append_is_rejected()
 
     client.responses.compact.assert_not_awaited()
     assert await underlying.get_items() == [old, new]
+
+
+@pytest.mark.asyncio
+async def test_rejected_stale_manual_response_chain_is_invalidated() -> None:
+    old = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "old"})
+    new = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "new"})
+    underlying = SimpleListSession(history=[old])
+    add_started = asyncio.Event()
+    allow_add = asyncio.Event()
+    original_add = underlying.add_items
+
+    async def blocking_add(items: list[TResponseInputItem]) -> None:
+        add_started.set()
+        await allow_add.wait()
+        await original_add(items)
+
+    underlying.add_items = blocking_add  # type: ignore[method-assign]
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[old], usage=None))
+    session = OpenAIResponsesCompactionSession(
+        session_id="stale-chain-invalidated",
+        underlying_session=underlying,
+        client=client,
+        compaction_mode="previous_response_id",
+    )
+    session._response_id = "resp-old"
+
+    append_task = asyncio.create_task(session.add_items([new]))
+    await add_started.wait()
+    stale_task = asyncio.create_task(
+        session.run_compaction({"response_id": "resp-old", "force": True})
+    )
+    await asyncio.sleep(0)
+    allow_add.set()
+    await append_task
+    await stale_task
+
+    assert session._response_id is None
+    with pytest.raises(ValueError, match="requires a response_id"):
+        await session.run_compaction({"force": True, "compaction_mode": "previous_response_id"})
+    client.responses.compact.assert_not_awaited()
+    assert await underlying.get_items() == [old, new]
+
+
+@pytest.mark.asyncio
+async def test_manual_input_compaction_queued_behind_append_still_runs() -> None:
+    old = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "old"})
+    new = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "new"})
+    compacted = cast(TResponseInputItem, {"type": "compaction", "summary": "ok"})
+    underlying = SimpleListSession(history=[old])
+    add_started = asyncio.Event()
+    allow_add = asyncio.Event()
+    original_add = underlying.add_items
+
+    async def blocking_add(items: list[TResponseInputItem]) -> None:
+        add_started.set()
+        await allow_add.wait()
+        await original_add(items)
+
+    underlying.add_items = blocking_add  # type: ignore[method-assign]
+    client = MagicMock()
+    client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(output=[compacted], usage=None)
+    )
+    session = OpenAIResponsesCompactionSession(
+        session_id="queued-input-safe",
+        underlying_session=underlying,
+        client=client,
+        compaction_mode="input",
+    )
+
+    append_task = asyncio.create_task(session.add_items([new]))
+    await add_started.wait()
+    compact_task = asyncio.create_task(
+        session.run_compaction({"force": True, "compaction_mode": "input"})
+    )
+    await asyncio.sleep(0)
+    allow_add.set()
+    await append_task
+    await compact_task
+
+    client.responses.compact.assert_awaited_once()
+    assert client.responses.compact.await_args is not None
+    assert client.responses.compact.await_args.kwargs["input"] == [old, new]
+    assert await underlying.get_items() == [compacted]

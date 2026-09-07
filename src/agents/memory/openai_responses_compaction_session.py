@@ -218,11 +218,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 not has_expected_generation
                 and pre_lock_mutation_generation != self._mutation_generation
             ):
-                logger.warning(
-                    "Skipped compaction because Session history changed while this "
-                    "manual compaction waited for mutation ownership."
+                guard_response_id = (
+                    args.get("response_id")
+                    if args and args.get("response_id")
+                    else self._response_id
                 )
-                return
+                guard_store = args.get("store") if args and "store" in args else None
+                guard_requested_mode = args.get("compaction_mode") if args else None
+                guard_mode = self._resolve_compaction_mode_for_response(
+                    response_id=guard_response_id,
+                    store=guard_store,
+                    requested_mode=guard_requested_mode,
+                )
+                if guard_mode == "previous_response_id":
+                    self._invalidate_response_chain()
+                    logger.warning(
+                        "Skipped compaction because Session history changed while this "
+                        "manual response-chain compaction waited for mutation ownership."
+                    )
+                    return
             await self._run_compaction_locked(args, wrapper=wrapper)
 
     async def _run_compaction_locked(
