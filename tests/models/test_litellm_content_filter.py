@@ -3,16 +3,19 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal
 
+from agents.exceptions import ModelBehaviorError
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
 
 
-async def _get_response(monkeypatch, *, finish_reason, content):
+async def _get_response(monkeypatch, *, finish_reason, content, reasoning_content=None):
     """Drive get_response against a mocked litellm completion and return the items."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content=content)
+        if reasoning_content is not None:
+            msg.reasoning_content = reasoning_content
         choice = Choices(index=0, finish_reason=finish_reason, message=msg)
         return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
 
@@ -87,3 +90,26 @@ async def test_normal_stop_is_unaffected(monkeypatch):
         if isinstance(content, ResponseOutputRefusal)
     ]
     assert not refusals
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_length_without_output_raises_model_behavior_error(monkeypatch):
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await _get_response(monkeypatch, finish_reason="length", content=None)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_length_with_partial_content_is_preserved(monkeypatch):
+    resp = await _get_response(monkeypatch, finish_reason="length", content="partial answer")
+    assert resp.output
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_length_with_reasoning_only_is_preserved(monkeypatch):
+    resp = await _get_response(
+        monkeypatch, finish_reason="length", content=None, reasoning_content="internal reasoning"
+    )
+    assert resp.output and resp.output[0].type == "reasoning"

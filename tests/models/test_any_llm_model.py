@@ -2350,3 +2350,83 @@ async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) ->
     assert isinstance(terminal, ResponseCompletedEvent)
     assert terminal.response.usage is not None
     assert _requests_for_response_without_usage(terminal.response) == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [None, ""])
+async def test_any_llm_length_without_output_raises_model_behavior_error(
+    content: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = ChatCompletion(
+        id="chatcmpl_length",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+    )
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=response)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini", api="chat_completions")
+    with pytest.raises(ModelBehaviorError, match="finish_reason='length'"):
+        await model.get_response(None, "hi", ModelSettings(), [], None, [], ModelTracing.DISABLED)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_length_with_partial_content_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = ChatCompletion(
+        id="chatcmpl_length_partial",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="length",
+                message=ChatCompletionMessage(role="assistant", content="partial answer"),
+            )
+        ],
+        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+    )
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=response)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini", api="chat_completions")
+    result = await model.get_response(
+        None, "hi", ModelSettings(), [], None, [], ModelTracing.DISABLED
+    )
+    assert result.output
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_any_llm_length_with_reasoning_only_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = ChatCompletionMessage.model_validate(
+        {"role": "assistant", "content": None, "reasoning_content": "internal reasoning"}
+    )
+    response = ChatCompletion(
+        id="chatcmpl_reasoning",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[Choice(index=0, finish_reason="length", message=message)],
+        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+    )
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=response)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini", api="chat_completions")
+    result = await model.get_response(
+        None, "hi", ModelSettings(), [], None, [], ModelTracing.DISABLED
+    )
+    assert result.output and result.output[0].type == "reasoning"

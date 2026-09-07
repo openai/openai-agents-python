@@ -334,6 +334,22 @@ class LitellmModel(Model):
                     )
                     message.provider_specific_fields = provider_specific_fields
 
+            if message is not None and first_choice is not None:
+                provider_specific_fields = getattr(message, "provider_specific_fields", None) or {}
+                if (
+                    getattr(first_choice, "finish_reason", None) == "length"
+                    and not message.content
+                    and not getattr(message, "refusal", None)
+                    and not provider_specific_fields.get("refusal")
+                    and not getattr(message, "tool_calls", None)
+                    and not getattr(message, "reasoning_content", None)
+                    and not getattr(message, "thinking_blocks", None)
+                ):
+                    raise ModelBehaviorError(
+                        "Chat Completions response terminated with finish_reason='length' "
+                        "but produced no assistant text, tool call, or refusal."
+                    )
+
             # Build provider_data for provider specific fields
             provider_data: dict[str, Any] = {"model": self.model}
             if message is not None and hasattr(response, "id"):
