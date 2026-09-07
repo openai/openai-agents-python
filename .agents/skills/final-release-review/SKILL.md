@@ -167,7 +167,11 @@ These checks make the final-candidate review a release gate. The report remains 
 
 ## Output format (required)
 
-Produce the report in English using this structure. Always use the fixed compare URL `https://github.com/openai/openai-agents-python/compare/<tag>...<target-commit>`.
+Produce the report in English using this structure and the repository's `AGENTS.md` section "GitHub-ready Output". Deliver the entire report, including any Key Changes draft, inside one copyable `markdown` code block by default; the template below is the literal content of that block. Honor an explicit request for raw text without fences.
+
+Inside the report, use the fixed compare URL `https://github.com/openai/openai-agents-python/compare/<tag>...<target-commit>` as a bare URL. Use native GitHub references such as `#123` for documentation and version PRs. Do not create Markdown links or wrap an already rendered link again. Use repository-relative paths in inline code for file evidence, never absolute local paths or local-file links. If the user requests no file paths, use affected component or documentation section names, including in the risk fields. Keep host-specific citations and annotations outside the report's code block.
+
+Before sending, check the copyable source for one intact compare URL, native PR references, portable file evidence, and absence of nested link wrappers or host-specific markup. Preserve the review's original evidence and scope when only correcting its formatting.
 
 ```markdown
 ### Release readiness review (<tag> -> TARGET <ref>)
@@ -199,12 +203,12 @@ https://github.com/openai/openai-agents-python/compare/<tag>...<target-commit>
 1. **<Finding or release consideration title>**
    - Risk: **<🟢 LOW | 🟡 MODERATE | 🔴 HIGH>**. <Impact statement.>
    - Evidence: <specific BASE-versus-TARGET evidence>
-   - Files: <path(s)>
+   - Files: <repository-relative paths, or affected components when paths are excluded>
    - Action: <next step and pass condition>
 
 ### Documentation coverage (non-blocking)
 
-- Coverage source: <PR URL/number and head SHA, multiple PRs, none found after a successful search, or search unavailable/partial>
+- Coverage source: <native PR reference and head SHA, multiple PRs, none found after a successful search, or search unavailable/partial>
 - Status: <covered | partially covered | not covered | stale/conflicting | unverified>
 - Covered obligations: <concise list or none>
 - Gaps or post-release suggestions: <exact files/sections/claims, or none>

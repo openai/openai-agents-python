@@ -420,7 +420,7 @@ Notes:
 -   `from_address(...)` creates and owns the Dapr client for you. If your app already manages one, construct `DaprSession(...)` directly with `dapr_client=...`.
 -   Exiting the context or calling `close()` makes an owned-client session terminal; subsequent session operations raise `RuntimeError`, while repeated or concurrent `close()` calls are safe. With an injected client, `close()` is a no-op and the session remains usable.
 -   If the backing state store supports TTL, pass `ttl=...` so it automatically applies TTL expiration to the session data.
--   Pass `consistency=DAPR_CONSISTENCY_STRONG` when you need stronger read-after-write guarantees.
+-   Pass `consistency=DAPR_CONSISTENCY_STRONG` to request strong consistency on state writes and deletes (store-dependent). Note that wire-level read consistency requires upstream Dapr Python client support for setting consistency on `get_state`.
 -   The Dapr Python SDK also checks the HTTP sidecar endpoint. In local development, start Dapr with `--dapr-http-port 3500` as well as the gRPC port used in `dapr_address`.
 -   See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py) for a full setup walkthrough, including local components and troubleshooting.
 
