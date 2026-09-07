@@ -127,7 +127,11 @@ class WorkspaceEditor:
                     path=operation.path,
                     cause=exc,
                 ) from exc
-            await self._write_new_text(destination, created_text, display_path=display_path)
+            # Hand over the unresolved path. destination has already been through
+            # normalize_path(), which resolves leaf symlinks on some backends, so passing
+            # it would ask the backend to create the link target instead of the requested
+            # name and a dangling link would be reported as a successful create.
+            await self._write_new_text(relative_path, created_text, display_path=display_path)
             return ApplyPatchResult(output=f"Created {display_path}")
 
         raise ApplyPatchDiffError(

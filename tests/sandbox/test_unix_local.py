@@ -14,8 +14,9 @@ from typing import cast
 
 import pytest
 
+from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import ApplyPatchDiffError, PtySessionNotFoundError
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -677,6 +678,7 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
         self.exec_commands: list[tuple[str, ...]] = []
         self.writes: list[Path] = []
         self.removed: list[Path] = []
+        self.made_dirs: list[Path] = []
 
     async def _exec_internal(
         self,
@@ -701,6 +703,16 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
         _ = (recursive, user)
         self.removed.append(Path(path))
 
+    async def mkdir(
+        self,
+        path: Path | str,
+        *,
+        parents: bool = False,
+        user: object = None,
+    ) -> None:
+        _ = (parents, user)
+        self.made_dirs.append(Path(path))
+
 
 @pytest.mark.asyncio
 async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
@@ -717,6 +729,7 @@ async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_pat
     assert [path.name for path in session.writes] != ["notes.txt"]
     assert all(path.name.startswith(".notes.txt.create-") for path in session.writes)
     assert session.removed == session.writes
+    assert session.made_dirs != []
 
 
 @pytest.mark.asyncio
@@ -792,6 +805,79 @@ def test_exclusive_create_script_reports_a_taken_name_on_each_shell(
     assert run(dangling) == _EXCLUSIVE_CREATE_EXISTS_CODE
     assert not (tmp_path / "missing.txt").exists()
 
+    # The caller creates the parent, so the script only has to claim the name.
     fresh = tmp_path / "nested" / "fresh.txt"
+    fresh.parent.mkdir()
     assert run(fresh) == 0
     assert fresh.read_bytes() == b"payload"
+
+    existing_directory = tmp_path / "adir"
+    existing_directory.mkdir()
+    assert run(existing_directory) == _EXCLUSIVE_CREATE_EXISTS_CODE
+    assert list(existing_directory.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    """Drive the real caller path.
+
+    WorkspaceEditor normalizes the destination before dispatching, and this backend
+    resolves leaf symlinks, so a create aimed at a dangling link used to land on the
+    link's absent target and report success.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="link.txt", diff="+clobbered\n")
+        )
+
+    assert not (tmp_path / "missing.txt").exists()
+    assert (tmp_path / "link.txt").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_directory(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "adir").mkdir()
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="adir", diff="+clobbered\n")
+        )
+
+    assert list((tmp_path / "adir").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_keeps_existing_content(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (tmp_path / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_writes_a_new_nested_file(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="nested/dir/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "nested" / "dir" / "new.txt").read_text() == "hello"
+    assert not any(p.name.startswith(".") for p in (tmp_path / "nested" / "dir").iterdir())
