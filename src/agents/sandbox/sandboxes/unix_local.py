@@ -1054,6 +1054,46 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
+    async def write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        if user is not None:
+            await super().write_new_file(path, data, user=user)
+            return
+
+        payload = coerce_write_payload(path=path, data=data)
+        # Validate the parent with the normal policy so grants and symlinked parents are
+        # still enforced, then keep the final component unresolved. normalize_path()
+        # resolves symlinks, which would turn a dangling link at the target name into its
+        # absent target and let the write land there instead of being rejected.
+        requested = Path(path)
+        parent_path = self.normalize_path(requested.parent, for_write=True)
+        workspace_path = parent_path / requested.name
+        # O_EXCL fails with EEXIST when the name is already taken, including by a symlink,
+        # so the name is claimed in the same syscall that creates the file.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            parent_path.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(workspace_path, flags, 0o644)
+        except FileExistsError:
+            raise
+        except OSError as e:
+            if e.errno in {errno.ELOOP, errno.EMLINK}:
+                raise FileExistsError(str(workspace_path)) from e
+            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+
+        try:
+            with os.fdopen(descriptor, "wb") as f:
+                shutil.copyfileobj(payload.stream, f)
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+
     async def _write_stream_with_exec(
         self,
         path: Path,
