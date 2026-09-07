@@ -192,6 +192,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # Reject a caller-supplied retained chain if a destructive mutation completed
         # while this call was waiting to acquire compaction ownership.
         pre_lock_invalidation_generation = self._response_chain_invalidation_generation
+        pre_lock_mutation_generation = self._mutation_generation
         async with self._mutation_lock:
             if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
                 logger.debug("skip: response chain invalidated while waiting for mutation lock")
@@ -211,6 +212,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 logger.warning(
                     "Skipped compaction because Session history changed after this "
                     "run appended its items."
+                )
+                return
+            if (
+                not has_expected_generation
+                and pre_lock_mutation_generation != self._mutation_generation
+            ):
+                logger.warning(
+                    "Skipped compaction because Session history changed while this "
+                    "manual compaction waited for mutation ownership."
                 )
                 return
             await self._run_compaction_locked(args, wrapper=wrapper)
