@@ -450,13 +450,24 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
-        if self._deferred_response_id is not None:
-            return
-        response_chain_generation = self._response_chain_generation
+        pre_lock_invalidation_generation = self._response_chain_invalidation_generation
+        async with self._mutation_lock:
+            if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
+                return
+            if response_id != self._response_id:
+                self._response_id = response_id
+                self._response_chain_generation += 1
+            if store is False and self._response_id:
+                self._last_unstored_response_id = self._response_id
+            elif store is True and self._response_id == self._last_unstored_response_id:
+                self._last_unstored_response_id = None
+            invalidation_generation = self._response_chain_invalidation_generation
+            if self._deferred_response_id is not None:
+                return
         (
             compaction_candidate_items,
             session_items,
-            history_generation,
+            _history_generation,
         ) = await self._ensure_compaction_candidates()
         resolved_mode = self._resolve_compaction_mode_for_response(
             response_id=response_id,
@@ -475,8 +486,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
         async with self._mutation_lock:
             if (
-                response_chain_generation != self._response_chain_generation
-                or history_generation != self._history_generation
+                invalidation_generation != self._response_chain_invalidation_generation
                 or self._deferred_response_id is not None
             ):
                 return
