@@ -22,6 +22,7 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSessionState,
     _UnixPtyProcessEntry,
 )
+from agents.sandbox.session.pty_types import truncate_text_by_tokens
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
 
@@ -335,14 +336,38 @@ class TestUnixLocalPty:
         update = await session._finalize_pty_update(
             process_id=process_id,
             entry=entry,
-            output=b"prefix ",
-            original_token_count=None,
+            raw_output=b"prefix ",
+            max_output_tokens=None,
         )
 
         assert update.exit_code == 0
         assert update.process_id is None
         assert update.output == "prefix 中\n".encode()
         assert not entry.output_chunks
+
+    @pytest.mark.asyncio
+    async def test_finalize_pty_update_applies_the_token_limit_after_flushing(
+        self, tmp_path: Path
+    ) -> None:
+        session = _RecordingUnixLocalSession(tmp_path / "workspace")
+        process = await asyncio.create_subprocess_exec("true")
+        await process.wait()
+        entry = unix_local_module._UnixPtyProcessEntry(process=process, tty=False)
+        entry.output_chunks.extend([b"\xe4\xb8", b"\xad" * 1 + b"\n" + b"x" * 64])
+        async with session._pty_lock:
+            session._pty_processes[4243] = entry
+
+        update = await session._finalize_pty_update(
+            process_id=4243,
+            entry=entry,
+            raw_output=b"abcd",
+            max_output_tokens=1,
+        )
+
+        expected_text, expected_count = truncate_text_by_tokens("abcd中\n" + "x" * 64, 1)
+        assert update.output == expected_text.encode()
+        assert update.original_token_count == expected_count
+        assert expected_count is not None
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_macos_sandbox

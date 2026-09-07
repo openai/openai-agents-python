@@ -48,7 +48,11 @@ from ..session import SandboxSession, SandboxSessionState
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
-from ..session.pty_output import collect_pty_output, drain_pty_output_chunks
+from ..session.pty_output import (
+    collect_pty_output_bytes,
+    drain_pty_output_chunks,
+    finish_pty_output,
+)
 from ..session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -400,16 +404,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        raw_output = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
-            max_output_tokens=max_output_tokens,
         )
         return await self._finalize_pty_update(
             process_id=process_id,
             entry=entry,
-            output=output,
-            original_token_count=original_token_count,
+            raw_output=raw_output,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_write_stdin(
@@ -442,19 +445,18 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        raw_output = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
             ),
-            max_output_tokens=max_output_tokens,
         )
         entry.last_used = time.monotonic()
         return await self._finalize_pty_update(
             process_id=session_id,
             entry=entry,
-            output=output,
-            original_token_count=original_token_count,
+            raw_output=raw_output,
+            max_output_tokens=max_output_tokens,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -532,15 +534,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         entry: _UnixPtyProcessEntry,
         yield_time_ms: int,
-        max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
-        return await collect_pty_output(
+    ) -> bytes:
+        return await collect_pty_output_bytes(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
             output_notify=entry.output_notify,
             is_done=entry.output_closed.is_set,
             yield_time_ms=yield_time_ms,
-            max_output_tokens=max_output_tokens,
         )
 
     async def _finalize_pty_update(
@@ -548,18 +548,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         process_id: int,
         entry: _UnixPtyProcessEntry,
-        output: bytes,
-        original_token_count: int | None,
+        raw_output: bytes,
+        max_output_tokens: int | None,
     ) -> PtyExecUpdate:
         exit_code: int | None = entry.process.returncode
         live_process_id: int | None = process_id
 
         if exit_code is not None:
             # The collector may have held back a partial UTF-8 sequence for a later poll;
-            # there is none once the entry is removed, so flush whatever is still queued.
-            deferred = await drain_pty_output_chunks(entry.output_chunks, entry.output_lock)
-            if deferred:
-                output += deferred.decode("utf-8", errors="replace").encode("utf-8")
+            # there is none once the entry is removed, so take whatever is still queued
+            # before the token limit is applied to the whole update.
+            raw_output += await drain_pty_output_chunks(entry.output_chunks, entry.output_lock)
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -567,6 +566,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 await self._terminate_pty_entry(removed)
             live_process_id = None
 
+        output, original_token_count = finish_pty_output(raw_output, max_output_tokens)
         return PtyExecUpdate(
             process_id=live_process_id,
             output=output,
