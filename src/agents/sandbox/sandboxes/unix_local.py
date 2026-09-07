@@ -1041,7 +1041,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             flags |= os.O_NOFOLLOW
         try:
             parent_path.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(workspace_path, flags, 0o644)
+            # 0o666 lets the process umask decide the final mode, matching what
+            # Path.open("wb") does on the ordinary write path.
+            descriptor = os.open(workspace_path, flags, 0o666)
         except FileExistsError:
             raise
         except OSError as e:

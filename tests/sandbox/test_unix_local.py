@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import shutil
 import signal
+import subprocess
 import tarfile
 import threading
 import time
@@ -21,6 +23,10 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
     _UnixPtyProcessEntry,
+)
+from agents.sandbox.session.base_sandbox_session import (
+    _EXCLUSIVE_CREATE_EXISTS_CODE,
+    _EXCLUSIVE_CREATE_SCRIPT,
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
@@ -670,6 +676,7 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
         self._exit_code = exit_code
         self.exec_commands: list[tuple[str, ...]] = []
         self.writes: list[Path] = []
+        self.removed: list[Path] = []
 
     async def _exec_internal(
         self,
@@ -684,6 +691,16 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
         _ = (data, user)
         self.writes.append(path)
 
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: object = None,
+    ) -> None:
+        _ = (recursive, user)
+        self.removed.append(Path(path))
+
 
 @pytest.mark.asyncio
 async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
@@ -695,21 +712,31 @@ async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_pat
             Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
         )
 
-    assert session.writes == []
+    # The payload only ever reached a staging name, and that staging entry is cleaned up,
+    # so a rejected create leaves nothing behind at the requested name.
+    assert [path.name for path in session.writes] != ["notes.txt"]
+    assert all(path.name.startswith(".notes.txt.create-") for path in session.writes)
+    assert session.removed == session.writes
 
 
 @pytest.mark.asyncio
-async def test_write_new_file_with_a_bound_user_writes_after_claiming_the_name(
+async def test_write_new_file_with_a_bound_user_links_the_completed_payload(
     tmp_path: Path,
 ) -> None:
+    """The payload is written first, then the target name is claimed by linking it."""
     session = _ExitCodeUnixLocalSession(tmp_path, exit_code=0)
 
     await session.write_new_file(
         Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
     )
 
-    assert [path.name for path in session.writes] == ["notes.txt"]
-    assert any("set -C" in part for cmd in session.exec_commands for part in cmd)
+    staged = session.writes[0]
+    assert staged.name.startswith(".notes.txt.create-")
+    dispatched = [part for cmd in session.exec_commands for part in cmd]
+    assert any("ln " in part for part in dispatched)
+    assert any(part.endswith("notes.txt") for part in dispatched)
+    assert str(staged) in dispatched
+    assert session.removed == [staged]
 
 
 @pytest.mark.asyncio
@@ -728,3 +755,43 @@ async def test_write_new_file_with_a_bound_user_keeps_a_symlink_name_unresolved(
     dispatched = [part for cmd in session.exec_commands for part in cmd]
     assert any(part.endswith("link.txt") for part in dispatched)
     assert not any(part.endswith("missing.txt") for part in dispatched)
+
+
+@pytest.mark.parametrize("shell", ["sh", "dash", "bash"])
+def test_exclusive_create_script_reports_a_taken_name_on_each_shell(
+    shell: str, tmp_path: Path
+) -> None:
+    """Run the shipped script through real shells.
+
+    The script is dispatched as ``sh -lc``, so whichever shell provides ``/bin/sh``
+    decides how a failing command is handled. An earlier version used ``:``, which is a
+    POSIX special builtin, so a redirection failure terminated dash before the explicit
+    exit mapping ran and the collision surfaced as a generic write error. This lives with
+    the Unix-local tests because tests/conftest.py already skips them on Windows.
+    """
+    executable = shutil.which(shell)
+    if executable is None:
+        pytest.skip(f"{shell} is not available")
+
+    staging = tmp_path / "staging"
+    staging.write_bytes(b"payload")
+    taken = tmp_path / "taken.txt"
+    taken.write_bytes(b"existing\n")
+    dangling = tmp_path / "dangling.txt"
+    dangling.symlink_to(tmp_path / "missing.txt")
+
+    def run(target: Path) -> int:
+        return subprocess.run(
+            [executable, "-c", _EXCLUSIVE_CREATE_SCRIPT, shell, str(target), str(staging)],
+            capture_output=True,
+        ).returncode
+
+    assert run(taken) == _EXCLUSIVE_CREATE_EXISTS_CODE
+    assert taken.read_bytes() == b"existing\n"
+
+    assert run(dangling) == _EXCLUSIVE_CREATE_EXISTS_CODE
+    assert not (tmp_path / "missing.txt").exists()
+
+    fresh = tmp_path / "nested" / "fresh.txt"
+    assert run(fresh) == 0
+    assert fresh.read_bytes() == b"payload"
