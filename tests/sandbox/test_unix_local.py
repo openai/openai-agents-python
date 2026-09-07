@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import os
 import signal
@@ -9,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -588,3 +589,45 @@ async def test_unix_local_refuses_a_fifo_without_a_peer_and_a_directory_read(
         assert isinstance(dir_error.value.__cause__, IsADirectoryError)
 
     assert fifo.is_fifo()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+def test_open_regular_file_classifies_a_fifo_before_opening_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    real_open = os.open
+
+    def guarded_open(path: object, *args: object, **kwargs: object) -> int:
+        if Path(str(path)) == fifo:
+            raise AssertionError("the FIFO must be rejected without being opened")
+        return real_open(cast(Any, path), *cast(Any, args), **cast(Any, kwargs))
+
+    monkeypatch.setattr(unix_local_module.os, "open", guarded_open)
+
+    with pytest.raises(WorkspaceArchiveReadError) as read_error:
+        unix_local_module._open_regular_file(fifo, path=Path("pipe"), for_write=False)
+    assert read_error.value.context["reason"] == "not a regular file: fifo"
+    with pytest.raises(WorkspaceArchiveWriteError):
+        unix_local_module._open_regular_file(fifo, path=Path("pipe"), for_write=True)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+def test_user_scoped_write_refuses_a_fifo_the_sdk_identity_cannot_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+
+    def denied_open(path: object, *args: object, **kwargs: object) -> int:
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+
+    monkeypatch.setattr(unix_local_module.os, "open", denied_open)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as write_error:
+        unix_local_module._raise_if_existing_special_file(fifo)
+    assert write_error.value.context["reason"] == "not a regular file: fifo"
+
+    # A missing target is left to the user-scoped exec, which creates it.
+    unix_local_module._raise_if_existing_special_file(tmp_path / "new.txt")

@@ -165,15 +165,32 @@ def _special_file_kind(mode: int) -> str | None:
     return next((name for predicate, name in _SPECIAL_FILE_KINDS if predicate(mode)), None)
 
 
+def _raise_for_special_file(kind: str | None, *, path: Path, for_write: bool) -> None:
+    if kind is None:
+        return
+    context = {"reason": f"not a regular file: {kind}"}
+    if for_write:
+        raise WorkspaceArchiveWriteError(path=path, context=context)
+    raise WorkspaceArchiveReadError(path=path, context=context)
+
+
 def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> int:
     """Open a workspace file for in-process I/O, refusing FIFOs, sockets, and device nodes.
 
     `open()` on a FIFO with no peer blocks the calling thread, and this session performs
     file I/O synchronously on the event loop, so such an open would stall the whole
-    process. The descriptor is opened non-blocking and classified with `fstat()` so a
-    concurrent replacement of the entry cannot slip past the check. Missing paths keep
-    their existing error handling; a directory is reported like the blocking `open()` did.
+    process. The entry is classified with `stat()` before it is opened at all, so a device
+    node is never invoked (some drivers block or act on open regardless of `O_NONBLOCK`),
+    and the descriptor is opened non-blocking and classified again with `fstat()` so a
+    replacement between the two calls cannot slip past. Missing paths keep their existing
+    error handling; a directory is reported like the blocking `open()` did.
     """
+    try:
+        _raise_for_special_file(
+            _special_file_kind(workspace_path.stat().st_mode), path=path, for_write=for_write
+        )
+    except OSError:
+        pass  # missing or unreadable: let the open below report it
     flags = os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     if for_write:
         flags |= os.O_WRONLY | os.O_CREAT | os.O_TRUNC
@@ -184,12 +201,7 @@ def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> 
         mode = os.fstat(fd).st_mode
         if stat.S_ISDIR(mode):
             raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(workspace_path))
-        kind = _special_file_kind(mode)
-        if kind is not None:
-            context = {"reason": f"not a regular file: {kind}"}
-            if for_write:
-                raise WorkspaceArchiveWriteError(path=path, context=context)
-            raise WorkspaceArchiveReadError(path=path, context=context)
+        _raise_for_special_file(_special_file_kind(mode), path=path, for_write=for_write)
         # Regular files ignore O_NONBLOCK; clear it anyway so the handle behaves like open().
         fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     except BaseException:
@@ -202,27 +214,31 @@ def _raise_if_existing_special_file(workspace_path: Path) -> None:
     """Refuse a user-scoped write whose existing target is a FIFO, socket, or device node.
 
     The write itself runs as the requested user (`cat > "$1"`), which would block on a
-    FIFO. Opening the current entry non-blocking classifies it without blocking: a FIFO
-    or socket without a peer fails with ENXIO, anything else is judged by `fstat()`.
+    FIFO. The entry is classified with `stat()`, which needs only search permission on the
+    parent, so a target the SDK identity cannot open (for example a mode-0200 FIFO owned by
+    the requested user) is still recognized; a FIFO or socket without a peer is also caught
+    by the non-blocking open failing with ENXIO.
     """
     try:
-        fd = os.open(workspace_path, os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        kind = _special_file_kind(workspace_path.stat().st_mode)
     except FileNotFoundError:
         return
+    except OSError:
+        kind = None
+    _raise_for_special_file(kind, path=workspace_path, for_write=True)
+    try:
+        fd = os.open(workspace_path, os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except OSError as e:
         if e.errno == errno.ENXIO:
             raise WorkspaceArchiveWriteError(
                 path=workspace_path, context={"reason": "not a regular file: fifo or socket"}
             ) from e
-        return  # let the user-scoped exec report permission and type errors
+        return  # missing, or a permission error the user-scoped exec will report itself
     try:
         kind = _special_file_kind(os.fstat(fd).st_mode)
     finally:
         os.close(fd)
-    if kind is not None:
-        raise WorkspaceArchiveWriteError(
-            path=workspace_path, context={"reason": f"not a regular file: {kind}"}
-        )
+    _raise_for_special_file(kind, path=workspace_path, for_write=True)
 
 
 class UnixLocalSandboxSession(BaseSandboxSession):
