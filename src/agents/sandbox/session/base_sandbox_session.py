@@ -2,7 +2,9 @@ import abc
 import asyncio
 import io
 import shlex
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path, PurePath
 from typing import Literal, NoReturn, TypeVar
 
@@ -150,12 +152,20 @@ while :; do
 done
 """.strip()
 _EXCLUSIVE_CREATE_EXISTS_CODE = 13
-# ``set -C`` makes the redirection use O_EXCL, so it fails when the target name already
-# exists, including a dangling symlink, and the existing content is left untouched. The
-# distinct exit codes keep "already exists" separable from any other failure without
-# parsing shell-specific stderr text.
+# ``ln`` is the only step that claims the target name, and it fails when that name is
+# already taken, including by a dangling symlink. Linking a fully written staging file
+# means the content is complete before the name exists, so a failed or cancelled upload
+# cannot leave an empty file behind that would block a retry. The trailing test only
+# classifies a failure, so "already exists" stays separable from any other error without
+# parsing shell-specific stderr text. ``ln`` is a regular command, unlike ``:``, so a
+# failure still reaches the explicit exit mapping on shells where ``:`` is special.
 _EXCLUSIVE_CREATE_SCRIPT = (
-    'target="$1"\nmkdir -p "$(dirname "$target")" || exit 12\nset -C\n: > "$target" || exit 13\n'
+    'target="$1"\n'
+    'source="$2"\n'
+    'mkdir -p "$(dirname "$target")" || exit 12\n'
+    'ln "$source" "$target" 2>/dev/null && exit 0\n'
+    'if [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
+    "exit 14\n"
 )
 
 _WRITE_ACCESS_CHECK_SCRIPT = (
@@ -963,8 +973,9 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Write a file that must not already exist.
 
-        The target name is claimed atomically before the payload is written, so a
-        concurrent creator either loses the race or keeps its content.
+        The target name is claimed in a single atomic step once the payload is complete,
+        so a concurrent creator either loses the race or keeps its own content, and a
+        failed write does not leave a partial file holding the name.
 
         :param path: Absolute path in the container or path relative to the
                 workspace root.
@@ -980,27 +991,37 @@ class BaseSandboxSession(abc.ABC):
         parent_path = await self._validate_path_access(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
         path_arg = sandbox_path_str(workspace_path)
-        result = await self.exec(
-            "sh",
-            "-lc",
-            _EXCLUSIVE_CREATE_SCRIPT,
-            "sh",
-            path_arg,
-            shell=False,
-            user=user,
-        )
-        if result.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
-            raise FileExistsError(path_arg)
-        if not result.ok():
-            raise WorkspaceArchiveWriteError(
-                path=workspace_path,
-                context={
-                    "command": ["sh", "-lc", "<exclusive_create>", path_arg],
-                    "stdout": result.stdout.decode("utf-8", errors="replace"),
-                    "stderr": result.stderr.decode("utf-8", errors="replace"),
-                },
+        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
+        staging_arg = sandbox_path_str(staging_path)
+
+        await self.write(staging_path, data, user=user)
+        try:
+            result = await self.exec(
+                "sh",
+                "-lc",
+                _EXCLUSIVE_CREATE_SCRIPT,
+                "sh",
+                path_arg,
+                staging_arg,
+                shell=False,
+                user=user,
             )
-        await self.write(workspace_path, data, user=user)
+            if result.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
+                raise FileExistsError(path_arg)
+            if not result.ok():
+                raise WorkspaceArchiveWriteError(
+                    path=workspace_path,
+                    context={
+                        "command": ["sh", "-lc", "<exclusive_create>", path_arg, staging_arg],
+                        "stdout": result.stdout.decode("utf-8", errors="replace"),
+                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    },
+                )
+        finally:
+            # The staging entry is an implementation detail, and removing it must not
+            # replace the outcome of the create.
+            with suppress(Exception):
+                await self.rm(staging_path, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None
