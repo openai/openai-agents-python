@@ -1075,17 +1075,25 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         workspace_path = parent_path / requested.name
         staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
         try:
-            parent_path.mkdir(parents=True, exist_ok=True)
-            with staging_path.open("wb") as staged:
-                shutil.copyfileobj(payload.stream, staged)
+            # Only the link may report a collision. A parent that is a regular file also
+            # raises FileExistsError from mkdir, and reporting that as "the target already
+            # exists" would send the model to update_file for a target that is absent.
+            try:
+                parent_path.mkdir(parents=True, exist_ok=True)
+                with staging_path.open("wb") as staged:
+                    shutil.copyfileobj(payload.stream, staged)
+            except OSError as e:
+                raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+
             # os.link claims the name in one step and fails with EEXIST when it is taken
             # by anything, including a directory or a dangling symlink. Linking a complete
             # payload means a failed write never leaves a file holding the name.
-            os.link(staging_path, workspace_path)
-        except FileExistsError:
-            raise
-        except OSError as e:
-            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+            try:
+                os.link(staging_path, workspace_path)
+            except FileExistsError:
+                raise
+            except OSError as e:
+                raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
         finally:
             with suppress(OSError):
                 staging_path.unlink()
