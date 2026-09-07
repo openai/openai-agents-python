@@ -442,13 +442,13 @@ class WorkspacePathPolicy:
         else:
             absolute = self._absolute_workspace_posix_path(coerce_posix_path(original))
             absolute_path = Path(str(absolute))
-        # The workspace root itself is always addressed through its resolved form, so a
-        # symlinked root alias stays authorized; only entries below it keep their leaf.
+        # The workspace root and configured grant roots are always addressed through their
+        # resolved form, so a symlinked root alias stays authorized; only entries below them
+        # keep their leaf.
         if (
             follow_leaf_symlink
             or absolute_path.name in ("", ".", "..")
-            or PurePosixPath(posixpath.normpath(absolute_path.as_posix()))
-            == self._normalized_root()
+            or self._is_configured_root_alias(absolute_path)
         ):
             resolved = absolute_path.resolve(strict=False)
         else:
@@ -460,6 +460,22 @@ class WorkspacePathPolicy:
         if grant is None:
             raise self._invalid_path_error(original)
         return resolved, grant
+
+    def _is_configured_root_alias(self, absolute_path: Path) -> bool:
+        normalized = PurePosixPath(posixpath.normpath(absolute_path.as_posix()))
+        if normalized == self._normalized_root():
+            return True
+        # Compare against the configured spelling: a grant root that is itself a symlink is
+        # addressed as configured, while its resolved form is what `_matching_grant` checks.
+        return any(
+            normalized
+            == PurePosixPath(
+                posixpath.normpath(
+                    Path(grant.host_path if grant.host_path is not None else grant.path).as_posix()
+                )
+            )
+            for grant in self._extra_path_grants
+        )
 
     def _sandbox_path_and_grant(
         self,

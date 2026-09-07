@@ -16,6 +16,7 @@ from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
 from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.errors import (
+    ApplyPatchFileNotFoundError,
     InvalidManifestPathError,
     PtySessionNotFoundError,
     WorkspaceArchiveWriteError,
@@ -520,6 +521,62 @@ class TestUnixLocalRmSymlinks:
         assert not link.is_symlink()
         assert target.read_text(encoding="utf-8") == "old\n"
         assert (workspace / "moved.txt").read_text(encoding="utf-8") == "new\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", ["missing.txt", "/etc/hostname"])
+    async def test_apply_patch_delete_file_removes_dangling_and_outward_symlinks(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        link = workspace / "alias"
+        link.symlink_to(target)
+        session = _RecordingUnixLocalSession(workspace)
+
+        result = await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(type="delete_file", path="alias")
+        )
+
+        assert result == "Done!"
+        assert not link.is_symlink()
+        assert not link.exists()
+
+    @pytest.mark.asyncio
+    async def test_apply_patch_delete_file_reports_a_missing_entry(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(ApplyPatchFileNotFoundError):
+            await WorkspaceEditor(session).apply_patch(
+                ApplyPatchOperation(type="delete_file", path="nothing-here")
+            )
+
+    @pytest.mark.asyncio
+    async def test_rm_accepts_a_symlinked_grant_root_alias(self, tmp_path: Path) -> None:
+        """A grant configured through a symlink is addressed by its resolved form, like root."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "scratch.txt").write_text("scratch", encoding="utf-8")
+        shared_link = tmp_path / "shared-link"
+        shared_link.symlink_to(shared)
+        session = UnixLocalSandboxSession(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(
+                    root=str(workspace),
+                    extra_path_grants=(SandboxPathGrant(path=str(shared_link)),),
+                ),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+
+        await session.rm(str(shared_link / "scratch.txt"))
+        assert not (shared / "scratch.txt").exists()
+
+        await session.rm(str(shared_link), recursive=True)
+        assert not shared.exists()
 
     @pytest.mark.asyncio
     async def test_rm_removes_file_symlink_not_its_target(self, tmp_path: Path) -> None:
