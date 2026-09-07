@@ -233,6 +233,11 @@ class WorkspaceEditor:
         where the only copy is in memory, and nothing is restored after the fact, so a file that
         another writer creates at the source path while this runs is never overwritten.
 
+        It can still be removed. The identity answer is read before the removal, and the removal
+        names a path rather than the entry that answer was about, so a writer that replaces the
+        source between the two loses the file it just wrote. Closing that needs a removal that
+        can be told which entry it is allowed to remove, which no backend here offers.
+
         The staging file is a new inode, so a rename the filesystem folds onto the source path
         replaces the original's mode and extended attributes. Carrying those across would mean
         reading and reapplying them per backend; committing the content in a single `mv` is
