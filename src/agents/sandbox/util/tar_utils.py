@@ -394,6 +394,21 @@ def safe_extract_tarfile(
         allow_external_symlink_targets=allow_external_symlink_targets,
     )
 
+    first_symlink = next((member for member in members if member.issym()), None)
+    if first_symlink is not None:
+        with tempfile.TemporaryDirectory(dir=root_resolved) as probe_dir:
+            probe_root = Path(probe_dir)
+            probe_target = probe_root / "target"
+            probe_link = probe_root / "link"
+            probe_target.touch()
+            try:
+                os.symlink(probe_target.name, probe_link)
+            except OSError as exc:
+                raise UnsafeTarMemberError(
+                    member=first_symlink.name,
+                    reason="extraction environment cannot create symlinks",
+                ) from exc
+
     def _prepare_replaceable_leaf(*, dest: Path, rel_path: Path, name: str) -> None:
         _ensure_no_symlink_parents(root=root_resolved, dest=dest, check_leaf=False)
         dest.parent.mkdir(parents=True, exist_ok=True)

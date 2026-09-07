@@ -100,6 +100,26 @@ def test_safe_extract_tarfile_preserves_venv_style_symlinks(tmp_path: Path) -> N
     assert os.readlink(tmp_path / "uv-project" / ".venv" / "bin" / "python") == "python3"
 
 
+def test_safe_extract_tarfile_preflights_symlink_capability_before_writing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = _tar_bytes(
+        _file("already-written.txt", b"must not be written"),
+        _symlink("link.txt", "target.txt"),
+    )
+
+    exc = OSError(1314, "A required privilege is not held by the client")
+    exc.winerror = 1314  # type: ignore[attr-defined]
+    monkeypatch.setattr(os, "symlink", lambda *args, **kwargs: (_ for _ in ()).throw(exc))
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot create symlinks") as raised:
+        _safe_extract(raw, tmp_path)
+
+    assert raised.value.__cause__ is exc
+    assert not (tmp_path / "already-written.txt").exists()
+    assert not (tmp_path / "link.txt").exists()
+
+
 def test_safe_tar_member_rel_path_requires_symlink_opt_in() -> None:
     symlink = _symlink("link.txt", "target.txt").info
 
