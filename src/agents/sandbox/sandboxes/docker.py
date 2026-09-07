@@ -97,6 +97,7 @@ logger = logging.getLogger(__name__)
 # RAM and spill larger ones to a temp file so a big upload can't OOM the process.
 _STREAM_SPOOL_MAX_SIZE = 16 * 1024 * 1024
 _DEFERRED_CLEANUP_TIMEOUT_S = 30.0
+_PTY_CLEANUP_TIMEOUT_S = 5.0
 
 
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
@@ -500,9 +501,20 @@ class DockerSandboxSession(BaseSandboxSession):
             )
         return staging_parent, staging_workspace
 
-    async def _rm_best_effort(self, path: Path) -> None:
+    async def _rm_best_effort(self, path: Path, *, timeout: float | None = None) -> None:
         try:
-            await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
+            if timeout is None:
+                await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
+            else:
+                command = ["rm", "-rf", "--", sandbox_path_str(path)]
+                await self._exec_run(
+                    cmd=command,
+                    workdir=self.state.manifest.root if self._workspace_root_ready else None,
+                    user=None,
+                    timeout=timeout,
+                    command_for_errors=tuple(command),
+                    kill_on_timeout=False,
+                )
         except Exception:
             pass
 
@@ -1223,9 +1235,12 @@ class DockerSandboxSession(BaseSandboxSession):
         api = container_client.api
 
         try:
-            inspect_result = await loop.run_in_executor(
-                _DOCKER_EXECUTOR,
-                lambda: api.exec_inspect(entry.exec_id),
+            inspect_result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _DOCKER_EXECUTOR,
+                    lambda: api.exec_inspect(entry.exec_id),
+                ),
+                timeout=_PTY_CLEANUP_TIMEOUT_S,
             )
         except Exception:
             return
@@ -1306,7 +1321,7 @@ class DockerSandboxSession(BaseSandboxSession):
         if entry.exit_code is None:
             await self._kill_pty_pid_path(entry.pid_path)
         else:
-            await self._rm_best_effort(entry.pid_path)
+            await self._rm_best_effort(entry.pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
 
         try:
             cast(Any, entry.sock).close()
@@ -1322,32 +1337,33 @@ class DockerSandboxSession(BaseSandboxSession):
         )
 
     async def _kill_pty_pid_path(self, pid_path: Path) -> None:
-        loop = asyncio.get_running_loop()
+        command = [
+            "sh",
+            "-lc",
+            (
+                'if [ -f "$1" ]; then '
+                'pid="$(cat "$1" 2>/dev/null || true)"; '
+                'if [ -n "$pid" ]; then '
+                'kill -KILL "$pid" >/dev/null 2>&1 || true; '
+                "fi; "
+                "fi"
+            ),
+            "sh",
+            sandbox_path_str(pid_path),
+        ]
         try:
-            await loop.run_in_executor(
-                _DOCKER_EXECUTOR,
-                lambda: self._container.exec_run(
-                    cmd=[
-                        "sh",
-                        "-lc",
-                        (
-                            'if [ -f "$1" ]; then '
-                            'pid="$(cat "$1" 2>/dev/null || true)"; '
-                            'if [ -n "$pid" ]; then '
-                            'kill -KILL "$pid" >/dev/null 2>&1 || true; '
-                            "fi; "
-                            "fi"
-                        ),
-                        "sh",
-                        sandbox_path_str(pid_path),
-                    ],
-                    demux=True,
-                ),
+            await self._exec_run(
+                cmd=command,
+                workdir=None,
+                user=None,
+                timeout=_PTY_CLEANUP_TIMEOUT_S,
+                command_for_errors=("kill", sandbox_path_str(pid_path)),
+                kill_on_timeout=False,
             )
         except Exception:
             pass
 
-        await self._rm_best_effort(pid_path)
+        await self._rm_best_effort(pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
 
     async def exists(self) -> bool:
         try:
