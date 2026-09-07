@@ -325,6 +325,48 @@ class TestOpenAIResponsesCompactionSession:
         assert session._response_id is None
 
     @pytest.mark.asyncio
+    async def test_queued_response_ids_publish_newest_after_noop_pop(self) -> None:
+        class GatedNoopPopSession(SimpleListSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pop_started = asyncio.Event()
+                self.allow_pop = asyncio.Event()
+
+            async def pop_item(self) -> TResponseInputItem | None:
+                self.pop_started.set()
+                await self.allow_pop.wait()
+                return None
+
+        underlying = GatedNoopPopSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+        )
+
+        pop_task = asyncio.create_task(session.pop_item())
+        await underlying.pop_started.wait()
+        older = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-old", "force": True})
+        )
+        newer = asyncio.create_task(
+            session.run_compaction({"response_id": "resp-new", "store": False, "force": True})
+        )
+        await asyncio.sleep(0)
+
+        underlying.allow_pop.set()
+        assert await pop_task is None
+        await asyncio.gather(older, newer)
+
+        assert session._response_id == "resp-new"
+        assert session._last_unstored_response_id == "resp-new"
+
+    @pytest.mark.asyncio
     async def test_new_response_id_invalidates_older_compaction_snapshot(self) -> None:
         item = cast(
             TResponseInputItem,

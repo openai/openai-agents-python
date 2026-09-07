@@ -140,6 +140,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id: str | None = None
         self._last_unstored_response_id: str | None = None
         self._response_chain_generation = 0
+        self._response_chain_invalidation_generation = 0
         self._history_generation = 0
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
@@ -150,6 +151,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._deferred_response_id = None
         self._last_unstored_response_id = None
         self._response_chain_generation += 1
+        self._response_chain_invalidation_generation += 1
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -192,10 +194,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         response_chain_generation: int
         resolved_mode: _ResolvedCompactionMode
         if args and args.get("response_id"):
-            pre_lock_response_chain_generation = self._response_chain_generation
+            pre_lock_invalidation_generation = self._response_chain_invalidation_generation
             async with self._mutation_lock:
-                if pre_lock_response_chain_generation != self._response_chain_generation:
-                    logger.debug("skip: response chain changed while waiting for mutation lock")
+                if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
+                    logger.debug("skip: response chain invalidated while waiting for mutation lock")
                     return
                 next_response_id = args["response_id"]
                 if next_response_id != self._response_id:
