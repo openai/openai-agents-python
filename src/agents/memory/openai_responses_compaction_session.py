@@ -138,6 +138,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
+        self._deferred_generation = 0
         self._last_unstored_response_id: str | None = None
         self._response_chain_generation = 0
         self._response_chain_invalidation_generation = 0
@@ -270,6 +271,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         deferred_response_id = self._deferred_response_id
+        deferred_generation = self._deferred_generation
         compaction_generation = self._compaction_generation
         invalidation_generation = self._response_chain_invalidation_generation
         self._deferred_response_id = None
@@ -289,14 +291,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         try:
             compacted = await self.client.responses.compact(**compact_kwargs)
         except (Exception, asyncio.CancelledError):
-            async with self._mutation_lock:
-                if (
-                    invalidation_generation == self._response_chain_invalidation_generation
-                    and compaction_generation == self._compaction_generation
-                    and deferred_response_id is not None
-                    and self._deferred_response_id is None
-                ):
-                    self._deferred_response_id = deferred_response_id
+            await self._await_restore_despite_cancellation(
+                self._restore_deferred_retry_if_current(
+                    deferred_response_id=deferred_response_id,
+                    deferred_generation=deferred_generation,
+                    compaction_generation=compaction_generation,
+                    invalidation_generation=invalidation_generation,
+                )
+            )
             raise
 
         compacted_usage = getattr(compacted, "usage", None)
@@ -313,13 +315,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 or history_generation != self._history_generation
             ):
                 if (
-                    response_chain_generation == self._response_chain_generation
-                    and history_generation != self._history_generation
+                    invalidation_generation == self._response_chain_invalidation_generation
                     and compaction_generation == self._compaction_generation
+                    and deferred_generation == self._deferred_generation
                     and deferred_response_id is not None
                     and self._deferred_response_id is None
                 ):
                     self._deferred_response_id = deferred_response_id
+                    self._deferred_generation += 1
                 logger.debug(
                     "skip: session ownership changed while compaction request was in flight"
                 )
@@ -465,6 +468,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             replacement_error,
         )
 
+    async def _restore_deferred_retry_if_current(
+        self,
+        *,
+        deferred_response_id: str | None,
+        deferred_generation: int,
+        compaction_generation: int,
+        invalidation_generation: int,
+    ) -> None:
+        async with self._mutation_lock:
+            if (
+                invalidation_generation == self._response_chain_invalidation_generation
+                and compaction_generation == self._compaction_generation
+                and deferred_generation == self._deferred_generation
+                and deferred_response_id is not None
+                and self._deferred_response_id is None
+            ):
+                self._deferred_response_id = deferred_response_id
+                self._deferred_generation += 1
+
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         pre_lock_invalidation_generation = self._response_chain_invalidation_generation
         async with self._mutation_lock:
@@ -507,6 +529,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             ):
                 return
             self._deferred_response_id = response_id
+            self._deferred_generation += 1
 
     def _get_deferred_compaction_response_id(self) -> str | None:
         return self._deferred_response_id

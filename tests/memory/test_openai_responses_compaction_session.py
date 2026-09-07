@@ -639,6 +639,40 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == [old_item, new_item]
 
     @pytest.mark.asyncio
+    async def test_stale_forced_compaction_restores_retry_after_response_advancement(self) -> None:
+        item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+        underlying = SimpleListSession(history=[item])
+        compact_started = asyncio.Event()
+        allow_compact = asyncio.Event()
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            compact_started.set()
+            await allow_compact.wait()
+            return SimpleNamespace(output=[], usage=None)
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda _: False,
+        )
+        session._deferred_response_id = "resp-deferred"
+        older = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await compact_started.wait()
+        assert session._deferred_response_id is None
+        await session.run_compaction({"response_id": "resp-new", "compaction_mode": "input"})
+        assert session._response_id == "resp-new"
+        allow_compact.set()
+        await older
+        assert session._deferred_response_id == "resp-deferred"
+        assert await underlying.get_items() == [item]
+
+    @pytest.mark.asyncio
     async def test_forced_compaction_failure_restores_deferred_retry(self) -> None:
         item = cast(
             TResponseInputItem,
@@ -660,6 +694,89 @@ class TestOpenAIResponsesCompactionSession:
 
         assert session._deferred_response_id == "resp-deferred"
         assert await underlying.get_items() == [item]
+
+    @pytest.mark.asyncio
+    async def test_older_failure_does_not_restore_over_newer_consumed_deferral(self) -> None:
+        item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+        underlying = SimpleListSession(history=[item])
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_first = asyncio.Event()
+        allow_second = asyncio.Event()
+        call_count = 0
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_started.set()
+                await allow_first.wait()
+                raise RuntimeError("older failed")
+            second_started.set()
+            await allow_second.wait()
+            return SimpleNamespace(output=[], usage=None)
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda _: True,
+        )
+        session._deferred_response_id = "resp-old"
+        older = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await first_started.wait()
+        await session._defer_compaction("resp-new")
+        newer = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await second_started.wait()
+        allow_first.set()
+        with pytest.raises(RuntimeError, match="older failed"):
+            await older
+        assert session._deferred_response_id is None
+        allow_second.set()
+        await newer
+        assert session._deferred_response_id is None
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancellation_cannot_interrupt_deferred_retry_restore(self) -> None:
+        item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+        underlying = SimpleListSession(history=[item])
+        compact_started = asyncio.Event()
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            compact_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        session._deferred_response_id = "resp-deferred"
+        task = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await compact_started.wait()
+        await session._mutation_lock.acquire()
+        try:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        finally:
+            session._mutation_lock.release()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert session._deferred_response_id == "resp-deferred"
 
     @pytest.mark.asyncio
     async def test_older_forced_compaction_does_not_restore_retry_after_newer_success(self) -> None:
