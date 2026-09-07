@@ -119,7 +119,6 @@ class WorkspaceEditor:
             )
 
         if operation.type == "create_file":
-            await self._ensure_absent(destination, display_path=display_path)
             try:
                 created_text = format_impl.apply_diff("", operation.diff, mode="create")
             except ValueError as exc:
@@ -128,7 +127,7 @@ class WorkspaceEditor:
                     path=operation.path,
                     cause=exc,
                 ) from exc
-            await self._write_text(destination, created_text)
+            await self._write_new_text(destination, created_text, display_path=display_path)
             return ApplyPatchResult(output=f"Created {display_path}")
 
         raise ApplyPatchDiffError(
@@ -187,29 +186,24 @@ class WorkspaceEditor:
         else:
             handle.close()
 
-    async def _ensure_absent(self, destination: Path, *, display_path: str) -> None:
-        # A missing destination is the success case here, so the probe must not mark the
-        # child sandbox.read span as failed on every successful create. Imported locally
-        # because the session package imports this module.
-        from .session.sandbox_session import _read_with_expected_span_errors
-
+    async def _write_new_text(self, destination: Path, text: str, *, display_path: str) -> None:
+        # Add File is documented as creating a new file, so the name is claimed
+        # exclusively by the backend rather than checked and then overwritten.
         try:
-            handle = await _read_with_expected_span_errors(
-                self._session,
+            await self._session.write_new_file(
                 destination,
+                io.BytesIO(text.encode("utf-8")),
                 user=self._user,
-                expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
             )
-        except (FileNotFoundError, WorkspaceReadNotFoundError):
-            return
-        handle.close()
-        raise ApplyPatchDiffError(
-            message=(
-                f"apply_patch cannot create {display_path} because it already exists. "
-                "Use an update_file operation to change an existing file."
-            ),
-            path=display_path,
-        )
+        except FileExistsError as exc:
+            raise ApplyPatchDiffError(
+                message=(
+                    f"apply_patch cannot create {display_path} because it already exists. "
+                    "Use an update_file operation to change an existing file."
+                ),
+                path=display_path,
+                cause=exc,
+            ) from exc
 
     async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
         try:

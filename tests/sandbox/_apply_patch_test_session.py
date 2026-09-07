@@ -56,6 +56,20 @@ class ApplyPatchSession(BaseSandboxSession):
         else:
             self.files[normalized] = bytes(payload)
 
+    async def write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        normalized = self.normalize_path(path)
+        if normalized in self.files:
+            raise FileExistsError(str(normalized))
+        # Real backends create the parents inside the primitive, so record that here too.
+        await self.mkdir(normalized.parent, parents=True, user=user)
+        await self.write(path, data, user=user)
+
     async def _exec_internal(
         self,
         *command: str | Path,

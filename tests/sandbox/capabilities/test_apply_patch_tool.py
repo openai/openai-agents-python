@@ -542,9 +542,7 @@ class TestSandboxApplyPatchTool:
             ),
         )
 
-        # Three reads: the update_file read, the create_file existence probe, and the
-        # delete_file existence check. Each must run as the bound user.
-        assert session.read_users == ["sandbox-user", "sandbox-user", "sandbox-user"]
+        assert session.read_users == ["sandbox-user", "sandbox-user"]
         assert session.mkdir_users == ["sandbox-user", "sandbox-user"]
         assert session.write_users == ["sandbox-user", "sandbox-user"]
         assert session.rm_users == ["sandbox-user"]
