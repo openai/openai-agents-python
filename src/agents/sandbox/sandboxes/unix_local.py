@@ -1073,28 +1073,22 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         requested = Path(path)
         parent_path = self.normalize_path(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
-        # O_EXCL fails with EEXIST when the name is already taken, including by a symlink,
-        # so the name is claimed in the same syscall that creates the file.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
         try:
             parent_path.mkdir(parents=True, exist_ok=True)
-            # 0o666 lets the process umask decide the final mode, matching what
-            # Path.open("wb") does on the ordinary write path.
-            descriptor = os.open(workspace_path, flags, 0o666)
+            with staging_path.open("wb") as staged:
+                shutil.copyfileobj(payload.stream, staged)
+            # os.link claims the name in one step and fails with EEXIST when it is taken
+            # by anything, including a directory or a dangling symlink. Linking a complete
+            # payload means a failed write never leaves a file holding the name.
+            os.link(staging_path, workspace_path)
         except FileExistsError:
             raise
         except OSError as e:
-            if e.errno in {errno.ELOOP, errno.EMLINK}:
-                raise FileExistsError(str(workspace_path)) from e
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
-
-        try:
-            with os.fdopen(descriptor, "wb") as f:
-                shutil.copyfileobj(payload.stream, f)
-        except OSError as e:
-            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+        finally:
+            with suppress(OSError):
+                staging_path.unlink()
 
     async def _write_stream_with_exec(
         self,

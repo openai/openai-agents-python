@@ -152,17 +152,19 @@ while :; do
 done
 """.strip()
 _EXCLUSIVE_CREATE_EXISTS_CODE = 13
-# ``ln`` is the only step that claims the target name, and it fails when that name is
-# already taken, including by a dangling symlink. Linking a fully written staging file
-# means the content is complete before the name exists, so a failed or cancelled upload
-# cannot leave an empty file behind that would block a retry. The trailing test only
-# classifies a failure, so "already exists" stays separable from any other error without
-# parsing shell-specific stderr text. ``ln`` is a regular command, unlike ``:``, so a
-# failure still reaches the explicit exit mapping on shells where ``:`` is special.
+# ``ln`` claims the target name and fails when that name is already taken. Linking a
+# fully written staging file means the content is complete before the name exists, so a
+# failed or cancelled upload cannot leave a file behind that holds the name. The leading
+# test rejects a name held by a directory, which ``ln`` would otherwise treat as a target
+# directory and populate; the trailing test only classifies a failure, so "already
+# exists" stays separable from any other error without parsing shell-specific stderr.
+# ``ln`` is a regular command, unlike ``:``, so its failure still reaches the explicit
+# exit mapping on shells where ``:`` is a special builtin. The caller creates the parent,
+# so this script never has to create one as a different identity.
 _EXCLUSIVE_CREATE_SCRIPT = (
     'target="$1"\n'
     'source="$2"\n'
-    'mkdir -p "$(dirname "$target")" || exit 12\n'
+    'if [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
     'ln "$source" "$target" 2>/dev/null && exit 0\n'
     'if [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
     "exit 14\n"
@@ -994,8 +996,11 @@ class BaseSandboxSession(abc.ABC):
         staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
         staging_arg = sandbox_path_str(staging_path)
 
-        await self.write(staging_path, data, user=user)
         try:
+            # Create the parent as the bound user so a fresh nested path is owned the same
+            # way the ordinary write path owned it.
+            await self.mkdir(parent_path, parents=True, user=user)
+            await self.write(staging_path, data, user=user)
             result = await self.exec(
                 "sh",
                 "-lc",
