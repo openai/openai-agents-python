@@ -1180,6 +1180,119 @@ def test_recursive_type_alias_type_is_rejected() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "policy_names", [None, ["max_results"], ["caption"]], ids=["missing", "no-caption", "no-limit"]
+)
+@pytest.mark.parametrize("already_released", [False, True], ids=["new-export", "released-export"])
+def test_new_top_level_typed_dict_requires_complete_policy(
+    policy_names: list[str] | None, already_released: bool
+) -> None:
+    from agents import WebSearchToolImageSettings
+
+    agents_module = SimpleNamespace(
+        __all__=["WebSearchToolImageSettings"],
+        WebSearchToolImageSettings=WebSearchToolImageSettings,
+    )
+    contract: dict[str, Any] = {
+        "baseline": "v0.22.0",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": ["WebSearchToolImageSettings"] if already_released else [],
+        "canonical_imports": [],
+        "public_modules": ["agents"],
+        "callables": {},
+    }
+    policy_entries = (
+        ()
+        if policy_names is None
+        else (
+            {
+                "module": "agents",
+                "class_name": "WebSearchToolImageSettings",
+                "names": policy_names,
+            },
+        )
+    )
+
+    def promote() -> dict[str, Any]:
+        return build_released_api_contract(
+            contract,
+            baseline="v0.22.1",
+            baseline_commit="b" * 40,
+            agents_module=agents_module,
+            release_policy=_release_policy({}, public_typed_dicts=policy_entries),
+        )
+
+    if already_released:
+        updated = promote()
+        assert updated["required_top_level_exports"] == ["WebSearchToolImageSettings"]
+    else:
+        with pytest.raises(ValueError, match="WebSearchToolImageSettings.*public_typed_dicts"):
+            promote()
+
+
+@pytest.mark.parametrize("drift", ["removed", "required", "type"])
+def test_web_search_image_settings_policy_freezes_fields(drift: str) -> None:
+    from agents import WebSearchToolImageSettings
+
+    agents_module = SimpleNamespace(
+        __all__=["WebSearchToolImageSettings"],
+        WebSearchToolImageSettings=WebSearchToolImageSettings,
+    )
+    policy = load_submodule_export_policy(CONTRACT.with_name("released_api_contract_policy.json"))
+    image_settings_policy = tuple(
+        entry
+        for entry in policy.public_typed_dicts
+        if entry["module"] == "agents" and entry["class_name"] == "WebSearchToolImageSettings"
+    )
+    contract: dict[str, Any] = {
+        "baseline": "v0.22.0",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [],
+        "canonical_imports": [],
+        "public_modules": ["agents"],
+        "callables": {},
+    }
+    updated = build_released_api_contract(
+        contract,
+        baseline="v0.22.1",
+        baseline_commit="b" * 40,
+        agents_module=agents_module,
+        release_policy=_release_policy({}, public_typed_dicts=image_settings_policy),
+    )
+
+    assert updated["public_typed_dicts"] == [
+        {
+            "module": "agents",
+            "class_name": "WebSearchToolImageSettings",
+            "fields": [
+                {"name": "max_results", "required": False, "annotation": "int"},
+                {"name": "caption", "required": False, "annotation": "bool"},
+            ],
+        }
+    ]
+    assert validate_released_api_contract(updated, agents_module=agents_module) == []
+
+    class RemovedField(TypedDict, total=False):
+        max_results: int
+
+    class RequiredField(TypedDict):
+        max_results: int
+        caption: bool
+
+    class ChangedType(TypedDict, total=False):
+        max_results: str
+        caption: bool
+
+    agents_module.WebSearchToolImageSettings = {
+        "removed": RemovedField,
+        "required": RequiredField,
+        "type": ChangedType,
+    }[drift]
+    errors = validate_released_api_contract(updated, agents_module=agents_module)
+    assert errors
+    assert all("changed its released TypedDict field contract" in error for error in errors)
+
+
 def test_curated_public_typed_dict_contract_detects_field_shape_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3860,6 +3973,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
         },
     }
     assert policy.public_typed_dicts == (
+        {
+            "class_name": "WebSearchToolImageSettings",
+            "module": "agents",
+            "names": ["max_results", "caption"],
+        },
         {
             "class_name": "ModelStepSpec",
             "module": "agents.testing.model",
