@@ -451,9 +451,11 @@ def _did_start_websocket_response(error: Exception) -> bool:
 def _is_websocket_disconnect_error(error: Exception) -> bool:
     exc_module = error.__class__.__module__
     exc_name = error.__class__.__name__
-    # websockets reports a peer closing before a valid HTTP upgrade as InvalidMessage.
+    # websockets reports a peer closing before a valid HTTP upgrade as InvalidMessage. Only an
+    # InvalidMessage caused by EOFError is transient according to websockets' retry policy.
     return exc_module.startswith("websockets") and (
-        exc_name.startswith("ConnectionClosed") or exc_name == "InvalidMessage"
+        exc_name.startswith("ConnectionClosed")
+        or (exc_name == "InvalidMessage" and isinstance(error.__cause__, EOFError))
     )
 
 
