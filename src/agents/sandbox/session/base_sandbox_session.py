@@ -1001,9 +1001,11 @@ class BaseSandboxSession(abc.ABC):
             # way the ordinary write path owned it.
             await self.mkdir(parent_path, parents=True, user=user)
             await self.write(staging_path, data, user=user)
+            # -c rather than -lc: this runs on a filesystem-only capability set, so it
+            # must not source workspace-writable shell startup files.
             result = await self.exec(
                 "sh",
-                "-lc",
+                "-c",
                 _EXCLUSIVE_CREATE_SCRIPT,
                 "sh",
                 path_arg,
@@ -1017,7 +1019,7 @@ class BaseSandboxSession(abc.ABC):
                 raise WorkspaceArchiveWriteError(
                     path=workspace_path,
                     context={
-                        "command": ["sh", "-lc", "<exclusive_create>", path_arg, staging_arg],
+                        "command": ["sh", "-c", "<exclusive_create>", path_arg, staging_arg],
                         "stdout": result.stdout.decode("utf-8", errors="replace"),
                         "stderr": result.stderr.decode("utf-8", errors="replace"),
                     },

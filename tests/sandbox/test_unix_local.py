@@ -16,7 +16,11 @@ import pytest
 
 from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import ApplyPatchDiffError, PtySessionNotFoundError
+from agents.sandbox.errors import (
+    ApplyPatchDiffError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -881,3 +885,21 @@ async def test_apply_patch_create_through_the_session_writes_a_new_nested_file(
 
     assert (tmp_path / "nested" / "dir" / "new.txt").read_text() == "hello"
     assert not any(p.name.startswith(".") for p in (tmp_path / "nested" / "dir").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_reports_a_file_parent_as_a_write_error(
+    tmp_path: Path,
+) -> None:
+    """A parent that is a regular file is not a collision on the requested name.
+
+    Reporting it as one would tell the model to use update_file for a target that does
+    not exist and cannot be updated.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "parent").write_bytes(b"i am a file\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="parent/child.txt", diff="+hi\n")
+        )
