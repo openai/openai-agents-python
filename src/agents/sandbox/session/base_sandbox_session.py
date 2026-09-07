@@ -149,6 +149,15 @@ while :; do
     fi
 done
 """.strip()
+_EXCLUSIVE_CREATE_EXISTS_CODE = 13
+# ``set -C`` makes the redirection use O_EXCL, so it fails when the target name already
+# exists, including a dangling symlink, and the existing content is left untouched. The
+# distinct exit codes keep "already exists" separable from any other failure without
+# parsing shell-specific stderr text.
+_EXCLUSIVE_CREATE_SCRIPT = (
+    'target="$1"\nmkdir -p "$(dirname "$target")" || exit 12\nset -C\n: > "$target" || exit 13\n'
+)
+
 _WRITE_ACCESS_CHECK_SCRIPT = (
     'target="$1"\n'
     'if [ -e "$target" ]; then\n'
@@ -944,6 +953,54 @@ class BaseSandboxSession(abc.ABC):
         :param data: A file-like object positioned at the start of the payload.
         :param user: Optional sandbox user to perform the write as.
         """
+
+    async def write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Write a file that must not already exist.
+
+        The target name is claimed atomically before the payload is written, so a
+        concurrent creator either loses the race or keeps its content.
+
+        :param path: Absolute path in the container or path relative to the
+                workspace root.
+        :param data: A file-like object positioned at the start of the payload.
+        :param user: Optional sandbox user to perform the write as.
+        :raises FileExistsError: If the path already exists, including a dangling symlink.
+        """
+        # Validate the parent so grants and symlinked parents are still enforced, then
+        # keep the final component unresolved. A path policy that resolves symlinks would
+        # otherwise turn a dangling link at the target name into its absent target and let
+        # the create land there instead of being rejected.
+        requested = Path(path)
+        parent_path = await self._validate_path_access(requested.parent, for_write=True)
+        workspace_path = parent_path / requested.name
+        path_arg = sandbox_path_str(workspace_path)
+        result = await self.exec(
+            "sh",
+            "-lc",
+            _EXCLUSIVE_CREATE_SCRIPT,
+            "sh",
+            path_arg,
+            shell=False,
+            user=user,
+        )
+        if result.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
+            raise FileExistsError(path_arg)
+        if not result.ok():
+            raise WorkspaceArchiveWriteError(
+                path=workspace_path,
+                context={
+                    "command": ["sh", "-lc", "<exclusive_create>", path_arg],
+                    "stdout": result.stdout.decode("utf-8", errors="replace"),
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                },
+            )
+        await self.write(workspace_path, data, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None

@@ -610,3 +610,121 @@ async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     # the workspace root are only released once nothing is still writing to them.
     assert events == ["extract-start", "extract-end"]
     assert not buf.closed
+
+
+def _exclusive_write_session(root: Path) -> UnixLocalSandboxSession:
+    return UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(root)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_keeps_an_intervening_creator_content(tmp_path: Path) -> None:
+    """The name is claimed by the write itself, so a creator that got there first wins."""
+    session = _exclusive_write_session(tmp_path)
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"written by someone else\n")
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(Path("notes.txt"), io.BytesIO(b"clobbered"))
+
+    assert target.read_bytes() == b"written by someone else\n"
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_rejects_a_dangling_symlink(tmp_path: Path) -> None:
+    """A symlink entry is not absent, and the write must not follow it to its target."""
+    session = _exclusive_write_session(tmp_path)
+    link = tmp_path / "link.txt"
+    link.symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(Path("link.txt"), io.BytesIO(b"clobbered"))
+
+    assert link.is_symlink()
+    assert not (tmp_path / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_creates_a_file_and_its_parents(tmp_path: Path) -> None:
+    session = _exclusive_write_session(tmp_path)
+
+    await session.write_new_file(Path("nested/dir/new.txt"), io.BytesIO(b"payload"))
+
+    assert (tmp_path / "nested" / "dir" / "new.txt").read_bytes() == b"payload"
+
+
+class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
+    """Drives the shared exec-based exclusive create with a chosen exit code."""
+
+    def __init__(self, root: Path, exit_code: int) -> None:
+        super().__init__(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(root=str(root)),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+        self._exit_code = exit_code
+        self.exec_commands: list[tuple[str, ...]] = []
+        self.writes: list[Path] = []
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = timeout
+        self.exec_commands.append(tuple(str(part) for part in command))
+        return ExecResult(stdout=b"", stderr=b"", exit_code=self._exit_code)
+
+    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
+        _ = (data, user)
+        self.writes.append(path)
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
+    """Exit 13 from the exclusive-create script means the name was already taken."""
+    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13)
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(
+            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+        )
+
+    assert session.writes == []
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_with_a_bound_user_writes_after_claiming_the_name(
+    tmp_path: Path,
+) -> None:
+    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=0)
+
+    await session.write_new_file(
+        Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+    )
+
+    assert [path.name for path in session.writes] == ["notes.txt"]
+    assert any("set -C" in part for cmd in session.exec_commands for part in cmd)
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_with_a_bound_user_keeps_a_symlink_name_unresolved(
+    tmp_path: Path,
+) -> None:
+    """The exclusive create must act on the link name, not on the target it points at."""
+    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13)
+    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(
+            Path("link.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+        )
+
+    dispatched = [part for cmd in session.exec_commands for part in cmd]
+    assert any(part.endswith("link.txt") for part in dispatched)
+    assert not any(part.endswith("missing.txt") for part in dispatched)

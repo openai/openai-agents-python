@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sys
+import io
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,9 @@ from agents.sandbox.errors import (
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
+    WorkspaceReadNotFoundError,
 )
+from agents.sandbox.types import User
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
@@ -431,42 +433,30 @@ async def test_apply_patch_create_rejects_an_existing_file() -> None:
     assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="UnixLocalSandbox is Unix-only")
+class _AlwaysMissingReadApplyPatchSession(ApplyPatchSession):
+    """Reports every path as missing while still holding the file.
+
+    A create that only probed with read() would be told the path is free and would
+    overwrite the stored content, so this pins the rejection to the write boundary.
+    """
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        _ = (path, user)
+        raise WorkspaceReadNotFoundError(path=path)
+
+
 @pytest.mark.asyncio
-async def test_apply_patch_create_does_not_record_a_failed_read_span(tmp_path: Path) -> None:
-    """The absence probe must not make every successful create look like a failed read."""
-    import uuid
+async def test_apply_patch_create_rejects_an_existing_file_without_reading_it() -> None:
+    session = _AlwaysMissingReadApplyPatchSession()
+    session.files[Path("/workspace/notes.txt")] = b"alpha\n"
 
-    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxSessionState
-    from agents.sandbox.session import SandboxSession
-    from agents.sandbox.snapshot import LocalSnapshot
-    from agents.tracing import trace
-    from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
-    from tests.testing_processor import fetch_ordered_spans
-
-    workspace = tmp_path / "workspace"
-    inner = FilesystemTestSandboxSession(
-        state=UnixLocalSandboxSessionState(
-            manifest=Manifest(root=str(workspace)),
-            snapshot=LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path),
-        )
-    )
-
-    with trace("apply_patch_create_span_test"):
-        async with SandboxSession(inner) as session:
-            await session.apply_patch(
-                ApplyPatchOperation(
-                    type="create_file",
-                    path="brand-new.txt",
-                    diff="+hello\n",
-                )
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="create_file",
+                path="notes.txt",
+                diff="+beta\n",
             )
+        )
 
-    assert (workspace / "brand-new.txt").read_text() == "hello"
-
-    read_span_errors = [
-        span.error
-        for span in fetch_ordered_spans()
-        if span.span_data.export().get("name") == "sandbox.read"
-    ]
-    assert read_span_errors and all(error is None for error in read_span_errors)
+    assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
