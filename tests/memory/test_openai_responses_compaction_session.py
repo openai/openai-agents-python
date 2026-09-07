@@ -602,6 +602,43 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == [old_item, new_item]
 
     @pytest.mark.asyncio
+    async def test_stale_forced_compaction_restores_deferred_retry_after_add(self) -> None:
+        old_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"}
+        )
+        new_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "new"}
+        )
+        underlying = SimpleListSession(history=[old_item])
+        compact_started = asyncio.Event()
+        allow_compact = asyncio.Event()
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            compact_started.set()
+            await allow_compact.wait()
+            return SimpleNamespace(output=[], usage=None)
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        session._deferred_response_id = "resp-deferred"
+        task = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await compact_started.wait()
+        assert session._deferred_response_id is None
+        await session.add_items([new_item])
+        allow_compact.set()
+        await task
+        assert session._deferred_response_id == "resp-deferred"
+        assert await underlying.get_items() == [old_item, new_item]
+
+    @pytest.mark.asyncio
     async def test_pop_while_defer_loads_does_not_republish_stale_response_id(self) -> None:
         item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
 

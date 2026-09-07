@@ -268,6 +268,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             return
 
+        deferred_response_id = self._deferred_response_id
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
@@ -297,6 +298,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 response_chain_generation != self._response_chain_generation
                 or history_generation != self._history_generation
             ):
+                if (
+                    response_chain_generation == self._response_chain_generation
+                    and history_generation != self._history_generation
+                    and deferred_response_id is not None
+                    and self._deferred_response_id is None
+                ):
+                    self._deferred_response_id = deferred_response_id
                 logger.debug(
                     "skip: session ownership changed while compaction request was in flight"
                 )
