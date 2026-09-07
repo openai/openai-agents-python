@@ -271,6 +271,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         deferred_response_id = self._deferred_response_id
         compaction_generation = self._compaction_generation
+        invalidation_generation = self._response_chain_invalidation_generation
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
@@ -285,7 +286,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         else:
             compact_kwargs["input"] = session_items
 
-        compacted = await self.client.responses.compact(**compact_kwargs)
+        try:
+            compacted = await self.client.responses.compact(**compact_kwargs)
+        except (Exception, asyncio.CancelledError):
+            async with self._mutation_lock:
+                if (
+                    invalidation_generation == self._response_chain_invalidation_generation
+                    and compaction_generation == self._compaction_generation
+                    and deferred_response_id is not None
+                    and self._deferred_response_id is None
+                ):
+                    self._deferred_response_id = deferred_response_id
+            raise
 
         compacted_usage = getattr(compacted, "usage", None)
         if wrapper is not None and compacted_usage is not None:

@@ -639,6 +639,29 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == [old_item, new_item]
 
     @pytest.mark.asyncio
+    async def test_forced_compaction_failure_restores_deferred_retry(self) -> None:
+        item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=RuntimeError("boom"))
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        session._deferred_response_id = "resp-deferred"
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+        assert session._deferred_response_id == "resp-deferred"
+        assert await underlying.get_items() == [item]
+
+    @pytest.mark.asyncio
     async def test_older_forced_compaction_does_not_restore_retry_after_newer_success(self) -> None:
         item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
         compacted = cast(TResponseInputItem, {"type": "compaction", "summary": "newer"})
