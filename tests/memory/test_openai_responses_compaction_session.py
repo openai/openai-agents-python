@@ -639,6 +639,49 @@ class TestOpenAIResponsesCompactionSession:
         assert await underlying.get_items() == [old_item, new_item]
 
     @pytest.mark.asyncio
+    async def test_older_forced_compaction_does_not_restore_retry_after_newer_success(self) -> None:
+        item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+        compacted = cast(TResponseInputItem, {"type": "compaction", "summary": "newer"})
+        underlying = SimpleListSession(history=[item])
+        first_started = asyncio.Event()
+        allow_first = asyncio.Event()
+        call_count = 0
+
+        async def compact(**kwargs: Any) -> SimpleNamespace:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_started.set()
+                await allow_first.wait()
+                return SimpleNamespace(output=[item], usage=None)
+            return SimpleNamespace(output=[compacted], usage=None)
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+        )
+        session._deferred_response_id = "resp-deferred"
+        older = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await first_started.wait()
+        assert session._deferred_response_id is None
+
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+        assert session._deferred_response_id is None
+        assert await underlying.get_items() == [compacted]
+
+        allow_first.set()
+        await older
+
+        assert session._deferred_response_id is None
+        assert await underlying.get_items() == [compacted]
+
+    @pytest.mark.asyncio
     async def test_defer_newer_response_invalidates_older_compaction_after_append(self) -> None:
         old_item = cast(
             TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"}

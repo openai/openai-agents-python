@@ -142,6 +142,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._response_chain_generation = 0
         self._response_chain_invalidation_generation = 0
         self._history_generation = 0
+        self._compaction_generation = 0
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
@@ -269,6 +270,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         deferred_response_id = self._deferred_response_id
+        compaction_generation = self._compaction_generation
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
@@ -301,6 +303,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 if (
                     response_chain_generation == self._response_chain_generation
                     and history_generation != self._history_generation
+                    and compaction_generation == self._compaction_generation
                     and deferred_response_id is not None
                     and self._deferred_response_id is None
                 ):
@@ -319,6 +322,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._history_generation += 1
             self._compaction_candidate_items = select_compaction_candidate_items(output_items)
             self._session_items = output_items
+            self._compaction_generation += 1
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
