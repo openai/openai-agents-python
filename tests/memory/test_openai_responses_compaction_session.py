@@ -1876,9 +1876,13 @@ class TestStripOrphanedAssistantIds:
             return snapshot
 
         underlying.get_items = blocking_get  # type: ignore[method-assign]
+        client = MagicMock()
+        client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[], usage=None))
         session = OpenAIResponsesCompactionSession(
             session_id="test",
             underlying_session=underlying,
+            client=client,
+            compaction_mode="input",
             should_trigger_compaction=lambda _: True,
         )
         defer_task = asyncio.create_task(session._defer_compaction("resp-old"))
@@ -1887,6 +1891,49 @@ class TestStripOrphanedAssistantIds:
         allow_read.set()
         await defer_task
         assert session._deferred_response_id is None
+        assert session._session_items is None
+        assert session._compaction_candidate_items is None
+
+        underlying.get_items = original_get  # type: ignore[method-assign]
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+        assert client.responses.compact.await_args.kwargs["input"] == []
+
+    @pytest.mark.asyncio
+    async def test_deferred_decision_retries_after_non_destructive_append(self) -> None:
+        old_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"}
+        )
+        new_item = cast(
+            TResponseInputItem, {"type": "message", "role": "assistant", "content": "new"}
+        )
+        underlying = SimpleListSession(history=[old_item])
+        read_started = asyncio.Event()
+        allow_read = asyncio.Event()
+        original_get = underlying.get_items
+        first_read = True
+
+        async def blocking_get(limit: int | None = None) -> list[TResponseInputItem]:
+            nonlocal first_read
+            snapshot = await original_get(limit)
+            if first_read:
+                first_read = False
+                read_started.set()
+                await allow_read.wait()
+            return snapshot
+
+        underlying.get_items = blocking_get  # type: ignore[method-assign]
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            should_trigger_compaction=lambda context: len(context["session_items"]) >= 2,
+        )
+        defer_task = asyncio.create_task(session._defer_compaction("resp-new"))
+        await read_started.wait()
+        await session.add_items([new_item])
+        allow_read.set()
+        await defer_task
+
+        assert session._deferred_response_id == "resp-new"
 
 
 class TestCompactionMutationSerialization:

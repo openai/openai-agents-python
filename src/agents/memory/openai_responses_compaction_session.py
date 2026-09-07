@@ -446,35 +446,55 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         pre_lock_invalidation_generation = self._response_chain_invalidation_generation
-        async with self._mutation_lock:
-            if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
+        while True:
+            async with self._mutation_lock:
+                if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
+                    return
+                if self._deferred_response_id is not None:
+                    return
+                invalidation_generation = self._response_chain_invalidation_generation
+                mutation_generation = self._mutation_generation
+                if self._compaction_candidate_items is not None and self._session_items is not None:
+                    compaction_candidate_items = self._compaction_candidate_items[:]
+                    session_items = self._session_items[:]
+                    should_compact = self.should_trigger_compaction(
+                        {
+                            "response_id": response_id,
+                            "compaction_mode": self._resolve_compaction_mode_for_response(
+                                response_id=response_id, store=store, requested_mode=None
+                            ),
+                            "compaction_candidate_items": compaction_candidate_items,
+                            "session_items": session_items,
+                        }
+                    )
+                    if should_compact:
+                        self._deferred_response_id = response_id
+                    return
+
+            history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+            compaction_candidate_items = select_compaction_candidate_items(history)
+
+            async with self._mutation_lock:
+                if invalidation_generation != self._response_chain_invalidation_generation:
+                    return
+                if self._deferred_response_id is not None:
+                    return
+                if mutation_generation != self._mutation_generation:
+                    pre_lock_invalidation_generation = self._response_chain_invalidation_generation
+                    continue
+                should_compact = self.should_trigger_compaction(
+                    {
+                        "response_id": response_id,
+                        "compaction_mode": self._resolve_compaction_mode_for_response(
+                            response_id=response_id, store=store, requested_mode=None
+                        ),
+                        "compaction_candidate_items": compaction_candidate_items,
+                        "session_items": history,
+                    }
+                )
+                if should_compact:
+                    self._deferred_response_id = response_id
                 return
-            if self._deferred_response_id is not None:
-                return
-            invalidation_generation = self._response_chain_invalidation_generation
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-        resolved_mode = self._resolve_compaction_mode_for_response(
-            response_id=response_id,
-            store=store,
-            requested_mode=None,
-        )
-        should_compact = self.should_trigger_compaction(
-            {
-                "response_id": response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
-        )
-        if not should_compact:
-            return
-        async with self._mutation_lock:
-            if (
-                invalidation_generation != self._response_chain_invalidation_generation
-                or self._deferred_response_id is not None
-            ):
-                return
-            self._deferred_response_id = response_id
 
     def _get_deferred_compaction_response_id(self) -> str | None:
         return self._deferred_response_id
