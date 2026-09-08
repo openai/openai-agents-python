@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
+from dataclasses import asdict, fields, replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,6 +15,7 @@ from openai.types.responses import Response, ResponseCompletedEvent, ResponseErr
 from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.responses.response_usage import ResponseUsage
+from openai.types.responses.tool_param import ImageGeneration
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -20,6 +23,7 @@ from agents import (
     AsyncComputer,
     Computer,
     ComputerTool,
+    ImageGenerationTool,
     ModelSettings,
     ModelTracing,
     Runner,
@@ -247,6 +251,134 @@ async def test_web_search_image_options_reach_responses_request(
         }
     ]
     assert body.get("include", []) == expected_include
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
+@pytest.mark.parametrize(
+    "tool",
+    [
+        ImageGenerationTool(ImageGeneration(type="image_generation")),
+        ImageGenerationTool(
+            ImageGeneration(
+                type="image_generation",
+                model="gpt-image-1",
+                quality="high",
+                action="edit",
+                input_fidelity="high",
+                input_image_mask={"file_id": "file-mask"},
+            )
+        ),
+        ImageGenerationTool(
+            tool_config={
+                "type": "image_generation",
+                "model": "gpt-image-2.5-sunburst",
+                "quality": "max",
+                "action": "generate",
+                "size": "1536x864",
+                "background": "transparent",
+                "output_format": "webp",
+                "output_compression": 0,
+                "partial_images": 0,
+                "moderation": "auto",
+            }
+        ),
+        ImageGenerationTool(
+            tool_config={
+                "type": "image_generation",
+                "model": "gpt-image-2.5-flare",
+                "quality": "xhigh",
+                "action": "auto",
+                "size": "auto",
+                "output_format": "png",
+                "partial_images": 2,
+            }
+        ),
+    ],
+    ids=["defaults", "typed_edit", "sunburst_max", "flare_xhigh"],
+)
+async def test_image_generation_options_reach_responses_request(
+    stream: bool, tool: ImageGenerationTool
+) -> None:
+    """Use the real client's serializer to check options beyond its current annotations."""
+    expected_config = copy.deepcopy(tool.tool_config)
+    request_bodies: list[dict[str, Any]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        request_bodies.append(json.loads(request.content))
+        if stream:
+            event = _response_completed_frame("resp-id", sequence_number=0)
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {event}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=get_response_obj([]).model_dump_json(),
+            headers={"content-type": "application/json"},
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
+        agent = Agent(
+            name="Image generator",
+            model=OpenAIResponsesModel(
+                model="gpt-5.5",
+                openai_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+            ),
+            tools=[tool],
+        )
+        prompt = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Generate an image, or edit this image."},
+                    {"type": "input_image", "file_id": "file-image", "detail": "auto"},
+                ],
+            }
+        ]
+        if stream:
+            result = Runner.run_streamed(agent, prompt)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, prompt)
+
+    assert len(request_bodies) == 1
+    assert request_bodies[0]["tools"] == [expected_config]
+    assert tool.tool_config == expected_config
+    assert request_bodies[0]["model"] == "gpt-5.5"
+
+
+def test_image_generation_config_remains_mutable() -> None:
+    config: ImageGeneration = {"type": "image_generation", "quality": "low"}
+    tool = ImageGenerationTool(config)
+    assert tool.tool_config is config
+    assert [field.name for field in fields(tool)] == ["tool_config"]
+    assert asdict(tool) == {"tool_config": config}
+    assert replace(tool).tool_config is config
+    tool.tool_config["quality"] = "high"
+    assert config["quality"] == "high"
+
+    replacement: ImageGeneration = {"type": "image_generation", "quality": "auto"}
+    assert replace(tool, tool_config=replacement).tool_config is replacement
+    tool.tool_config = replacement
+    assert tool.tool_config is replacement
+
+    tool.tool_config = {
+        "type": "image_generation",
+        "model": "gpt-image-2.5-flare",
+        "quality": "xhigh",
+    }
+    tool.tool_config["quality"] = "max"
+    assert Converter.convert_tools([tool], []).tools == [
+        {
+            "type": "image_generation",
+            "model": "gpt-image-2.5-flare",
+            "quality": "max",
+        }
+    ]
 
 
 class DummyWSConnection:
