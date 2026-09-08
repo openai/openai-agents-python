@@ -1034,8 +1034,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         requested = Path(path)
         parent_path = self.normalize_path(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
-        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
+        staging_path = parent_path / f".rumbo-create-{uuid.uuid4().hex}"
         try:
+            # Classify an observable collision before creating staging bytes. The link below
+            # remains the atomic race winner and is still the authoritative check.
+            if workspace_path.exists() or workspace_path.is_symlink():
+                raise FileExistsError(str(workspace_path))
+
             # Only the link may report a collision. A parent that is a regular file also
             # raises FileExistsError from mkdir, and reporting that as "the target already
             # exists" would send the model to update_file for a target that is absent.
