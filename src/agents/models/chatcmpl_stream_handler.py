@@ -310,44 +310,26 @@ class ChatCmplStreamHandler:
         buffered_calls: dict[int, _BufferedToolCall],
         tool_call_delta: ChoiceDeltaToolCall,
     ) -> int:
-        """Return a stable integer index for a provider tool-call delta.
+        """Resolve a missing provider index only when the call is unambiguous."""
+        if tool_call_delta.index is not None:
+            return tool_call_delta.index
 
-        Some OpenAI-compatible providers omit ``index`` for single-call streams. The
-        OpenAI SDK accepts those payloads through its lenient response construction, but
-        the buffered replay path needs an integer index to build a new tool-call model.
-        Prefer a matching call id, then the explicit provider index, and finally the most
-        recently buffered call for an index-less continuation. A fresh synthetic index
-        keeps distinct calls deterministic when an indexed and index-less call coexist.
-        """
         if tool_call_delta.id:
-            for index, candidate_call in buffered_calls.items():
-                if candidate_call.call_id == tool_call_delta.id:
+            for index, buffered_call in buffered_calls.items():
+                if buffered_call.call_id == tool_call_delta.id:
                     return index
 
-            unresolved_indexes = [
-                index
-                for index, candidate_call in buffered_calls.items()
-                if candidate_call.call_id is None
-            ]
-            if len(unresolved_indexes) == 1:
-                return unresolved_indexes[0]
+        if not buffered_calls:
+            return 0
 
-        if tool_call_delta.index is not None:
-            indexed_call = buffered_calls.get(tool_call_delta.index)
-            if indexed_call is None or not (
-                tool_call_delta.id
-                and indexed_call.call_id
-                and indexed_call.call_id != tool_call_delta.id
-            ):
-                return tool_call_delta.index
+        if len(buffered_calls) == 1:
+            index, buffered_call = next(iter(buffered_calls.items()))
+            if not tool_call_delta.id or buffered_call.call_id in (None, tool_call_delta.id):
+                return index
 
-        if tool_call_delta.index is None and not tool_call_delta.id and buffered_calls:
-            return next(reversed(buffered_calls))
-
-        synthetic_index = 0
-        while synthetic_index in buffered_calls:
-            synthetic_index += 1
-        return synthetic_index
+        raise ModelBehaviorError(
+            "Chat Completions provider streamed multiple function tool calls without indexes."
+        )
 
     @staticmethod
     def _accumulate_tool_call_delta(

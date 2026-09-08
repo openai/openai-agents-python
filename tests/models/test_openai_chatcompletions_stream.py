@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import httpx2
 import pytest
+from openai._models import construct_type
 from openai.types.chat.chat_completion import ChatCompletion, Choice as ChatCompletionChoice
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -715,38 +716,55 @@ async def test_buffer_tool_call_stream_merges_provider_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_assigns_index_when_provider_omits_it() -> None:
-    first_delta = ChoiceDeltaToolCall.model_construct(
-        index=None,
-        id="tool-id",
-        function=ChoiceDeltaToolCallFunction(name="my_func", arguments='{"a":'),
-        type="function",
+    first_chunk = construct_type(
+        type_=ChatCompletionChunk,
+        value={
+            "id": "chunk-id",
+            "created": 1,
+            "model": "fake",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "id": "tool-id",
+                                "function": {"name": "my_func", "arguments": '{"a":'},
+                                "type": "function",
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
     )
-    continuation_delta = ChoiceDeltaToolCall.model_construct(
-        index=None,
-        id=None,
-        function=ChoiceDeltaToolCallFunction(name=None, arguments="1}"),
-        type="function",
+    continuation_chunk = construct_type(
+        type_=ChatCompletionChunk,
+        value={
+            "id": "chunk-id",
+            "created": 1,
+            "model": "fake",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"tool_calls": [{"function": {"arguments": "1}"}}]},
+                }
+            ],
+        },
     )
+    assert first_chunk.choices[0].delta.tool_calls[0].index is None
+    assert continuation_chunk.choices[0].delta.tool_calls[0].index is None
+
     finish = Choice(
         index=0,
         delta=ChoiceDelta(),
         finish_reason="tool_calls",
     )
     chunks = [
-        ChatCompletionChunk(
-            id="chunk-id",
-            created=1,
-            model="fake",
-            object="chat.completion.chunk",
-            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[first_delta]))],
-        ),
-        ChatCompletionChunk(
-            id="chunk-id",
-            created=1,
-            model="fake",
-            object="chat.completion.chunk",
-            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[continuation_delta]))],
-        ),
+        first_chunk,
+        continuation_chunk,
         ChatCompletionChunk(
             id="chunk-id",
             created=1,
@@ -767,7 +785,7 @@ async def test_buffer_tool_call_stream_assigns_index_when_provider_omits_it() ->
 
 
 @pytest.mark.asyncio
-async def test_buffer_tool_call_stream_orders_indexed_and_unindexed_calls() -> None:
+async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls() -> None:
     indexed_delta = ChoiceDeltaToolCall(
         index=0,
         id="indexed-id",
@@ -780,48 +798,16 @@ async def test_buffer_tool_call_stream_orders_indexed_and_unindexed_calls() -> N
         function=ChoiceDeltaToolCallFunction(name="unindexed", arguments="{}"),
         type="function",
     )
-    unindexed_continuation = ChoiceDeltaToolCall.model_construct(
-        index=None,
-        id=None,
-        function=ChoiceDeltaToolCallFunction(name=None, arguments=""),
-        type="function",
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[indexed_delta, unindexed_delta]))],
     )
-    finish = Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")
-    chunks = [
-        ChatCompletionChunk(
-            id="chunk-id",
-            created=1,
-            model="fake",
-            object="chat.completion.chunk",
-            choices=[
-                Choice(index=0, delta=ChoiceDelta(tool_calls=[indexed_delta, unindexed_delta]))
-            ],
-        ),
-        ChatCompletionChunk(
-            id="chunk-id",
-            created=1,
-            model="fake",
-            object="chat.completion.chunk",
-            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[unindexed_continuation]))],
-        ),
-        ChatCompletionChunk(
-            id="chunk-id",
-            created=1,
-            model="fake",
-            object="chat.completion.chunk",
-            choices=[finish],
-        ),
-    ]
 
-    buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
-
-    assert len(buffered_chunks) == 1
-    buffered_tool_calls = buffered_chunks[0].choices[0].delta.tool_calls
-    assert buffered_tool_calls
-    assert [(tool_call.index, tool_call.id) for tool_call in buffered_tool_calls] == [
-        (0, "indexed-id"),
-        (1, "unindexed-id"),
-    ]
+    with pytest.raises(ModelBehaviorError, match="multiple function tool calls without indexes"):
+        await _collect_buffered_tool_call_chunks(chunk)
 
 
 def test_stream_handler_internal_part_stores_text_and_type() -> None:
