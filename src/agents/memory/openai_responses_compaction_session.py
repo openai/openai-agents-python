@@ -601,15 +601,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._invalidate_response_chain()
                 return popped
 
-            # Some backends can remove corrupt tail records while returning None.
-            # Compare authoritative history before/after to distinguish that case
-            # from a genuine empty-session no-op.
-            history_after = await self._get_all_underlying_session_items()
-            if history_after != history_before:
-                self._compaction_candidate_items = None
-                self._session_items = None
-                self._mutation_generation += 1
-                self._invalidate_response_chain()
+            # None is ambiguous across supported backends: an empty session returns
+            # None, but some backends can also destructively discard corrupt tail records and
+            # return None when no valid item remains. The wrapper cannot reliably distinguish
+            # those cases from its normalized history view, so fail closed and invalidate all
+            # retained chain/cache state rather than risk replaying server history.
+            self._compaction_candidate_items = None
+            self._session_items = None
+            self._mutation_generation += 1
+            self._invalidate_response_chain()
             return None
 
     async def clear_session(self) -> None:
