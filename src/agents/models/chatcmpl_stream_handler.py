@@ -324,7 +324,11 @@ class ChatCmplStreamHandler:
 
         if len(buffered_calls) == 1:
             index, buffered_call = next(iter(buffered_calls.items()))
-            if not tool_call_delta.id or buffered_call.call_id in (None, tool_call_delta.id):
+            if tool_call_delta.id and buffered_call.call_id is None:
+                return index
+
+            incoming_name = tool_call_delta.function.name if tool_call_delta.function else None
+            if not tool_call_delta.id and not (incoming_name and buffered_call.name):
                 return index
 
         raise ModelBehaviorError(

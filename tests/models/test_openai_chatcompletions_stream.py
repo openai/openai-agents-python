@@ -786,25 +786,34 @@ async def test_buffer_tool_call_stream_assigns_index_when_provider_omits_it() ->
 
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls() -> None:
-    indexed_delta = ChoiceDeltaToolCall(
-        index=0,
-        id="indexed-id",
-        function=ChoiceDeltaToolCallFunction(name="indexed", arguments="{}"),
-        type="function",
+    chunk = construct_type(
+        type_=ChatCompletionChunk,
+        value={
+            "id": "chunk-id",
+            "created": 1,
+            "model": "fake",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "id": "first-id",
+                                "function": {"name": "first", "arguments": '{"a":1}'},
+                                "type": "function",
+                            },
+                            {
+                                "function": {"name": "second", "arguments": '{"b":2}'},
+                                "type": "function",
+                            },
+                        ]
+                    },
+                }
+            ],
+        },
     )
-    unindexed_delta = ChoiceDeltaToolCall.model_construct(
-        index=None,
-        id="unindexed-id",
-        function=ChoiceDeltaToolCallFunction(name="unindexed", arguments="{}"),
-        type="function",
-    )
-    chunk = ChatCompletionChunk(
-        id="chunk-id",
-        created=1,
-        model="fake",
-        object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[indexed_delta, unindexed_delta]))],
-    )
+    assert all(tool_call.index is None for tool_call in chunk.choices[0].delta.tool_calls)
 
     with pytest.raises(ModelBehaviorError, match="multiple function tool calls without indexes"):
         await _collect_buffered_tool_call_chunks(chunk)
