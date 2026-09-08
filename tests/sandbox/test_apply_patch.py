@@ -8,6 +8,7 @@ from agents.editor import ApplyPatchOperation
 from agents.sandbox import Manifest
 from agents.sandbox.errors import (
     ApplyPatchDecodeError,
+    ApplyPatchDestinationExistsError,
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
@@ -411,3 +412,61 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
         )
 
     assert session.files[Path("/workspace/old.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_move_rejects_existing_destination() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+    session.files[Path("/workspace/target.txt")] = b"important\n"
+
+    with pytest.raises(
+        ApplyPatchDestinationExistsError,
+        match="apply_patch destination already exists: target.txt",
+    ):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                diff="@@\n-source\n+changed\n",
+                move_to="target.txt",
+            )
+        )
+
+    assert session.files[Path("/workspace/source.txt")] == b"source\n"
+    assert session.files[Path("/workspace/target.txt")] == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_move_allows_missing_destination() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="source.txt",
+            diff="@@\n-source\n+changed\n",
+            move_to="target.txt",
+        )
+    )
+
+    assert Path("/workspace/source.txt") not in session.files
+    assert session.files[Path("/workspace/target.txt")] == b"changed\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_move_same_path_still_updates_in_place() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="source.txt",
+            diff="@@\n-source\n+changed\n",
+            move_to="source.txt",
+        )
+    )
+
+    assert session.files[Path("/workspace/source.txt")] == b"changed\n"
