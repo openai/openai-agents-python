@@ -4396,6 +4396,9 @@ async def _build_run_state_from_json(
         pending_input_write = (
             pending_write.get("pending_input") if isinstance(pending_write, dict) else None
         )
+        pending_input_field_present = (
+            isinstance(pending_write, dict) and "pending_input" in pending_write
+        )
         pending_write_items = (
             pending_write.get("items") if isinstance(pending_write, dict) else None
         )
@@ -4413,8 +4416,10 @@ async def _build_run_state_from_json(
         except ValidationError:
             validated_pending_write_items = None
             validated_pending_input_write = None
-        valid_pending_input = pending_input_write is None or (
-            (schema_major, schema_minor) >= (1, 18) and bool(validated_pending_input_write)
+        valid_pending_input = not pending_input_field_present or (
+            (schema_major, schema_minor) >= (1, 18)
+            and isinstance(pending_input_write, list)
+            and bool(validated_pending_input_write)
         )
         if (
             (schema_major, schema_minor) < (1, 17)

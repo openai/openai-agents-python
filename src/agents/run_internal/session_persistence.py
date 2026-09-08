@@ -889,7 +889,10 @@ async def resume_pending_session_write(
         if before is None:
             # No append has started. Retain the batch even if this first read fails.
             tail = await _session_get_items(
-                session, limit=len(pending["items"]) + 1, wrapper=wrapper
+                session,
+                limit=len(pending["items"]) + 1,
+                wrapper=wrapper,
+                capture_compaction_generation=True,
             )
             pending["before"] = legacy_digests(tail)
             append = True
@@ -902,6 +905,7 @@ async def resume_pending_session_write(
                     get_with_generation,
                     limit=expected_length,
                 )
+                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
             else:
                 tail = await _session_get_items(session, limit=expected_length, wrapper=wrapper)
             observed = legacy_digests(tail)
@@ -927,8 +931,6 @@ async def resume_pending_session_write(
                     "Cannot reconcile the pending Session write: history changed or is ambiguous. "
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
-            if committed and committed_generation is not None and wrapper is not None:
-                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)

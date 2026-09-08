@@ -343,6 +343,46 @@ async def test_resumed_committed_append_refreshes_compaction_input(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_pending_input_recovery_refreshes_compaction_generation(round_trip: bool) -> None:
+    backend = _FailingResumeSession()
+    compaction_inputs: list[list[TResponseInputItem]] = []
+    compact_enabled = False
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compaction_inputs.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: compact_enabled,
+    )
+    agent, model, _, state, effects = await _approved_session_state(False, session)
+    await session.run_compaction()
+    state.add_input("Late input")
+    backend.failure = "before"
+
+    try:
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, False)
+        assert error.value is backend.error
+        if round_trip:
+            state = await RunState.from_json(agent, state.to_json())
+
+        compact_enabled = True
+        result = await _run_session_resume(agent, state, session, False)
+        assert result.final_output == "done"
+        assert effects == [7]
+        assert len(compaction_inputs) == 1
+    finally:
+        await backend.clear_session()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["input", "auto"])
 async def test_compaction_reload_preserves_session_retrieval_window(
     mode: Literal["input", "auto"], tmp_path: Path
@@ -499,7 +539,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape", "pending-input-null"])
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"
@@ -508,8 +548,10 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     payload = state.to_json()
     if invalid == "old-schema":
         payload["$schemaVersion"] = "1.16"
-    else:
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    else:
+        payload["pending_session_write"]["pending_input"] = None
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
 
