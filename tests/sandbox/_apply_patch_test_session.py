@@ -121,13 +121,17 @@ class ApplyPatchSession(BaseSandboxSession):
         stored_source = self._stored_path(source)
         if stored_source not in self.files:
             raise FileNotFoundError(stored_source)
+        stored_destination = self._stored_path(destination)
+        destination_exists = stored_destination in self.files
         payload = self.files.pop(stored_source)
-        # Look the destination up after removing the source, so a case-only rename does not
-        # find the entry it is renaming. A real `mv` replaces whatever is at the destination
-        # and stores the name it was given, which is how a case-only rename changes the case.
-        self.files.pop(self._stored_path(destination), None)
         normalized_destination = self.normalize_path(destination)
-        self.files[normalized_destination] = payload
+        if destination_exists and stored_destination != stored_source:
+            # APFS keeps an existing entry's spelling when a different inode replaces it
+            # through a case-variant path. A later rename of that same entry changes the case.
+            self.files[stored_destination] = payload
+        else:
+            self.files.pop(stored_destination, None)
+            self.files[normalized_destination] = payload
         self.mv_calls.append((stored_source, normalized_destination))
 
     async def same_file(
@@ -146,8 +150,6 @@ class ApplyPatchSession(BaseSandboxSession):
         return self._resolved_path(left) == self._resolved_path(right)
 
     def _resolved_path(self, path: Path | str) -> Path:
-        # `-ef` resolves the whole chain, so a fake that follows one hop would answer False
-        # where a real filesystem answers True. The seen set stops a cycle.
         stored = self._stored_path(path)
         seen: set[Path] = set()
         while stored in self.symlinks and stored not in seen:
@@ -171,11 +173,11 @@ class PosixHostApplyPatchSession(ApplyPatchSession):
 
 
 class CaseFoldingApplyPatchSession(PosixHostApplyPatchSession):
-    """A case-sensitive host over a sandbox filesystem that folds path case.
+    """A case-sensitive host over a store that models case-folding APFS.
 
-    APFS, NTFS, and Docker bind mounts backed by either store `notes.txt` and `Notes.txt` as
-    one file, and they preserve the case of the name that created the file. Lookups here fold
-    case so an existing entry keeps its stored name when it is written again.
+    Case-folding APFS stores `notes.txt` and `Notes.txt` as one file. Replacing that entry
+    through a case-variant path keeps its stored name, while moving the entry itself changes
+    the spelling. Lookups here fold case so the double follows that measured behavior.
     """
 
     def _stored_path(self, path: Path | str) -> Path:

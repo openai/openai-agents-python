@@ -1207,14 +1207,13 @@ class BaseSandboxSession(abc.ABC):
         session, which may not be the kind of system the sandbox is running on.
 
         `test -ef` resolves symlinks, so a symlink and the file it points at are the same
-        file by this test while being two directory entries: removing the symlink leaves the
-        file alone. Pass ``follow_symlinks=False`` when the answer is going to decide whether
-        removing one path destroys the other, which makes a symlink on either side answer no.
+        file by this test while being two directory entries. Pass ``follow_symlinks=False``
+        when the caller needs to distinguish those entries.
 
         :param left: First path to compare.
         :param right: Second path to compare.
         :param follow_symlinks: If false, a symlink on either side is not the same file as
-                its target.
+                its target when the backend preserves the requested leaf path.
         :param user: Optional sandbox user to compare as.
         :returns: True when both paths resolve to the same file.
         """

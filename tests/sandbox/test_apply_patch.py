@@ -271,6 +271,12 @@ async def test_apply_patch_case_only_move_to_keeps_file_on_case_folding_filesyst
     )
 
     assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+    assert len(session.mv_calls) == 2
+    assert session.mv_calls[1] == (
+        PurePosixPath("/workspace/notes.txt"),
+        PurePosixPath("/workspace/Notes.txt"),
+    )
+    assert session.rm_calls == []
 
 
 @pytest.mark.asyncio
@@ -418,12 +424,7 @@ async def test_apply_patch_move_to_commits_the_destination_before_removing_the_s
 
 @pytest.mark.asyncio
 async def test_apply_patch_move_to_removes_a_source_symlink_pointing_at_the_destination() -> None:
-    """`test -ef` follows symlinks, and the removal decision must not.
-
-    A symlink and its target are one file by device and inode, and two directory entries.
-    Removing the symlink leaves the target alone, so a rename that reads them as the same file
-    leaves the old name behind pointing at the new one.
-    """
+    """A source symlink is a separate entry even when `test -ef` follows it to the destination."""
     session = PosixHostApplyPatchSession()
     link = cast(Path, PurePosixPath("/workspace/notes.txt"))
     target = cast(Path, PurePosixPath("/workspace/Notes.txt"))
@@ -441,25 +442,19 @@ async def test_apply_patch_move_to_removes_a_source_symlink_pointing_at_the_dest
     )
 
     assert session.files == {target: b"alpha\ngamma\n"}
+    assert session.mv_calls[-1][1] == target
+    assert session.rm_calls == [(link, False)]
 
 
 @pytest.mark.asyncio
 async def test_sandbox_session_forwards_follow_symlinks_to_the_inner_session() -> None:
-    """The editor always talks to the instrumented wrapper, never to the session underneath.
-
-    `BaseSandboxSession.apply_patch` builds the editor around `self`, and every client hands
-    out a `SandboxSession`. A wrapper that accepts `follow_symlinks` and drops it leaves the
-    inner session running the plain `-ef` test, and every test above uses a session double that
-    never crosses the wrapper, so nothing else here would notice.
-    """
+    """The wrapper every client receives must preserve the destructive check's argument."""
     inner = MagicMock()
     inner.same_file = AsyncMock(return_value=True)
     session = SandboxSession(inner)
 
     await session.same_file("/workspace/link.txt", "/workspace/target.txt", follow_symlinks=False)
 
-    # .get, not [], so a wrapper that drops the argument fails on the value rather than
-    # raising KeyError from the assertion itself.
     assert inner.same_file.await_args.kwargs.get("follow_symlinks") is False
 
 
