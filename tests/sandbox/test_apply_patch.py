@@ -18,6 +18,7 @@ from agents.sandbox.session.sandbox_session import SandboxSession
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     CaseFoldingApplyPatchSession,
+    CaseFoldingHostApplyPatchSession,
     ConcurrentWriterApplyPatchSession,
     NormalizationFoldingApplyPatchSession,
     ParentAliasApplyPatchSession,
@@ -284,6 +285,29 @@ async def test_apply_patch_case_only_move_to_keeps_file_on_case_folding_filesyst
 async def test_apply_patch_case_only_move_to_moves_file_on_case_sensitive_filesystem() -> None:
     """A case-sensitive filesystem keeps the names apart, so the source must still be removed."""
     session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_renames_from_a_case_folding_host() -> None:
+    """The host's path comparison must not decide whether two sandbox paths are one file.
+
+    On a Windows host `Path` equality folds case, so a case-only `move_to` looked like a
+    `move_to` that names the path it already has. The update was written in place and reported
+    as a success while the requested name was never created in the case-sensitive sandbox.
+    """
+    session = CaseFoldingHostApplyPatchSession()
     session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
 
     await session.apply_patch(

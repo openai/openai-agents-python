@@ -248,9 +248,15 @@ class WorkspaceEditor:
         because a destination basename near the filesystem's 255-byte limit would make the
         decorated name exceed it and the write would fail with ENAMETOOLONG.
         """
-        if source == moved_destination:
+        if source.as_posix() == moved_destination.as_posix():
             # Not a rename, so nothing needs committing elsewhere. Writing in place is what an
             # update without `move_to` does, and it keeps the inode, the mode and the xattrs.
+            #
+            # The comparison is on the spelling rather than on `Path` equality, which folds case
+            # on a Windows host. Whether two sandbox paths are one file is the sandbox's answer,
+            # not the host's: a Windows host talking to a case-sensitive sandbox would otherwise
+            # take this branch for a case-only rename and never create the new name. Paths that
+            # differ only in case go down the staging path, where `same_file` asks the sandbox.
             await self._write_text(source, text)
             return
 

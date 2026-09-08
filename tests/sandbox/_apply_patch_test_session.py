@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import unicodedata
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import cast
 
 from agents.sandbox import Manifest
@@ -170,6 +170,89 @@ class PosixHostApplyPatchSession(ApplyPatchSession):
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         normalized = super().normalize_path(path, for_write=for_write)
         return cast(Path, PurePosixPath(normalized.as_posix()))
+
+
+class _CaseFoldingHostPath(PurePosixPath):
+    """A pure path that compares case-insensitively, as `WindowsPath` does on a Windows host.
+
+    `Path("/workspace/notes.txt") == Path("/workspace/Notes.txt")` is `True` on Windows and
+    `False` everywhere else. Modelling that here rather than reading `sys.platform` keeps the
+    coverage on every host that runs the suite.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, PurePath):
+            return self.as_posix().casefold() == other.as_posix().casefold()
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.as_posix().casefold())
+
+
+class CaseFoldingHostApplyPatchSession(PosixHostApplyPatchSession):
+    """A host that folds case in path comparisons, over a sandbox store that does not.
+
+    This is the SDK running on Windows against a Linux container. The host's own filesystem
+    says nothing about the sandbox's, so a case-only `move_to` is a real rename that the
+    sandbox must perform. The store below keeps every spelling apart; only `normalize_path`
+    hands back paths that fold.
+    """
+
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        normalized = super().normalize_path(path, for_write=for_write)
+        return cast(Path, _CaseFoldingHostPath(normalized.as_posix()))
+
+    def _stored_path(self, path: Path | str) -> Path:
+        return cast(Path, PurePosixPath(self.normalize_path(path).as_posix()))
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        _ = user
+        stored = self._stored_path(path)
+        if stored not in self.files:
+            raise FileNotFoundError(stored)
+        return io.BytesIO(self.files[stored])
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        payload = data.read()
+        stored = self._stored_path(path)
+        if isinstance(payload, str):
+            self.files[stored] = payload.encode("utf-8")
+        else:
+            self.files[stored] = bytes(payload)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        stored = self._stored_path(path)
+        self.rm_calls.append((stored, recursive))
+        self.files.pop(stored, None)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        stored_source = self._stored_path(source)
+        if stored_source not in self.files:
+            raise FileNotFoundError(stored_source)
+        stored_destination = self._stored_path(destination)
+        self.files[stored_destination] = self.files.pop(stored_source)
+        self.mv_calls.append((stored_source, stored_destination))
 
 
 class CaseFoldingApplyPatchSession(PosixHostApplyPatchSession):
