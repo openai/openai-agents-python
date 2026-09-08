@@ -731,7 +731,7 @@ async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_pat
     # The payload only ever reached a staging name, and that staging entry is cleaned up,
     # so a rejected create leaves nothing behind at the requested name.
     assert [path.name for path in session.writes] != ["notes.txt"]
-    assert all(path.name.startswith(".notes.txt.create-") for path in session.writes)
+    assert all(path.name.startswith(".apply-patch-create-") for path in session.writes)
     assert session.removed == session.writes
     assert session.made_dirs != []
 
@@ -748,7 +748,7 @@ async def test_write_new_file_with_a_bound_user_links_the_completed_payload(
     )
 
     staged = session.writes[0]
-    assert staged.name.startswith(".notes.txt.create-")
+    assert staged.name.startswith(".apply-patch-create-")
     dispatched = [part for cmd in session.exec_commands for part in cmd]
     assert any("ln " in part for part in dispatched)
     assert any(part.endswith("notes.txt") for part in dispatched)
@@ -903,3 +903,27 @@ async def test_apply_patch_create_through_the_session_reports_a_file_parent_as_a
         await session.apply_patch(
             ApplyPatchOperation(type="create_file", path="parent/child.txt", diff="+hi\n")
         )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_accepts_a_destination_at_the_component_limit(
+    tmp_path: Path,
+) -> None:
+    """Staging must not push a valid destination name past the filesystem's limit.
+
+    Deriving the staging basename from the destination made it longer than the
+    destination itself, so a name the ordinary write path accepts failed to create.
+    """
+    session = _exclusive_write_session(tmp_path)
+    long_name = "a" * 250 + ".txt"
+    # Confirm the platform really does accept this name, so the test fails for the
+    # right reason rather than because the limit is lower here.
+    probe = tmp_path / long_name
+    probe.write_text("probe")
+    probe.unlink()
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path=long_name, diff="+hello\n")
+    )
+
+    assert (tmp_path / long_name).read_text() == "hello"
