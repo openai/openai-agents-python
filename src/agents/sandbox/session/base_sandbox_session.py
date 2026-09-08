@@ -1212,6 +1212,16 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Atomically move a file without replacing an existing destination when supported."""
         from ..errors import AtomicMoveUnsupportedError
+
+        try:
+            from ..sandboxes.unix_local import UnixLocalSandboxSession
+        except ImportError:
+            UnixLocalSandboxSession = None
+
+        if UnixLocalSandboxSession is not None and isinstance(self, UnixLocalSandboxSession):
+            await self._move_no_replace(source, destination, user=user)
+            return
+
         raise AtomicMoveUnsupportedError(source=source, destination=destination)
 
 
