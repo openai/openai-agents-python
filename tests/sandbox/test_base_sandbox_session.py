@@ -169,3 +169,24 @@ async def test_pty_cleanup_attempts_remaining_entries_after_failure() -> None:
         await _session()._cleanup_pty_entries((1, 2), cleanup)
 
     assert attempted == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_pty_cleanup_timeout_is_bounded() -> None:
+    session = _Session()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(
+        session._settle_pty_cleanup(cleanup(), timeout=0.01)
+    )
+    await started.wait()
+
+    with pytest.raises(ExecTimeoutError):
+        await task
+
+    assert not release.is_set()
