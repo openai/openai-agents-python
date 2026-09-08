@@ -442,12 +442,8 @@ async def test_move_no_replace_is_atomic_against_existing_destination(tmp_path: 
 
     session = _RecordingUnixLocalSession(workspace)
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ApplyPatchDestinationExistsError):
         await session.move_no_replace(Path("source.txt"), Path("destination.txt"))
-
-    from agents.sandbox.errors import ApplyPatchDestinationExistsError
-
-    assert isinstance(exc_info.value, ApplyPatchDestinationExistsError)
     assert source.read_text(encoding="utf-8") == "new"
     assert destination.read_text(encoding="utf-8") == "keep"
 
