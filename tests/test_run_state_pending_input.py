@@ -366,6 +366,53 @@ async def test_pending_input_conversations_session_reconciles_sanitized_message_
 
 
 @pytest.mark.asyncio
+async def test_pending_input_provider_data_survives_lost_ack_reconciliation() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    provider_data = {
+        "model": "litellm/test",
+        "thinking_blocks": [{"signature": "signed-block"}],
+    }
+    state.add_input(
+        [
+            {
+                "type": "function_call_output",
+                "call_id": "provider-replay",
+                "output": "provider-backed replay",
+                "provider_data": provider_data,
+            }
+        ]
+    )
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "after"
+
+    with pytest.raises(
+        RuntimeError, match="conversation append failed|pending input Session append failed"
+    ):
+        await Runner.run(agent, state, session=session, run_config=RunConfig(tracing_disabled=True))
+
+    state = await RunState.from_json(agent, state.to_json())
+    assert state._pending_session_write is not None
+    pending_item = state._pending_session_write["items"][0]
+    assert isinstance(pending_item, dict)
+    assert pending_item["provider_data"] == provider_data
+
+    result = await Runner.run(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+
+    assert result.final_output == "Recovered"
+    stored = await session.get_items()
+    matches = [
+        item
+        for item in stored
+        if isinstance(item, dict) and item.get("call_id") == "provider-replay"
+    ]
+    assert len(matches) == 1
+    assert matches[0].get("provider_data") == provider_data
+
+
+@pytest.mark.asyncio
 async def test_pending_input_added_during_session_write_survives_stream_checkpoint() -> None:
     session = _PendingInputWriteFailureSession()
     model, agent, state, _calls = await _make_after_turn_state(session=session)
