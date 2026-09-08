@@ -175,6 +175,34 @@ async def _resume_pending_input_state(
 
 
 @pytest.mark.asyncio
+async def test_pending_input_preserves_provider_data_on_serialization_round_trip() -> None:
+    agent = Agent(name="assistant")
+    state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="Initial request",
+        starting_agent=agent,
+    )
+    state._current_step = NextStepRunAgain()
+    provider_data = {
+        "model": "litellm/test",
+        "thinking_blocks": [{"signature": "signed-block"}],
+    }
+    state.add_input(
+        {
+            "role": "assistant",
+            "content": "provider-backed replay",
+            "provider_data": provider_data,
+        }
+    )
+
+    restored = await RunState.from_json(agent, state.to_json())
+    restored_item = restored.pending_input[0]
+
+    assert isinstance(restored_item, dict)
+    assert restored_item["provider_data"] == provider_data
+
+
+@pytest.mark.asyncio
 async def test_pending_input_preserves_order_and_serialization_round_trips() -> None:
     agent = Agent(name="assistant")
     state: RunState[Any] = RunState(
