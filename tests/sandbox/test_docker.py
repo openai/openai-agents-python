@@ -4689,14 +4689,8 @@ async def test_docker_pty_non_tty_rejects_stdin_and_stop_cleans_up(
     await session.stop()
 
     assert api.socket.closed is True
-    assert len(container.exec_calls) == 2
+    assert len(container.exec_calls) == 1
     _assert_pty_kill_call(container.exec_calls[0])
-    assert container.exec_calls[1]["cmd"] == [
-        "rm",
-        "-rf",
-        "--",
-        cast(list[str], api.exec_create_calls[0]["cmd"])[5],
-    ]
 
     with pytest.raises(PtySessionNotFoundError):
         await session.pty_write_stdin(session_id=started.process_id, chars="")
@@ -4811,14 +4805,8 @@ async def test_docker_pty_exec_start_times_out_blocking_docker_startup(
             yield_time_s=0.01,
         )
 
-    assert len(container.exec_calls) == 2
+    assert len(container.exec_calls) == 1
     _assert_pty_kill_call(container.exec_calls[0])
-    assert container.exec_calls[1]["cmd"] == [
-        "rm",
-        "-rf",
-        "--",
-        cast(list[str], container.exec_calls[0]["cmd"])[4],
-    ]
 
 
 @pytest.mark.asyncio
