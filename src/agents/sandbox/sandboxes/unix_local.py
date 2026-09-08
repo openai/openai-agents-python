@@ -991,7 +991,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
 
-    async def _move_no_replace(
+    async def move_no_replace(
         self,
         source: Path,
         destination: Path,
