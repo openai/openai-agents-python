@@ -402,6 +402,32 @@ async def test_pending_input_added_during_session_write_survives_stream_checkpoi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_pending_input_added_during_successful_session_write_is_admitted(
+    streamed: bool,
+) -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Before write")
+    model.enqueue([get_text_message("Recovered")])
+    session.block_next_add = True
+
+    result_task = asyncio.create_task(
+        _resume_pending_input_state(agent, state, session, streamed=streamed)
+    )
+    await session.add_started.wait()
+    state.add_input("During write")
+    session.release_add.set()
+    result = await result_task
+
+    assert result.final_output == "Recovered"
+    assert state.pending_input == []
+    session_items = await session.get_items()
+    assert [_message_text(item) for item in session_items].count("Before write") == 1
+    assert [_message_text(item) for item in session_items].count("During write") == 1
+
+
+@pytest.mark.asyncio
 async def test_streamed_resume_matches_pending_input_ordering() -> None:
     model, agent, state, calls = await _make_after_turn_state()
     state.add_input("Change the destination to Tokyo")
