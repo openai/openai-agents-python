@@ -777,7 +777,9 @@ async def test_buffer_tool_call_stream_assigns_index_when_provider_omits_it() ->
     buffered_chunks = await _collect_buffered_tool_call_chunks(*chunks)
 
     assert len(buffered_chunks) == 1
-    buffered_tool_call = buffered_chunks[0].choices[0].delta.tool_calls[0]
+    buffered_tool_calls = buffered_chunks[0].choices[0].delta.tool_calls
+    assert buffered_tool_calls
+    buffered_tool_call = buffered_tool_calls[0]
     assert buffered_tool_call.index == 0
     assert buffered_tool_call.id == "tool-id"
     assert buffered_tool_call.function
@@ -831,7 +833,9 @@ async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls(
             ],
         },
     )
-    assert all(tool_call.index is None for tool_call in chunk.choices[0].delta.tool_calls)
+    unindexed_tool_calls = chunk.choices[0].delta.tool_calls
+    assert unindexed_tool_calls
+    assert all(tool_call.index is None for tool_call in unindexed_tool_calls)
 
     with pytest.raises(ModelBehaviorError, match="ambiguous function tool calls without indexes"):
         await _collect_buffered_tool_call_chunks(chunk)
