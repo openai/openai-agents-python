@@ -650,6 +650,15 @@ class SandboxSession(BaseSandboxSession):
     ) -> None:
         await self._inner.mkdir(path, parents=parents, user=user)
 
+    async def move_no_replace(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await self._inner.move_no_replace(source, destination, user=user)
+
     async def _read(
         self,
         path: Path,
