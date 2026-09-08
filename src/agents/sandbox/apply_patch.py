@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from pathlib import Path
@@ -140,7 +141,7 @@ class WorkspaceEditor:
                         await self._session.rm(temp_path, user=self._user)
                     try:
                         await self._session.rm(destination, user=self._user)
-                    except Exception as source_rm_error:
+                    except (Exception, asyncio.CancelledError) as source_rm_error:
                         try:
                             await self._session.move_no_replace(
                                 moved_destination,
@@ -168,7 +169,7 @@ class WorkspaceEditor:
                                 rollback_error=rollback_error,
                             ) from source_rm_error
                         raise
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     try:
                         await self._session.rm(temp_path, user=self._user)
                     except Exception:
