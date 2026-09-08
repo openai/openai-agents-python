@@ -711,8 +711,10 @@ class BaseSandboxSession(abc.ABC):
             raise PtySessionNotFoundError(session_id=session_id)
         return entry
 
-    async def _settle_pty_cleanup(self, operation: Awaitable[None], *, timeout: float = 30.0) -> None:
+    async def _settle_pty_cleanup(self, operation: Awaitable[None], *, timeout: float | None = None) -> None:
         """Complete cleanup after PTY ownership leaves the session registry."""
+
+        effective_timeout = self.PTY_CLEANUP_TIMEOUT_S if timeout is None else timeout
 
         async def run_operation() -> None:
             await operation
@@ -722,11 +724,11 @@ class BaseSandboxSession(abc.ABC):
         caller_cancellation: asyncio.CancelledError | None = None
         while not completion.done():
             try:
-                await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
+                await asyncio.wait_for(asyncio.shield(completion), timeout=effective_timeout)
             except asyncio.TimeoutError:
                 raise ExecTimeoutError(
                     command=("pty_cleanup",),
-                    timeout_s=timeout,
+                    timeout_s=effective_timeout,
                 )
             except asyncio.CancelledError as error:
                 caller_cancellation = caller_cancellation or error
