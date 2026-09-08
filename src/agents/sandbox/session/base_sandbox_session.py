@@ -20,6 +20,7 @@ from ..apply_patch import PatchFormat, WorkspaceEditor
 from ..entries import BaseEntry
 from ..errors import (
     ExecNonZeroError,
+    ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
     InvalidManifestPathError,
