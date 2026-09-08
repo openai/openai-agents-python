@@ -229,9 +229,9 @@ class WorkspaceEditor:
         So neither path is written or removed until the new content is committed somewhere else:
         the text goes to a staging file, a single `mv` puts it at the destination, and only then
         is the source removed when the filesystem says it is a different entry. When both names
-        are one entry, a second move of that entry changes its stored spelling. Before the first
-        move the original is untouched; after it the new content exists. There is no moment where
-        the only copy is in memory, and nothing is restored after the fact.
+        are one entry and the leaf spellings differ, a second move changes the stored spelling.
+        Before the first move the original is untouched; after it the new content exists. There
+        is no moment where the only copy is in memory, and nothing is restored after the fact.
 
         The identity answer can still go stale. On the different-entry branch, a writer that
         replaces the source before the removal loses its file. On the same-entry branch, a writer
@@ -262,14 +262,15 @@ class WorkspaceEditor:
             with contextlib.suppress(Exception):
                 await self._session.rm(staging, user=self._user)
             raise
-        if await self._session.same_file(
+        same_entry = await self._session.same_file(
             source, moved_destination, follow_symlinks=False, user=self._user
-        ):
+        )
+        if same_entry and source.name != moved_destination.name:
             # On case-folding APFS, replacing an existing entry through a case-variant path
             # updates its content but keeps its old spelling. Moving that same entry performs
             # the requested case-only rename without touching the committed content.
             await self._session.mv(source, moved_destination, user=self._user)
-        else:
+        elif not same_entry:
             await self._session.rm(source, user=self._user)
 
     async def _write_text(self, destination: Path, text: str) -> None:

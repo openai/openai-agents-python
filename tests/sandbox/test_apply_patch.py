@@ -20,6 +20,7 @@ from tests.sandbox._apply_patch_test_session import (
     CaseFoldingApplyPatchSession,
     ConcurrentWriterApplyPatchSession,
     NormalizationFoldingApplyPatchSession,
+    ParentAliasApplyPatchSession,
     PosixHostApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
     WriteFailureApplyPatchSession,
@@ -295,6 +296,27 @@ async def test_apply_patch_case_only_move_to_moves_file_on_case_sensitive_filesy
     )
 
     assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_same_leaf_through_parent_alias_does_not_move_twice() -> None:
+    """A parent symlink alias does not require renaming the file's directory entry."""
+    session = ParentAliasApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/real/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="real/notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="alias/notes.txt",
+        )
+    )
+
+    assert session.files == {source: b"alpha\ngamma\n"}
+    assert len(session.mv_calls) == 1
+    assert session.rm_calls == []
 
 
 @pytest.mark.asyncio

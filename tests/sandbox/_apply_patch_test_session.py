@@ -210,6 +210,57 @@ class CaseFoldingApplyPatchSession(PosixHostApplyPatchSession):
         await super().rm(self._stored_path(path), recursive=recursive, user=user)
 
 
+class ParentAliasApplyPatchSession(PosixHostApplyPatchSession):
+    """A store where `/workspace/alias` resolves to `/workspace/real`."""
+
+    def _stored_path(self, path: Path | str) -> Path:
+        normalized = cast(PurePosixPath, self.normalize_path(path))
+        alias = PurePosixPath("/workspace/alias")
+        try:
+            relative = normalized.relative_to(alias)
+        except ValueError:
+            return cast(Path, normalized)
+        return cast(Path, PurePosixPath("/workspace/real") / relative)
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        return await ApplyPatchSession.read(self, self._stored_path(path), user=user)
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await ApplyPatchSession.write(self, self._stored_path(path), data, user=user)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        await super().rm(self._stored_path(path), recursive=recursive, user=user)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        normalized_source = self.normalize_path(source)
+        normalized_destination = self.normalize_path(destination)
+        if (
+            normalized_source != normalized_destination
+            and normalized_source.name == normalized_destination.name
+            and self._stored_path(source) == self._stored_path(destination)
+        ):
+            raise RuntimeError("mv: source and destination are the same file")
+        await super().mv(source, destination, user=user)
+
+
 class NormalizationFoldingApplyPatchSession(PosixHostApplyPatchSession):
     """A case-sensitive host over a filesystem that folds case and Unicode normalization.
 
