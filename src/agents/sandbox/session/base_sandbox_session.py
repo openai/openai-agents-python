@@ -223,6 +223,7 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
+    _apply_patch_lock: asyncio.Lock | None = None
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -1211,7 +1212,12 @@ class BaseSandboxSession(abc.ABC):
         *,
         patch_format: PatchFormat | Literal["v4a"] = "v4a",
     ) -> str:
-        return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
+        lock = self._apply_patch_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._apply_patch_lock = lock
+        async with lock:
+            return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
 
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         policy = self._workspace_path_policy()
