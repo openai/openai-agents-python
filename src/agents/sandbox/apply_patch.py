@@ -10,6 +10,7 @@ from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchRes
 from .errors import (
     ApplyPatchDecodeError,
     ApplyPatchDestinationExistsError,
+    ApplyPatchMoveRollbackError,
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
@@ -137,7 +138,34 @@ class WorkspaceEditor:
                             raise ApplyPatchDestinationExistsError(path=moved_display_path)
                         await self._write_text(moved_destination, updated_text)
                         await self._session.rm(temp_path, user=self._user)
-                    await self._session.rm(destination, user=self._user)
+                    try:
+                        await self._session.rm(destination, user=self._user)
+                    except Exception as source_rm_error:
+                        try:
+                            await self._session.move_no_replace(
+                                moved_destination,
+                                temp_path,
+                                user=self._user,
+                            )
+                        except AtomicMoveUnsupportedError:
+                            try:
+                                await self._session.rm(moved_destination, user=self._user)
+                                await self._write_text(destination, updated_text)
+                            except Exception as rollback_error:
+                                raise ApplyPatchMoveRollbackError(
+                                    source=destination,
+                                    destination=moved_destination,
+                                    move_error=source_rm_error,
+                                    rollback_error=rollback_error,
+                                ) from source_rm_error
+                        except Exception as rollback_error:
+                            raise ApplyPatchMoveRollbackError(
+                                source=destination,
+                                destination=moved_destination,
+                                move_error=source_rm_error,
+                                rollback_error=rollback_error,
+                            ) from source_rm_error
+                        raise
                 except Exception:
                     try:
                         await self._session.rm(temp_path, user=self._user)
