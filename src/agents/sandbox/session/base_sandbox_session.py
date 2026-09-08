@@ -722,15 +722,25 @@ class BaseSandboxSession(abc.ABC):
             await operation
 
         task = asyncio.create_task(run_operation(), name="agents.pty_cleanup")
-        completion = asyncio.create_task(asyncio.wait((task,)))
+
+        def consume_cleanup_result(completed_task: asyncio.Task[None]) -> None:
+            with contextlib.suppress(BaseException):
+                completed_task.result()
+
+        deadline = asyncio.get_running_loop().time() + effective_timeout
         caller_cancellation: asyncio.CancelledError | None = None
-        while not completion.done():
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                task.add_done_callback(consume_cleanup_result)
+                raise ExecTimeoutError(
+                    command=("pty_cleanup",),
+                    timeout_s=effective_timeout,
+                )
             try:
-                await asyncio.wait_for(asyncio.shield(completion), timeout=effective_timeout)
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
             except asyncio.TimeoutError as timeout_error:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                task.add_done_callback(consume_cleanup_result)
                 raise ExecTimeoutError(
                     command=("pty_cleanup",),
                     timeout_s=effective_timeout,
@@ -739,7 +749,6 @@ class BaseSandboxSession(abc.ABC):
             except asyncio.CancelledError as error:
                 caller_cancellation = caller_cancellation or error
 
-        completion.result()
         task.result()
         if caller_cancellation is not None:
             raise caller_cancellation
