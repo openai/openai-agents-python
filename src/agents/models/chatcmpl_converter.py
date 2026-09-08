@@ -880,10 +880,11 @@ class Converter:
                 else:
                     keepable_output_content = output_content
                     if not isinstance(output_content, str):
-                        # Parts that cannot become a text part are dropped here rather than
-                        # converted and then filtered out, so an unrepresentable one (an image
-                        # carrying file_id, say) omits itself instead of failing the turn.
-                        keepable_output_content = [
+                        # Text sitting alongside a part this API cannot express is still worth
+                        # sending, so those parts are dropped before conversion instead of being
+                        # converted and filtered out afterwards. Output carrying no text is left
+                        # alone, so it keeps whatever conversion already does with it.
+                        remaining_output_content = [
                             c
                             for c in output_content
                             if not (
@@ -891,6 +892,8 @@ class Converter:
                                 and c.get("type") in _NON_TEXT_TOOL_OUTPUT_CONTENT_TYPES
                             )
                         ]
+                        if remaining_output_content:
+                            keepable_output_content = remaining_output_content
                     all_output_content = cls.extract_all_content(keepable_output_content)
                     if isinstance(all_output_content, str):
                         tool_result_content = all_output_content

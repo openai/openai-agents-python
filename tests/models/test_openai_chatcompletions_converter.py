@@ -683,10 +683,12 @@ def test_items_to_messages_with_mixed_function_output_keeps_text_by_default(
     assert "tool output omitted" not in caplog.text
 
 
-def test_items_to_messages_with_file_id_image_function_output_uses_placeholder_by_default(
-    caplog: pytest.LogCaptureFixture,
-):
-    """A file-id image is not representable here, so it should be omitted like a URL image."""
+def test_items_to_messages_with_file_id_image_only_function_output_still_raises():
+    """Output carrying no text has nothing to preserve, so it keeps raising as before.
+
+    A file id is an uploaded-file reference, so the error points the caller at a model
+    that can actually read it rather than quietly degrading the run to a placeholder.
+    """
     func_output_item: FunctionCallOutput = {
         "type": "function_call_output",
         "call_id": "somecall",
@@ -698,15 +700,8 @@ def test_items_to_messages_with_file_id_image_function_output_uses_placeholder_b
         ],
     }
 
-    with caplog.at_level(logging.WARNING, logger="openai.agents"):
-        messages = Converter.items_to_messages([func_output_item])
-
-    assert len(messages) == 1
-    tool_msg = messages[0]
-    assert tool_msg["role"] == "tool"
-    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
-    assert tool_msg["content"] == "[tool output omitted]"
-    assert "Replacing the tool output with a placeholder" in caplog.text
+    with pytest.raises(UserError, match="Only image URLs are supported for input_image"):
+        Converter.items_to_messages([func_output_item])
 
 
 def test_items_to_messages_with_mixed_file_id_image_function_output_keeps_text_by_default(
