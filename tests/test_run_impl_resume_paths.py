@@ -583,6 +583,28 @@ async def test_pending_session_write_accepts_local_shell_replay_output() -> None
 
 
 @pytest.mark.asyncio
+async def test_top_level_pending_input_accepts_local_shell_replay_output() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_input"] = [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_input"] == payload["pending_input"]
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_input"] == payload["pending_input"]
+
+
+@pytest.mark.asyncio
 async def test_pending_session_write_materializes_computer_safety_checks() -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"

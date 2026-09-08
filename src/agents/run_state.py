@@ -4151,7 +4151,7 @@ async def _build_run_state_from_json(
         raise validation_error_factory("Run state pending_input must be a list", UserError)
     try:
         state._pending_input = [
-            _HANDOFF_OUTPUT_ADAPTER.validate_python(item) for item in pending_input_raw
+            _validate_pending_session_write_item(item) for item in pending_input_raw
         ]
     except ValidationError:
         raise validation_error_factory("Run state pending_input is invalid", UserError) from None
