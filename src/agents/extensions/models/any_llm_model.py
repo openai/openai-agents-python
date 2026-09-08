@@ -667,6 +667,20 @@ class AnyLLMModel(Model):
                 "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
+            if (
+                message is not None
+                and first_choice is not None
+                and first_choice.finish_reason == "length"
+                and not message.content
+                and not message.refusal
+                and not message.tool_calls
+                and not _extract_any_llm_reasoning_text(message)
+            ):
+                raise ModelBehaviorError(
+                    "Chat Completions response terminated with finish_reason='length' "
+                    "but produced no assistant text, tool call, or refusal."
+                )
+
             provider_data: dict[str, Any] = {"model": self.model}
             if message is not None and hasattr(response, "id"):
                 provider_data["response_id"] = response.id
