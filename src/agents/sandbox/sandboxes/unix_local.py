@@ -991,6 +991,90 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
 
+    async def _move_no_replace(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        source_path = self.normalize_path(source, for_write=True)
+        destination_path = self.normalize_path(destination, for_write=True)
+
+        if source_path == destination_path:
+            return
+
+        if user is not None:
+            await self._check_read_with_exec(source_path, user=user)
+            # The process must perform both link and unlink as the bound user so that
+            # provider-level authorization is preserved.
+            env, cwd = await self._resolved_exec_context()
+            workspace_root = Path(cwd).resolve()
+            command_parts = self._prepare_exec_command(
+                "sh",
+                "-c",
+                'set -e; ln -- "$1" "$2" && rm -- "$1"',
+                "sh",
+                str(source_path),
+                str(destination_path),
+                shell=False,
+                user=user,
+            )
+            command_parts = self._workspace_relative_command_parts(command_parts, workspace_root)
+            process_cwd, command_parts = self._shell_workspace_process_context(
+                command_parts=command_parts,
+                workspace_root=workspace_root,
+                cwd=cwd,
+            )
+            exec_command = self._confined_exec_command(
+                command_parts=command_parts,
+                workspace_root=workspace_root,
+                env=env,
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *exec_command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=process_cwd,
+                    env=env,
+                    start_new_session=True,
+                )
+                stdout, stderr = await proc.communicate()
+            except Exception as exc:
+                from ..errors import ExecTransportError
+                raise ExecTransportError(command=("ln", "--", str(source_path), str(destination_path)), cause=exc) from exc
+            if proc.returncode != 0:
+                message = stderr.decode("utf-8", errors="replace")
+                if "File exists" in message or "already exists" in message:
+                    from ..errors import ApplyPatchDestinationExistsError
+                    raise ApplyPatchDestinationExistsError(path=destination_path, cause=RuntimeError(message))
+                from ..errors import WorkspaceArchiveWriteError
+                raise WorkspaceArchiveWriteError(
+                    path=destination_path,
+                    cause=RuntimeError(message or "atomic move failed"),
+                )
+            return
+
+        def _link_then_unlink() -> None:
+            os.link(source_path, destination_path)
+            try:
+                source_path.unlink()
+            except Exception:
+                with suppress(OSError):
+                    destination_path.unlink()
+                raise
+
+        try:
+            await run_blocking_workspace_io(_link_then_unlink)
+        except FileExistsError as exc:
+            from ..errors import ApplyPatchDestinationExistsError
+            raise ApplyPatchDestinationExistsError(path=destination_path, cause=exc) from exc
+        except OSError as exc:
+            from ..errors import WorkspaceArchiveWriteError
+            raise WorkspaceArchiveWriteError(path=destination_path, cause=exc) from exc
+
+
     async def write(
         self,
         path: Path,
