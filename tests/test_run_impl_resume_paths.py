@@ -515,6 +515,32 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
 
 
 @pytest.mark.asyncio
+async def test_pending_session_write_accepts_local_shell_replay_output() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_session_write"]["items"] = [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_session_write"]["items"] == [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resumed_session_append_partial_commit_fails_closed() -> None:
     agent, model, session, state, effects = await _approved_session_state(False)
     # Two approved calls produce one resumed batch, allowing an actual partial append.

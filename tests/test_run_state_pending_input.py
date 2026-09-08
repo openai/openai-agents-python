@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from openai.types.responses.response_computer_tool_call import (
@@ -14,6 +18,7 @@ from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorErro
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks, RunHooks
+from agents.memory import OpenAIConversationsSession, Session
 from agents.run import CallModelData, ModelInputData
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
@@ -27,6 +32,70 @@ from .model_test_helpers import get_exact_output_stream_step
 from .test_computer_tool_lifecycle import FakeComputer
 from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
+
+
+class _PendingInputWriteFailureSession(SimpleListSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failure: Literal["before", "after"] | None = None
+        self.error = RuntimeError("pending input Session append failed")
+        self.block_next_add = False
+        self.add_started = asyncio.Event()
+        self.release_add = asyncio.Event()
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        failure, self.failure = self.failure, None
+        if failure == "before":
+            raise self.error
+        if self.block_next_add:
+            self.block_next_add = False
+            self.add_started.set()
+            await self.release_add.wait()
+        await super().add_items(items)
+        if failure == "after":
+            raise self.error
+
+
+class _RecordingConversationsSession(OpenAIConversationsSession):
+    def __init__(self) -> None:
+        self.create_conversation = AsyncMock(return_value=SimpleNamespace(id="test"))
+        client = SimpleNamespace(
+            conversations=SimpleNamespace(create=self.create_conversation),
+        )
+        super().__init__(openai_client=cast(Any, client))
+        self.items: list[TResponseInputItem] = []
+        self.failure: Literal["before", "after"] | None = None
+        self.error = RuntimeError("conversation append failed")
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        await self._get_session_id()
+        if limit == 0:
+            return []
+        return list(self.items if limit is None else self.items[-limit:])
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        failure, self.failure = self.failure, None
+        if failure == "before":
+            raise self.error
+        for item in items:
+            normalized = copy.deepcopy(item)
+            if (
+                isinstance(normalized, dict)
+                and normalized.get("type") == "message"
+                and isinstance(normalized.get("content"), str)
+            ):
+                normalized["content"] = [
+                    {
+                        "type": "input_text"
+                        if normalized.get("role") != "assistant"
+                        else "output_text",
+                        "text": normalized["content"],
+                    }
+                ]
+                normalized["id"] = "msg_server_assigned"
+            self.items.append(normalized)
+        if failure == "after":
+            raise self.error
 
 
 def _item_type(item: TResponseInputItem) -> str | None:
@@ -52,7 +121,7 @@ def _message_text(item: TResponseInputItem) -> str | None:
 
 async def _make_after_turn_state(
     *,
-    session: SimpleListSession | None = None,
+    session: Session | None = None,
     auto_previous_response_id: bool = False,
 ) -> tuple[ScriptedModel, Agent[Any], RunState[Any], list[str]]:
     calls: list[str] = []
@@ -87,6 +156,22 @@ async def _make_after_turn_state(
     assert isinstance(state._current_step, NextStepRunAgain)
     assert calls == ["Paris"]
     return model, agent, state, calls
+
+
+async def _resume_pending_input_state(
+    agent: Agent[Any],
+    state: RunState[Any],
+    session: Session,
+    *,
+    streamed: bool,
+) -> Any:
+    run_config = RunConfig(tracing_disabled=True)
+    if not streamed:
+        return await Runner.run(agent, state, session=session, run_config=run_config)
+    result = Runner.run_streamed(agent, state, session=session, run_config=run_config)
+    async for _event in result.stream_events():
+        pass
+    return result
 
 
 @pytest.mark.asyncio
@@ -166,6 +251,154 @@ async def test_after_turn_resume_admits_input_after_tool_output_exactly_once() -
     for terminal_state in (state, result.to_state()):
         with pytest.raises(UserError, match="terminal RunState"):
             terminal_state.add_input("Too late")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_streamed", [False, True])
+@pytest.mark.parametrize("recovery_streamed", [False, True])
+@pytest.mark.parametrize("round_trip", [False, True])
+@pytest.mark.parametrize("failure", ["before", "after"])
+async def test_pending_input_session_append_reconciles_once_without_rerunning_guardrails(
+    failing_streamed: bool,
+    recovery_streamed: bool,
+    round_trip: bool,
+    failure: Literal["before", "after"],
+) -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    guardrail_calls = 0
+
+    def inspect_pending_input(
+        _context: RunContextWrapper[Any],
+        _agent: Agent[Any],
+        _input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailFunctionOutput(output_info="accepted", tripwire_triggered=False)
+
+    agent.input_guardrails = [InputGuardrail(guardrail_function=inspect_pending_input)]
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    model_calls_before = len(model.calls)
+    session.failure = failure
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        if failing_streamed:
+            failed_result = Runner.run_streamed(
+                agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+            )
+            async for _event in failed_result.stream_events():
+                pass
+            state = failed_result.to_state()
+        else:
+            await Runner.run(
+                agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+            )
+
+    assert guardrail_calls == 1
+    assert len(model.calls) == model_calls_before
+    assert state._pending_session_write is not None
+    assert [_message_text(item) for item in state.pending_input] == ["Late input"]
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    result = await _resume_pending_input_state(agent, state, session, streamed=recovery_streamed)
+
+    assert result.final_output == "Recovered"
+    assert len(model.calls) == model_calls_before + 1
+    assert guardrail_calls == 1
+    assert state.pending_input == []
+    assert state._pending_session_write is None
+    assert [_message_text(item) for item in await session.get_items()].count("Late input") == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_input_session_checkpoint_rejects_malformed_input_before_resume() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Late input")
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "before"
+
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        await Runner.run(agent, state, session=session, run_config=RunConfig(tracing_disabled=True))
+
+    payload = state.to_json()
+    malformed = {"role": ["user"]}
+    payload["pending_input"] = [malformed]
+    pending_write = cast(dict[str, Any], payload["pending_session_write"])
+    pending_write["pending_input"] = [malformed]
+    pending_write["items"] = [malformed]
+
+    with pytest.raises(RuntimeError, match="Error details are redacted"):
+        await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_pending_input_conversations_session_reconciles_sanitized_message_id() -> None:
+    session = _RecordingConversationsSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input(
+        [
+            {
+                "id": "user-id",
+                "type": "message",
+                "role": "user",
+                "content": "Late input",
+            }
+        ]
+    )
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "after"
+
+    with pytest.raises(RuntimeError, match="conversation append failed"):
+        await Runner.run(agent, state, session=session, run_config=RunConfig(tracing_disabled=True))
+
+    state = await RunState.from_json(agent, state.to_json())
+    result = await Runner.run(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+
+    assert result.final_output == "Recovered"
+    assert [_message_text(item) for item in session.items].count("Late input") == 1
+    session.create_conversation.assert_awaited_once_with(items=[])
+
+
+@pytest.mark.asyncio
+async def test_pending_input_added_during_session_write_survives_stream_checkpoint() -> None:
+    session = _PendingInputWriteFailureSession()
+    model, agent, state, _calls = await _make_after_turn_state(session=session)
+    state.add_input("Before write")
+    model.enqueue([get_text_message("Recovered")])
+    session.failure = "after"
+    session.block_next_add = True
+
+    failed_result = Runner.run_streamed(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+
+    async def consume_stream() -> None:
+        async for _event in failed_result.stream_events():
+            pass
+
+    consume_task = asyncio.create_task(consume_stream())
+    await session.add_started.wait()
+    state.add_input("During write")
+    session.release_add.set()
+    with pytest.raises(RuntimeError, match="pending input Session append failed"):
+        await consume_task
+    checkpoint = failed_result.to_state()
+    assert [_message_text(item) for item in checkpoint.pending_input] == [
+        "Before write",
+        "During write",
+    ]
+
+    result = await _resume_pending_input_state(agent, checkpoint, session, streamed=False)
+
+    assert result.final_output == "Recovered"
+    assert [_message_text(item) for item in await session.get_items()].count("Before write") == 1
+    assert [_message_text(item) for item in await session.get_items()].count("During write") == 1
 
 
 @pytest.mark.asyncio
