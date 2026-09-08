@@ -49,8 +49,13 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects import mysql as mysql_dialect
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
@@ -299,6 +304,48 @@ class SQLAlchemySession(SessionABC):
     # ------------------------------------------------------------------
     # Session protocol implementation
     # ------------------------------------------------------------------
+    async def _validate_session_id_collation(self, conn: AsyncConnection) -> None:
+        """Reject trailing-space IDs only when the actual MySQL collation pads spaces."""
+        if self._engine.dialect.name not in {"mysql", "mariadb"}:
+            return
+        if not self.session_id.endswith(" "):
+            return
+
+        try:
+            collation_result = await conn.execute(
+                sql_text(
+                    "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name "
+                    "AND COLUMN_NAME = 'session_id'"
+                ),
+                {"table_name": self._sessions.name},
+            )
+            collation = collation_result.scalar_one_or_none()
+            if not collation:
+                return
+
+            pad_attribute: str | None
+            if getattr(self._engine.dialect, "is_mariadb", False):
+                pad_attribute = "NO PAD" if "_nopad_" in collation.casefold() else "PAD SPACE"
+            else:
+                pad_result = await conn.execute(
+                    sql_text(
+                        "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
+                        "WHERE COLLATION_NAME = :collation"
+                    ),
+                    {"collation": collation},
+                )
+                pad_attribute = pad_result.scalar_one_or_none()
+        except SQLAlchemyError:
+            return
+
+        if pad_attribute == "PAD SPACE":
+            raise ValueError(
+                f"session_id {self.session_id!r} ends with a space, which is not distinct "
+                f"under the column's PAD SPACE collation {collation!r}; two sessions would "
+                "silently share one history"
+            )
+
     async def _ensure_tables(self) -> None:
         """Ensure tables are created before any database operations."""
         if not self._create_tables:
@@ -315,6 +362,7 @@ class SQLAlchemySession(SessionABC):
 
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
+                await self._validate_session_id_collation(conn)
             self._create_tables = False  # Only create once
         finally:
             self._init_lock.release()
