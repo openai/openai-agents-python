@@ -719,6 +719,18 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_write_new_file_preflights_existing_target_before_staging(tmp_path: Path) -> None:
+    session = _exclusive_write_session(tmp_path)
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"original")
+    before = list(session.writes) if hasattr(session, "writes") else []
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(Path("notes.txt"), io.BytesIO(b"replacement"))
+
+    assert target.read_bytes() == b"original"
+    assert before == []
 async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
     """Exit 13 from the exclusive-create script means the name was already taken."""
     session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13)
@@ -731,7 +743,7 @@ async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_pat
     # The payload only ever reached a staging name, and that staging entry is cleaned up,
     # so a rejected create leaves nothing behind at the requested name.
     assert [path.name for path in session.writes] != ["notes.txt"]
-    assert all(path.name.startswith(".notes.txt.create-") for path in session.writes)
+    assert all(path.name.startswith(".rumbo-create-") for path in session.writes)
     assert session.removed == session.writes
     assert session.made_dirs != []
 
