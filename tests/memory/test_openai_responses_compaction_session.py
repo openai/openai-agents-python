@@ -2296,6 +2296,85 @@ class TestCompactionMutationSerialization:
         assert await underlying.get_items() == []
 
 
+@pytest.mark.asyncio
+async def test_replacement_failure_restores_deferred_retry() -> None:
+    item = cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "old"})
+    underlying = SimpleListSession(history=[item])
+    client = MagicMock()
+    client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(
+            output=[cast(TResponseInputItem, {"type": "compaction", "summary": "new"})]
+        )
+    )
+    session = OpenAIResponsesCompactionSession(
+        session_id="replacement-failure-retry",
+        underlying_session=underlying,
+        client=client,
+        compaction_mode="input",
+    )
+    session._deferred_response_id = "resp-deferred"
+
+    async def fail_replace(
+        *, output_items: list[TResponseInputItem], previous_items: list[TResponseInputItem]
+    ) -> None:
+        raise RuntimeError("replace boom")
+
+    session._replace_underlying_session_items = fail_replace  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="replace boom"):
+        await session.run_compaction({"force": True, "compaction_mode": "input"})
+
+    assert session._deferred_response_id == "resp-deferred"
+
+
+@pytest.mark.asyncio
+async def test_pop_returning_none_after_destructive_cleanup_invalidates_chain() -> None:
+    removed = cast(
+        TResponseInputItem, {"type": "message", "role": "assistant", "content": "corrupt"}
+    )
+
+    class CleanupReturnsNoneSession(SimpleListSession):
+        async def pop_item(self) -> TResponseInputItem | None:
+            await super().pop_item()
+            return None
+
+    underlying = CleanupReturnsNoneSession(history=[removed])
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[], usage=None))
+    session = OpenAIResponsesCompactionSession(
+        session_id="null-pop-mutation",
+        underlying_session=underlying,
+        client=client,
+        compaction_mode="previous_response_id",
+        should_trigger_compaction=lambda _: False,
+    )
+    await session.run_compaction({"response_id": "resp-old"})
+    assert await session.pop_item() is None
+
+    with pytest.raises(ValueError, match="requires a response_id"):
+        await session.run_compaction({"force": True})
+    client.responses.compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_pop_preserves_retained_response_chain() -> None:
+    underlying = SimpleListSession()
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[], usage=None))
+    session = OpenAIResponsesCompactionSession(
+        session_id="empty-pop-noop",
+        underlying_session=underlying,
+        client=client,
+        compaction_mode="previous_response_id",
+        should_trigger_compaction=lambda _: False,
+    )
+    await session.run_compaction({"response_id": "resp-old"})
+    assert await session.pop_item() is None
+    await session.run_compaction({"force": True})
+    client.responses.compact.assert_awaited_once_with(
+        model=session.model, previous_response_id="resp-old"
+    )
+
+
 class TestCompactionStripsOrphanedIds:
     """Regression test for #2727: gpt-5.4 compact retains assistant msg IDs after
     stripping reasoning items, causing 400 errors on the next responses.create call."""
