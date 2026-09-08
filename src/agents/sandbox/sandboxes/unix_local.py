@@ -1074,6 +1074,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         parent_path = self.normalize_path(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
         staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
+        # Classify a visible collision before staging, so a target inside a non-writable
+        # parent reports the collision rather than a permission failure from the staging
+        # write. os.path.lexists does not follow a symlink at the target name.
+        if os.path.lexists(workspace_path):
+            raise FileExistsError(str(workspace_path))
+
         try:
             # Only the link may report a collision. A parent that is a regular file also
             # raises FileExistsError from mkdir, and reporting that as "the target already
