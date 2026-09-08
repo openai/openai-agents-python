@@ -993,7 +993,10 @@ class BaseSandboxSession(abc.ABC):
         parent_path = await self._validate_path_access(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
         path_arg = sandbox_path_str(workspace_path)
-        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
+        # A fixed-length staging basename. Deriving it from the destination made the
+        # staging name longer than the destination, so a name that fits the filesystem's
+        # component limit could still fail to stage.
+        staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
         staging_arg = sandbox_path_str(staging_path)
 
         try:

@@ -1073,7 +1073,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         requested = Path(path)
         parent_path = self.normalize_path(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
-        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
+        staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
         try:
             # Only the link may report a collision. A parent that is a regular file also
             # raises FileExistsError from mkdir, and reporting that as "the target already
