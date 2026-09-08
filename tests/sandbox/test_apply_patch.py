@@ -487,7 +487,7 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
     original_read = session.read
 
     async def blocking_read(
-        path: Path, *, user: str | None = None
+        path: Path, *, user: object = None
     ) -> io.BytesIO:
         if path == Path("/workspace/source-a.txt") and not entered.is_set():
             entered.set()
