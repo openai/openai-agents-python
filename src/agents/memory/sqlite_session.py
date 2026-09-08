@@ -85,7 +85,9 @@ class SQLiteSession(SessionABC):
                     ) as init_conn:
                         self._configure_connection(init_conn)
                         self._init_db_for_connection(init_conn)
-        except Exception:
+        except BaseException:
+            if self._is_memory_db and hasattr(self, "_shared_connection"):
+                self._invalidate_connection(self._shared_connection)
             if self._lock_path is not None and not self._lock_released:
                 self._release_file_lock(self._lock_path)
                 self._lock_released = True
@@ -142,7 +144,7 @@ class SQLiteSession(SessionABC):
                 raise
 
     def _invalidate_connection(self, conn: sqlite3.Connection) -> None:
-        """Close and evict a connection that could not roll back safely."""
+        """Close and evict a connection that cannot be used safely."""
         try:
             conn.close()
         except BaseException:
@@ -175,7 +177,11 @@ class SQLiteSession(SessionABC):
                     str(self.db_path),
                     check_same_thread=False,
                 )
-                self._configure_connection(connection)
+                try:
+                    self._configure_connection(connection)
+                except BaseException:
+                    self._invalidate_connection(connection)
+                    raise
                 self._local.connection = connection
                 with self._connections_lock:
                     self._connections.add(connection)

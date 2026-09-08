@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -267,6 +268,79 @@ async def test_sqlite_session_close_closes_worker_thread_connections():
         assert session._connections == set()
         with pytest.raises(sqlite3.ProgrammingError):
             connections[0].execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_failed_connection_configuration_closes_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed worker connection must close without preventing a later retry."""
+    db_path = tmp_path / "configuration_failure.db"
+    session = SQLiteSession("configuration_failure", db_path)
+    connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        # Make lock failure immediate; elapsed retry duration is not under test.
+        kwargs["timeout"] = 0
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    blocker = connect(db_path, isolation_level=None)
+    try:
+        blocker.execute("PRAGMA journal_mode=DELETE")
+        blocker.execute("BEGIN EXCLUSIVE")
+        monkeypatch.setattr("agents.memory.sqlite_session.sqlite3.connect", tracked_connect)
+
+        with pytest.raises(sqlite3.OperationalError, match="database is locked") as exc_info:
+            await session.get_items()
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connections[0].execute("PRAGMA busy_timeout")
+
+        blocker.rollback()
+        items: list[TResponseInputItem] = [{"role": "user", "content": "retry succeeded"}]
+        await session.add_items(items)
+        assert await session.get_items() == items
+
+        session.close()
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                connection.execute("SELECT 1")
+    finally:
+        blocker.close()
+        session.close()
+        for connection in connections:
+            connection.close()
+
+
+def test_sqlite_session_failed_memory_initialization_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed construction must release the newly allocated in-memory database."""
+    connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr("agents.memory.sqlite_session.sqlite3.connect", tracked_connect)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="syntax error") as exc_info:
+            SQLiteSession("initialization_failure", messages_table="select")
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.sqlite_errorcode == sqlite3.SQLITE_ERROR
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connections[0].execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 @pytest.mark.asyncio
