@@ -1,5 +1,6 @@
 import abc
 import asyncio
+import contextlib
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -726,11 +727,15 @@ class BaseSandboxSession(abc.ABC):
         while not completion.done():
             try:
                 await asyncio.wait_for(asyncio.shield(completion), timeout=effective_timeout)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as timeout_error:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
                 raise ExecTimeoutError(
                     command=("pty_cleanup",),
                     timeout_s=effective_timeout,
-                )
+                    cause=timeout_error,
+                ) from timeout_error
             except asyncio.CancelledError as error:
                 caller_cancellation = caller_cancellation or error
 
