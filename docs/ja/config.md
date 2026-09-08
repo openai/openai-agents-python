@@ -2,23 +2,23 @@
 search:
   exclude: true
 ---
-# 設定
+# 構成
 
 このページでは、デフォルトの OpenAI キーまたはクライアント、デフォルトの OpenAI API 形式、トレーシングのエクスポートに関するデフォルト設定、ログ動作など、通常はアプリケーションの起動時に一度だけ設定する SDK 全体のデフォルトについて説明します。
 
-これらのデフォルトはサンドボックスベースのワークフローにも適用されますが、サンドボックスのワークスペース、サンドボックスクライアント、セッションの再利用は個別に設定します。
+これらのデフォルトはサンドボックスベースのワークフローにも適用されますが、サンドボックスワークスペース、サンドボックスクライアント、セッションの再利用は個別に構成します。
 
-代わりに特定のエージェントまたは実行を設定する必要がある場合は、以下から始めてください。
+代わりに特定のエージェントまたは実行を構成する必要がある場合は、以下から始めてください。
 
--   [エージェント](agents.md)：通常の `Agent` に対する指示、ツール、出力型、ハンドオフ、ガードレール。
--   [エージェントの実行](running_agents.md)：`RunConfig`、セッション、会話状態のオプション。
--   [サンドボックスエージェント](sandbox/guide.md)：`SandboxRunConfig`、マニフェスト、ケイパビリティ、サンドボックスクライアント固有のワークスペース設定。
--   [モデル](models/index.md)：モデルの選択とプロバイダーの設定。
--   [トレーシング](tracing.md)：実行ごとのトレーシングメタデータとカスタムトレースプロセッサー。
+-   通常の `Agent` に対する指示、ツール、出力型、ハンドオフ、ガードレールについては、[エージェント](agents.md)を参照してください。
+-   `RunConfig`、セッション、会話状態のオプションについては、[エージェントの実行](running_agents.md)を参照してください。
+-   `SandboxRunConfig`、マニフェスト、ケイパビリティ、サンドボックスクライアント固有のワークスペース設定については、[サンドボックスエージェント](sandbox/guide.md)を参照してください。
+-   モデルの選択とプロバイダーの構成については、[モデル](models/index.md)を参照してください。
+-   実行単位のトレーシングメタデータとカスタムトレースプロセッサーについては、[トレーシング](tracing.md)を参照してください。
 
-## 設定オブジェクトと辞書 {#configuration-objects-and-dictionaries}
+## 構成オブジェクトと辞書 {#configuration-objects-and-dictionaries}
 
-SDK で定義されている設定パラメーターは、通常、型付きの設定オブジェクト、または同じフィールドを含む辞書のいずれかを受け付けます。これは、型注釈に辞書が含まれる、エージェント、実行、モデル、セッション、サンドボックス、音声の各設定境界に適用されます。SDK で定義されたネストされた設定型でも辞書を使用できます。
+SDK で定義される構成パラメーターは通常、型付きの設定オブジェクト、または同じフィールドを含む辞書のいずれかを受け付けます。これは、型アノテーションに辞書が含まれるエージェント、実行、モデル、セッション、サンドボックス、音声の各構成境界に適用されます。SDK で定義されたネストされた設定型にも辞書を使用できます。
 
 ```python
 from agents import Agent
@@ -33,11 +33,11 @@ agent = Agent(
 )
 ```
 
-SDK はこれらの辞書を、対応する設定オブジェクトへ正規化します。SDK で定義されたデータクラス設定型に不明なフィールドがあると `TypeError` が発生するため、スペルを誤ったオプション名を早期に検出できます。特定の境界が辞書を受け付けるかどうかは、そのパラメーターの型注釈または API リファレンスで確認してください。
+SDK は、これらの辞書を対応する設定オブジェクトに正規化します。SDK で定義されたデータクラス構成型に不明なフィールドがあると `TypeError` が発生するため、オプション名の入力ミスを早期に検出できます。特定の境界が辞書を受け付けるかどうかを確認するには、そのパラメーターの型アノテーションまたは API リファレンスを確認してください。
 
 ## API キーとクライアント {#api-keys-and-clients}
 
-デフォルトでは、SDK は LLM リクエストとトレーシングに `OPENAI_API_KEY` 環境変数を使用します。キーは、SDK が最初に OpenAI クライアントを作成するときに解決されるため（遅延初期化）、最初のモデル呼び出しより前に環境変数を設定してください。アプリの起動前にその環境変数を設定できない場合は、[set_default_openai_key()][agents.set_default_openai_key] 関数を使用してキーを設定できます。
+デフォルトでは、SDK は LLM リクエストとトレーシングに `OPENAI_API_KEY` 環境変数を使用します。キーは SDK が最初に OpenAI クライアントを作成するときに解決されるため（遅延初期化）、最初のモデル呼び出しの前に環境変数を設定してください。アプリの起動前にその環境変数を設定できない場合は、[set_default_openai_key()][agents.set_default_openai_key] 関数を使用してキーを設定できます。
 
 ```python
 from agents import set_default_openai_key
@@ -45,7 +45,7 @@ from agents import set_default_openai_key
 set_default_openai_key("sk-...")
 ```
 
-また、使用する OpenAI クライアントを設定することもできます。デフォルトでは、SDK は環境変数の API キーまたは上記で設定したデフォルトキーを使用して、`AsyncOpenAI` インスタンスを作成します。[set_default_openai_client()][agents.set_default_openai_client] 関数を使用すると、これを変更できます。
+また、使用する OpenAI クライアントを構成することもできます。デフォルトでは、SDK は環境変数の API キーまたは上記で設定したデフォルトキーを使用して `AsyncOpenAI` インスタンスを作成します。[set_default_openai_client()][agents.set_default_openai_client] 関数を使用すると、これを変更できます。
 
 ```python
 from openai import AsyncOpenAI
@@ -55,11 +55,15 @@ custom_client = AsyncOpenAI(base_url="...", api_key="...")
 set_default_openai_client(custom_client)
 ```
 
-明示的なクライアントを [`OpenAIProvider`][agents.models.openai_provider.OpenAIProvider] に渡すと、そのクライアントが接続とアカウントの設定を管理します。`api_key`、`base_url`、`websocket_base_url`、`organization`、`project` を `OpenAIProvider` に同時に渡さないでください。`openai_client` とこれらの引数のいずれかを組み合わせると、重複する値が暗黙に無視されるのではなく、[`UserError`][agents.exceptions.UserError] が発生します。目的の値は `AsyncOpenAI` の構築時に設定してください。
+明示的なクライアントを [`OpenAIProvider`][agents.models.openai_provider.OpenAIProvider] に渡す場合、そのクライアントが接続設定とアカウント設定を管理します。`OpenAIProvider` に `api_key`、`base_url`、`websocket_base_url`、`organization`、`project` も渡さないでください。`openai_client` とこれらの引数のいずれかを組み合わせると、重複した値が暗黙に無視されるのではなく、[`UserError`][agents.exceptions.UserError] が発生します。意図した値は `AsyncOpenAI` の構築時に設定してください。
+
+`openai_client` を省略した場合、`api_key`、`base_url`、`websocket_base_url`、`organization`、`project` がすべて `None` のときに限り、`OpenAIProvider` は SDK 全体のデフォルトクライアントを再利用します。空文字列を含め、これらのオプションのいずれかを渡すと、プロバイダーは独自のクライアントを作成し、プロバイダーオプションが SDK 全体のデフォルトクライアントより優先されます。プロバイダーが `set_default_openai_client()` によって設定されたクライアントを継承する必要がある場合は、すべてのプロバイダーオプションを `None` のままにしてください。
+
+[`OpenAIVoiceModelProvider`][agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider] は、`api_key`、`base_url`、`organization`、`project` に対して、同じ所有権と優先順位のルールを使用します。明示的な `openai_client` を、これら 4 つのオプションのいずれかと組み合わせることはできません。
 
 ### `openai` v3 でのカスタム HTTP クライアント {#custom-http-clients-with-openai-v3}
 
-バージョン 0.21.0 では `openai>=3.0.0,<4` が必要です。デフォルトの OpenAI プロバイダーは HTTPX2 を使用するため、ほとんどのアプリケーションでは HTTP クライアントを直接設定する必要はありません。アプリケーションが `http_client=` を `AsyncOpenAI` に渡す場合は、カスタムクライアントとそのトランスポート向けオプションに HTTPX2 型を使用してください。
+バージョン 0.21.0 では `openai>=3.0.0,<4` が必要です。デフォルトの OpenAI プロバイダーは HTTPX2 を使用するため、ほとんどのアプリケーションでは HTTP クライアントを直接構成する必要はありません。アプリケーションから `AsyncOpenAI` に `http_client=` を渡す場合は、カスタムクライアントとそのトランスポート関連オプションに HTTPX2 の型を使用してください。
 
 ```python
 import httpx2
@@ -77,11 +81,11 @@ custom_client = AsyncOpenAI(
 set_default_openai_client(custom_client)
 ```
 
-同じ移行は、カスタムトランスポート、認証、イベントフック、モックトランスポート、URL、リクエスト、レスポンス、トランスポート例外の処理にも適用されます。それぞれに対応する `httpx2` を使用してください。Agents SDK は、任意の従来の `httpx` オブジェクトを HTTPX2 に変換しません。アプリケーションが `httpx` を明示的にインストールすると、OpenAI Python SDK は従来のクライアント向けに一時的な互換パスを提供しますが、新規コードおよび移行後のコードでは HTTPX2 を使用してください。
+同じ移行が、カスタムトランスポート、認証、イベントフック、モックトランスポート、URL、リクエスト、レスポンス、トランスポート例外処理にも適用されます。それぞれの `httpx2` 相当のものを使用してください。Agents SDK は、任意の従来の `httpx` オブジェクトを HTTPX2 に変換しません。アプリケーションが `httpx` を明示的にインストールすると、OpenAI Python SDK は従来のクライアント向けに一時的な互換性確保の手段を提供しますが、新規コードおよび移行済みコードでは HTTPX2 を使用する必要があります。
 
 この OpenAI クライアント境界は、ローカル MCP トランスポートのカスタマイズとは別のものです。MCP Python SDK v1 は独自の従来の `httpx` 依存関係を使用し、MCP Python SDK v2 は `httpx2` を使用します。[MCP Python SDK v1 と v2](mcp.md#mcp-python-sdk-v1-and-v2)を参照してください。
 
-環境ベースのエンドポイント設定を使用する場合、デフォルトの OpenAI プロバイダーは `OPENAI_BASE_URL` も読み取ります。Responses の WebSocket トランスポートを有効にすると、WebSocket の `/responses` エンドポイントとして `OPENAI_WEBSOCKET_BASE_URL` も読み取ります。
+環境変数ベースのエンドポイント構成を使用する場合、デフォルトの OpenAI プロバイダーは `OPENAI_BASE_URL` も読み取ります。Responses の WebSocket トランスポートを有効にすると、WebSocket の `/responses` エンドポイント用に `OPENAI_WEBSOCKET_BASE_URL` も読み取ります。
 
 ```bash
 export OPENAI_BASE_URL="https://your-openai-compatible-endpoint.example/v1"
@@ -96,9 +100,9 @@ from agents import set_default_openai_api
 set_default_openai_api("chat_completions")
 ```
 
-## OpenAI プロバイダーのデフォルト設定 {#openai-provider-defaults}
+## OpenAI プロバイダーのデフォルト {#openai-provider-defaults}
 
-SDK の OpenAI バックエンドを使用するプロバイダーも、モデル名の文字列をモデルにマッピングする際に SDK 全体のデフォルト設定を読み取ります。OpenAI Responses モデルで WebSocket トランスポートをデフォルトで使用するには、[`set_default_openai_responses_transport()`][agents.set_default_openai_responses_transport] を使用します。
+SDK の OpenAI バックエンドを使用するプロバイダーも、モデル名の文字列をモデルに対応付ける際に、SDK 全体のデフォルトを読み取ります。OpenAI Responses モデルでデフォルトで WebSocket トランスポートを使用するには、[`set_default_openai_responses_transport()`][agents.set_default_openai_responses_transport] を使用します。
 
 ```python
 from agents import set_default_openai_responses_transport
@@ -108,7 +112,7 @@ set_default_openai_responses_transport("websocket")
 
 これは、デフォルトの OpenAI プロバイダーがモデル名を解決した結果として得られる OpenAI Responses モデルに影響します。プロバイダーレベルの設定、接続の再利用、キープアライブオプション、カスタム WebSocket エンドポイントについては、[Responses WebSocket トランスポート](models/index.md#responses-websocket-transport)を参照してください。
 
-OpenAI の設定でプロバイダーレベルのエージェント登録メタデータが必要な場合は、起動時にデフォルトのハーネス ID を一度設定します。
+OpenAI の設定でプロバイダーレベルのエージェント登録メタデータが必要な場合は、起動時にデフォルトのハーネス ID を一度構成します。
 
 ```python
 from agents import set_default_openai_harness
@@ -126,7 +130,7 @@ set_default_openai_agent_registration(
 )
 ```
 
-SDK のデフォルトが設定されていない場合、SDK の OpenAI バックエンドを使用するプロバイダーは `OPENAI_AGENT_HARNESS_ID` 環境変数にフォールバックします。ハーネス ID が設定されている場合、`RunConfig.trace_metadata` にそのキーがすでに存在しない限り、SDK はそれを `agent_harness_id` としてトレースメタデータに追加します。
+SDK のデフォルトが設定されていない場合、SDK の OpenAI バックエンドを使用するプロバイダーは `OPENAI_AGENT_HARNESS_ID` 環境変数にフォールバックします。ハーネス ID が構成されている場合、`RunConfig.trace_metadata` にそのキーがすでに存在しない限り、SDK はトレースメタデータに `agent_harness_id` として追加します。
 
 ## トレーシング {#tracing}
 
@@ -138,7 +142,7 @@ from agents import set_tracing_export_api_key
 set_tracing_export_api_key("sk-...")
 ```
 
-モデルのトラフィックではあるキーまたはクライアントを使用し、トレーシングでは別の OpenAI キーを使用する必要がある場合は、デフォルトのキーまたはクライアントを設定するときに `use_for_tracing=False` を渡し、その後トレーシングを個別に設定します。カスタムクライアントを使用していない場合は、[`set_default_openai_key()`][agents.set_default_openai_key] でも同じパターンを使用できます。
+モデルの通信で 1 つのキーまたはクライアントを使用し、トレーシングでは別の OpenAI キーを使用する必要がある場合は、デフォルトのキーまたはクライアントを設定するときに `use_for_tracing=False` を渡し、その後トレーシングを個別に構成します。カスタムクライアントを使用していない場合は、[`set_default_openai_key()`][agents.set_default_openai_key] でも同じ方法を使用できます。
 
 ```python
 from openai import AsyncOpenAI
@@ -153,14 +157,14 @@ set_default_openai_client(custom_client, use_for_tracing=False)
 set_tracing_export_api_key("sk-tracing")
 ```
 
-デフォルトのエクスポーターを使用するときに、トレースを特定の組織またはプロジェクトに関連付ける必要がある場合は、アプリの起動前に以下の環境変数を設定します。
+デフォルトのエクスポーターを使用して、特定の組織またはプロジェクトにトレースを関連付ける必要がある場合は、アプリの起動前に次の環境変数を設定します。
 
 ```bash
 export OPENAI_ORG_ID="org_..."
 export OPENAI_PROJECT_ID="proj_..."
 ```
 
-グローバルエクスポーターを変更せずに、実行ごとのトレーシング API キーを設定することもできます。
+グローバルエクスポーターを変更せずに、実行ごとにトレーシング API キーを設定することもできます。
 
 ```python
 from agents import Runner, RunConfig
@@ -180,7 +184,7 @@ from agents import set_tracing_disabled
 set_tracing_disabled(True)
 ```
 
-トレーシングを有効なままにしつつ、機密情報を含む可能性のある入力や出力をトレースペイロードから除外する場合は、[`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] を `False` に設定します。
+トレーシングを有効なまま維持しつつ、機密情報を含む可能性のある入出力をトレースペイロードから除外するには、[`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] を `False` に設定します。
 
 ```python
 from agents import Runner, RunConfig
@@ -192,17 +196,17 @@ await Runner.run(
 )
 ```
 
-アプリの起動前に以下の環境変数を設定することで、コードを使用せずにデフォルトを変更することもできます。
+アプリの起動前に次の環境変数を設定することで、コードを使わずにデフォルトを変更することもできます。
 
 ```bash
 export OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=0
 ```
 
-トレーシングのすべての制御項目については、[トレーシングガイド](tracing.md)を参照してください。
+トレーシングのすべての制御については、[トレーシングガイド](tracing.md)を参照してください。
 
 ## デバッグログ {#debug-logging}
 
-SDK は 2 つの Python ロガー（`openai.agents` と `openai.agents.tracing`）を定義しますが、デフォルトではハンドラーを追加しません。ログには、アプリケーションの Python ログ設定が適用されます。
+SDK は 2 つの Python ロガー（`openai.agents` と `openai.agents.tracing`）を定義しますが、デフォルトではハンドラーをアタッチしません。ログは、アプリケーションの Python ロギング構成に従います。
 
 詳細ログを有効にするには、[`enable_verbose_stdout_logging()`][agents.enable_verbose_stdout_logging] 関数を使用します。
 
@@ -212,7 +216,7 @@ from agents import enable_verbose_stdout_logging
 enable_verbose_stdout_logging()
 ```
 
-また、ハンドラー、フィルター、フォーマッターなどを追加してログをカスタマイズすることもできます。詳細については、[Python ログガイド](https://docs.python.org/3/howto/logging.html)を参照してください。
+また、ハンドラー、フィルター、フォーマッターなどを追加して、ログをカスタマイズすることもできます。詳細については、[Python ロギングガイド](https://docs.python.org/3/howto/logging.html)を参照してください。
 
 ```python
 import logging
@@ -231,22 +235,22 @@ logger.setLevel(logging.WARNING)
 logger.addHandler(logging.StreamHandler())
 ```
 
-### ログと診断における機密データ {#sensitive-data-in-logs-and-diagnostics}
+### ログと診断情報に含まれる機密データ {#sensitive-data-in-logs-and-diagnostics}
 
-一部のログと診断例外には、機密データ（モデルまたはツールの入力と出力など）が含まれる場合があります。
+一部のログや診断例外には、機密データが含まれる場合があります（たとえば、モデルやツールの入出力）。
 
-デフォルトでは、SDK は LLM の入力と出力、およびツールの入力と出力を **ログに記録しません** 。これらの保護は、以下によって制御されます。
+デフォルトでは、SDK は LLM の入出力やツールの入出力を **ログに記録しません** 。これらの保護は以下によって制御されます。
 
 ```bash
 OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1
 OPENAI_AGENTS_DONT_LOG_TOOL_DATA=1
 ```
 
-デバッグのために一時的にこのデータを含める必要がある場合は、アプリの起動前にいずれかの変数を `0`（または `false`）に設定します。
+デバッグのためにこのデータを一時的に含める必要がある場合は、アプリの起動前にいずれかの変数を `0`（または `false`）に設定します。
 
 ```bash
 export OPENAI_AGENTS_DONT_LOG_MODEL_DATA=0
 export OPENAI_AGENTS_DONT_LOG_TOOL_DATA=0
 ```
 
-これらのフラグは、影響を受けるエラーが、ペイロードを含む診断の詳細を保持するかどうかも制御します。たとえば、ツールデータの秘匿化が有効な場合、`FunctionTool` の無効な引数によって、根本の検証エラーを例外チェーンに含まない汎用的な `ModelBehaviorError` が発生します。いずれかの変数を `0` に設定すると、ログ、例外メッセージ、例外チェーン、その他の診断コンテキストに未加工のモデルデータまたはツールデータが公開される可能性があるため、管理された開発環境でのみ有効にしてください。
+これらのフラグは、影響を受けるエラーでペイロードを含む診断の詳細を保持するかどうかも制御します。たとえば、ツールデータの編集が有効な場合、`FunctionTool` の無効な引数によって、基礎となる検証エラーを例外チェーンに含まない汎用的な `ModelBehaviorError` が発生します。いずれかの変数を `0` に設定すると、ログ、例外メッセージ、例外チェーン、その他の診断コンテキストに未加工のモデルデータまたはツールデータが公開される可能性があるため、管理された開発環境でのみ有効にしてください。
