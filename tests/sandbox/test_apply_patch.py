@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from agents.editor import ApplyPatchOperation
-from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox import Manifest
+from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.errors import (
     ApplyPatchDecodeError,
     ApplyPatchDestinationExistsError,
