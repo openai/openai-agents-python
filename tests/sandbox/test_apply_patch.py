@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agents.editor import ApplyPatchOperation
+from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox import Manifest
 from agents.sandbox.errors import (
     ApplyPatchDecodeError,
@@ -496,8 +497,11 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
 
     session.read = blocking_read  # type: ignore[method-assign]
 
+    editor_a = WorkspaceEditor(session)
+    editor_b = WorkspaceEditor(session)
+
     task_a = asyncio.create_task(
-        session.apply_patch(
+        editor_a.apply_operation(
             ApplyPatchOperation(
                 type="update_file",
                 path="source-a.txt",
@@ -508,7 +512,7 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
     )
     await entered.wait()
     task_b = asyncio.create_task(
-        session.apply_patch(
+        editor_b.apply_operation(
             ApplyPatchOperation(
                 type="update_file",
                 path="source-b.txt",
