@@ -2356,12 +2356,12 @@ async def test_pop_returning_none_after_destructive_cleanup_invalidates_chain() 
 
 
 @pytest.mark.asyncio
-async def test_empty_pop_preserves_retained_response_chain() -> None:
+async def test_empty_pop_invalidates_retained_response_chain() -> None:
     underlying = SimpleListSession()
     client = MagicMock()
     client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[], usage=None))
     session = OpenAIResponsesCompactionSession(
-        session_id="empty-pop-noop",
+        session_id="empty-pop-invalidates",
         underlying_session=underlying,
         client=client,
         compaction_mode="previous_response_id",
@@ -2369,10 +2369,9 @@ async def test_empty_pop_preserves_retained_response_chain() -> None:
     )
     await session.run_compaction({"response_id": "resp-old"})
     assert await session.pop_item() is None
-    await session.run_compaction({"force": True})
-    client.responses.compact.assert_awaited_once_with(
-        model=session.model, previous_response_id="resp-old"
-    )
+    with pytest.raises(ValueError, match="requires a response_id"):
+        await session.run_compaction({"force": True})
+    client.responses.compact.assert_not_awaited()
 
 
 class TestCompactionStripsOrphanedIds:
