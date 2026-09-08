@@ -580,7 +580,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
-            history_before = await self._get_all_underlying_session_items()
             try:
                 popped = await self.underlying_session.pop_item()
             except asyncio.CancelledError:
