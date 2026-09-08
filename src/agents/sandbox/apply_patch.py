@@ -8,6 +8,7 @@ from ..apply_diff import ApplyDiffMode, apply_diff
 from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
 from .errors import (
     ApplyPatchDecodeError,
+    ApplyPatchDestinationExistsError,
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
@@ -111,6 +112,14 @@ class WorkspaceEditor:
 
             moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
+            if moved_destination != destination:
+                try:
+                    handle = await self._session.read(moved_destination, user=self._user)
+                except (FileNotFoundError, WorkspaceReadNotFoundError):
+                    pass
+                else:
+                    handle.close()
+                    raise ApplyPatchDestinationExistsError(path=moved_display_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
                 await self._session.rm(destination, user=self._user)
