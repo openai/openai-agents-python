@@ -1212,12 +1212,7 @@ class BaseSandboxSession(abc.ABC):
         *,
         patch_format: PatchFormat | Literal["v4a"] = "v4a",
     ) -> str:
-        lock = self._apply_patch_lock
-        if lock is None:
-            lock = asyncio.Lock()
-            self._apply_patch_lock = lock
-        async with lock:
-            return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
+        return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
 
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
         policy = self._workspace_path_policy()
