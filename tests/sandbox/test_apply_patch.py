@@ -480,22 +480,22 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
     session.files[Path("/workspace/target-a.txt")] = b"occupied-a\n"
     session.files[Path("/workspace/target-b.txt")] = b"occupied-b\n"
 
-    from agents.sandbox.apply_patch import WorkspaceEditor
-    editor = WorkspaceEditor(session)
     entered = asyncio.Event()
     release = asyncio.Event()
-    original_read = editor._read_text
+    original_read = session.read
 
-    async def blocking_read(*args: object, **kwargs: object) -> str:
-        if not entered.is_set():
+    async def blocking_read(
+        path: Path, *, user: str | None = None
+    ) -> io.BytesIO:
+        if path == Path("/workspace/source-a.txt") and not entered.is_set():
             entered.set()
             await release.wait()
-        return await original_read(*args, **kwargs)
+        return await original_read(path, user=user)
 
-    editor._read_text = blocking_read  # type: ignore[method-assign]
+    session.read = blocking_read  # type: ignore[method-assign]
 
     task_a = asyncio.create_task(
-        editor.apply_operation(
+        session.apply_patch(
             ApplyPatchOperation(
                 type="update_file",
                 path="source-a.txt",
@@ -506,7 +506,7 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
     )
     await entered.wait()
     task_b = asyncio.create_task(
-        editor.apply_operation(
+        session.apply_patch(
             ApplyPatchOperation(
                 type="update_file",
                 path="source-b.txt",
