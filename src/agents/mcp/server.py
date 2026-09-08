@@ -967,6 +967,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._cache_dirty = True
         self._tools_cache_generation = 0
         self._tools_refresh_sequence = 0
+        self._tools_last_published_refresh_sequence = 0
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
@@ -1503,10 +1504,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 del fetch_pages
                 if (
                     refresh_generation == self._tools_cache_generation
-                    and refresh_sequence == self._tools_refresh_sequence
+                    and refresh_sequence > self._tools_last_published_refresh_sequence
                 ):
                     self._tools_list = tools
                     self._cache_dirty = False
+                    self._tools_last_published_refresh_sequence = refresh_sequence
 
             # Filter tools based on tool_filter
             filtered_tools = tools
