@@ -149,8 +149,10 @@ class WorkspaceEditor:
                             )
                         except AtomicMoveUnsupportedError:
                             try:
+                                # The source removal already failed, so the original
+                                # source file is still authoritative. Remove only the
+                                # newly-created destination to restore the source-only state.
                                 await self._session.rm(moved_destination, user=self._user)
-                                await self._write_text(destination, updated_text)
                             except Exception as rollback_error:
                                 raise ApplyPatchMoveRollbackError(
                                     source=destination,
