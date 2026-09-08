@@ -1346,6 +1346,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 'if [ -n "$pid" ]; then '
                 'kill -KILL "$pid" >/dev/null 2>&1 || true; '
                 "fi; "
+                'rm -f -- "$1"; '
                 "fi"
             ),
             "sh",
@@ -1363,7 +1364,6 @@ class DockerSandboxSession(BaseSandboxSession):
         except Exception:
             pass
 
-        await self._rm_best_effort(pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
 
     async def exists(self) -> bool:
         try:
