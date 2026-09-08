@@ -412,3 +412,32 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
         )
 
     assert session.files[Path("/workspace/old.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_fallback_preserves_existing_behavior_for_unsupported_backend() -> None:
+    class UnsupportedMoveSession(ApplyPatchSession):
+        async def move_no_replace(
+            self,
+            source: Path,
+            destination: Path,
+            *,
+            user: object = None,
+        ) -> None:
+            _ = (source, destination, user)
+            raise AtomicMoveUnsupportedError(source=source, destination=destination)
+
+    session = UnsupportedMoveSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="source.txt",
+            diff="@@\n-source\n+changed\n",
+            move_to="target.txt",
+        )
+    )
+
+    assert Path("/workspace/source.txt") not in session.files
+    assert session.files[Path("/workspace/target.txt")] == b"changed\n"
