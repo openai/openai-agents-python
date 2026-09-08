@@ -51,7 +51,7 @@ class WorkspaceEditor:
         self._session = session
         self._user = user
         self._workspace_scope = workspace_scope or SandboxWorkspaceScope()
-    
+
     def _operation_lock(self) -> asyncio.Lock:
         lock = getattr(self._session, "_apply_patch_lock", None)
         if lock is None:
