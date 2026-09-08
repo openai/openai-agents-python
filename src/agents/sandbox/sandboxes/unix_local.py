@@ -9,7 +9,6 @@ if sys.platform == "win32":  # pragma: no cover
 import asyncio
 import ctypes
 import errno
-import errno
 import fcntl
 import io
 import logging
