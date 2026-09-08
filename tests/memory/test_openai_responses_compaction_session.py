@@ -272,8 +272,7 @@ class TestOpenAIResponsesCompactionSession:
         assert "previous_response_id" not in call_kwargs
         assert call_kwargs["input"] == []
 
-
-@pytest.mark.asyncio
+    @pytest.mark.asyncio
     async def test_run_compaction_input_mode_without_response_id(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [

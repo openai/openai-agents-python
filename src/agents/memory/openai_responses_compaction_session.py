@@ -198,7 +198,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             if pre_lock_invalidation_generation != self._response_chain_invalidation_generation:
                 guard_response_id = (
-                    args.get("response_id") if args and args.get("response_id") else self._response_id
+                    args.get("response_id")
+                    if args and args.get("response_id")
+                    else self._response_id
                 )
                 guard_store = args.get("store") if args and "store" in args else None
                 guard_requested_mode = args.get("compaction_mode") if args else None
