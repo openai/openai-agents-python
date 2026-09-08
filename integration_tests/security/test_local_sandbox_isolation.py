@@ -29,7 +29,7 @@ from agents.sandbox.session import (
 )
 from agents.sandbox.snapshot import NoopSnapshotSpec
 from agents.testing import ModelStep, ScriptedModel, UnexpectedModelCall
-from integration_tests._contract_support import _redaction_observables
+from integration_tests._contract_state import _redaction_observables
 from integration_tests.conftest import skip_or_fail
 
 pytestmark = pytest.mark.security

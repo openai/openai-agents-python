@@ -22,6 +22,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 import agents._debug as _debug
 import agents.sandbox.runtime_agent_preparation as runtime_agent_preparation_module
 from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
+from agents._run_state_agent_identity import _build_agent_identity_map
 from agents.exceptions import InputGuardrailTripwireTriggered, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
 from agents.items import ModelResponse, ToolCallOutputItem, TResponseInputItem
@@ -30,7 +31,7 @@ from agents.prompts import GenerateDynamicPromptData, Prompt
 from agents.result import RunResult, RunResultStreaming
 from agents.run import CallModelData, ModelInputData, RunConfig
 from agents.run_context import AgentHookContext, RunContextWrapper
-from agents.run_state import RunState, _build_agent_identity_map
+from agents.run_state import RunState
 from agents.sandbox import (
     FileMode,
     Group,

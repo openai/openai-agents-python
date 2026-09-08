@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 import pytest
 
@@ -12,25 +11,33 @@ from agents.run_internal._asyncio_progress import get_function_tool_task_progres
 async def test_function_tool_task_progress_deadline_detects_timer_backed_sleep() -> None:
     loop = asyncio.get_running_loop()
 
+    started = asyncio.Event()
+
     async def _sleeping_task() -> None:
+        started.set()
         await asyncio.sleep(0.05)
 
-    task = asyncio.create_task(_sleeping_task())
-    await asyncio.sleep(0)
-
     before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+    task = asyncio.create_task(_sleeping_task())
+    try:
+        await started.wait()
+        assert not task.done()
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+        inspected = loop.time()
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+        assert deadline is not None
+        assert before + 0.05 <= deadline <= inspected + 0.05
+
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -38,159 +45,238 @@ async def test_function_tool_task_progress_deadline_returns_none_for_external_wa
     loop = asyncio.get_running_loop()
     blocker: asyncio.Future[None] = loop.create_future()
 
+    started = asyncio.Event()
+
     async def _blocked_task() -> None:
+        started.set()
         await blocker
 
     task = asyncio.create_task(_blocked_task())
-    await asyncio.sleep(0)
+    try:
+        await started.wait()
+        assert not task.done()
+        assert not blocker.done()
 
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
 
-    assert deadline is None
+        assert deadline is None
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
 
 
 @pytest.mark.asyncio
 async def test_function_tool_task_progress_deadline_can_follow_tracked_invoke_task() -> None:
     loop = asyncio.get_running_loop()
     outer_started = asyncio.Event()
+    invoke_started = asyncio.Event()
 
     async def _invoke_task() -> None:
+        invoke_started.set()
         await asyncio.sleep(0.05)
 
     async def _outer_task() -> None:
         outer_started.set()
         await asyncio.Future()
 
+    before = loop.time()
     invoke_task = asyncio.create_task(_invoke_task())
     outer_task = asyncio.create_task(_outer_task())
-    await asyncio.wait_for(outer_started.wait(), timeout=0.2)
+    try:
+        await invoke_started.wait()
+        await outer_started.wait()
+        assert not outer_task.done()
+        assert not invoke_task.done()
 
-    before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=outer_task,
-        task_to_invoke_task={outer_task: invoke_task},
-        loop=loop,
-    )
+        inspected = loop.time()
+        deadline = get_function_tool_task_progress_deadline(
+            task=outer_task,
+            task_to_invoke_task={outer_task: invoke_task},
+            loop=loop,
+        )
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+        assert deadline is not None
+        assert before + 0.05 <= deadline <= inspected + 0.05
 
-    outer_task.cancel()
-    invoke_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await outer_task
-    with contextlib.suppress(asyncio.CancelledError):
-        await invoke_task
+    finally:
+        outer_task.cancel()
+        invoke_task.cancel()
+        await asyncio.gather(outer_task, invoke_task, return_exceptions=True)
+
+    assert outer_task.cancelled()
+    assert invoke_task.cancelled()
 
 
 @pytest.mark.asyncio
 async def test_function_tool_task_progress_deadline_can_follow_awaited_child_task() -> None:
     loop = asyncio.get_running_loop()
 
+    started = asyncio.Event()
+
+    async def _child_task() -> None:
+        started.set()
+        await asyncio.sleep(0.05)
+
     async def _parent_task() -> None:
-        child = asyncio.create_task(asyncio.sleep(0.05))
         await child
 
-    task = asyncio.create_task(_parent_task())
-    await asyncio.sleep(0)
-
     before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+    child = asyncio.create_task(_child_task())
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+    task = asyncio.create_task(_parent_task())
+    try:
+        await started.wait()
+        assert not task.done()
+        assert not child.done()
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+        inspected = loop.time()
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
+
+        assert deadline is not None
+        assert before + 0.05 <= deadline <= inspected + 0.05
+
+    finally:
+        task.cancel()
+        child.cancel()
+        await asyncio.gather(task, child, return_exceptions=True)
+
+    assert task.cancelled()
+    assert child.cancelled()
 
 
 @pytest.mark.asyncio
 async def test_function_tool_task_progress_deadline_can_follow_shielded_child_task() -> None:
     loop = asyncio.get_running_loop()
 
+    started = asyncio.Event()
+
+    async def _child_task() -> None:
+        started.set()
+        await asyncio.sleep(0.05)
+
     async def _shielded_task() -> None:
-        child = asyncio.create_task(asyncio.sleep(0.05))
         await asyncio.shield(child)
 
-    task = asyncio.create_task(_shielded_task())
-    await asyncio.sleep(0)
-
     before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+    child = asyncio.create_task(_child_task())
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+    task = asyncio.create_task(_shielded_task())
+    try:
+        await started.wait()
+        assert not task.done()
+        assert not child.done()
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+        inspected = loop.time()
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
+
+        assert deadline is not None
+        assert before + 0.05 <= deadline <= inspected + 0.05
+
+    finally:
+        task.cancel()
+        child.cancel()
+        await asyncio.gather(task, child, return_exceptions=True)
+
+    assert task.cancelled()
+    assert child.cancelled()
 
 
 @pytest.mark.asyncio
 async def test_function_tool_task_progress_deadline_can_follow_gathered_child_tasks() -> None:
     loop = asyncio.get_running_loop()
 
-    async def _gathered_task() -> None:
-        await asyncio.gather(asyncio.sleep(0.05), asyncio.sleep(0.06))
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
 
-    task = asyncio.create_task(_gathered_task())
-    await asyncio.sleep(0)
+    async def _child_task(started: asyncio.Event, delay: float) -> None:
+        started.set()
+        await asyncio.sleep(delay)
+
+    async def _gathered_task() -> None:
+        await asyncio.gather(first_child, second_child)
 
     before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+    first_child = asyncio.create_task(_child_task(first_started, 0.05))
+    second_child = asyncio.create_task(_child_task(second_started, 0.06))
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+    task = asyncio.create_task(_gathered_task())
+    try:
+        await first_started.wait()
+        await second_started.wait()
+        assert not task.done()
+        assert not first_child.done()
+        assert not second_child.done()
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+        inspected = loop.time()
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
+
+        assert deadline is not None
+        assert before + 0.05 <= deadline <= inspected + 0.05
+
+    finally:
+        task.cancel()
+        first_child.cancel()
+        second_child.cancel()
+        await asyncio.gather(task, first_child, second_child, return_exceptions=True)
+
+    assert task.cancelled()
+    assert first_child.cancelled()
+    assert second_child.cancelled()
 
 
 @pytest.mark.asyncio
 async def test_function_tool_task_progress_deadline_can_follow_timer_backed_future() -> None:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[None] = loop.create_future()
-    handle = loop.call_later(0.05, future.set_result, None)
+    handle: asyncio.TimerHandle | None = None
+
+    started = asyncio.Event()
 
     async def _timer_backed_future_task() -> None:
+        started.set()
         await future
 
     task = asyncio.create_task(_timer_backed_future_task())
-    await asyncio.sleep(0)
+    try:
+        await started.wait()
+        assert not task.done()
+        assert not future.done()
 
-    before = loop.time()
-    deadline = get_function_tool_task_progress_deadline(
-        task=task,
-        task_to_invoke_task={},
-        loop=loop,
-    )
+        # Arm the real timer after startup so no loop turn can expire it before inspection.
+        handle = loop.call_later(0.05, future.set_result, None)
+        deadline = get_function_tool_task_progress_deadline(
+            task=task,
+            task_to_invoke_task={},
+            loop=loop,
+        )
 
-    assert deadline is not None
-    assert before <= deadline <= before + 0.1
+        assert deadline is not None
+        assert deadline == handle.when()
 
-    task.cancel()
-    handle.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    finally:
+        if handle is not None:
+            handle.cancel()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
+    assert handle is not None and handle.cancelled()

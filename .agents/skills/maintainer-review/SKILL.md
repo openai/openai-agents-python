@@ -1,6 +1,6 @@
 ---
 name: maintainer-review
-description: Assess an openai-agents-python GitHub issue or pull request as a maintainer. Use to verify the claimed need and practical impact, compare supported alternatives or competing approaches, separate code quality from repository readiness, recommend the maintainer action, and draft a copy-ready comment when evidence, changes, or closure should be requested.
+description: Assess a GitHub issue or PR for demonstrated need, supported alternatives, correctness, and maintainer action. Desk review only.
 ---
 
 # Maintainer Review
@@ -129,7 +129,7 @@ For repository-specific runtime invariants, start with `.agents/references/READM
 Use this evidence order:
 
 1. Trace the closest existing supported capabilities and determine whether they already satisfy the underlying user outcome.
-2. Inspect existing tests and complete the code-path trace, including the mandatory interleaving and ownership pass when triggered, without executing code.
+2. Inspect existing tests and complete the code-path trace, including the changed-behavior coverage and interleaving passes below when triggered, without executing code.
 3. Compare the implementation and existing evidence with the released version, base branch, or known-good control without executing code.
 4. If a decision-relevant runtime uncertainty remains, stop and suggest a separate runtime investigation using the evidence requirements below.
 
@@ -150,6 +150,16 @@ Before a positive assessment, complete the pass in step 2 and be able to state a
 
 If any answer is missing and could change whether code should exist at all, do not call the issue actionable or the PR merge-worthy. Request only the evidence needed to distinguish a genuine capability gap from a usage, discoverability, or solution-design problem. This is a product and architecture evidence gap, not a runtime-probe trigger by itself.
 
+##### Mandatory changed-behavior coverage pass
+
+After the need gate passes, run this pass before a positive PR assessment or a conclusion that no additional runtime investigation is needed when a patch rejects, drops, replaces, or reclassifies previously accepted input, output, or state.
+
+1. Trace the full set of supported cases matched by the changed condition through the actual normalization, conversion, and consumer paths. Do not stop at the reported reproducer or the fields checked by the patch; inspect the existing processing paths for information or semantics the new condition overlooks. Identify what callers could previously read, persist, replay, or act on and what the head would return or raise instead.
+2. Group affected providers, adapters, or producers by materially different representations and semantics. Verify those differences against the relevant dependency version and supported release boundary; current upstream code alone does not establish behavior in an older dependency. Shared interfaces or a fix in one adapter do not prove equivalent behavior in another. Investigate only groups the changed condition can affect, not an exhaustive provider matrix.
+3. Keep evidence of need separate from evidence of compatibility. Label contributor-reported live results, inspected test assertions, authoritative specifications, and independently observed runtime results accurately. A reproduction from one provider can demonstrate the bug without establishing that the new condition preserves other supported output shapes. A unit test using a constructed response does not establish which providers emit that response.
+
+Record a compact working note for each materially different case: `trigger and representation -> base/head outcome -> caller consequence -> evidence and remaining uncertainty`. An omitted case is unfinished review work, not evidence that no runtime concern exists. Complete the static trace first. If it proves a supported regression, request the focused correction without requiring a live reproduction. If a concrete provider-dependent uncertainty could change compatibility or the recommendation, keep the assessment preliminary and identify the focused runtime evidence and control needed under the existing desk-review boundary. Do not turn generic provider uncertainty into mandatory runtime testing.
+
 ##### Mandatory interleaving and ownership pass
 
 Run this pass before any positive PR assessment when a patch adds, removes, or reorders cleanup, retry, reconnect, cancellation, listeners, shared futures or tasks, connections or streams, state flags, or mutable state across an `await`, callback, event, or deferred completion.
@@ -164,7 +174,7 @@ Run this pass before any positive PR assessment when a patch adds, removes, or r
 Do not mark a concurrency-sensitive patch `Merge-worthy as-is` merely because sequential reconnect, retry, failure, and close tests pass. A triggered ownership pass is incomplete unless the evidence records the complete mutation surface, concrete ownership mechanism, strongest distinct-mutator interleaving, and survivor and coherence result. If the code trace proves an unsafe interleaving, conclude from static evidence and request a focused fix and regression test. If ownership remains ambiguous, keep the result preliminary and state the exact runtime evidence needed to resolve it.
 
 - If the claim or PR is decisively negative from a complete reachable code-path trace, conclude the review without a runtime probe. Examples include an impossible or unsupported path, duplicated existing handling, a demonstrated no-op, a direct compatibility break, or a clearly wrong abstraction. Do not call an ambiguous result negative merely to avoid a probe.
-- If the initial result is positive and there is no unresolved runtime concern, and any triggered interleaving and ownership pass is complete, the desk review may be sufficient for a final maintainer decision. Do not suggest additional runtime investigation only to restate evidence that cannot plausibly change the decision.
+- If the initial result is positive and there is no unresolved runtime concern, and the triggered changed-behavior coverage and interleaving passes are complete, the desk review may be sufficient for a final maintainer decision. Do not suggest additional runtime investigation only to restate evidence that cannot plausibly change the decision.
 - If there is any unresolved runtime concern that could plausibly change claim validity, severity, merge-worthiness, required changes, or the preferred competing PR, report a `Preliminary assessment`. State the unresolved question, why it could change the decision, the evidence needed, and an appropriate control, then suggest a separate runtime investigation without planning or executing it.
 - A purely stylistic, documentation, CI-status, or repository-readiness concern does not justify suggesting a runtime investigation unless it masks a runtime question.
 

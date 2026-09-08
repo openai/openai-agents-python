@@ -1,6 +1,6 @@
 ---
 name: pr-draft-summary
-description: Create the required PR-ready summary block, branch suggestion, title, and draft description for openai-agents-python. Use before the final response whenever the current task changed runtime code, tests, examples, build/test configuration, or docs with behavior impact, regardless of perceived change size and including local-only or uncommitted work. Skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, an explicitly invoked $release-candidate-prep handoff, or when the user explicitly says not to include the PR draft block.
+description: Prepare the required local PR title, description, and branch suggestion after eligible implementation work is complete.
 ---
 
 # PR Draft Summary
@@ -9,6 +9,8 @@ description: Create the required PR-ready summary block, branch suggestion, titl
 Produce the PR-ready summary required in this repository after eligible code work is complete: a concise summary plus a PR-ready title and draft description that begins with "This pull request <verb> ...". The block should be ready to paste into a PR for openai-agents-python.
 
 ## When to Trigger
+- An explicit user request for a PR draft takes precedence over the automatic-trigger exclusions below.
+- For automatic invocation, spelling, comments, or formatting alone are editorial even under runtime/test paths when they change no behavior or contract. Skip the automatic draft for those edits.
 - Before every final response, check whether the current task changed runtime code (`src/agents/`), tests (`tests/`), examples (`examples/`), build/test configuration, or docs with behavior impact.
 - If it did, run this skill after required verification and before sending the final response. Do not use perceived change size to decide whether to run it.
 - Run it for eligible local-only and uncommitted work even when the user did not ask to create a pull request. Producing this text does not authorize creating a branch, committing, pushing, or opening a pull request.

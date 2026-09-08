@@ -1,6 +1,6 @@
 ---
 name: sensitive-logging-audit
-description: Audit and fix sensitive-data exposure through Python runtime logging in openai-agents-python. Use when reviewing logging, print, warnings, stderr, traceback, MCP names, model or tool exceptions, redaction flags, or any diagnostic path that may retain user data.
+description: Audit or fix sensitive-data exposure in Python SDK diagnostics, exceptions, logging, and telemetry.
 ---
 
 # Sensitive Logging Audit

@@ -793,6 +793,14 @@
   ],
   "public_typed_dicts": [
     {
+      "class_name": "WebSearchToolImageSettings",
+      "module": "agents",
+      "names": [
+        "max_results",
+        "caption"
+      ]
+    },
+    {
       "class_name": "ModelStepSpec",
       "module": "agents.testing.model",
       "names": [

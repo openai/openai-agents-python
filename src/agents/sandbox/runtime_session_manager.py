@@ -8,15 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, cast
 
+from .._run_state_agent_identity import (
+    _allocate_unique_agent_identity,
+    _build_agent_identity_keys_by_id,
+)
 from ..agent import Agent
 from ..exceptions import _raise_data_redacted_error
 from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from ..run_context import TContext
-from ..run_state import (
-    RunState,
-    _allocate_unique_agent_identity,
-    _build_agent_identity_keys_by_id,
-)
+from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
 from ._mount_security import (
     _manifest_has_configured_mount_authority,

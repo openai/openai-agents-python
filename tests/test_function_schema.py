@@ -554,6 +554,88 @@ def test_var_keyword_scalar_annotation():
     assert func(*args, **kwargs) == 5
 
 
+def _var_positional_field_constraints(*scores: Annotated[int, Field(ge=0, le=10)]) -> int:
+    return sum(scores)
+
+
+def _var_keyword_field_constraints(**scores: Annotated[int, Field(ge=0, le=10)]) -> int:
+    return sum(scores.values())
+
+
+@pytest.mark.parametrize(
+    "func, strict, container_type, value_key",
+    [
+        (_var_positional_field_constraints, True, "array", "items"),
+        (_var_keyword_field_constraints, False, "object", "additionalProperties"),
+    ],
+)
+def test_variadic_field_constraints_in_schema(func, strict, container_type, value_key):
+    fs = function_schema(func, strict_json_schema=strict)
+    scores = fs.params_json_schema["properties"]["scores"]
+
+    assert scores["type"] == container_type
+    assert scores[value_key] == {"type": "integer", "minimum": 0, "maximum": 10}
+    assert "minimum" not in scores
+    assert "maximum" not in scores
+
+
+def test_variadic_field_constraints_apply_to_each_string():
+    def func(*names: Annotated[str, Field(min_length=2)]) -> str:
+        return ",".join(names)
+
+    fs = function_schema(func)
+    names = fs.params_json_schema["properties"]["names"]
+    assert names["items"]["minLength"] == 2
+    assert "minItems" not in names
+
+    parsed = fs.params_pydantic_model.model_validate({"names": ["ok"]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == "ok"
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"names": ["ok", "x"]})
+
+
+def test_variadic_field_constraints_preserve_collection_defaults():
+    def func(
+        *scores: Annotated[int, Field(default=5, alias="values", ge=0)],
+        **extras: Annotated[int, Field(..., alias="options", ge=0)],
+    ) -> int:
+        return sum(scores) + sum(extras.values())
+
+    fs = function_schema(func, strict_json_schema=False)
+    assert set(fs.params_json_schema["properties"]) == {"scores", "extras"}
+    assert not fs.params_json_schema.get("required")
+    for payload in ({}, {"scores": [], "extras": {}}):
+        parsed = fs.params_pydantic_model.model_validate(payload)
+        assert parsed.model_dump() == {"scores": [], "extras": {}}
+        args, kwargs = fs.to_call_args(parsed)
+        assert func(*args, **kwargs) == 0
+
+
+def test_variadic_field_constraints_preserve_homogeneous_tuple_values():
+    def func(*pairs: Annotated[tuple[int, ...], Field(min_length=2)]) -> int:
+        return sum(sum(pair) for pair in pairs)
+
+    fs = function_schema(func)
+    pairs = fs.params_json_schema["properties"]["pairs"]
+    assert pairs["items"]["minItems"] == 2
+    assert pairs["items"]["items"] == {"type": "integer"}
+    parsed = fs.params_pydantic_model.model_validate({"pairs": [[1, 2]]})
+    args, kwargs = fs.to_call_args(parsed)
+    assert args == [(1, 2)]
+    assert func(*args, **kwargs) == 3
+    with pytest.raises(ValidationError):
+        fs.params_pydantic_model.model_validate({"pairs": [[1]]})
+
+
+def test_variadic_field_constraints_do_not_bypass_fixed_tuple_rejection():
+    def func(*pairs: Annotated[tuple[int, str], Field(min_length=2)]) -> int:
+        return len(pairs)
+
+    with pytest.raises(UserError, match=r"use tuple\[T, \.\.\.\] or list\[T\] instead"):
+        function_schema(func)
+
+
 def test_schema_with_mapping_raises_strict_mode_error():
     """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
 

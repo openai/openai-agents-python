@@ -30,6 +30,7 @@ from openai import omit
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from pydantic import BaseModel
 
+import agents
 from agents import (
     Agent,
     AgentOutputSchema,
@@ -43,6 +44,7 @@ from agents import (
     ToolSearchTool,
     UserError,
     WebSearchTool,
+    WebSearchToolImageSettings,
     function_tool,
     handoff,
     tool_namespace,
@@ -439,6 +441,8 @@ def test_convert_tools_basic_types_and_includes():
     assert web_params.get("user_location") == web_tool.user_location
     assert web_params.get("search_context_size") == web_tool.search_context_size
     assert "external_web_access" not in web_params
+    assert "search_content_types" not in web_params
+    assert "image_settings" not in web_params
     # Verify computer tool uses the GA built-in tool payload.
     comp_params = next(ct for ct in converted.tools if ct["type"] == "computer")
     assert comp_params == {"type": "computer"}
@@ -491,6 +495,69 @@ def test_convert_file_search_tool_rejects_unsupported_result_limits(
         UserError, match="max_num_results must be zero, an integer between 1 and 50"
     ):
         Converter.convert_tools([tool], handoffs=[])
+
+
+def test_convert_tools_includes_web_search_content_types_and_image_settings() -> None:
+    from agents.tool import WebSearchToolImageSettings as ToolImageSettings
+
+    assert WebSearchToolImageSettings is ToolImageSettings
+    assert "WebSearchToolImageSettings" in agents.__all__
+    image_settings: WebSearchToolImageSettings = {"max_results": 3, "caption": True}
+    web_tool = WebSearchTool(
+        search_content_types=["text", "image"],
+        image_settings=image_settings,
+    )
+
+    converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.6")
+
+    # Image results arrive through the web_search_call.results include.
+    assert converted.includes == ["web_search_call.results"]
+    assert converted.tools == [
+        {
+            "type": "web_search",
+            "filters": None,
+            "user_location": None,
+            "search_context_size": "medium",
+            "search_content_types": ["text", "image"],
+            "image_settings": {"max_results": 3, "caption": True},
+        }
+    ]
+
+
+def test_convert_tools_image_only_uses_default_image_settings() -> None:
+    web_tool = WebSearchTool(search_content_types=["image"])
+
+    converted = Converter.convert_tools([web_tool], handoffs=[])
+
+    assert converted.includes == ["web_search_call.results"]
+    assert converted.tools[0].get("search_content_types") == ["image"]
+    assert "image_settings" not in converted.tools[0]
+
+
+def test_web_search_tool_preserves_existing_positional_parameters() -> None:
+    web_tool = WebSearchTool(None, None, "high", False)
+
+    converted = Converter.convert_tools([web_tool], handoffs=[])
+
+    assert converted.includes == []
+    assert converted.tools == [
+        {
+            "type": "web_search",
+            "filters": None,
+            "user_location": None,
+            "search_context_size": "high",
+            "external_web_access": False,
+        }
+    ]
+
+
+def test_convert_tools_text_only_content_types_adds_no_include() -> None:
+    web_tool = WebSearchTool(search_content_types=["text"])
+
+    converted = Converter.convert_tools([web_tool], handoffs=[], model="gpt-5.6")
+
+    assert converted.includes == []
+    assert converted.tools[0].get("search_content_types") == ["text"]
 
 
 def test_convert_tools_includes_explicit_false_external_web_access() -> None:
