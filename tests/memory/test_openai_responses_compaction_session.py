@@ -221,6 +221,59 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_queued_input_compaction_survives_destructive_pop(self) -> None:
+        class BlockingPopSession(SimpleListSession):
+            def __init__(self, history: list[TResponseInputItem]) -> None:
+                super().__init__(history=history)
+                self.pop_started = asyncio.Event()
+                self.allow_pop = asyncio.Event()
+
+            async def pop_item(self) -> TResponseInputItem | None:
+                self.pop_started.set()
+                await self.allow_pop.wait()
+                return await super().pop_item()
+
+        history: list[TResponseInputItem] = [
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "old"},
+            ),
+        ]
+        underlying = BlockingPopSession(history)
+        compacted_response = MagicMock()
+        compacted_response.output = []
+        client = MagicMock()
+        client.responses.compact = AsyncMock(return_value=compacted_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="input",
+        )
+        session._response_id = "resp-old"
+
+        pop_task = asyncio.create_task(session.pop_item())
+        await underlying.pop_started.wait()
+
+        compaction_task = asyncio.create_task(
+            session.run_compaction({"force": True, "compaction_mode": "input"})
+        )
+        await asyncio.sleep(0)
+        assert not compaction_task.done()
+
+        underlying.allow_pop.set()
+        assert await pop_task == history[0]
+
+        await compaction_task
+
+        client.responses.compact.assert_awaited_once()
+        call_kwargs = client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in call_kwargs
+        assert call_kwargs["input"] == []
+
+
+@pytest.mark.asyncio
     async def test_run_compaction_input_mode_without_response_id(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
