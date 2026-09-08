@@ -520,6 +520,30 @@ class _RestorableProvisioningFailureSession(_ProvisioningFailureSession):
 
 
 @pytest.mark.asyncio
+async def test_sandbox_session_delegates_move_no_replace() -> None:
+    class _MoveSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__(Manifest())
+            self.calls: list[tuple[Path, Path]] = []
+
+        async def move_no_replace(
+            self,
+            source: Path,
+            destination: Path,
+            *,
+            user: User | None = None,
+        ) -> None:
+            _ = user
+            self.calls.append((source, destination))
+
+    inner = _MoveSession()
+    session = SandboxSession(inner)
+    await session.move_no_replace(Path("source"), Path("destination"))
+
+    assert inner.calls == [(Path("source"), Path("destination"))]
+
+
+@pytest.mark.asyncio
 async def test_sandbox_session_aclose_runs_public_cleanup_lifecycle() -> None:
     inner = _FakeSession(Manifest())
     session = SandboxSession(inner)
