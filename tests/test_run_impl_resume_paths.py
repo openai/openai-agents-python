@@ -605,6 +605,35 @@ async def test_top_level_pending_input_accepts_local_shell_replay_output() -> No
 
 
 @pytest.mark.asyncio
+async def test_pending_input_preserves_provider_data_during_restore() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    provider_item = {
+        "type": "function_call_output",
+        "call_id": "call-provider-data",
+        "output": "answer",
+        "provider_data": {
+            "thinking_blocks": [{"type": "thinking", "thinking": "hidden", "signature": "sig-1"}]
+        },
+    }
+    payload = state.to_json()
+    payload["pending_input"] = [provider_item]
+    pending_write = cast(dict[str, Any], payload["pending_session_write"])
+    pending_write["pending_input"] = [provider_item]
+    pending_write["items"] = [provider_item]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_input"] == [provider_item]
+    assert restored.to_json()["pending_session_write"]["pending_input"] == [provider_item]
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_input"] == [provider_item]
+    assert roundtripped.to_json()["pending_session_write"]["items"] == [provider_item]
+
+
+@pytest.mark.asyncio
 async def test_pending_session_write_materializes_computer_safety_checks() -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"

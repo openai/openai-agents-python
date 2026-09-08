@@ -285,12 +285,17 @@ _MISSING_CONTEXT_SENTINEL = object()
 
 def _validate_pending_session_write_item(item: Any) -> TResponseInputItem:
     """Validate a checkpoint item, including SDK-generated local-shell replay outputs."""
+    has_provider_data = isinstance(item, Mapping) and "provider_data" in item
+    provider_data = item.get("provider_data") if has_provider_data else None
     validated: Any
     try:
         validated = _HANDOFF_OUTPUT_ADAPTER.validate_python(item)
     except ValidationError:
         validated = _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(item)
-    return cast(TResponseInputItem, _to_dump_compatible(validated))
+    dumped = _to_dump_compatible(validated)
+    if has_provider_data and isinstance(dumped, dict):
+        dumped["provider_data"] = _to_dump_compatible(provider_data)
+    return cast(TResponseInputItem, dumped)
 
 
 _ALLOWED_MISSING_MESSAGE_FIELDS = frozenset({"status"})
