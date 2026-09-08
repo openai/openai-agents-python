@@ -152,6 +152,12 @@ while :; do
 done
 """.strip()
 _EXCLUSIVE_CREATE_EXISTS_CODE = 13
+# Classify an already-visible target before any payload is staged. Without this the
+# staging write runs first, so a target inside an executable but non-writable parent
+# fails on permissions and the caller sees a write error instead of the collision error
+# that tells it to use update_file. The atomic claim below still decides real races.
+_TARGET_EXISTS_SCRIPT = 'target="$1"\nif [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
+
 # ``ln`` claims the target name and fails when that name is already taken. Linking a
 # fully written staging file means the content is complete before the name exists, so a
 # failed or cancelled upload cannot leave a file behind that holds the name. The leading
@@ -998,6 +1004,12 @@ class BaseSandboxSession(abc.ABC):
         # component limit could still fail to stage.
         staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
         staging_arg = sandbox_path_str(staging_path)
+
+        preflight = await self.exec(
+            "sh", "-c", _TARGET_EXISTS_SCRIPT, "sh", path_arg, shell=False, user=user
+        )
+        if preflight.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
+            raise FileExistsError(path_arg)
 
         try:
             # Create the parent as the bound user so a fresh nested path is owned the same

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import shutil
 import signal
 import subprocess
@@ -671,7 +672,7 @@ async def test_write_new_file_creates_a_file_and_its_parents(tmp_path: Path) -> 
 class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
     """Drives the shared exec-based exclusive create with a chosen exit code."""
 
-    def __init__(self, root: Path, exit_code: int) -> None:
+    def __init__(self, root: Path, exit_code: int, *, preflight_exit_code: int = 0) -> None:
         super().__init__(
             state=UnixLocalSandboxSessionState(
                 manifest=Manifest(root=str(root)),
@@ -679,6 +680,7 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
             )
         )
         self._exit_code = exit_code
+        self._preflight_exit_code = preflight_exit_code
         self.exec_commands: list[tuple[str, ...]] = []
         self.writes: list[Path] = []
         self.removed: list[Path] = []
@@ -690,8 +692,12 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
         timeout: float | None = None,
     ) -> ExecResult:
         _ = timeout
-        self.exec_commands.append(tuple(str(part) for part in command))
-        return ExecResult(stdout=b"", stderr=b"", exit_code=self._exit_code)
+        parts = tuple(str(part) for part in command)
+        self.exec_commands.append(parts)
+        # The collision preflight is the invocation that receives only the target.
+        is_preflight = not any("ln " in part for part in parts)
+        code = self._preflight_exit_code if is_preflight else self._exit_code
+        return ExecResult(stdout=b"", stderr=b"", exit_code=code)
 
     async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
         _ = (data, user)
@@ -720,17 +726,32 @@ class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
 
 @pytest.mark.asyncio
 async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
-    """Exit 13 from the exclusive-create script means the name was already taken."""
-    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13)
+    """A target that is already visible is rejected before any payload is staged."""
+    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=0, preflight_exit_code=13)
 
     with pytest.raises(FileExistsError):
         await session.write_new_file(
             Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
         )
 
-    # The payload only ever reached a staging name, and that staging entry is cleaned up,
-    # so a rejected create leaves nothing behind at the requested name.
-    assert [path.name for path in session.writes] != ["notes.txt"]
+    # No payload bytes were uploaded, so a create onto an occupied name costs one probe
+    # rather than a full staged write that is then discarded.
+    assert session.writes == []
+    assert session.removed == []
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_with_a_bound_user_reports_a_racing_creator(tmp_path: Path) -> None:
+    """A creator that wins between the preflight and the link still loses the name."""
+    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13, preflight_exit_code=0)
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(
+            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+        )
+
+    # Here the payload was staged before the race was detected, and the staging entry is
+    # still cleaned up rather than left in the workspace.
     assert all(path.name.startswith(".apply-patch-create-") for path in session.writes)
     assert session.removed == session.writes
     assert session.made_dirs != []
@@ -927,3 +948,32 @@ async def test_apply_patch_create_accepts_a_destination_at_the_component_limit(
     )
 
     assert (tmp_path / long_name).read_text() == "hello"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+@pytest.mark.asyncio
+async def test_apply_patch_create_reports_collision_inside_a_read_only_parent(
+    tmp_path: Path,
+) -> None:
+    """A visible collision must classify as a collision, not as a permission failure.
+
+    Staging before classifying meant a target inside an executable but non-writable
+    parent failed on the staging write, so the caller was told the write failed instead
+    of being told to use update_file.
+    """
+    session = _exclusive_write_session(tmp_path)
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "notes.txt"
+    target.write_bytes(b"important\n")
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(ApplyPatchDiffError):
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="create_file", path="locked/notes.txt", diff="+clobbered\n"
+                )
+            )
+        assert target.read_bytes() == b"important\n"
+    finally:
+        parent.chmod(0o755)
