@@ -983,6 +983,26 @@ def test_process_model_response_accepts_program_output_for_retained_program() ->
     assert isinstance(processed.new_items[0], ToolCallOutputItem)
 
 
+@pytest.mark.asyncio
+async def test_runner_validates_program_parent_against_filtered_input() -> None:
+    model = ScriptedModel([[_program_output(), get_text_message("42 units are available")]])
+    program = _program().model_dump(exclude_none=True)
+
+    def add_program(data: Any) -> Any:
+        data.model_data.input.append(program)
+        return data.model_data
+
+    agent = Agent(
+        name="inventory",
+        model=model,
+        tools=[ProgrammaticToolCallingTool()],
+    )
+    run_config = RunConfig(call_model_input_filter=add_program)
+
+    result = await Runner.run(agent, "Check inventory", run_config=run_config)
+    assert result.final_output == "42 units are available"
+
+
 def test_process_model_response_accepts_program_output_for_program_in_input() -> None:
     agent = Agent(name="inventory", tools=[ProgrammaticToolCallingTool()])
 
