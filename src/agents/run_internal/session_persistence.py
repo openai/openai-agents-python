@@ -204,20 +204,23 @@ async def _session_get_items(
     capture_compaction_generation: bool = False,
 ) -> list[TResponseInputItem]:
     """Read session items while preserving the legacy method call shape."""
+    session_wrapper = _get_session_wrapper(session, wrapper)
+
+    async def read_items() -> list[TResponseInputItem]:
+        if limit is _SESSION_LIMIT_UNSET:
+            result = await _call_session_method(session.get_items, wrapper=session_wrapper)
+        else:
+            result = await _call_session_method(
+                session.get_items, limit=limit, wrapper=session_wrapper
+            )
+        return cast(list[TResponseInputItem], result)
+
     get_with_generation = getattr(session, "_get_items_with_generation", None)
     if capture_compaction_generation and wrapper is not None and callable(get_with_generation):
-        if limit is _SESSION_LIMIT_UNSET:
-            result, generation = await _call_session_method(get_with_generation)
-        else:
-            result, generation = await _call_session_method(get_with_generation, limit=limit)
+        result, generation = await _call_session_method(get_with_generation, read_items)
         wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
         return cast(list[TResponseInputItem], result)
-    wrapper = _get_session_wrapper(session, wrapper)
-    if limit is _SESSION_LIMIT_UNSET:
-        result = await _call_session_method(session.get_items, wrapper=wrapper)
-    else:
-        result = await _call_session_method(session.get_items, limit=limit, wrapper=wrapper)
-    return cast(list[TResponseInputItem], result)
+    return await read_items()
 
 
 async def _session_add_items(
@@ -227,18 +230,22 @@ async def _session_add_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape."""
+    session_wrapper = _get_session_wrapper(session, wrapper)
+
+    async def write_items() -> None:
+        await _call_session_method(session.add_items, items, wrapper=session_wrapper)
+
     add_with_generation = getattr(session, "_add_items_with_generation", None)
     if wrapper is not None and callable(add_with_generation):
         expected_generation = getattr(wrapper, "_session_compaction_generation", None)
         generation = await _call_session_method(
             add_with_generation,
-            items,
+            write_items,
             expected_generation=expected_generation,
         )
         wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
         return
-    wrapper = _get_session_wrapper(session, wrapper)
-    await _call_session_method(session.add_items, items, wrapper=wrapper)
+    await write_items()
 
 
 async def _session_pop_item(
@@ -903,7 +910,11 @@ async def resume_pending_session_write(
             if wrapper is not None and callable(get_with_generation):
                 tail, committed_generation = await _call_session_method(
                     get_with_generation,
-                    limit=expected_length,
+                    lambda: _session_get_items(
+                        session,
+                        limit=expected_length,
+                        wrapper=wrapper,
+                    ),
                 )
                 wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
             else:

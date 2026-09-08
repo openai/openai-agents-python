@@ -14,6 +14,12 @@ RUNNER = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "run_inte
 INTEGRATION_CONFTEST = RUNNER.parents[2] / "integration_tests" / "conftest.py"
 
 
+@pytest.fixture(autouse=True)
+def isolate_runner_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The runner deliberately mutates its environment before starting subprocesses.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+
+
 def _sanitizer() -> Callable[[Path], Any]:
     return cast(Callable[[Path], Any], runpy.run_path(str(RUNNER))["_sanitize_and_load_junit"])
 
