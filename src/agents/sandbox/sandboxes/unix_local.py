@@ -15,13 +15,14 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import tarfile
 import tempfile
 import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -150,6 +151,115 @@ class _UnixPtyProcessEntry:
     output_closed: asyncio.Event = field(default_factory=asyncio.Event)
     pump_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     wait_task: asyncio.Task[None] | None = None
+
+
+_SPECIAL_FILE_KINDS: tuple[tuple[Callable[[int], bool], str], ...] = (
+    (stat.S_ISFIFO, "fifo"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISCHR, "character device"),
+    (stat.S_ISBLK, "block device"),
+)
+_SPECIAL_FILE_EXIT_CODE = 3
+
+# User-scoped writer, run as the requested user via the confined exec path. It does the
+# special-file classification itself (host-side checks cannot see inside a directory only
+# that user may search): an existing entry is opened read-write, which unlike a write-only
+# open never blocks on a FIFO, and the type of the *descriptor* is tested through /dev/fd.
+_USER_WRITE_SCRIPT = (
+    'target="$1"\n'
+    'mkdir -p "$(dirname "$target")" || exit 1\n'
+    'if [ -e "$target" ] || [ -L "$target" ]; then\n'
+    '    exec 3<>"$target" || exit 1\n'
+    "    if [ -p /dev/fd/3 ] || [ -S /dev/fd/3 ] || [ -c /dev/fd/3 ] || [ -b /dev/fd/3 ]; then\n"
+    f"        exit {_SPECIAL_FILE_EXIT_CODE}\n"
+    "    fi\n"
+    "    exec 3>&-\n"
+    "fi\n"
+    'cat > "$target"\n'
+)
+
+
+def _special_file_kind(mode: int) -> str | None:
+    return next((name for predicate, name in _SPECIAL_FILE_KINDS if predicate(mode)), None)
+
+
+def _raise_for_special_file(kind: str | None, *, path: Path, for_write: bool) -> None:
+    if kind is None:
+        return
+    context = {"reason": f"not a regular file: {kind}"}
+    if for_write:
+        raise WorkspaceArchiveWriteError(path=path, context=context)
+    raise WorkspaceArchiveReadError(path=path, context=context)
+
+
+def _classify_mode(mode: int, *, workspace_path: Path, path: Path, for_write: bool) -> None:
+    if stat.S_ISDIR(mode):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(workspace_path))
+    _raise_for_special_file(_special_file_kind(mode), path=path, for_write=for_write)
+
+
+def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> int:
+    """Open a workspace file for in-process I/O, refusing FIFOs, sockets, and device nodes.
+
+    `open()` on a FIFO with no peer blocks the calling thread, and this session performs
+    file I/O synchronously on the event loop, so such an open would stall the whole
+    process; a device node may block or act on open regardless of `O_NONBLOCK`.
+
+    Where the platform offers `O_PATH` (Linux), the entry is pinned with a descriptor that
+    does not open it, classified with `fstat()`, and then that same inode is opened for I/O
+    through `/proc/self/fd`, so a replacement of the path between the two steps cannot
+    reach a blocking open. A missing target is created with `O_EXCL`, which guarantees the
+    created entry is a regular file. Elsewhere the entry is classified with `stat()`
+    before a non-blocking open and again with `fstat()` on the opened descriptor.
+    Missing paths keep their existing error handling; a directory is reported like the
+    blocking `open()` did.
+    """
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if for_write:
+        io_flags = os.O_WRONLY | os.O_TRUNC
+    else:
+        io_flags = os.O_RDONLY
+    o_path = getattr(os, "O_PATH", None)
+    if o_path is not None:
+        try:
+            pin = os.open(workspace_path, o_path | cloexec)
+        except FileNotFoundError:
+            if not for_write:
+                raise
+            # Create the file ourselves; O_EXCL means whatever we get back is the
+            # regular file this call created, never an entry swapped in meanwhile.
+            return os.open(workspace_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | cloexec, 0o666)
+        try:
+            _classify_mode(
+                os.fstat(pin).st_mode, workspace_path=workspace_path, path=path, for_write=for_write
+            )
+            return os.open(f"/proc/self/fd/{pin}", io_flags | cloexec)
+        finally:
+            os.close(pin)
+
+    try:
+        _classify_mode(
+            workspace_path.stat().st_mode,
+            workspace_path=workspace_path,
+            path=path,
+            for_write=for_write,
+        )
+    except OSError:
+        pass  # missing or unreadable: let the open below report it
+    flags = io_flags | os.O_NONBLOCK | cloexec
+    if for_write:
+        flags |= os.O_CREAT
+    fd = os.open(workspace_path, flags, 0o666)
+    try:
+        _classify_mode(
+            os.fstat(fd).st_mode, workspace_path=workspace_path, path=path, for_write=for_write
+        )
+        # Regular files ignore O_NONBLOCK; clear it anyway so the handle behaves like open().
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 class UnixLocalSandboxSession(BaseSandboxSession):
@@ -988,11 +1098,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         workspace_path = self.normalize_path(path)
         try:
-            return workspace_path.open("rb")
+            fd = _open_regular_file(workspace_path, path=path, for_write=False)
         except FileNotFoundError as e:
             raise WorkspaceReadNotFoundError(path=path, cause=e) from e
         except OSError as e:
             raise WorkspaceArchiveReadError(path=path, cause=e) from e
+        return os.fdopen(fd, "rb")
 
     async def write(
         self,
@@ -1010,7 +1121,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         try:
             workspace_path.parent.mkdir(parents=True, exist_ok=True)
-            with workspace_path.open("wb") as f:
+            fd = _open_regular_file(workspace_path, path=workspace_path, for_write=True)
+            with os.fdopen(fd, "wb") as f:
                 shutil.copyfileobj(payload.stream, f)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
@@ -1027,7 +1139,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         command_parts = self._prepare_exec_command(
             "sh",
             "-c",
-            'mkdir -p "$(dirname "$1")" && cat > "$1"',
+            _USER_WRITE_SCRIPT,
             "sh",
             str(path),
             shell=False,
@@ -1065,6 +1177,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=path, cause=e) from e
 
+        if proc.returncode == _SPECIAL_FILE_EXIT_CODE:
+            raise WorkspaceArchiveWriteError(
+                path=path, context={"reason": "not a regular file", "user": str(user)}
+            )
         if proc.returncode:
             raise WorkspaceArchiveWriteError(
                 path=path,
