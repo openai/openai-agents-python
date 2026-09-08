@@ -441,3 +441,66 @@ async def test_apply_patch_move_fallback_preserves_existing_behavior_for_unsuppo
 
     assert Path("/workspace/source.txt") not in session.files
     assert session.files[Path("/workspace/target.txt")] == b"changed\n"
+
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_restores_source_when_source_removal_fails() -> None:
+    class FailingSourceRemoveSession(ApplyPatchSession):
+        async def rm(
+            self, path: Path | str, *, recursive: bool = False, user: object = None
+        ) -> None:
+            _ = (recursive, user)
+            if self.normalize_path(path) == Path("/workspace/source.txt"):
+                raise PermissionError("source protected")
+            await super().rm(path, recursive=recursive, user=user)
+
+    session = FailingSourceRemoveSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    with pytest.raises(PermissionError, match="source protected"):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                diff="@@\n-source\n+changed\n",
+                move_to="target.txt",
+            )
+        )
+
+    assert session.files[Path("/workspace/source.txt")] == b"source\n"
+    assert Path("/workspace/target.txt") not in session.files
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_reports_rollback_failure() -> None:
+    class BrokenMoveSession(ApplyPatchSession):
+        async def rm(
+            self, path: Path | str, *, recursive: bool = False, user: object = None
+        ) -> None:
+            _ = (recursive, user)
+            raise PermissionError("rm failed")
+
+        async def move_no_replace(
+            self,
+            source: Path,
+            destination: Path,
+            *,
+            user: object = None,
+        ) -> None:
+            _ = user
+            if self.normalize_path(source) != self.normalize_path(destination):
+                raise OSError("rollback failed")
+
+    session = BrokenMoveSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    with pytest.raises(ApplyPatchMoveRollbackError, match="rollback failed"):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                diff="@@\n-source\n+changed\n",
+                move_to="target.txt",
+            )
+        )
