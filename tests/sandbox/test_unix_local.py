@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import io
 import os
+import shutil
 import signal
+import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -592,17 +594,18 @@ async def test_unix_local_refuses_a_fifo_without_a_peer_and_a_directory_read(
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
-def test_open_regular_file_classifies_a_fifo_before_opening_it(
+def test_open_regular_file_never_opens_a_fifo_for_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
     real_open = os.open
+    o_path = getattr(os, "O_PATH", 0)
 
-    def guarded_open(path: object, *args: object, **kwargs: object) -> int:
-        if Path(str(path)) == fifo:
-            raise AssertionError("the FIFO must be rejected without being opened")
-        return real_open(cast(Any, path), *cast(Any, args), **cast(Any, kwargs))
+    def guarded_open(path: object, flags: int, *args: object) -> int:
+        if Path(str(path)) == fifo and not (o_path and flags & o_path):
+            raise AssertionError("the FIFO must be classified without an I/O open")
+        return real_open(cast(Any, path), flags, *cast(Any, args))
 
     monkeypatch.setattr(unix_local_module.os, "open", guarded_open)
 
@@ -611,23 +614,80 @@ def test_open_regular_file_classifies_a_fifo_before_opening_it(
     assert read_error.value.context["reason"] == "not a regular file: fifo"
     with pytest.raises(WorkspaceArchiveWriteError):
         unix_local_module._open_regular_file(fifo, path=Path("pipe"), for_write=True)
+    assert fifo.is_fifo()
+
+
+def test_open_regular_file_creates_missing_targets_and_reads_them_back(tmp_path: Path) -> None:
+    target = tmp_path / "new.txt"
+    fd = unix_local_module._open_regular_file(target, path=Path("new.txt"), for_write=True)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(b"hello")
+    fd = unix_local_module._open_regular_file(target, path=Path("new.txt"), for_write=False)
+    with os.fdopen(fd, "rb") as handle:
+        assert handle.read() == b"hello"
+    with pytest.raises(FileNotFoundError):
+        unix_local_module._open_regular_file(
+            tmp_path / "absent", path=Path("absent"), for_write=False
+        )
+    with pytest.raises(IsADirectoryError):
+        unix_local_module._open_regular_file(tmp_path, path=Path("."), for_write=False)
+
+
+def _run_user_write_script(
+    target: Path, payload: bytes, *, user: int | None
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["sh", "-c", unix_local_module._USER_WRITE_SCRIPT, "sh", str(target)],
+        input=payload,
+        capture_output=True,
+        check=False,
+        timeout=5,  # a regression would block on the FIFO; the watchdog fails the test instead
+        user=user,
+        group=user,
+    )
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
-def test_user_scoped_write_refuses_a_fifo_the_sdk_identity_cannot_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_user_write_script_refuses_a_fifo_and_writes_regular_files(tmp_path: Path) -> None:
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
 
-    def denied_open(path: object, *args: object, **kwargs: object) -> int:
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+    refused = _run_user_write_script(fifo, b"payload", user=None)
+    assert refused.returncode == unix_local_module._SPECIAL_FILE_EXIT_CODE, refused.stderr
+    assert fifo.is_fifo()
 
-    monkeypatch.setattr(unix_local_module.os, "open", denied_open)
+    created = _run_user_write_script(tmp_path / "sub" / "new.txt", b"hello", user=None)
+    assert created.returncode == 0, created.stderr
+    assert (tmp_path / "sub" / "new.txt").read_bytes() == b"hello"
 
-    with pytest.raises(WorkspaceArchiveWriteError) as write_error:
-        unix_local_module._raise_if_existing_special_file(fifo)
-    assert write_error.value.context["reason"] == "not a regular file: fifo"
+    existing = tmp_path / "existing.txt"
+    existing.write_bytes(b"old content that is longer")
+    rewritten = _run_user_write_script(existing, b"new", user=None)
+    assert rewritten.returncode == 0, rewritten.stderr
+    assert existing.read_bytes() == b"new"
 
-    # A missing target is left to the user-scoped exec, which creates it.
-    unix_local_module._raise_if_existing_special_file(tmp_path / "new.txt")
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to run the writer as another user")
+def test_user_write_script_refuses_a_fifo_under_a_user_only_parent(tmp_path: Path) -> None:
+    """The requested user, not the SDK identity, is the one that can see and open the FIFO."""
+    nobody = 65534
+    # pytest's tmp_path sits under a root-only directory; the requested user must be able
+    # to reach the parent, so build it under the world-traversable temp root instead.
+    parent = Path(tempfile.mkdtemp(prefix="unix-local-private-"))
+    try:
+        fifo = parent / "pipe"
+        os.mkfifo(fifo)
+        os.chown(fifo, nobody, nobody)
+        os.chown(parent, nobody, nobody)
+        parent.chmod(0o700)
+
+        refused = _run_user_write_script(fifo, b"payload", user=nobody)
+        assert refused.returncode == unix_local_module._SPECIAL_FILE_EXIT_CODE, refused.stderr
+        assert fifo.is_fifo()
+
+        written = _run_user_write_script(parent / "note.txt", b"hello", user=nobody)
+        assert written.returncode == 0, written.stderr
+        assert (parent / "note.txt").read_bytes() == b"hello"
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
