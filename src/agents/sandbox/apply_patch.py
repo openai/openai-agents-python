@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
@@ -50,6 +51,7 @@ class WorkspaceEditor:
         self._session = session
         self._user = user
         self._workspace_scope = workspace_scope or SandboxWorkspaceScope()
+        self._operation_lock = asyncio.Lock()
 
     async def apply_patch(
         self,
@@ -60,11 +62,21 @@ class WorkspaceEditor:
         patch_format: PatchFormat | Literal["v4a"] = "v4a",
     ) -> str:
         format_impl = _resolve_patch_format(patch_format)
-        for operation in _coerce_operations(operations):
-            await self.apply_operation(operation, patch_format=format_impl)
+        async with self._operation_lock:
+            for operation in _coerce_operations(operations):
+                await self._apply_operation_locked(operation, patch_format=format_impl)
         return "Done!"
 
     async def apply_operation(
+        self,
+        operation: ApplyPatchOperation,
+        *,
+        patch_format: PatchFormat | Literal["v4a"] = "v4a",
+    ) -> ApplyPatchResult:
+        async with self._operation_lock:
+            return await self._apply_operation_locked(operation, patch_format=patch_format)
+
+    async def _apply_operation_locked(
         self,
         operation: ApplyPatchOperation,
         *,
