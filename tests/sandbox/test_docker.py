@@ -4761,10 +4761,8 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
     monkeypatch.setattr(container, "exec_run", stalled_first_kill)
 
     cleanup_task = asyncio.create_task(session.pty_terminate_all())
-    await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
-    cleanup_task.cancel()
-
     try:
+        await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.5)
 
