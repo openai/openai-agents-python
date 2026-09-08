@@ -480,7 +480,8 @@ async def test_apply_patch_serializes_concurrent_operations() -> None:
     session.files[Path("/workspace/target-a.txt")] = b"occupied-a\n"
     session.files[Path("/workspace/target-b.txt")] = b"occupied-b\n"
 
-    editor = session.editor
+    from agents.sandbox.apply_patch import WorkspaceEditor
+    editor = WorkspaceEditor(session)
     entered = asyncio.Event()
     release = asyncio.Event()
     original_read = editor._read_text
