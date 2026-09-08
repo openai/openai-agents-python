@@ -279,6 +279,7 @@ class _DockerExecSocket:
 
 
 class DockerSandboxSession(BaseSandboxSession):
+    PTY_CLEANUP_TIMEOUT_S = _PTY_CLEANUP_TIMEOUT_S
     _docker_client: DockerSDKClient
     _container: Container
     _workspace_root_ready: bool
