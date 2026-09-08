@@ -223,7 +223,6 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
-    _apply_patch_lock: asyncio.Lock | None = None
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -1225,10 +1224,10 @@ class BaseSandboxSession(abc.ABC):
         *,
         patch_format: PatchFormat | Literal["v4a"] = "v4a",
     ) -> str:
-        lock = self._apply_patch_lock
+        lock = getattr(self, "_apply_patch_lock", None)
         if lock is None:
             lock = asyncio.Lock()
-            self._apply_patch_lock = lock
+            setattr(self, "_apply_patch_lock", lock)
         async with lock:
             return await WorkspaceEditor(self).apply_patch(operations, patch_format=patch_format)
 
