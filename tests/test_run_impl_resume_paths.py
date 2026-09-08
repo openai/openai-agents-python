@@ -583,6 +583,32 @@ async def test_pending_session_write_accepts_local_shell_replay_output() -> None
 
 
 @pytest.mark.asyncio
+async def test_pending_session_write_materializes_computer_safety_checks() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_session_write"]["items"] = [
+        {
+            "type": "computer_call_output",
+            "call_id": "computer-1",
+            "output": {"type": "computer_screenshot", "image_url": "img"},
+            "acknowledged_safety_checks": [
+                {"id": "check-1", "code": "confirm", "message": "approved"}
+            ],
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    expected = payload["pending_session_write"]["items"]
+    assert restored.to_json()["pending_session_write"]["items"] == expected
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_session_write"]["items"] == expected
+
+
+@pytest.mark.asyncio
 async def test_resumed_session_append_partial_commit_fails_closed() -> None:
     agent, model, session, state, effects = await _approved_session_state(False)
     # Two approved calls produce one resumed batch, allowing an actual partial append.
