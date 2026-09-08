@@ -27,6 +27,7 @@ class ErrorCode(str, Enum):
     APPLY_PATCH_FILE_NOT_FOUND = "apply_patch_file_not_found"
     APPLY_PATCH_DESTINATION_EXISTS = "apply_patch_destination_exists"
     SANDBOX_ATOMIC_MOVE_UNSUPPORTED = "sandbox_atomic_move_unsupported"
+    APPLY_PATCH_MOVE_ROLLBACK_FAILED = "apply_patch_move_rollback_failed"
     APPLY_PATCH_DECODE_ERROR = "apply_patch_decode_error"
 
     WORKSPACE_READ_NOT_FOUND = "workspace_read_not_found"
@@ -454,6 +455,32 @@ class AtomicMoveUnsupportedError(SandboxRuntimeError):
             op="apply_patch",
             context={"source": str(source), "destination": str(destination), **_as_context(context)},
             cause=cause,
+            retryable=False,
+        )
+
+
+class ApplyPatchMoveRollbackError(WorkspaceIOError):
+    """Apply patch moved a file but could not restore state after source removal failed."""
+
+    def __init__(
+        self,
+        *,
+        source: Path,
+        destination: Path,
+        move_error: BaseException,
+        rollback_error: BaseException,
+    ) -> None:
+        super().__init__(
+            message=f"apply_patch move rollback failed: {source} -> {destination}",
+            error_code=ErrorCode.APPLY_PATCH_MOVE_ROLLBACK_FAILED,
+            op="apply_patch",
+            context={
+                "source": str(source),
+                "destination": str(destination),
+                "move_error": type(move_error).__name__,
+                "rollback_error": type(rollback_error).__name__,
+            },
+            cause=rollback_error,
             retryable=False,
         )
 
