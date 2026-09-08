@@ -19,7 +19,7 @@ else:
 
 from agents import Agent, RunState, UserError
 from agents.run_context import RunContextWrapper
-from agents.run_state import SUPPORTED_SCHEMA_VERSIONS
+from agents.run_state import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
 from agents.sandbox.entries.mounts.patterns import FuseMountConfig
 from integration_tests._contract_state import (
     _deserialize_common_sandbox_session_state,
@@ -164,10 +164,12 @@ def test_historical_state_comparison_preserves_json_scalar_types() -> None:
 
 def test_historical_fixture_corpus_matches_supported_schema_versions() -> None:
     assert SOURCES["baseline"] == "v0.19.4"
-    assert frozenset(SOURCES["versions"]) == SUPPORTED_SCHEMA_VERSIONS
+    assert frozenset(SOURCES["versions"]) | {CURRENT_SCHEMA_VERSION} == SUPPORTED_SCHEMA_VERSIONS
     assert all(entry["commit"] for entry in SOURCES["versions"].values())
     assert {entry["version"] for entry in SOURCES["features"]} == {
-        version for version in SUPPORTED_SCHEMA_VERSIONS if version not in {"1.0", "1.1"}
+        version
+        for version in SUPPORTED_SCHEMA_VERSIONS
+        if version not in {"1.0", "1.1", CURRENT_SCHEMA_VERSION}
     }
     assert {entry["provenance"] for entry in SOURCES["features"]} == {
         "historical_writer",

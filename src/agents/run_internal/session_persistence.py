@@ -121,8 +121,10 @@ async def admit_pending_input(
             None,
             store=store,
             wrapper=wrapper,
+            resumed_write_state=run_state,
+            pending_input_snapshot=pending_input,
         )
-    if server_conversation_tracker is None:
+    elif server_conversation_tracker is None:
         run_state.clear_pending_input()
 
     return admission_items
@@ -591,6 +593,7 @@ async def save_result_to_session(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     resumed_write_state: RunState | None = None,
+    pending_input_snapshot: list[TResponseInputItem] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -682,6 +685,22 @@ async def save_result_to_session(
             item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
         ]
 
+    if pending_input_snapshot is not None:
+        if resumed_write_state is None:
+            raise UserError("Pending input Session writes require a resumable RunState")
+        if len(new_items) != len(pending_input_snapshot) or not all(
+            isinstance(item, InputItem) for item in new_items
+        ):
+            raise UserError("Pending input Session writes must contain only admission items")
+        if (
+            resumed_write_state.pending_input[: len(pending_input_snapshot)]
+            != pending_input_snapshot
+        ):
+            raise UserError("Pending input changed before its Session write could be checkpointed")
+        if not items_to_save:
+            del resumed_write_state._pending_input[: len(pending_input_snapshot)]
+            return 0
+
     if len(items_to_save) == 0:
         if run_state is not None:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -694,10 +713,15 @@ async def save_result_to_session(
             "session_id": session.session_id,
             "items": copy.deepcopy(items_to_save),
             "before": None,
-            "persisted_count": (
-                resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
-            ),
+            "persisted_count": resumed_write_state._current_turn_persisted_item_count
+            + (0 if pending_input_snapshot is not None else saved_run_items_count),
         }
+        if pending_input_snapshot is not None:
+            resumed_write_state._pending_session_write["pending_input"] = copy.deepcopy(
+                new_items_as_input
+            )
+            resumed_write_state._generated_items.extend(new_items)
+            resumed_write_state._session_items.extend(new_items)
         await resume_pending_session_write(
             resumed_write_state,
             session,
@@ -817,6 +841,30 @@ async def resume_pending_session_write(
             for item in items
         ]
 
+    pending_input = pending.get("pending_input")
+    if pending_input is not None:
+        expected_pending_items = deduplicate_input_items_preferring_latest(pending_input)
+        if isinstance(session, OpenAIConversationsSession):
+            expected_pending_items = [
+                _sanitize_openai_conversation_item(item) for item in expected_pending_items
+            ]
+            expected_pending_items = [
+                item
+                for item in expected_pending_items
+                if not _is_unpersistable_for_openai_conversation(item)
+            ]
+        if [digest_input_item(item) for item in expected_pending_items] != [
+            digest_input_item(item) for item in pending["items"]
+        ]:
+            raise UserError(
+                "Cannot reconcile the pending Session write: its staged input batch changed."
+            )
+        prefix = run_state._pending_input[: len(pending_input)]
+        if len(prefix) != len(pending_input) or [digest_input_item(item) for item in prefix] != [
+            digest_input_item(item) for item in pending_input
+        ]:
+            raise UserError("Cannot reconcile the pending Session write: its staged input changed.")
+
     run_state._session_write_in_progress = True
     try:
         before = pending["before"]
@@ -852,6 +900,8 @@ async def resume_pending_session_write(
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        if pending_input is not None:
+            del run_state._pending_input[: len(pending_input)]
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
         run_state._pending_session_write = None
     finally:
