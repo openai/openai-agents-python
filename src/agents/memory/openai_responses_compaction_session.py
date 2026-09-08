@@ -340,6 +340,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 previous_items=previous_items,
             )
         except (Exception, asyncio.CancelledError):
+            if deferred_response_id is not None and self._deferred_response_id is None:
+                self._deferred_response_id = deferred_response_id
             self._mutation_generation += 1
             raise
         self._mutation_generation += 1
@@ -578,6 +580,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
+            history_before = await self._get_all_underlying_session_items()
             try:
                 popped = await self.underlying_session.pop_item()
             except asyncio.CancelledError:
@@ -591,12 +594,23 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 self._session_items = None
                 self._mutation_generation += 1
                 raise
-            if popped:
+            if popped is not None:
                 self._compaction_candidate_items = None
                 self._session_items = None
                 self._mutation_generation += 1
                 self._invalidate_response_chain()
-            return popped
+                return popped
+
+            # Some backends can remove corrupt tail records while returning None.
+            # Compare authoritative history before/after to distinguish that case
+            # from a genuine empty-session no-op.
+            history_after = await self._get_all_underlying_session_items()
+            if history_after != history_before:
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._mutation_generation += 1
+                self._invalidate_response_chain()
+            return None
 
     async def clear_session(self) -> None:
         async with self._mutation_lock:
