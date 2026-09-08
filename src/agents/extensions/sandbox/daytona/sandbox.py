@@ -746,7 +746,18 @@ class DaytonaSandboxSession(BaseSandboxSession):
             raise
 
         if pruned is not None:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(pruned))
+            try:
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(pruned), propagate_timeout=False
+                )
+            except BaseException:
+                await self._rollback_pty_start(
+                    process_id,
+                    entry,
+                    self._pty_sessions,
+                    lambda: self._terminate_pty_entry(entry),
+                )
+                raise
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(

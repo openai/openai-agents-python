@@ -2014,7 +2014,7 @@ class TestPtyExec:
             task.cancel()  # Exercise repeated caller cancellation.
             await asyncio.sleep(0)
             assert not first_ws._closed
-            assert not second_ws._closed
+            assert second_ws._closed
 
             release_close.set()
             with pytest.raises(asyncio.CancelledError):

@@ -100,6 +100,11 @@ _DEFERRED_CLEANUP_TIMEOUT_S = 30.0
 _PTY_CLEANUP_TIMEOUT_S = 5.0
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
     """Return ``(length, readable_stream, spool_to_close)`` for a length-framed write.
 
@@ -565,6 +570,7 @@ class DockerSandboxSession(BaseSandboxSession):
         timeout: float | None,
         command_for_errors: tuple[str | Path, ...],
         kill_on_timeout: bool,
+        keep_running_on_timeout: bool = False,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
@@ -576,9 +582,12 @@ class DockerSandboxSession(BaseSandboxSession):
                 user=user or "",
             ),
         )
+        wait_target = asyncio.shield(future) if keep_running_on_timeout else future
         try:
-            exec_result = await asyncio.wait_for(future, timeout=timeout)
+            exec_result = await asyncio.wait_for(wait_target, timeout=timeout)
         except asyncio.TimeoutError as e:
+            if keep_running_on_timeout and not future.done():
+                future.add_done_callback(_consume_future_exception)
             if kill_on_timeout:
                 # Best-effort: kill processes matching the command line.
                 # If this fails, the caller still gets a timeout error.
@@ -1083,7 +1092,18 @@ class DockerSandboxSession(BaseSandboxSession):
             raise
 
         if pruned_entry is not None:
-            await self._settle_pty_cleanup(self._terminate_pty_entry(pruned_entry))
+            try:
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(pruned_entry), propagate_timeout=False
+                )
+            except BaseException:
+                await self._rollback_pty_start(
+                    process_id,
+                    entry,
+                    self._pty_processes,
+                    lambda: self._terminate_pty_entry(entry),
+                )
+                raise
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -1362,6 +1382,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 timeout=_PTY_CLEANUP_TIMEOUT_S,
                 command_for_errors=("kill", sandbox_path_str(pid_path)),
                 kill_on_timeout=False,
+                keep_running_on_timeout=True,
             )
         except Exception:
             pass

@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 from typing import cast
@@ -4771,13 +4772,66 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
         release_first_kill.set()
         if first_kill_started.is_set():
             await asyncio.wait_for(asyncio.to_thread(first_kill_finished.wait), timeout=0.5)
-        if cleanup_task is not None:
-            if not cleanup_task.done():
-                cleanup_task.cancel()
-            with suppress(BaseException):
-                await cleanup_task
+            if cleanup_task is not None:
+                if not cleanup_task.done():
+                    cleanup_task.cancel()
+                with suppress(BaseException):
+                    await cleanup_task
 
+    async def wait_for_first_socket_close() -> None:
+        while not first_socket.closed:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_first_socket_close(), timeout=0.5)
     assert first_socket.closed is True
+
+
+@pytest.mark.asyncio
+async def test_docker_pty_kill_remains_queued_after_cleanup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakePtyApi()
+    container = _FakePtyContainer(api)
+    session = DockerSandboxSession(
+        docker_client=object(),
+        container=container,
+        state=DockerSandboxSessionState(
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            container_id="container",
+            workspace_root_ready=True,
+        ),
+    )
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+
+    def block_executor() -> None:
+        blocker_started.set()
+        release_blocker.wait()
+
+    executor.submit(block_executor)
+    monkeypatch.setattr(docker_sandbox, "_DOCKER_EXECUTOR", executor)
+    monkeypatch.setattr(docker_sandbox, "_PTY_CLEANUP_TIMEOUT_S", 0.01)
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(blocker_started.wait), timeout=0.5)
+        await session._kill_pty_pid_path(Path("/tmp/queued.pid"))
+        assert container.exec_calls == []
+
+        release_blocker.set()
+
+        async def wait_for_kill() -> None:
+            while not container.exec_calls:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_kill(), timeout=0.5)
+        _assert_pty_kill_call(container.exec_calls[0])
+    finally:
+        release_blocker.set()
+        await asyncio.to_thread(executor.shutdown, True)
 
 
 @pytest.mark.asyncio

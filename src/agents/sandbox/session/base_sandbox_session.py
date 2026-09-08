@@ -3,8 +3,9 @@ import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path, PurePath
-from typing import Literal, NoReturn, TypeVar
+from typing import Any, Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
 
@@ -225,6 +226,9 @@ class BaseSandboxSession(abc.ABC):
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
     _pty_cleanup_tasks: set[asyncio.Task[None]] | None = None
+    _pty_lock: asyncio.Lock
+    _pty_processes: dict[int, Any]
+    _reserved_pty_process_ids: set[int]
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -400,14 +404,37 @@ class BaseSandboxSession(abc.ABC):
         try:
             try:
                 await self._before_stop()
+            except BaseException as before_stop_error:
+                # Persist before re-raising cancellation or a cleanup deadline/error so the
+                # backend cannot be deleted with workspace state that exists only remotely.
+                await self._persist_snapshot_before_stop_error()
+                if isinstance(before_stop_error, Exception):
+                    wrapped = self._wrap_stop_error(before_stop_error)
+                    if wrapped is not before_stop_error:
+                        raise wrapped from before_stop_error
+                raise
+            try:
                 await self._persist_snapshot()
-            except Exception as e:
-                wrapped = self._wrap_stop_error(e)
-                if wrapped is e:
+            except Exception as error:
+                wrapped = self._wrap_stop_error(error)
+                if wrapped is error:
                     raise
-                raise wrapped from e
+                raise wrapped from error
         finally:
             await self._after_stop()
+
+    async def _persist_snapshot_before_stop_error(self) -> None:
+        """Persist a snapshot even if stop is cancelled again while doing so."""
+
+        snapshot_task = asyncio.create_task(
+            self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
+        )
+        while not snapshot_task.done():
+            try:
+                await asyncio.shield(snapshot_task)
+            except asyncio.CancelledError:
+                continue
+        snapshot_task.result()
 
     async def _before_stop(self) -> None:
         """Run transient process cleanup before snapshot persistence."""
@@ -739,6 +766,7 @@ class BaseSandboxSession(abc.ABC):
         operation: Awaitable[None],
         *,
         timeout: float | None = None,
+        propagate_timeout: bool = True,
     ) -> None:
         """Settle cleanup after PTY ownership leaves the session registry.
 
@@ -779,12 +807,33 @@ class BaseSandboxSession(abc.ABC):
                     raise caller_cancellation
             elif caller_cancellation is not None:
                 raise caller_cancellation
-            elif timed_out:
+            elif timed_out and propagate_timeout:
                 raise asyncio.TimeoutError()
         finally:
             if not completion.done():
                 completion.cancel()
             await asyncio.gather(completion, return_exceptions=True)
+
+    async def _rollback_pty_start(
+        self,
+        process_id: int,
+        entry: Any,
+        pty_registry: dict[int, Any],
+        terminate_entry: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Remove and terminate a PTY whose start failed after registration."""
+
+        async with self._pty_lock:
+            if pty_registry.get(process_id) is not entry:
+                return
+            pty_registry.pop(process_id)
+            self._reserved_pty_process_ids.discard(process_id)
+
+        with suppress(BaseException):
+            await self._settle_pty_cleanup(
+                terminate_entry(),
+                propagate_timeout=False,
+            )
 
     async def _cleanup_pty_entries(
         self,
@@ -795,15 +844,53 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Attempt every PTY cleanup and re-raise the first failure."""
 
+        loop = asyncio.get_running_loop()
+        batch_timeout = self._pty_cleanup_timeout_s() if timeout is None else timeout
+        deadline = loop.time() + batch_timeout
+        cleanup_tasks = [
+            asyncio.create_task(
+                self._settle_pty_cleanup(
+                    cleanup_entry(entry),
+                    timeout=batch_timeout,
+                    propagate_timeout=False,
+                ),
+                name="agents.pty_cleanup_batch",
+            )
+            for entry in entries
+        ]
+
+        def consume_cleanup_task_exception(task: asyncio.Task[None]) -> None:
+            if not task.cancelled():
+                task.exception()
+
+        for task in cleanup_tasks:
+            task.add_done_callback(consume_cleanup_task_exception)
+
+        pending = set(cleanup_tasks)
+        caller_cancellation: asyncio.CancelledError | None = None
         first_error: BaseException | None = None
-        for entry in entries:
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
             try:
-                await self._settle_pty_cleanup(cleanup_entry(entry), timeout=timeout)
+                done, pending = await asyncio.wait(pending, timeout=remaining)
             except BaseException as error:
-                if first_error is None:
-                    first_error = error
+                if isinstance(error, asyncio.CancelledError):
+                    caller_cancellation = caller_cancellation or error
+                    continue
+                raise
+
+            for task in done:
+                try:
+                    task.result()
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
         if first_error is not None:
             raise first_error
+        if caller_cancellation is not None:
+            raise caller_cancellation
 
     async def pty_exec_start(
         self,
