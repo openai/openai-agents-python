@@ -470,3 +470,60 @@ async def test_apply_patch_update_move_same_path_still_updates_in_place() -> Non
     )
 
     assert session.files[Path("/workspace/source.txt")] == b"changed\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_serializes_concurrent_operations() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/source-a.txt")] = b"a\n"
+    session.files[Path("/workspace/source-b.txt")] = b"b\n"
+    session.files[Path("/workspace/target-a.txt")] = b"occupied-a\n"
+    session.files[Path("/workspace/target-b.txt")] = b"occupied-b\n"
+
+    editor = session.editor
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_read = editor._read_text
+
+    async def blocking_read(*args: object, **kwargs: object) -> str:
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await original_read(*args, **kwargs)
+
+    editor._read_text = blocking_read  # type: ignore[method-assign]
+
+    task_a = asyncio.create_task(
+        editor.apply_operation(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source-a.txt",
+                diff="@@\n-a\n+a2\n",
+                move_to="target-a.txt",
+            )
+        )
+    )
+    await entered.wait()
+    task_b = asyncio.create_task(
+        editor.apply_operation(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source-b.txt",
+                diff="@@\n-b\n+b2\n",
+                move_to="target-b.txt",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+    assert not task_b.done()
+    release.set()
+
+    with pytest.raises(ApplyPatchDestinationExistsError):
+        await task_a
+    with pytest.raises(ApplyPatchDestinationExistsError):
+        await task_b
+
+    assert session.files[Path("/workspace/source-a.txt")] == b"a\n"
+    assert session.files[Path("/workspace/source-b.txt")] == b"b\n"
+    assert session.files[Path("/workspace/target-a.txt")] == b"occupied-a\n"
+    assert session.files[Path("/workspace/target-b.txt")] == b"occupied-b\n"
