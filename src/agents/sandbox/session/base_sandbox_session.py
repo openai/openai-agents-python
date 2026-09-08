@@ -1203,6 +1203,18 @@ class BaseSandboxSession(abc.ABC):
             archive_limits=effective_archive_limits,
         )
 
+    async def move_no_replace(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Atomically move a file without replacing an existing destination when supported."""
+        from ..errors import AtomicMoveUnsupportedError
+        raise AtomicMoveUnsupportedError(source=source, destination=destination)
+
+
     async def apply_patch(
         self,
         operations: ApplyPatchOperation
