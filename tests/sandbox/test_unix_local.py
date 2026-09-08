@@ -430,6 +430,43 @@ class TestUnixLocalPty:
             await session.pty_write_stdin(session_id=started.process_id, chars="")
 
 
+
+@pytest.mark.asyncio
+async def test_move_no_replace_is_atomic_against_existing_destination(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    destination = workspace / "destination.txt"
+    source.write_text("new", encoding="utf-8")
+    destination.write_text("keep", encoding="utf-8")
+
+    session = _RecordingUnixLocalSession(workspace)
+
+    with pytest.raises(Exception) as exc_info:
+        await session.move_no_replace(Path("source.txt"), Path("destination.txt"))
+
+    from agents.sandbox.errors import ApplyPatchDestinationExistsError
+
+    assert isinstance(exc_info.value, ApplyPatchDestinationExistsError)
+    assert source.read_text(encoding="utf-8") == "new"
+    assert destination.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_move_no_replace_moves_missing_destination(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    destination = workspace / "destination.txt"
+    source.write_text("new", encoding="utf-8")
+
+    session = _RecordingUnixLocalSession(workspace)
+
+    await session.move_no_replace(Path("source.txt"), Path("destination.txt"))
+
+    assert not source.exists()
+    assert destination.read_text(encoding="utf-8") == "new"
+
 class TestUnixLocalUserScopedFilesystem:
     @pytest.mark.asyncio
     async def test_mkdir_as_user_checks_permissions_then_uses_local_fs(
