@@ -260,6 +260,7 @@ class SQLAlchemySession(SessionABC):
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
         self._create_tables = create_tables
+        self._session_id_collation_validated = False
 
     # ---------------------------------------------------------------------
     # Convenience constructors
@@ -328,14 +329,25 @@ class SQLAlchemySession(SessionABC):
             if getattr(self._engine.dialect, "is_mariadb", False):
                 pad_attribute = "NO PAD" if "_nopad_" in collation.casefold() else "PAD SPACE"
             else:
-                pad_result = await conn.execute(
-                    sql_text(
-                        "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
-                        "WHERE COLLATION_NAME = :collation"
-                    ),
-                    {"collation": collation},
-                )
-                pad_attribute = pad_result.scalar_one_or_none()
+                try:
+                    pad_result = await conn.execute(
+                        sql_text(
+                            "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
+                            "WHERE COLLATION_NAME = :collation"
+                        ),
+                        {"collation": collation},
+                    )
+                    pad_attribute = pad_result.scalar_one_or_none()
+                except SQLAlchemyError:
+                    version_result = await conn.execute(sql_text("SELECT VERSION()"))
+                    version = version_result.scalar_one_or_none()
+                    pad_attribute = (
+                        "PAD SPACE"
+                        if version
+                        and version.partition(".")[0].isdigit()
+                        and int(version.partition(".")[0]) < 8
+                        else None
+                    )
         except SQLAlchemyError:
             return
 
@@ -349,6 +361,14 @@ class SQLAlchemySession(SessionABC):
     async def _ensure_tables(self) -> None:
         """Ensure tables are created before any database operations."""
         if not self._create_tables:
+            if (
+                not self._session_id_collation_validated
+                and self._engine.dialect.name in {"mysql", "mariadb"}
+                and self.session_id.endswith(" ")
+            ):
+                async with self._engine.connect() as conn:
+                    await self._validate_session_id_collation(conn)
+                self._session_id_collation_validated = True
             return
 
         assert self._init_lock is not None
@@ -363,6 +383,7 @@ class SQLAlchemySession(SessionABC):
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
                 await self._validate_session_id_collation(conn)
+                self._session_id_collation_validated = True
             self._create_tables = False  # Only create once
         finally:
             self._init_lock.release()

@@ -21,6 +21,7 @@ from openai.types.responses.response_reasoning_item_param import (
 )
 from sqlalchemy import create_mock_engine, event, insert, select, text, update
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -331,6 +332,25 @@ async def test_validate_session_id_collation_rejects_pad_space(
         assert conn.execute.await_args_list[1].args[1] == {"collation": "utf8mb4_bin"}
 
 
+async def test_validate_session_id_collation_rejects_pad_space_on_mysql_57() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(
+        side_effect=[
+            _ScalarResult("utf8mb4_bin"),
+            SQLAlchemyError("Unknown column PAD_ATTRIBUTE"),
+            _ScalarResult("5.7.44"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._validate_session_id_collation(conn)
+
+    assert conn.execute.await_count == 3
+
+
 async def test_validate_session_id_collation_allows_mariadb_nopad() -> None:
     engine = MagicMock(spec=AsyncEngine)
     engine.dialect = SimpleNamespace(name="mysql", is_mariadb=True)
@@ -391,6 +411,25 @@ async def test_create_tables_false_skips_session_id_collation_validation(
         await session.engine.dispose()
 
     validate.assert_not_awaited()
+
+
+async def test_existing_mysql_schema_validates_trailing_space_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+    validate = AsyncMock()
+    monkeypatch.setattr(session, "_validate_session_id_collation", validate)
+
+    await session._ensure_tables()
+
+    validate.assert_awaited_once_with(conn)
 
 
 async def test_session_ids_keep_trailing_spaces_on_sqlite():
