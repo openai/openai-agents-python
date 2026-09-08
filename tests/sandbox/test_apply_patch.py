@@ -504,3 +504,45 @@ async def test_apply_patch_move_reports_rollback_failure() -> None:
                 move_to="target.txt",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_rolls_back_on_source_removal_cancellation() -> None:
+    class CancellingSourceRemoveSession(ApplyPatchSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.source_remove_attempts = 0
+
+        async def move_no_replace(
+            self,
+            source: Path,
+            destination: Path,
+            *,
+            user: object = None,
+        ) -> None:
+            raise AtomicMoveUnsupportedError(source=source, destination=destination)
+
+        async def rm(
+            self, path: Path | str, *, recursive: bool = False, user: object = None
+        ) -> None:
+            if self.normalize_path(path) == Path("/workspace/source.txt"):
+                self.source_remove_attempts += 1
+                if self.source_remove_attempts == 1:
+                    raise asyncio.CancelledError()
+            await super().rm(path, recursive=recursive, user=user)
+
+    session = CancellingSourceRemoveSession()
+    session.files[Path("/workspace/source.txt")] = b"source\n"
+
+    with pytest.raises(asyncio.CancelledError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                diff="@@\n-source\n+changed\n",
+                move_to="target.txt",
+            )
+        )
+
+    assert session.files[Path("/workspace/source.txt")] == b"source\n"
+    assert Path("/workspace/target.txt") not in session.files
