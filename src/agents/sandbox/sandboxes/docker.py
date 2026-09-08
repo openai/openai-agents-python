@@ -1159,8 +1159,10 @@ class DockerSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        await self._settle_pty_cleanup(
-            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
+        await self._cleanup_pty_entries(
+            entries,
+            self._terminate_pty_entry,
+            timeout=_PTY_CLEANUP_TIMEOUT_S,
         )
 
     def _pump_pty_socket(
@@ -1346,6 +1348,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 'if [ -n "$pid" ]; then '
                 'kill -KILL "$pid" >/dev/null 2>&1 || true; '
                 "fi; "
+                'rm -f -- "$1" >/dev/null 2>&1 || true; '
                 "fi"
             ),
             "sh",
@@ -1362,8 +1365,6 @@ class DockerSandboxSession(BaseSandboxSession):
             )
         except Exception:
             pass
-
-        await self._rm_best_effort(pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
 
     async def exists(self) -> bool:
         try:

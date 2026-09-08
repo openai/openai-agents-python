@@ -53,6 +53,7 @@ from .utils import _safe_decode
 
 _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
+_DEFAULT_PTY_CLEANUP_TIMEOUT_S = 5.0
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_SCRIPT = """
@@ -223,6 +224,7 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
+    _pty_cleanup_tasks: set[asyncio.Task[None]] | None = None
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -711,37 +713,92 @@ class BaseSandboxSession(abc.ABC):
             raise PtySessionNotFoundError(session_id=session_id)
         return entry
 
-    async def _settle_pty_cleanup(self, operation: Awaitable[None]) -> None:
-        """Complete cleanup after PTY ownership leaves the session registry."""
+    def _pty_cleanup_timeout_s(self) -> float:
+        timeouts = getattr(getattr(self, "state", None), "timeouts", None)
+        timeout = getattr(timeouts, "cleanup_s", None)
+        if timeout is not None:
+            return float(timeout)
+        return _DEFAULT_PTY_CLEANUP_TIMEOUT_S
+
+    def _track_pty_cleanup_task(self, task: asyncio.Task[None]) -> None:
+        tasks = self._pty_cleanup_tasks
+        if tasks is None:
+            tasks = set()
+            self._pty_cleanup_tasks = tasks
+        tasks.add(task)
+
+        def forget_task(done: asyncio.Task[None]) -> None:
+            tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(forget_task)
+
+    async def _settle_pty_cleanup(
+        self,
+        operation: Awaitable[None],
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Settle cleanup after PTY ownership leaves the session registry.
+
+        The cleanup task is independently owned so caller cancellation cannot
+        abandon it. A timeout bounds how long the caller waits while leaving
+        the provider operation running to finish its ordered cleanup.
+        """
 
         async def run_operation() -> None:
             await operation
 
         task = asyncio.create_task(run_operation(), name="agents.pty_cleanup")
+        self._track_pty_cleanup_task(task)
         completion = asyncio.create_task(asyncio.wait((task,)))
         caller_cancellation: asyncio.CancelledError | None = None
-        while not completion.done():
-            try:
-                await asyncio.shield(completion)
-            except asyncio.CancelledError as error:
-                caller_cancellation = caller_cancellation or error
+        deadline = asyncio.get_running_loop().time() + (
+            self._pty_cleanup_timeout_s() if timeout is None else timeout
+        )
+        timed_out = False
+        try:
+            while not completion.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
+                except asyncio.CancelledError as error:
+                    caller_cancellation = caller_cancellation or error
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
 
-        completion.result()
-        task.result()
-        if caller_cancellation is not None:
-            raise caller_cancellation
+            if completion.done():
+                completion.result()
+                task.result()
+                if caller_cancellation is not None:
+                    raise caller_cancellation
+            elif caller_cancellation is not None:
+                raise caller_cancellation
+            elif timed_out:
+                raise asyncio.TimeoutError()
+        finally:
+            if not completion.done():
+                completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
 
     async def _cleanup_pty_entries(
         self,
         entries: Sequence[_PtyEntryT],
         cleanup_entry: Callable[[_PtyEntryT], Awaitable[None]],
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Attempt every PTY cleanup and re-raise the first failure."""
 
         first_error: BaseException | None = None
         for entry in entries:
             try:
-                await cleanup_entry(entry)
+                await self._settle_pty_cleanup(cleanup_entry(entry), timeout=timeout)
             except BaseException as error:
                 if first_error is None:
                     first_error = error

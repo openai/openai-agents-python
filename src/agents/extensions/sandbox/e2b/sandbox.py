@@ -1108,9 +1108,7 @@ class E2BSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        await self._settle_pty_cleanup(
-            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
-        )
+        await self._cleanup_pty_entries(entries, self._terminate_pty_entry)
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

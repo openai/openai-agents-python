@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 
@@ -3633,6 +3634,7 @@ def _assert_pty_kill_call(call: dict[str, object]) -> None:
             'if [ -f "$1" ]; then '
             'pid="$(cat "$1" 2>/dev/null || true)"; '
             'if [ -n "$pid" ]; then kill -KILL "$pid" >/dev/null 2>&1 || true; fi; '
+            'rm -f -- "$1" >/dev/null 2>&1 || true; '
             "fi"
         ),
     ]
@@ -4689,14 +4691,8 @@ async def test_docker_pty_non_tty_rejects_stdin_and_stop_cleans_up(
     await session.stop()
 
     assert api.socket.closed is True
-    assert len(container.exec_calls) == 2
+    assert len(container.exec_calls) == 1
     _assert_pty_kill_call(container.exec_calls[0])
-    assert container.exec_calls[1]["cmd"] == [
-        "rm",
-        "-rf",
-        "--",
-        cast(list[str], api.exec_create_calls[0]["cmd"])[5],
-    ]
 
     with pytest.raises(PtySessionNotFoundError):
         await session.pty_write_stdin(session_id=started.process_id, chars="")
@@ -4760,20 +4756,28 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
     monkeypatch.setattr(docker_sandbox, "_PTY_CLEANUP_TIMEOUT_S", 0.01)
     monkeypatch.setattr(container, "exec_run", stalled_first_kill)
 
-    cleanup_task = asyncio.create_task(session.pty_terminate_all())
-    await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
-    cleanup_task.cancel()
-
+    cleanup_task: asyncio.Task[None] | None = None
     try:
+        cleanup_task = asyncio.create_task(session.pty_terminate_all())
+        await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
+        cleanup_task.cancel()
+
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.5)
 
-        assert first_socket.closed is True
         assert second_socket.closed is True
         assert session._pty_processes == {}
     finally:
         release_first_kill.set()
-        await asyncio.wait_for(asyncio.to_thread(first_kill_finished.wait), timeout=0.5)
+        if first_kill_started.is_set():
+            await asyncio.wait_for(asyncio.to_thread(first_kill_finished.wait), timeout=0.5)
+        if cleanup_task is not None:
+            if not cleanup_task.done():
+                cleanup_task.cancel()
+            with suppress(BaseException):
+                await cleanup_task
+
+    assert first_socket.closed is True
 
 
 @pytest.mark.asyncio
@@ -4813,14 +4817,8 @@ async def test_docker_pty_exec_start_times_out_blocking_docker_startup(
             yield_time_s=0.01,
         )
 
-    assert len(container.exec_calls) == 2
+    assert len(container.exec_calls) == 1
     _assert_pty_kill_call(container.exec_calls[0])
-    assert container.exec_calls[1]["cmd"] == [
-        "rm",
-        "-rf",
-        "--",
-        cast(list[str], container.exec_calls[0]["cmd"])[4],
-    ]
 
 
 @pytest.mark.asyncio

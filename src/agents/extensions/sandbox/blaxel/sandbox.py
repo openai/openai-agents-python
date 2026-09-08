@@ -911,9 +911,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             self._pty_sessions.clear()
             self._reserved_pty_process_ids.clear()
 
-        await self._settle_pty_cleanup(
-            self._cleanup_pty_entries(entries, self._terminate_pty_entry)
-        )
+        await self._cleanup_pty_entries(entries, self._terminate_pty_entry)
 
     # -- PTY internals -------------------------------------------------------
 
