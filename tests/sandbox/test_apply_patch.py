@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import io
 from pathlib import Path
 
 import pytest
