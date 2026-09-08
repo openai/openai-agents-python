@@ -75,6 +75,12 @@ ResponseInputContentWithAudioParam = (
 
 _OMITTED_TOOL_OUTPUT_PLACEHOLDER = "[tool output omitted]"
 
+# Content part types that never convert to a text part, so they are dropped from a tool
+# output before conversion when only the text is being kept.
+_NON_TEXT_TOOL_OUTPUT_CONTENT_TYPES = frozenset(
+    {"input_image", "image_url", "input_file", "input_audio", "video_url"}
+)
+
 
 class Converter:
     @classmethod
@@ -872,7 +878,20 @@ class Converter:
                 if preserve_tool_output_all_content:
                     tool_result_content = cls.extract_all_content(output_content)
                 else:
-                    all_output_content = cls.extract_all_content(output_content)
+                    keepable_output_content = output_content
+                    if not isinstance(output_content, str):
+                        # Parts that cannot become a text part are dropped here rather than
+                        # converted and then filtered out, so an unrepresentable one (an image
+                        # carrying file_id, say) omits itself instead of failing the turn.
+                        keepable_output_content = [
+                            c
+                            for c in output_content
+                            if not (
+                                isinstance(c, dict)
+                                and c.get("type") in _NON_TEXT_TOOL_OUTPUT_CONTENT_TYPES
+                            )
+                        ]
+                    all_output_content = cls.extract_all_content(keepable_output_content)
                     if isinstance(all_output_content, str):
                         tool_result_content = all_output_content
                     else:

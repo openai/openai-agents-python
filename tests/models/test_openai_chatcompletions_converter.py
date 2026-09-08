@@ -683,6 +683,59 @@ def test_items_to_messages_with_mixed_function_output_keeps_text_by_default(
     assert "tool output omitted" not in caplog.text
 
 
+def test_items_to_messages_with_file_id_image_function_output_uses_placeholder_by_default(
+    caplog: pytest.LogCaptureFixture,
+):
+    """A file-id image is not representable here, so it should be omitted like a URL image."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {
+                "type": "input_image",
+                "file_id": "file-abc123",
+            }
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        messages = Converter.items_to_messages([func_output_item])
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == "[tool output omitted]"
+    assert "Replacing the tool output with a placeholder" in caplog.text
+
+
+def test_items_to_messages_with_mixed_file_id_image_function_output_keeps_text_by_default(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Text alongside a file-id image should survive, as it does alongside a URL image."""
+    func_output_item: FunctionCallOutput = {
+        "type": "function_call_output",
+        "call_id": "somecall",
+        "output": [
+            {"type": "input_text", "text": "visible text"},
+            {
+                "type": "input_image",
+                "file_id": "file-abc123",
+            },
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        messages = Converter.items_to_messages([func_output_item])
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == func_output_item["call_id"]
+    assert tool_msg["content"] == [{"type": "text", "text": "visible text"}]
+    assert "tool output omitted" not in caplog.text
+
+
 def test_items_to_messages_can_preserve_non_text_function_output() -> None:
     """Compatible providers can opt in to preserving non-text tool output."""
     func_output_item: FunctionCallOutput = {
