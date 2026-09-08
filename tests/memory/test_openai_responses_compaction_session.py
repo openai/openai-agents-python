@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings as warnings_module
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1722,13 +1723,13 @@ class TestCompactionMutationSerialization:
         class PausingCompactionSession(OpenAIResponsesCompactionSession):
             async def _add_items_with_generation(
                 self,
-                items: list[TResponseInputItem],
+                write_items: Callable[[], Awaitable[None]],
                 *,
                 expected_generation: int | None,
             ) -> int | None:
                 nonlocal add_calls
                 generation = await super()._add_items_with_generation(
-                    items,
+                    write_items,
                     expected_generation=expected_generation,
                 )
                 add_calls += 1
@@ -1863,13 +1864,13 @@ class TestCompactionMutationSerialization:
         class PausingCompactionSession(OpenAIResponsesCompactionSession):
             async def _add_items_with_generation(
                 self,
-                items: list[TResponseInputItem],
+                write_items: Callable[[], Awaitable[None]],
                 *,
                 expected_generation: int | None,
             ) -> int | None:
                 nonlocal add_calls
                 generation = await super()._add_items_with_generation(
-                    items,
+                    write_items,
                     expected_generation=expected_generation,
                 )
                 add_calls += 1
