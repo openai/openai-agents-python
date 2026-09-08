@@ -190,3 +190,36 @@ async def test_pty_cleanup_timeout_is_bounded() -> None:
         await task
 
     assert not release.is_set()
+
+
+@pytest.mark.asyncio
+async def test_pty_cleanup_timeout_does_not_wait_for_stubborn_operation() -> None:
+    session = _session()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = False
+
+    async def cleanup() -> None:
+        nonlocal completed
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await release.wait()
+            completed = True
+            return
+
+    task = asyncio.create_task(
+        session._settle_pty_cleanup(cleanup(), timeout=0.01)
+    )
+    await started.wait()
+    started_at = asyncio.get_running_loop().time()
+    with pytest.raises(ExecTimeoutError):
+        await task
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed < 0.5
+    assert not completed
+
+    release.set()
+    await asyncio.sleep(0)
