@@ -13,7 +13,6 @@ from .errors import (
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
-    AtomicMoveUnsupportedError,
     InvalidManifestPathError,
     WorkspaceReadNotFoundError,
 )
@@ -118,18 +117,9 @@ class WorkspaceEditor:
                 temp_path = moved_destination.parent / f".openai-agents-move-{uuid.uuid4().hex}.tmp"
                 try:
                     await self._write_text(temp_path, updated_text)
-                    try:
-                        await self._session.move_no_replace(temp_path, moved_destination, user=self._user)
-                    except AtomicMoveUnsupportedError:
-                        try:
-                            handle = await self._session.read(moved_destination, user=self._user)
-                        except (FileNotFoundError, WorkspaceReadNotFoundError):
-                            pass
-                        else:
-                            handle.close()
-                            raise ApplyPatchDestinationExistsError(path=moved_display_path)
-                        await self._write_text(moved_destination, updated_text)
-                        await self._session.rm(temp_path, user=self._user)
+                    await self._session.move_no_replace(
+                        temp_path, moved_destination, user=self._user
+                    )
                     await self._session.rm(destination, user=self._user)
                 except Exception:
                     try:
