@@ -131,7 +131,8 @@ def _create_owner_bearing_structure_tables(
 
 
 def _multiprocessing_context() -> Any:
-    method = "spawn" if sys.platform == "win32" else "forkserver"
+    # Spawn avoids the forkserver's Unix listener, which macOS sandboxes can deny.
+    method = "spawn" if sys.platform in {"win32", "darwin"} else "forkserver"
     return multiprocessing.get_context(method)
 
 
