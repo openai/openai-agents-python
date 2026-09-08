@@ -25,6 +25,7 @@ class ErrorCode(str, Enum):
     APPLY_PATCH_INVALID_PATH = "apply_patch_invalid_path"
     APPLY_PATCH_INVALID_DIFF = "apply_patch_invalid_diff"
     APPLY_PATCH_FILE_NOT_FOUND = "apply_patch_file_not_found"
+    APPLY_PATCH_DESTINATION_EXISTS = "apply_patch_destination_exists"
     APPLY_PATCH_DECODE_ERROR = "apply_patch_decode_error"
 
     WORKSPACE_READ_NOT_FOUND = "workspace_read_not_found"
@@ -410,6 +411,26 @@ class ApplyPatchDiffError(ApplyPatchError):
             error_code=ErrorCode.APPLY_PATCH_INVALID_DIFF,
             op="apply_patch",
             context=resolved_context,
+            cause=cause,
+            retryable=False,
+        )
+
+
+class ApplyPatchDestinationExistsError(WorkspaceIOError):
+    """Apply patch move failed because the destination already exists."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        context: Mapping[str, object] | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(
+            message=f"apply_patch destination already exists: {path}",
+            error_code=ErrorCode.APPLY_PATCH_DESTINATION_EXISTS,
+            op="apply_patch",
+            context={"path": str(path), **_as_context(context)},
             cause=cause,
             retryable=False,
         )
