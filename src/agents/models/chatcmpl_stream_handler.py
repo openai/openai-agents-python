@@ -306,44 +306,13 @@ class ChatCmplStreamHandler:
         return False
 
     @staticmethod
-    def _buffered_tool_call_index(
-        buffered_calls: dict[int, _BufferedToolCall],
-        tool_call_delta: ChoiceDeltaToolCall,
-    ) -> int:
-        """Resolve a missing provider index only when the call is unambiguous."""
-        if tool_call_delta.index is not None:
-            return tool_call_delta.index
-
-        if tool_call_delta.id:
-            for index, buffered_call in buffered_calls.items():
-                if buffered_call.call_id == tool_call_delta.id:
-                    return index
-
-        if not buffered_calls:
-            return 0
-
-        if len(buffered_calls) == 1:
-            index, buffered_call = next(iter(buffered_calls.items()))
-            if tool_call_delta.id and buffered_call.call_id is None:
-                return index
-
-            incoming_name = tool_call_delta.function.name if tool_call_delta.function else None
-            if not tool_call_delta.id and not (incoming_name and buffered_call.name):
-                return index
-
-        raise ModelBehaviorError(
-            "Chat Completions provider streamed multiple function tool calls without indexes."
-        )
-
-    @staticmethod
     def _accumulate_tool_call_delta(
         buffered_calls: dict[int, _BufferedToolCall],
         tool_call_delta: ChoiceDeltaToolCall,
     ) -> None:
-        index = ChatCmplStreamHandler._buffered_tool_call_index(buffered_calls, tool_call_delta)
         buffered_call = buffered_calls.setdefault(
-            index,
-            _BufferedToolCall(index=index),
+            tool_call_delta.index,
+            _BufferedToolCall(index=tool_call_delta.index),
         )
 
         if tool_call_delta.id:
@@ -427,6 +396,7 @@ class ChatCmplStreamHandler:
         buffered_calls: dict[int, _BufferedToolCall] = {}
         passthrough_tool_call_indexes: set[int] = set()
         saw_passthrough_tool_call = False
+        buffering_unindexed_tool_call = False
         last_chunk: ChatCompletionChunk | None = None
 
         async for chunk in stream:
@@ -447,6 +417,47 @@ class ChatCmplStreamHandler:
                 delta = choice.delta
 
                 if tool_call_deltas := (delta.tool_calls if delta and delta.tool_calls else None):
+                    buffered_deltas = [
+                        tool_call_delta
+                        for tool_call_delta in tool_call_deltas
+                        if cls._should_buffer_tool_call_delta(tool_call_delta)
+                    ]
+                    unindexed_deltas = [
+                        tool_call_delta
+                        for tool_call_delta in buffered_deltas
+                        if tool_call_delta.index is None
+                    ]
+                    if unindexed_deltas:
+                        unindexed_delta = unindexed_deltas[0]
+                        function_name = (
+                            unindexed_delta.function.name if unindexed_delta.function else None
+                        )
+                        valid_start = (
+                            not buffering_unindexed_tool_call
+                            and not buffered_calls
+                            and len(tool_call_deltas) == 1
+                            and bool(unindexed_delta.id)
+                            and bool(function_name)
+                        )
+                        valid_continuation = (
+                            buffering_unindexed_tool_call
+                            and len(tool_call_deltas) == 1
+                            and not unindexed_delta.id
+                            and not function_name
+                        )
+                        if not (valid_start or valid_continuation):
+                            raise ModelBehaviorError(
+                                "Chat Completions provider streamed ambiguous function tool calls "
+                                "without indexes."
+                            )
+                        buffering_unindexed_tool_call = True
+                        tool_call_deltas = [unindexed_delta.model_copy(update={"index": 0})]
+                    elif buffering_unindexed_tool_call and buffered_deltas:
+                        raise ModelBehaviorError(
+                            "Chat Completions provider mixed indexed and unindexed function tool "
+                            "call deltas."
+                        )
+
                     remaining_tool_calls: list[ChoiceDeltaToolCall] = []
                     for tool_call_delta in tool_call_deltas:
                         if tool_call_delta.index in passthrough_tool_call_indexes:

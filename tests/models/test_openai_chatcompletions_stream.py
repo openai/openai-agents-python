@@ -785,7 +785,37 @@ async def test_buffer_tool_call_stream_assigns_index_when_provider_omits_it() ->
 
 
 @pytest.mark.asyncio
-async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls() -> None:
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            {
+                "id": "first-id",
+                "function": {"name": "first", "arguments": '{"a":1}'},
+                "type": "function",
+            },
+            {
+                "function": {"name": "second", "arguments": '{"b":2}'},
+                "type": "function",
+            },
+        ],
+        [
+            {
+                "function": {"name": "first", "arguments": '{"a":1}'},
+                "type": "function",
+            },
+            {
+                "id": "second-id",
+                "function": {"name": "second", "arguments": '{"b":2}'},
+                "type": "function",
+            },
+        ],
+    ],
+    ids=["identified-then-idless", "idless-then-identified"],
+)
+async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls(
+    tool_calls: list[dict[str, Any]],
+) -> None:
     chunk = construct_type(
         type_=ChatCompletionChunk,
         value={
@@ -796,26 +826,14 @@ async def test_buffer_tool_call_stream_rejects_ambiguous_unindexed_calls() -> No
             "choices": [
                 {
                     "index": 0,
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "id": "first-id",
-                                "function": {"name": "first", "arguments": '{"a":1}'},
-                                "type": "function",
-                            },
-                            {
-                                "function": {"name": "second", "arguments": '{"b":2}'},
-                                "type": "function",
-                            },
-                        ]
-                    },
+                    "delta": {"tool_calls": tool_calls},
                 }
             ],
         },
     )
     assert all(tool_call.index is None for tool_call in chunk.choices[0].delta.tool_calls)
 
-    with pytest.raises(ModelBehaviorError, match="multiple function tool calls without indexes"):
+    with pytest.raises(ModelBehaviorError, match="ambiguous function tool calls without indexes"):
         await _collect_buffered_tool_call_chunks(chunk)
 
 
