@@ -1949,6 +1949,7 @@ class TestStripOrphanedAssistantIds:
 
         underlying.get_items = original_get  # type: ignore[method-assign]
         await session.run_compaction({"force": True, "compaction_mode": "input"})
+        assert client.responses.compact.await_args is not None
         assert client.responses.compact.await_args.kwargs["input"] == []
 
     @pytest.mark.asyncio
