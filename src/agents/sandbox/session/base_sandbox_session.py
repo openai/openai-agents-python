@@ -993,10 +993,31 @@ class BaseSandboxSession(abc.ABC):
         parent_path = await self._validate_path_access(requested.parent, for_write=True)
         workspace_path = parent_path / requested.name
         path_arg = sandbox_path_str(workspace_path)
-        staging_path = parent_path / f".{requested.name}.create-{uuid.uuid4().hex}"
+        staging_path = parent_path / f".rumbo-create-{uuid.uuid4().hex}"
         staging_arg = sandbox_path_str(staging_path)
 
         try:
+            # Classify an already-observable collision before staging so a destination in
+            # an otherwise non-writable parent gets the same create/update error as the
+            # atomic claim below. This probe is only diagnostic; the final link still
+            # owns the real race.
+            preflight = await self.exec(
+                "sh",
+                "-c",
+                'if [ -e "$1" ] || [ -L "$1" ]; then exit 13; fi',
+                "sh",
+                path_arg,
+                shell=False,
+                user=user,
+            )
+            if preflight.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
+                raise FileExistsError(path_arg)
+            if not preflight.ok():
+                raise WorkspaceArchiveWriteError(
+                    path=workspace_path,
+                    context={"command": ["sh", "-c", "<exclusive_preflight>", path_arg]},
+                )
+
             # Create the parent as the bound user so a fresh nested path is owned the same
             # way the ordinary write path owned it.
             await self.mkdir(parent_path, parents=True, user=user)
