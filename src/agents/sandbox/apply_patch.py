@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -8,9 +9,11 @@ from ..apply_diff import ApplyDiffMode, apply_diff
 from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
 from .errors import (
     ApplyPatchDecodeError,
+    ApplyPatchDestinationExistsError,
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
+    AtomicMoveUnsupportedError,
     InvalidManifestPathError,
     WorkspaceReadNotFoundError,
 )
@@ -111,9 +114,31 @@ class WorkspaceEditor:
 
             moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
-            await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
-                await self._session.rm(destination, user=self._user)
+                temp_path = moved_destination.parent / f".openai-agents-move-{uuid.uuid4().hex}.tmp"
+                try:
+                    await self._write_text(temp_path, updated_text)
+                    try:
+                        await self._session.move_no_replace(temp_path, moved_destination, user=self._user)
+                    except AtomicMoveUnsupportedError:
+                        try:
+                            handle = await self._session.read(moved_destination, user=self._user)
+                        except (FileNotFoundError, WorkspaceReadNotFoundError):
+                            pass
+                        else:
+                            handle.close()
+                            raise ApplyPatchDestinationExistsError(path=moved_display_path)
+                        await self._write_text(moved_destination, updated_text)
+                        await self._session.rm(temp_path, user=self._user)
+                    await self._session.rm(destination, user=self._user)
+                except Exception:
+                    try:
+                        await self._session.rm(temp_path, user=self._user)
+                    except Exception:
+                        pass
+                    raise
+            else:
+                await self._write_text(moved_destination, updated_text)
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
