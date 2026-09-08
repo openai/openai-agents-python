@@ -7,6 +7,8 @@ if sys.platform == "win32":  # pragma: no cover
     )
 
 import asyncio
+import ctypes
+import errno
 import errno
 import fcntl
 import io
@@ -1056,7 +1058,34 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 )
             return
 
-        def _link_then_unlink() -> None:
+        def _move_local() -> None:
+            if sys.platform == "linux":
+                libc = ctypes.CDLL(None, use_errno=True)
+                renameat2 = getattr(libc, "renameat2", None)
+                if renameat2 is not None:
+                    renameat2.argtypes = [
+                        ctypes.c_int,
+                        ctypes.c_char_p,
+                        ctypes.c_int,
+                        ctypes.c_char_p,
+                        ctypes.c_uint,
+                    ]
+                    renameat2.restype = ctypes.c_int
+                    result = renameat2(
+                        -100,
+                        os.fsencode(source_path),
+                        -100,
+                        os.fsencode(destination_path),
+                        1,
+                    )
+                    if result == 0:
+                        return
+                    error_number = ctypes.get_errno()
+                    if error_number == errno.EEXIST:
+                        raise FileExistsError(errno.EEXIST, os.strerror(error_number), destination_path)
+                    if error_number != errno.ENOSYS:
+                        raise OSError(error_number, os.strerror(error_number), destination_path)
+
             os.link(source_path, destination_path)
             try:
                 source_path.unlink()
@@ -1066,7 +1095,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 raise
 
         try:
-            await run_blocking_workspace_io(_link_then_unlink)
+            await run_blocking_workspace_io(_move_local)
         except FileExistsError as exc:
             from ..errors import ApplyPatchDestinationExistsError
             raise ApplyPatchDestinationExistsError(path=destination_path, cause=exc) from exc
