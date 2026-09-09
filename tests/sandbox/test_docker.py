@@ -1926,7 +1926,7 @@ async def test_docker_labels_roundtrip_through_run_state() -> None:
     serialized = run_state.to_json()
     restored = await RunState.from_json(agent, serialized)
 
-    assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.17"
+    assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.18"
     assert restored._sandbox is not None
     restored_session_state = restored._sandbox["session_state"]
     assert isinstance(restored_session_state, dict)

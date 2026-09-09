@@ -995,6 +995,7 @@ def defer_interrupted_session_write(
     *,
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    response_id: str | None = None,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
@@ -1055,6 +1056,10 @@ def defer_interrupted_session_write(
             run_state._current_turn_persisted_item_count + len(converted_run_items)
         ),
         "held": True,
+        # The response the withheld batch belongs to, so the settle can run the same
+        # compaction bookkeeping the ordinary persistence path runs for it. An extend
+        # keeps the original response: the batch is that response's write.
+        "response_id": (pending.get("response_id") if pending is not None else None) or response_id,
     }
     run_state._pending_session_write = record
 
@@ -1138,23 +1143,26 @@ async def resume_pending_session_write(
             return
         # The entry settle offers the batch with no accompanying resolved items, so the
         # pairing contract applies against the batch alone: a call whose output a
-        # detached handoff filter dropped must not land dangling here either. A batch
-        # extended while detached also missed the Conversations-specific sanitization,
-        # so the attached backend's invariant is restored before the direct append.
-        if isinstance(session, OpenAIConversationsSession):
-            pending["items"] = [
-                _sanitize_openai_conversation_item(item) for item in pending["items"]
-            ]
-            pending["items"] = [
-                item
-                for item in pending["items"]
-                if not _is_unpersistable_for_openai_conversation(item)
-            ]
-        pending["items"] = _held_items_safe_to_settle(pending["items"], [], None)
-        if not pending["items"]:
-            run_state._pending_session_write = None
+        # detached handoff filter dropped must not land dangling here either.
+        settling = _held_items_safe_to_settle(pending["items"], [], None)
+        response_id = pending.get("response_id")
+        run_state._pending_session_write = None
+        if not settling:
             return
-        pending.pop("held", None)
+        # Settle through the canonical persistence path rather than appending behind
+        # its back: it owns the Conversations sanitization, the ordered dedup, the
+        # pending-write registration that makes a failed append recoverable, and the
+        # compaction bookkeeping for the response this batch belongs to.
+        await save_result_to_session(
+            session,
+            settling,
+            [],
+            run_state,
+            response_id=response_id,
+            wrapper=wrapper,
+            resumed_write_state=run_state,
+        )
+        return
     if run_state._session_write_in_progress:
         raise UserError("The pending Session write is already in progress for this RunState")
     if session is None or session.session_id != pending["session_id"]:

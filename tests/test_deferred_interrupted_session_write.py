@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -20,6 +20,9 @@ from agents import (
 from agents.agent import Agent as AgentType
 from agents.exceptions import OutputGuardrailTripwireTriggered
 from agents.items import TResponseInputItem
+from agents.lifecycle import RunHooks
+from agents.memory.openai_conversations_session import OpenAIConversationsSession
+from agents.run import RunConfig
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from tests.utils.simple_session import SimpleListSession
 
@@ -986,23 +989,17 @@ async def test_a_failed_guarded_final_settle_fails_closed(streamed: bool) -> Non
     assert "call_PARKED" in {item.get("call_id") for item in pending["items"]}
 
 
-class _RecordingConversationsSession:
-    """Stand-in with the Conversations class identity, at the boundary the settle checks.
+class _RecordingConversationsSession(OpenAIConversationsSession):
+    """Stand-in carrying the Conversations class identity the settle checks.
 
-    The real ``OpenAIConversationsSession`` talks to the Conversations API; the settle
-    only consults its class via ``isinstance`` to decide whether the batch needs the
-    Conversations sanitization, so the fake records what would be sent instead.
+    The real backend talks to the Conversations API; the settle only asks whether the
+    session is one of these to decide that the batch needs the Conversations
+    sanitization, so this records what would be sent instead of sending it.
     """
 
-    def __new__(cls) -> _RecordingConversationsSession:
-        from agents.memory.openai_conversations_session import OpenAIConversationsSession
-
-        instance = object.__new__(
-            type("_FakeConversations", (OpenAIConversationsSession,), dict(cls.__dict__))
-        )
-        instance.session_id = "conv-1"
-        instance.added: list[TResponseInputItem] = []
-        return instance
+    def __init__(self) -> None:
+        self.session_id = "conv-1"
+        self.added: list[TResponseInputItem] = []
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return []
@@ -1132,14 +1129,17 @@ def test_the_pairing_guard_prunes_with_the_canonical_rule() -> None:
     # reasoning without its required following item.
     from agents.run_internal.session_persistence import _held_items_safe_to_settle
 
-    reasoning: TResponseInputItem = {"type": "reasoning", "id": "rs_1", "summary": []}
-    unpaired_shell: TResponseInputItem = {
-        "type": "shell_call",
-        "call_id": "sh_1",
-        "id": "sh_item_1",
-        "status": "completed",
-        "action": {"type": "exec", "command": "ls"},
-    }
+    reasoning = cast("TResponseInputItem", {"type": "reasoning", "id": "rs_1", "summary": []})
+    unpaired_shell = cast(
+        "TResponseInputItem",
+        {
+            "type": "shell_call",
+            "call_id": "sh_1",
+            "id": "sh_item_1",
+            "status": "completed",
+            "action": {"type": "exec", "command": "ls"},
+        },
+    )
     paired_call: TResponseInputItem = {
         "type": "function_call",
         "call_id": "fn_1",
@@ -1304,3 +1304,212 @@ async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> N
     # The append was registered before it ran, so the batch is recorded to reconcile.
     assert state._pending_session_write is not None
     assert "call_PARKED" in {i.get("call_id") for i in state._pending_session_write["items"]}
+
+
+class _CompactionRecordingSession(SimpleListSession):
+    """Record the compaction bookkeeping a compaction-aware backend expects."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compactions: list[dict[str, Any]] = []
+
+    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
+        self.compactions.append({"deferred": response_id, "store": store})
+
+    def _get_deferred_compaction_response_id(self) -> str | None:
+        return None
+
+    async def run_compaction(self, args: Any = None) -> None:
+        self.compactions.append(dict(args or {}))
+
+
+@pytest.mark.asyncio
+async def test_the_entry_settle_runs_the_compaction_bookkeeping() -> None:
+    # The entry settle goes through the canonical persistence path, so a
+    # compaction-aware backend still gets the bookkeeping for the response the held
+    # batch belongs to. Appending behind that path would silently skip a supported
+    # compaction hook for the interrupted response.
+    from agents.run_internal.run_steps import NextStepRunAgain
+    from agents.run_internal.session_persistence import resume_pending_session_write
+
+    session = _CompactionRecordingSession()
+    state = RunState(
+        context=None,
+        original_input="go",
+        starting_agent=_make_deferring_agent(),
+        max_turns=5,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": "test",
+        "items": [
+            {
+                "type": "function_call",
+                "call_id": "call_PARKED",
+                "name": "write_thing",
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_PARKED", "output": "wrote:x"},
+        ],
+        "before": None,
+        "persisted_count": 2,
+        "held": True,
+        "response_id": "resp_parked",
+    }
+
+    await resume_pending_session_write(state, session)  # type: ignore[arg-type]
+
+    assert state._pending_session_write is None
+    assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
+    assert any(
+        entry.get("response_id") == "resp_parked" or entry.get("deferred") == "resp_parked"
+        for entry in session.compactions
+    ), f"no compaction bookkeeping for the parked response: {session.compactions}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_the_park_records_the_response_the_batch_belongs_to(streamed: bool) -> None:
+    # The settle runs the compaction bookkeeping for the response the withheld batch
+    # came from, so the park has to record which response that was.
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+
+    first = await _run(agent, "do the thing", session, streamed=streamed)
+    assert len(first.interruptions) == 1
+
+    pending = first.to_state().to_json()["pending_session_write"]
+    assert pending["held"] is True
+    assert pending["response_id"] == first.raw_responses[-1].response_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_max_turns_handler_completion_clears_the_held_record(streamed: bool) -> None:
+    # A max-turn handler ends the run, so a held batch still standing has no later
+    # gate-legal exit to settle it: both runners must report the same terminal state,
+    # with no pending write left to invalidate the finished run's checkpoint.
+    from agents.run_internal.run_loop import finalize_max_turns_handler_output
+
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    assert state._pending_session_write is not None
+
+    async def _no_save(items: list[Any]) -> None:
+        return None
+
+    await finalize_max_turns_handler_output(
+        agent=agent,
+        hooks=RunHooks(),
+        run_config=RunConfig(tracing_disabled=True),
+        output="stopped at max turns",
+        context_wrapper=RunContextWrapper(context=None),
+        output_guardrail_results=[],
+        save_items_after_guardrails=_no_save,
+        include_in_history=False,
+        run_state=state,
+    )
+
+    assert state._pending_session_write is None
+
+
+def _boom_custom_data_extractor(ctx: Any) -> dict[str, Any]:
+    raise RuntimeError("extractor boom")
+
+
+@function_tool(
+    name_override="write_thing",
+    needs_approval=True,
+    custom_data_extractor=_boom_custom_data_extractor,
+)
+def write_thing_with_failing_extractor(query: str) -> str:
+    return f"wrote:{query}"
+
+
+def _make_failing_extractor_agent() -> Agent:
+    """The approved tool succeeds, then its post-output callback raises."""
+    return Agent(
+        name="deferred repro (failing extractor)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(output=[function_call("look_up", {"query": "x"}, call_id="call_LOOKUP")]),
+                ModelStep(
+                    output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[look_up, write_thing_with_failing_extractor],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_post_output_callback_failure_keeps_the_executed_output(streamed: bool) -> None:
+    # The approved tool ran and its output was committed when the post-output callback
+    # raised. A retry skips the completed invocation and produces no new session items,
+    # so the batch has to carry that output from the commit boundary or the executed
+    # call and its result vanish from history.
+    session = SimpleListSession()
+    agent = _make_failing_extractor_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+
+    with pytest.raises(Exception, match="extractor boom"):
+        await _run(agent, state, session, streamed=streamed)
+
+    pending = state._pending_session_write
+    assert pending is not None
+    assert _parked_pair(pending["items"]) == _EXPECTED_PAIR
+
+
+def _make_never_finishing_agent() -> Agent:
+    """Parks on turn two, then keeps calling tools so max turns is what ends the run."""
+    steps = [
+        ModelStep(output=[function_call("look_up", {"query": "a"}, call_id="call_LOOKUP")]),
+        ModelStep(output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]),
+    ]
+    steps += [
+        ModelStep(output=[function_call("look_up", {"query": f"q{i}"}, call_id=f"call_L{i}")])
+        for i in range(8)
+    ]
+    return Agent(
+        name="deferred repro (never finishing)",
+        instructions="x",
+        model=ScriptedModel(steps),
+        tools=[look_up, write_thing],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_max_turns_completion_clears_the_held_record() -> None:
+    # The streaming runner reaches its max-turn handler through its own terminal path,
+    # not the shared helper, so it needs its own coverage: a detached resume that runs
+    # out of turns must not report terminal handler output while carrying a resumable
+    # pending write the non-streaming runner had already dropped.
+    session = SimpleListSession()
+    agent = _make_never_finishing_agent()
+    first = await _run(agent, "go", session, streamed=True)
+    assert len(first.interruptions) == 1
+    state = await _serialized_round_trip(first, agent)
+    state.approve(state.get_interruptions()[0])
+    assert state._pending_session_write is not None
+
+    resumed = Runner.run_streamed(
+        agent,
+        state,
+        session=None,
+        max_turns=3,
+        error_handlers={"max_turns": lambda data: "stopped at max turns"},
+    )
+    async for _ in resumed.stream_events():
+        pass
+
+    assert resumed.final_output == "stopped at max turns"
+    assert "pending_session_write" not in resumed.to_state().to_json()
+    assert state._pending_session_write is None

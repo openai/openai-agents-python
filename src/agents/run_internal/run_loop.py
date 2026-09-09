@@ -776,8 +776,16 @@ async def finalize_max_turns_handler_output(
     output_guardrail_results: list[OutputGuardrailResult],
     save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
     include_in_history: bool,
+    run_state: RunState | None = None,
 ) -> tuple[Any, RunItem]:
-    """Validate and finalize one synthesized max-turn handler output."""
+    """Validate and finalize one synthesized max-turn handler output.
+
+    A max-turn handler ends the run, so a held Session write still standing here has
+    no later gate-legal exit to settle it: it is discarded, exactly as a detached
+    completion discards it, so the finished run's checkpoint stays loadable and both
+    runners report the same terminal state.
+    """
+    take_held_session_write(run_state)
     validated_output = validate_handler_final_output(agent, output)
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
@@ -1439,6 +1447,7 @@ async def start_streaming(
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
+                                response_id=turn_result.model_response.response_id,
                             )
                             reinterruption_items = []
                         elif turn_session_items:
@@ -1763,6 +1772,11 @@ async def start_streaming(
                     break
                 streamed_result._max_turns_handled = True
                 streamed_result.current_turn = max_turns
+                # A max-turn handler ends the run, so a held Session write still
+                # standing has no later gate-legal exit to settle it. Discarding it
+                # keeps the finished run's checkpoint loadable and matches the
+                # non-streaming runner, which reports the same terminal state.
+                take_held_session_write(run_state)
                 if run_state is not None and not is_resumed_state:
                     run_state._current_turn = max_turns
                     run_state._current_step = None
@@ -2055,6 +2069,7 @@ async def start_streaming(
                             session,
                             run_items=turn_session_items,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                            response_id=turn_result.model_response.response_id,
                         )
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,

@@ -176,6 +176,10 @@ class _PendingSessionWrite(TypedDict):
     from that point it is an ordinary pending write and the digest reconciliation
     recovers a half-acknowledged append. Absent or ``False`` keeps the released
     meaning: an append already approved for eager settlement on resume entry.
+
+    ``response_id`` records the model response the withheld batch belongs to, so the
+    settle can run the same compaction bookkeeping the ordinary persistence path does
+    for that response instead of appending behind its back.
     """
 
     session_id: str
@@ -183,6 +187,7 @@ class _PendingSessionWrite(TypedDict):
     before: list[str] | None
     persisted_count: int
     held: NotRequired[bool]
+    response_id: NotRequired[str | None]
 
 
 def _default_run_state_validation_error(
@@ -199,10 +204,11 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
+_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.18"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -236,8 +242,11 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes, their held-at-interruption "
-        "variant, and terminal-unrecoverable runs."
+        "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
+    ),
+    "1.18": (
+        "Persists the interrupted turn's withheld Session write, including the response it "
+        "belongs to, so an approval resume can settle it under the output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4382,13 +4391,26 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
+        # The held variant carries two keys the released 1.17 reader rejects, so it is
+        # gated to its own schema version; a 1.17 payload keeps exactly the four keys
+        # that version defined and settles eagerly as it always did.
+        held_keys_allowed = (schema_major, schema_minor) >= tuple(
+            int(part)
+            for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        )
+        base_keys = {"session_id", "items", "before", "persisted_count"}
+        held_keys = {"held", "response_id"} if held_keys_allowed else set()
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) - {"held"} != {"session_id", "items", "before", "persisted_count"}
+            or set(pending_write) - held_keys != base_keys
             or ("held" in pending_write and type(pending_write["held"]) is not bool)
             or (pending_write.get("held") is True and pending_write.get("before") is not None)
+            or (
+                "response_id" in pending_write
+                and not isinstance(pending_write["response_id"], str | type(None))
+            )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
             or not pending_write["items"]
