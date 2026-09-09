@@ -522,12 +522,14 @@ async def test_a_detached_resume_does_not_make_the_next_one_rewrite_the_session(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_an_emptied_resolved_turn_corrupts_nothing_in_either_runner(
+async def test_an_emptied_resolved_turn_settles_the_paired_part_of_the_held_batch(
     streamed: bool,
 ) -> None:
-    # When a handoff input_filter empties the resolved turn, the held batch must not be
-    # written on its own: a call with no output poisons the Session exactly as the
-    # orphaned output does.
+    # A handoff input_filter empties the resolved turn, but the approved tool already
+    # ran and its output was folded into the held batch: pairing is the predicate, so
+    # the executed pair settles and only the unpaired call drops. Discarding the whole
+    # batch would lose the Session's only record that the tool ran, and the next run
+    # would re-issue its side effect.
     session = SimpleListSession()
     agent = _make_emptying_handoff_agent()
     state = await _parked_and_approved(agent, session, streamed=streamed)
@@ -538,6 +540,8 @@ async def test_an_emptied_resolved_turn_corrupts_nothing_in_either_runner(
     outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
     assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
     assert outputs - calls == set(), f"orphaned outputs: {sorted(map(str, outputs - calls))}"
+    assert "call_PARKED" in calls, "the executed pair must survive the emptied turn"
+    assert "call_HANDOFF" not in calls, "the unpaired call must not be written"
     assert "pending_session_write" not in resumed.to_state().to_json()
     # The discard must reach the live state too: a stale held record would invalidate
     # any checkpoint later taken from this completed run.
@@ -1307,6 +1311,42 @@ async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> N
     assert "call_PARKED" in {i.get("call_id") for i in state._pending_session_write["items"]}
 
 
+@pytest.mark.asyncio
+async def test_the_settled_count_matches_what_the_append_actually_wrote() -> None:
+    # The resolved turn re-delivers the very output the batch already folded in, so it
+    # dedups away inside the append. Counting the batch by its raw length would report
+    # more persisted items than exist, and the count slices the next save of this turn
+    # positionally: an inflated count drops resolved items out of their own write.
+    from agents.items import ToolCallOutputItem
+    from agents.run_internal.session_persistence import save_resumed_turn_items
+
+    agent = _make_deferring_agent()
+    call: TResponseInputItem = {
+        "type": "function_call",
+        "call_id": "call_PARKED",
+        "name": "write_thing",
+        "arguments": "{}",
+    }
+    output: TResponseInputItem = {
+        "type": "function_call_output",
+        "call_id": "call_PARKED",
+        "output": "wrote:x",
+    }
+    session = SimpleListSession()
+
+    count = await save_resumed_turn_items(
+        run_state=None,
+        session=session,
+        items=[ToolCallOutputItem(agent=agent, raw_item=output, output="wrote:x")],
+        held_input=[call, output],
+        persisted_count=0,
+        response_id=None,
+        reasoning_item_id_policy=None,
+    )
+
+    assert count == len(await session.get_items())
+
+
 class _CompactionRecordingSession(SimpleListSession):
     """Record the compaction bookkeeping a compaction-aware backend expects."""
 
@@ -1322,6 +1362,27 @@ class _CompactionRecordingSession(SimpleListSession):
 
     async def run_compaction(self, args: Any = None) -> None:
         self.compactions.append(dict(args or {}))
+
+
+@pytest.mark.asyncio
+async def test_the_compaction_deferral_reads_the_settling_batch_not_the_callers_input() -> None:
+    # The batch settles through ``original_input``, so the deferral has to look there;
+    # but that slot also carries the caller's own turn input on every ordinary
+    # interruption save. Reading the whole slot would defer compaction for a response
+    # that produced no local tool output, purely because the caller resumed with an
+    # earlier one in its input.
+    from agents.run_internal.session_persistence import save_result_to_session
+
+    session = _CompactionRecordingSession()
+    caller_input: list[TResponseInputItem] = [
+        {"type": "function_call", "call_id": "call_EARLIER", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_EARLIER", "output": "old"},
+        {"role": "user", "content": "go"},
+    ]
+
+    await save_result_to_session(session, caller_input, [], None, response_id="resp_fresh")
+
+    assert [entry for entry in session.compactions if "deferred" in entry] == []
 
 
 @pytest.mark.asyncio
@@ -1385,6 +1446,41 @@ async def test_the_park_records_the_response_the_batch_belongs_to(streamed: bool
     pending = first.to_state().to_json()["pending_session_write"]
     assert pending["held"] is True
     assert pending["response_id"] == first.raw_responses[-1].response_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+async def test_a_rejected_max_turns_handler_output_keeps_the_held_record() -> None:
+    # The discard belongs to a handler that actually ends the run. Validation rejects a
+    # wrongly typed handler output by raising, and the streamed runner discards only
+    # after its finalization completes, so discarding ahead of the raise would leave
+    # the caller's live RunState without a batch its streamed twin still holds.
+    from agents.exceptions import UserError
+    from agents.run_internal.run_loop import finalize_max_turns_handler_output
+
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    agent.output_type = int
+    state = await _parked_and_approved(agent, session, streamed=False)
+    assert state._pending_session_write is not None
+
+    async def _no_save(items: list[Any]) -> None:
+        return None
+
+    with pytest.raises(UserError):
+        await finalize_max_turns_handler_output(
+            agent=agent,
+            hooks=RunHooks(),
+            run_config=RunConfig(tracing_disabled=True),
+            output="not an int",
+            context_wrapper=RunContextWrapper(context=None),
+            output_guardrail_results=[],
+            save_items_after_guardrails=_no_save,
+            include_in_history=False,
+            run_state=state,
+        )
+
+    assert state._pending_session_write is not None
 
 
 @pytest.mark.asyncio

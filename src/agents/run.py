@@ -150,6 +150,7 @@ from .run_internal.session_persistence import (
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    settle_held_batch_for_emptied_turn,
     take_held_session_write,
     update_run_state_after_resume,
 )
@@ -1219,11 +1220,26 @@ class AgentRunner:
                                         )
                                     )
                                 else:
-                                    # An emptied resolved turn (a handoff input_filter can
-                                    # drop every item) discards the held batch: a call
-                                    # written without its output poisons the Session
-                                    # exactly as the orphaned output does.
-                                    take_held_session_write(run_state)
+                                    # An emptied resolved turn (a handoff input_filter
+                                    # can drop every item) still settles the pairs the
+                                    # batch already holds: the approved tool ran, and
+                                    # dropping its output with the filtered items would
+                                    # lose the Session's only record of that.
+                                    run_state._current_turn_persisted_item_count = (
+                                        await settle_held_batch_for_emptied_turn(
+                                            run_state,
+                                            session,
+                                            persisted_count=(
+                                                run_state._current_turn_persisted_item_count
+                                            ),
+                                            response_id=(turn_result.model_response.response_id),
+                                            reasoning_item_id_policy=(
+                                                run_state._reasoning_item_id_policy
+                                            ),
+                                            store=store_setting,
+                                            wrapper=context_wrapper,
+                                        )
+                                    )
 
                             # After the resumed turn, treat subsequent turns as fresh so
                             # counters and input saving behave normally.

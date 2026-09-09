@@ -85,6 +85,7 @@ __all__ = [
     "defer_interrupted_session_write",
     "extend_held_session_write",
     "take_held_session_write",
+    "settle_held_batch_for_emptied_turn",
     "resume_pending_session_write",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -636,13 +637,22 @@ async def save_result_to_session(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     resumed_write_state: RunState | None = None,
+    settling_held_batch: bool = False,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
     during streaming do not duplicate tool outputs or inputs.
 
+    ``settling_held_batch`` marks the calls that carry a withheld batch through
+    ``original_input``; only those look for local tool outputs in that slot, because on
+    an ordinary save the same slot holds the caller's own input. Those calls also count
+    the batch items this append actually wrote, which is not the batch's raw length: a
+    resolved turn re-delivers the outputs the batch already folded in and they dedup
+    away here.
+
     Returns:
-        The number of new run items persisted for this call.
+        The number of new run items persisted for this call, plus the settled batch
+        items when ``settling_held_batch`` is set.
     """
     already_persisted = run_state._current_turn_persisted_item_count if run_state is not None else 0
 
@@ -754,17 +764,25 @@ async def save_result_to_session(
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
+    # The append wrote every deduplicated item; the ones that are not surviving run
+    # items are the settled batch's own, counted here because only this scope knows
+    # what the dedup kept.
+    settled_batch_items = len(items_to_save) - saved_run_items_count if settling_held_batch else 0
+
     if response_id and is_openai_responses_compaction_aware_session(session):
         # A settling held batch carries its tool outputs as already-converted input
         # items through ``original_input``, so looking only at ``new_items`` would
         # report no local tool output and compact the very response whose outputs just
-        # landed. The question is whether this append persists any local tool output,
-        # whichever slot carried it.
+        # landed. Only a settle reads that slot: on an ordinary save it holds the
+        # caller's input, whose earlier outputs say nothing about this response.
         has_local_tool_outputs = any(
             isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
-        ) or any(
-            isinstance(item, dict) and item.get("type") in _LOCAL_TOOL_OUTPUT_TYPES
-            for item in items_to_save
+        ) or (
+            settling_held_batch
+            and any(
+                isinstance(item, dict) and item.get("type") in _LOCAL_TOOL_OUTPUT_TYPES
+                for item in items_to_save
+            )
         )
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
@@ -804,7 +822,7 @@ async def save_result_to_session(
             wrapper=compaction_wrapper,
         )
 
-    return saved_run_items_count
+    return saved_run_items_count + settled_batch_items
 
 
 async def save_resumed_turn_items(
@@ -857,6 +875,7 @@ async def save_resumed_turn_items(
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        settling_held_batch=settling_held,
         resumed_write_state=(
             run_state
             if run_state is not None
@@ -873,8 +892,42 @@ async def save_resumed_turn_items(
     # Settled held items are this turn's persisted items too. Leaving them uncounted
     # would let a later gate-enabled resume pass the resumed-safety validation with a
     # zero count and re-append the stored calls through the final sweep; counting them
-    # makes that resume fail fast on the existing persisted-items refusal instead.
-    return persisted_count + saved_count + len(held_input or [])
+    # makes that resume fail fast on the existing persisted-items refusal instead. The
+    # append reports them itself, because the raw batch length overcounts whatever the
+    # dedup dropped and this count slices a later save of the same turn.
+    return persisted_count + saved_count
+
+
+async def settle_held_batch_for_emptied_turn(
+    run_state: RunState | None,
+    session: Session | None,
+    *,
+    persisted_count: int,
+    response_id: str | None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> int:
+    """Settle the paired part of a held batch whose resolved turn came back empty.
+
+    A handoff ``input_filter`` can drop every resolved item, but an approved tool has
+    already run by then and its output was folded into the batch. Emptiness of the turn
+    is therefore the wrong predicate: pairing is. The executed call and output settle
+    together and the unpaired requests drop, exactly as every other settle decides it,
+    so the Session keeps the only record that the tool ran and the next run does not
+    re-issue its side effect.
+    """
+    return await save_resumed_turn_items(
+        run_state=run_state,
+        session=session,
+        items=[],
+        held_input=take_held_session_write(run_state),
+        persisted_count=persisted_count,
+        response_id=response_id,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+        store=store,
+        wrapper=wrapper,
+    )
 
 
 def _held_pair_identity(item: TResponseInputItem | None) -> tuple[str, str] | None:
@@ -1181,6 +1234,7 @@ async def resume_pending_session_write(
             response_id=response_id,
             store=settle_store,
             wrapper=wrapper,
+            settling_held_batch=True,
             resumed_write_state=run_state,
         )
         return

@@ -186,6 +186,7 @@ from .session_persistence import (
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    settle_held_batch_for_emptied_turn,
     take_held_session_write,
     update_run_state_after_resume,
 )
@@ -785,8 +786,10 @@ async def finalize_max_turns_handler_output(
     completion discards it, so the finished run's checkpoint stays loadable and both
     runners report the same terminal state.
     """
-    take_held_session_write(run_state)
     validated_output = validate_handler_final_output(agent, output)
+    # Only past the validation does the handler actually end the run; discarding above
+    # it would throw the batch away on a rejection the streamed runner survives.
+    take_held_session_write(run_state)
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
 
@@ -1454,7 +1457,25 @@ async def start_streaming(
                         elif turn_session_items:
                             reinterruption_items = list(turn_session_items)
                         else:
-                            take_held_session_write(run_state)
+                            # An emptied resolved turn still settles the pairs the
+                            # batch already holds: the approved tool ran, and dropping
+                            # its output with the filtered items would lose the
+                            # Session's only record of that.
+                            streamed_result._current_turn_persisted_item_count = (
+                                await settle_held_batch_for_emptied_turn(
+                                    run_state,
+                                    session,
+                                    persisted_count=(
+                                        streamed_result._current_turn_persisted_item_count
+                                    ),
+                                    response_id=turn_result.model_response.response_id,
+                                    reasoning_item_id_policy=(
+                                        streamed_result._reasoning_item_id_policy
+                                    ),
+                                    store=store_setting,
+                                    wrapper=streamed_result.context_wrapper,
+                                )
+                            )
                             reinterruption_items = []
                         await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
@@ -1495,7 +1516,23 @@ async def start_streaming(
                                 ),
                             )
                         elif not turn_session_items:
-                            take_held_session_write(run_state)
+                            # An emptied resolved turn still settles the pairs the
+                            # batch already holds; only the unpaired requests drop.
+                            streamed_result._current_turn_persisted_item_count = (
+                                await settle_held_batch_for_emptied_turn(
+                                    run_state,
+                                    session,
+                                    persisted_count=(
+                                        streamed_result._current_turn_persisted_item_count
+                                    ),
+                                    response_id=turn_result.model_response.response_id,
+                                    reasoning_item_id_policy=(
+                                        streamed_result._reasoning_item_id_policy
+                                    ),
+                                    store=store_setting,
+                                    wrapper=streamed_result.context_wrapper,
+                                )
+                            )
                         await _save_resumed_items(
                             list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
@@ -1558,7 +1595,23 @@ async def start_streaming(
                                 ),
                             )
                         elif not turn_session_items:
-                            take_held_session_write(run_state)
+                            # An emptied resolved turn still settles the pairs the
+                            # batch already holds; only the unpaired requests drop.
+                            streamed_result._current_turn_persisted_item_count = (
+                                await settle_held_batch_for_emptied_turn(
+                                    run_state,
+                                    session,
+                                    persisted_count=(
+                                        streamed_result._current_turn_persisted_item_count
+                                    ),
+                                    response_id=turn_result.model_response.response_id,
+                                    reasoning_item_id_policy=(
+                                        streamed_result._reasoning_item_id_policy
+                                    ),
+                                    store=store_setting,
+                                    wrapper=streamed_result.context_wrapper,
+                                )
+                            )
                         await _save_resumed_items(
                             list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
