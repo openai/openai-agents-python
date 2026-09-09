@@ -245,6 +245,27 @@ async def test_pty_cleanup_attempts_remaining_entries_after_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pty_cleanup_raises_first_entry_error_deterministically() -> None:
+    second_failed = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def cleanup(entry: int) -> None:
+        if entry == 1:
+            await release_first.wait()
+        else:
+            second_failed.set()
+        raise RuntimeError(f"cleanup {entry} failed")
+
+    task = asyncio.create_task(_session()._cleanup_pty_entries((1, 2), cleanup))
+    await second_failed.wait()
+    assert not task.done()
+    release_first.set()
+
+    with pytest.raises(RuntimeError, match="cleanup 1 failed"):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_pty_cleanup_batch_uses_one_deadline_and_starts_every_entry() -> None:
     session = _session()
     started: list[int] = []
@@ -325,6 +346,31 @@ async def test_pty_start_rollback_accepts_provider_session_registry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pty_start_rollback_settles_registry_removal_before_cancellation() -> None:
+    session = _session()
+    entry = object()
+    registry = {7: entry}
+    session._pty_lock = asyncio.Lock()
+    session._reserved_pty_process_ids = {7}
+    await session._pty_lock.acquire()
+    terminated = False
+
+    async def terminate() -> None:
+        nonlocal terminated
+        terminated = True
+
+    task = asyncio.create_task(session._rollback_pty_start(7, entry, registry, terminate))
+    await asyncio.sleep(0)
+    task.cancel("rollback cancelled")
+    session._pty_lock.release()
+
+    await task
+    assert registry == {}
+    assert session._reserved_pty_process_ids == set()
+    assert terminated
+
+
+@pytest.mark.asyncio
 async def test_stop_persists_snapshot_after_cleanup_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,4 +436,35 @@ async def test_stop_preserves_original_cleanup_failure_when_snapshot_fails(
 
     assert str(exc_info.value) == "pty cleanup failed"
     assert isinstance(exc_info.value.__cause__, ValueError)
+    assert session._should_preserve_backend_on_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_stop_wraps_cleanup_failure_when_snapshot_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.state = SimpleNamespace(manifest=Manifest(), type="test")
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+    source_error = RuntimeError("cleanup failed")
+    snapshot_error = ValueError("snapshot failed")
+
+    async def before_stop() -> None:
+        raise source_error
+
+    async def persist_snapshot() -> None:
+        raise snapshot_error
+
+    session._before_stop = before_stop
+    session._persist_snapshot = persist_snapshot
+    session._wrap_stop_error = lambda error: RuntimeError("wrapped cleanup failed")
+
+    with pytest.raises(RuntimeError, match="wrapped cleanup failed") as exc_info:
+        await inspect.unwrap(BaseSandboxSession.stop)(session)
+
+    assert exc_info.value.__cause__ is snapshot_error
     assert session._should_preserve_backend_on_cleanup()

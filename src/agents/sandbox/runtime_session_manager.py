@@ -95,28 +95,32 @@ class _SandboxSessionResources:
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:
                         cleanup_error = exc
+            preserve_backend = (
+                isinstance(self._session, SandboxSession)
+                and self._session._should_preserve_backend_on_cleanup()
+            )
+            if not preserve_backend:
+                try:
+                    await self._session.shutdown()
+                except BaseException as exc:  # pragma: no cover
+                    if cleanup_error is None:
+                        cleanup_error = exc
             try:
-                await self._session.shutdown()
+                if (
+                    self._client is not None
+                    and isinstance(self._session, SandboxSession)
+                    and not self._session._should_preserve_backend_on_cleanup()
+                ):
+                    await self._client.delete(self._session)
             except BaseException as exc:  # pragma: no cover
                 if cleanup_error is None:
                     cleanup_error = exc
             finally:
                 try:
-                    if (
-                        self._client is not None
-                        and isinstance(self._session, SandboxSession)
-                        and not self._session._should_preserve_backend_on_cleanup()
-                    ):
-                        await self._client.delete(self._session)
+                    await self._session._aclose_dependencies()
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:
                         cleanup_error = exc
-                finally:
-                    try:
-                        await self._session._aclose_dependencies()
-                    except BaseException as exc:  # pragma: no cover
-                        if cleanup_error is None:
-                            cleanup_error = exc
             if cleanup_error is not None:
                 raise cleanup_error
 

@@ -418,6 +418,10 @@ class BaseSandboxSession(abc.ABC):
                 else:
                     # Keep the cleanup failure that caused stop() to fail as the primary error,
                     # while retaining the snapshot failure as diagnostic context.
+                    if isinstance(before_stop_error, Exception):
+                        wrapped = self._wrap_stop_error(before_stop_error)
+                        if wrapped is not before_stop_error:
+                            raise wrapped from snapshot_error
                     raise before_stop_error from snapshot_error
                 if isinstance(before_stop_error, Exception):
                     wrapped = self._wrap_stop_error(before_stop_error)
@@ -874,15 +878,18 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Remove and terminate a PTY whose start failed after registration."""
 
-        async with self._pty_lock:
-            if pty_registry.get(process_id) is not entry:
-                return
-            pty_registry.pop(process_id)
-            self._reserved_pty_process_ids.discard(process_id)
+        async def rollback() -> None:
+            async with self._pty_lock:
+                if pty_registry.get(process_id) is not entry:
+                    return
+                pty_registry.pop(process_id)
+                self._reserved_pty_process_ids.discard(process_id)
+
+            await terminate_entry()
 
         with suppress(BaseException):
             await self._settle_pty_cleanup(
-                terminate_entry(),
+                rollback(),
                 propagate_timeout=False,
             )
 
@@ -919,7 +926,7 @@ class BaseSandboxSession(abc.ABC):
 
         pending = set(cleanup_tasks)
         caller_cancellation: asyncio.CancelledError | None = None
-        first_error: BaseException | None = None
+        cleanup_errors: dict[int, BaseException] = {}
         while pending:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -932,14 +939,15 @@ class BaseSandboxSession(abc.ABC):
                     continue
                 raise
 
-            for task in done:
+            for index, task in enumerate(cleanup_tasks):
+                if task not in done:
+                    continue
                 try:
                     task.result()
                 except BaseException as error:
-                    if first_error is None:
-                        first_error = error
-        if first_error is not None:
-            raise first_error
+                    cleanup_errors.setdefault(index, error)
+        if cleanup_errors:
+            raise cleanup_errors[min(cleanup_errors)]
         if caller_cancellation is not None:
             raise caller_cancellation
         if pending:

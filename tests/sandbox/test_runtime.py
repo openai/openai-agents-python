@@ -609,6 +609,25 @@ async def test_runner_owned_cleanup_redacts_pre_stop_hook_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_owned_cleanup_preserves_backend_before_shutdown() -> None:
+    inner = _FakeSession(Manifest())
+    inner._backend_preservation_required = True
+    client = _FakeClient(inner)
+    resources = _SandboxSessionResources(
+        session=client.session,
+        client=client,
+        owns_session=True,
+    )
+
+    await resources.cleanup()
+
+    assert inner.stop_calls == 1
+    assert inner.shutdown_calls == 0
+    assert client.delete_calls == 0
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("runner_owned", [False, True])
 async def test_pre_stop_cancellation_skips_persistence_and_completes_cleanup(
     runner_owned: bool,
