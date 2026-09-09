@@ -181,12 +181,12 @@ class _PendingSessionWrite(TypedDict):
     ``response_id`` records the model response the withheld batch belongs to, and
     ``store`` the store setting that response was produced under, so the settle runs
     the same compaction bookkeeping the ordinary persistence path would have run for
+    it instead of appending behind its back.
+
     ``reasoning_item_id_policy`` records how the batch's items were converted, so a
     detached re-park folds new items under the same conversion: a Conversations-origin
     batch preserves server reasoning ids even when the resuming run's own policy would
     omit them, and an id stripped at registration cannot be restored at the settle.
-
-    it instead of appending behind its back.
     """
 
     session_id: str

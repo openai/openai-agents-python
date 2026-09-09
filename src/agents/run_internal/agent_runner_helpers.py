@@ -648,6 +648,7 @@ async def save_final_turn_items_after_guardrails(
         # closed with the batch recorded instead of silently losing it, even when the
         # payload was deduplicated from the append.
         resumed_write_state=run_state if settling_held else None,
+        settling_held_batch=settling_held,
     )
 
 
