@@ -4,6 +4,11 @@ import json
 from typing import Literal
 
 import pytest
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 from agents import (
     Agent,
@@ -385,3 +390,63 @@ async def test_a_detached_resume_does_not_make_the_next_one_rewrite_the_session(
     ]
     assert call_ids.count("call_PARKED") == 1
     assert call_ids.count("call_PARKED_2") == 1
+
+
+@pytest.mark.asyncio
+async def test_an_item_that_merely_looks_familiar_is_never_dropped() -> None:
+    """Only ``call_id``-keyed items can be recognized as already written.
+
+    An assistant preamble repeats verbatim across turns, so a Session tail can hold an
+    identical one from an EARLIER turn while none of the current response is saved.
+    Suppressing by content would delete a legitimate occurrence from history while still
+    appending the calls around it, so items without a collision-free identity are always
+    kept.
+    """
+    from agents.items import MessageOutputItem, ToolCallItem
+    from agents.run_internal.session_persistence import deferred_interrupted_session_prefix
+
+    agent = Agent(name="preamble")
+    text = "Let me check that."
+    preamble = MessageOutputItem(
+        agent=agent,
+        raw_item=ResponseOutputMessage(
+            id="__fake_id__",
+            content=[ResponseOutputText(text=text, annotations=[], type="output_text")],
+            role="assistant",
+            status="completed",
+            type="message",
+        ),
+    )
+    call = ToolCallItem(
+        agent=agent,
+        raw_item=ResponseFunctionToolCall(
+            id="__fake_id__",
+            call_id="call_NEW",
+            name="write_thing",
+            arguments="{}",
+            type="function_call",
+        ),
+    )
+    # The Session already holds an identical preamble from a previous turn, and nothing
+    # of the current response.
+    session = SimpleListSession(
+        history=[
+            {"role": "user", "content": "hi"},
+            {
+                "id": "__fake_id__",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            },
+        ]
+    )
+
+    kept = await deferred_interrupted_session_prefix(
+        session,
+        base_session_items=[preamble, call],
+        persisted_count=0,
+        session_start=0,
+    )
+
+    assert kept == [preamble, call]
