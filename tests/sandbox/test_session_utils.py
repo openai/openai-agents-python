@@ -3,8 +3,10 @@ from __future__ import annotations
 import io
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -23,6 +25,7 @@ from agents.sandbox.session import SandboxSessionStartEvent
 from agents.sandbox.session.base_sandbox_session import (
     _READ_PATH_PROBE_SCRIPT,
     _READ_PATH_PROBE_TIMEOUT_S,
+    _RM_ACCESS_CHECK_SCRIPT,
     BaseSandboxSession,
 )
 from agents.sandbox.session.events import SandboxSessionFinishEvent, validate_sandbox_session_event
@@ -235,6 +238,78 @@ async def test_check_mkdir_with_exec_runs_non_destructive_probe_as_user() -> Non
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
     assert session.last_command[4:6] == ("sh", "-lc")
     assert session.last_command[-2:] == ("/workspace/nested/dir", "1")
+
+
+def _run_rm_access_check(target: Path, *, recursive: bool = False) -> int:
+    return subprocess.run(
+        ["sh", "-c", _RM_ACCESS_CHECK_SCRIPT, "sh", str(target), "1" if recursive else "0"],
+        check=False,
+    ).returncode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell access probe")
+def test_rm_access_check_allows_own_entries_in_a_writable_directory(tmp_path: Path) -> None:
+    (tmp_path / "own.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "link").symlink_to("/nonexistent")
+
+    assert _run_rm_access_check(tmp_path / "own.txt") == 0
+    assert _run_rm_access_check(tmp_path / "link") == 0  # dangling symlink is still an entry
+    assert _run_rm_access_check(tmp_path / "missing") == 1
+    assert _run_rm_access_check(tmp_path / "missing", recursive=True) == 0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() != 0,
+    reason="needs root to run the probe as another user against a sticky directory",
+)
+def test_rm_access_check_enforces_sticky_directory_ownership_for_unprivileged_users() -> None:
+    """In a sticky directory owned by root, an unprivileged user may remove only entries it
+    owns (files and symlinks alike, judged by the link itself); root may remove any of them."""
+    other_uid = 65534  # nobody
+    base = Path(tempfile.mkdtemp(prefix="openclaw-sticky-"))
+    try:
+        base.chmod(0o711)
+        sticky = base / "sticky"
+        sticky.mkdir()
+        sticky.chmod(0o1777)
+        root_file = sticky / "root.txt"
+        root_file.write_text("x", encoding="utf-8")
+        root_link = sticky / "root-link"
+        root_link.symlink_to("/etc/hostname")
+        their_file = sticky / "theirs.txt"
+        their_file.write_text("x", encoding="utf-8")
+        os.chown(their_file, other_uid, other_uid)
+        their_link = sticky / "their-link"
+        their_link.symlink_to("/etc/hostname")
+        os.lchown(their_link, other_uid, other_uid)
+
+        def as_nobody(target: Path) -> int:
+            return subprocess.run(
+                ["sh", "-c", _RM_ACCESS_CHECK_SCRIPT, "sh", str(target), "0"],
+                check=False,
+                user=other_uid,
+                group=other_uid,
+                extra_groups=[],
+            ).returncode
+
+        assert as_nobody(root_file) == 1
+        assert as_nobody(root_link) == 1
+        assert as_nobody(their_file) == 0
+        assert as_nobody(their_link) == 0
+        # The privileged user is not bound by the sticky ownership rule, even in a sticky
+        # directory it does not own that holds another user's entries.
+        foreign_sticky = base / "foreign-sticky"
+        foreign_sticky.mkdir()
+        foreign_file = foreign_sticky / "theirs.txt"
+        foreign_file.write_text("x", encoding="utf-8")
+        os.chown(foreign_file, other_uid, other_uid)
+        foreign_sticky.chmod(0o1777)
+        os.chown(foreign_sticky, other_uid, other_uid)
+        assert _run_rm_access_check(foreign_file) == 0
+        assert _run_rm_access_check(their_file) == 0
+        assert _run_rm_access_check(their_link) == 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 @pytest.mark.asyncio

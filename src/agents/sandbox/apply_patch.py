@@ -11,6 +11,7 @@ from .errors import (
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
+    ExecNonZeroError,
     InvalidManifestPathError,
     WorkspaceReadNotFoundError,
 )
@@ -71,12 +72,16 @@ class WorkspaceEditor:
     ) -> ApplyPatchResult:
         format_impl = _resolve_patch_format(patch_format)
         relative_path, display_path = self._resolve_path(operation.path)
-        destination = self._session.normalize_path(relative_path)
 
         if operation.type == "delete_file":
-            await self._ensure_exists(destination, display_path=display_path)
-            await self._session.rm(destination, user=self._user)
+            # Remove the workspace entry the model named, not the file it resolves to: a
+            # symlink is checked and removed as the link itself, so its target survives and
+            # a dangling or outward-pointing link can still be deleted.
+            await self._ensure_entry_exists(relative_path, display_path=display_path)
+            await self._session.rm(relative_path, user=self._user)
             return ApplyPatchResult(output=f"Deleted {display_path}")
+
+        destination = self._session.normalize_path(relative_path)
 
         if operation.diff is None:
             raise ApplyPatchDiffError(
@@ -113,7 +118,7 @@ class WorkspaceEditor:
             moved_destination = self._session.normalize_path(moved_relative_path)
             await self._write_text(moved_destination, updated_text)
             if moved_destination != destination:
-                await self._session.rm(destination, user=self._user)
+                await self._session.rm(relative_path, user=self._user)
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
@@ -178,13 +183,31 @@ class WorkspaceEditor:
                 cause=exc,
             ) from exc
 
-    async def _ensure_exists(self, destination: Path, *, display_path: str) -> None:
+    async def _ensure_entry_exists(self, relative_path: Path, *, display_path: str) -> None:
+        not_found: BaseException | None = None
         try:
-            handle = await self._session.read(destination, user=self._user)
-        except (FileNotFoundError, WorkspaceReadNotFoundError) as exc:
-            raise ApplyPatchFileNotFoundError(path=Path(display_path), cause=exc) from exc
+            destination = self._session.normalize_path(relative_path)
+        except InvalidManifestPathError as exc:
+            # The leaf resolves outside every allowed root; the entry itself may still exist.
+            not_found = exc
         else:
-            handle.close()
+            try:
+                handle = await self._session.read(destination, user=self._user)
+            except (FileNotFoundError, WorkspaceReadNotFoundError) as exc:
+                not_found = exc
+            else:
+                handle.close()
+                return
+
+        # A dangling or outward-pointing symlink cannot be read, but it is still an entry
+        # of its parent directory, which is what delete_file removes.
+        try:
+            entries = await self._session.ls(relative_path.parent, user=self._user)
+        except ExecNonZeroError:
+            entries = []
+        if any(Path(entry.path).name == relative_path.name for entry in entries):
+            return
+        raise ApplyPatchFileNotFoundError(path=Path(display_path), cause=not_found) from not_found
 
     async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
         try:
