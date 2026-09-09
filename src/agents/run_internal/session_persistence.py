@@ -1124,11 +1124,15 @@ def defer_interrupted_session_write(
         "held": True,
         # The response the withheld batch belongs to, so the settle can run the same
         # compaction bookkeeping the ordinary persistence path runs for it. An extend
-        # keeps the original response: the batch is that response's write.
-        "response_id": (pending.get("response_id") if pending is not None else None) or response_id,
-        "store": (pending.get("store") if pending is not None else None)
-        if (pending is not None and pending.get("store") is not None)
-        else store,
+        # keeps the original response: the batch is that response's write, and the
+        # settle resolves its compaction mode from that response's own storage setting.
+        # Presence decides, not truthiness: a park under the ordinary ``store=None``
+        # records a real value, and letting a re-interruption's setting overwrite it
+        # would resolve the original response's compaction mode from the wrong turn.
+        "response_id": pending["response_id"]
+        if (pending is not None and "response_id" in pending)
+        else response_id,
+        "store": pending["store"] if (pending is not None and "store" in pending) else store,
     }
     run_state._pending_session_write = record
 

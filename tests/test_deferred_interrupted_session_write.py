@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -1345,6 +1346,145 @@ async def test_the_settled_count_matches_what_the_append_actually_wrote() -> Non
     )
 
     assert count == len(await session.get_items())
+
+
+class _FinalOutputHookFailure(RunHooks[Any]):
+    """Fail the run at the final-output hook, after the terminal step is decided."""
+
+    async def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
+        raise RuntimeError("final output hook failed")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_max_turns_finalization_keeps_the_held_record() -> None:
+    # The batch is disposed of when the run actually ends, not when the terminal step
+    # is chosen. Validation, the final-output hooks and the output guardrails all run
+    # after that choice and all can raise, and a run that raises may still be retried
+    # or reattached with the executed tool's call and output reachable only here.
+    from agents.run_internal.run_loop import finalize_max_turns_handler_output
+
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    state = await _parked_and_approved(agent, session, streamed=False)
+    assert state._pending_session_write is not None
+
+    async def _no_save(items: list[Any]) -> None:
+        return None
+
+    with pytest.raises(RuntimeError):
+        await finalize_max_turns_handler_output(
+            agent=agent,
+            hooks=_FinalOutputHookFailure(),
+            run_config=RunConfig(tracing_disabled=True),
+            output="stopped at max turns",
+            context_wrapper=RunContextWrapper(context=None),
+            output_guardrail_results=[],
+            save_items_after_guardrails=_no_save,
+            include_in_history=False,
+            run_state=state,
+        )
+
+    assert state._pending_session_write is not None
+
+
+def _make_deferring_agent_with_a_turn_after_the_resume() -> Agent:
+    """A gated write whose resume runs one more model turn before finishing.
+
+    The extra turn moves the final output past the resumed boundary and onto the main
+    loop, which owns its own detached-completion disposal.
+    """
+    return Agent(
+        name="deferred repro (turn after resume)",
+        instructions="Always call write_thing.",
+        model=ScriptedModel(
+            [
+                ModelStep(output=[function_call("look_up", {"query": "x"}, call_id="call_LOOKUP")]),
+                ModelStep(
+                    output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]
+                ),
+                ModelStep(output=[function_call("look_up", {"query": "y"}, call_id="call_AFTER")]),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[look_up, write_thing],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "make_agent",
+    [_make_deferring_agent, _make_deferring_agent_with_a_turn_after_the_resume],
+    ids=["final-on-the-resumed-turn", "final-on-a-later-turn"],
+)
+async def test_a_failed_detached_completion_keeps_the_held_record(
+    streamed: bool, make_agent: Callable[[], Agent]
+) -> None:
+    # A detached completion discards the batch because the run ends there, but only
+    # once it has ended: the guardrails and the final save run after the terminal step
+    # is chosen, and a failure there leaves a checkpoint whose reattach is the batch's
+    # only remaining way into the Session.
+    from agents import output_guardrail
+
+    @output_guardrail
+    async def _fails(ctx: Any, agent: Agent, output: Any) -> GuardrailFunctionOutput:
+        raise RuntimeError("output guardrail failed")
+
+    session = SimpleListSession()
+    agent = make_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    assert state._pending_session_write is not None
+    agent.output_guardrails = [*agent.output_guardrails, _fails]
+
+    with pytest.raises(RuntimeError):
+        await _run(agent, state, None, streamed=streamed)
+
+    assert state._pending_session_write is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parked_store", [None, False, True])
+async def test_a_re_park_keeps_the_storage_setting_the_response_was_produced_under(
+    parked_store: bool | None,
+) -> None:
+    # The batch belongs to the parked response, and the settle resolves that
+    # response's compaction mode from this value. Presence decides, not truthiness: a
+    # park under the ordinary ``store=None`` records a real setting, and a
+    # re-interruption under a different one must not overwrite it.
+    from agents.run_internal.session_persistence import defer_interrupted_session_write
+
+    class _Session:
+        session_id = "s1"
+
+    state = object.__new__(RunState)
+    state._pending_session_write = {
+        "session_id": "s1",
+        "items": [
+            {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"}
+        ],
+        "before": None,
+        "persisted_count": 1,
+        "held": True,
+        "response_id": "resp_parked",
+        "store": parked_store,
+    }
+    state._current_turn_persisted_item_count = 0
+    state._reasoning_item_id_policy = None
+
+    defer_interrupted_session_write(
+        state,
+        _Session(),  # type: ignore[arg-type]
+        run_items=[],
+        reasoning_item_id_policy=None,
+        response_id="resp_reinterrupted",
+        store=not parked_store,
+    )
+
+    assert state._pending_session_write is not None
+    assert state._pending_session_write["store"] is parked_store
+    assert state._pending_session_write["response_id"] == "resp_parked"
 
 
 class _CompactionRecordingSession(SimpleListSession):

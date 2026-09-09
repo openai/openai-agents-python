@@ -1973,12 +1973,6 @@ class AgentRunner:
 
                     try:
                         if isinstance(turn_result.next_step, NextStepFinalOutput):
-                            if session is None and run_state is not None:
-                                # A detached completion has no Session to settle against
-                                # and the run ends here, so the batch is discarded
-                                # rather than left to invalidate the completed run's
-                                # checkpoint. Mirrors the resumed final exit.
-                                take_held_session_write(run_state)
                             if run_state is not None and _has_output_guardrails(
                                 current_agent, run_config
                             ):
@@ -2105,6 +2099,16 @@ class AgentRunner:
                             )
                             if run_state is not None:
                                 run_state._terminal_unrecoverable = False
+
+                            if session is None and run_state is not None:
+                                # A detached completion has no Session to settle against
+                                # and the run ends here, so the batch is discarded
+                                # rather than left to invalidate the completed run's
+                                # checkpoint. Only here, though: the guardrails and the
+                                # final save above can raise, and a run that raises may
+                                # still be retried or reattached, with the executed
+                                # tool's call and output reachable only through it.
+                                take_held_session_write(run_state)
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (

@@ -784,12 +784,13 @@ async def finalize_max_turns_handler_output(
     A max-turn handler ends the run, so a held Session write still standing here has
     no later gate-legal exit to settle it: it is discarded, exactly as a detached
     completion discards it, so the finished run's checkpoint stays loadable and both
-    runners report the same terminal state.
+    runners report the same terminal state. The discard waits for the run to actually
+    end, which is either a completed finalization or a decided blocked outcome:
+    validation, the final-output hooks and the guardrails can all raise, and a run that
+    raises may still be retried or reattached, with the executed tool's call and output
+    reachable only through this batch.
     """
     validated_output = validate_handler_final_output(agent, output)
-    # Only past the validation does the handler actually end the run; discarding above
-    # it would throw the batch away on a rejection the streamed runner survives.
-    take_held_session_write(run_state)
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
 
@@ -805,6 +806,9 @@ async def finalize_max_turns_handler_output(
             output_guardrail_results,
         )
     except OutputGuardrailTripwireTriggered:
+        # A blocked outcome is decided and nothing of the withheld batch may reach the
+        # Session, exactly as every other tripwire path disposes of it.
+        take_held_session_write(run_state)
         raise
     except Exception as guardrail_error:
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
@@ -821,6 +825,7 @@ async def finalize_max_turns_handler_output(
 
     if redacted_persistence_error is not None:
         raise redacted_persistence_error from None
+    take_held_session_write(run_state)
     return validated_output, synthesized_item
 
 
@@ -1552,11 +1557,6 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
-                        if session is None:
-                            # A detached final output has no Session to settle against
-                            # and the run ends here, so the batch is discarded rather
-                            # than left to invalidate the completed run's checkpoint.
-                            take_held_session_write(run_state)
                         await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
@@ -1577,6 +1577,16 @@ async def start_streaming(
                         )
                         if streamed_result._stored_exception is not None:
                             break
+                        if session is None:
+                            # A detached final output has no Session to settle against
+                            # and the run ends here, so the batch is discarded rather
+                            # than left to invalidate the completed run's checkpoint.
+                            # Only here, though: the finalization above runs the hooks,
+                            # the guardrails and the final save, any of which can raise,
+                            # and a run that raises may still be retried or reattached
+                            # with the executed tool's call and output reachable only
+                            # through this batch.
+                            take_held_session_write(run_state)
                         run_state._current_step = None
                         break
 
@@ -2056,12 +2066,6 @@ async def start_streaming(
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
-                    if session is None:
-                        # A detached completion has no Session to settle against and
-                        # the run ends here, so the batch is discarded rather than
-                        # left to invalidate the completed run's checkpoint. Mirrors
-                        # the resumed final exit.
-                        take_held_session_write(run_state)
                     await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
                         agent=current_agent,
@@ -2078,6 +2082,15 @@ async def start_streaming(
                     )
                     if streamed_result._stored_exception is not None:
                         break
+                    if session is None:
+                        # A detached completion has no Session to settle against and
+                        # the run ends here, so the batch is discarded rather than
+                        # left to invalidate the completed run's checkpoint. Only here,
+                        # though: the finalization above runs the hooks, the guardrails
+                        # and the final save, any of which can raise, and a run that
+                        # raises may still be retried or reattached with the executed
+                        # tool's call and output reachable only through this batch.
+                        take_held_session_write(run_state)
                     if run_state is not None:
                         run_state._current_step = None
                     break
