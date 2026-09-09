@@ -320,32 +320,6 @@ def _should_defer_interrupted_session_items(
     return _has_output_guardrails(agent, run_config) and agent.tool_use_behavior != "run_llm_again"
 
 
-def _deferred_interrupted_session_prefix(
-    *,
-    base_session_items: Sequence[RunItem],
-    persisted_count: int,
-    session_start: int | None,
-) -> list[RunItem]:
-    """Return the interrupted response's session items whose write was deferred.
-
-    When ``_should_defer_interrupted_session_items`` gated the interruption-time write,
-    nothing of the current response reached the Session. Once a resume commits to
-    continuing the run, this prefix must be persisted ahead of the resolved turn's items
-    so a tool output never lands without its ``function_call``.
-
-    The park-time decision is derived from checkpoint state, never re-evaluated against
-    the live configuration: the caller may resume with a different ``tool_use_behavior``
-    or guardrail set, and consulting today's gate would drop the deferred items when the
-    gate has since closed. A non-deferred interruption write bumps
-    ``_current_turn_persisted_item_count``, so ``persisted_count == 0`` identifies the
-    deferred park on its own — and also keeps this empty (no double write) when the
-    interruption-time write actually ran, whatever the configuration says now.
-    """
-    if persisted_count != 0 or session_start is None:
-        return []
-    return list(base_session_items[session_start:])
-
-
 def _validate_resumed_session_output_guardrail_safety(
     *,
     agent: Agent[Any],
