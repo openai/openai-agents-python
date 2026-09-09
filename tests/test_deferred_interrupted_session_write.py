@@ -21,6 +21,7 @@ from agents import (
     output_guardrail,
 )
 from agents.agent import Agent as AgentType
+from agents.items import TResponseInputItem
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from tests.utils.simple_session import SimpleListSession
 
@@ -450,3 +451,37 @@ async def test_an_item_that_merely_looks_familiar_is_never_dropped() -> None:
     )
 
     assert kept == [preamble, call]
+
+
+@pytest.mark.asyncio
+async def test_hosted_mcp_approval_identities_are_recognized() -> None:
+    """Not every family names its id ``call_id``.
+
+    A hosted MCP approval request identifies itself with ``id`` and its response points
+    back with ``approval_request_id``. Unrecognized, a partially written response would
+    append requests the Session already holds, and duplicate request ids corrupt the
+    history the next model call reads.
+    """
+    from agents.run_internal.session_persistence import _identity_key
+
+    request: TResponseInputItem = {
+        "type": "mcp_approval_request",
+        "id": "mcpr_123",
+        "name": "do_it",
+        "server_label": "srv",
+        "arguments": "{}",
+    }
+    response: TResponseInputItem = {
+        "type": "mcp_approval_response",
+        "approval_request_id": "mcpr_123",
+        "approve": True,
+    }
+
+    assert _identity_key(request) == ("mcp_approval_request", "mcpr_123")
+    # The response is a DIFFERENT row than the request it answers: same id, distinct
+    # identity, so persisting the response never suppresses the request or vice versa.
+    assert _identity_key(response) == ("mcp_approval_response", "mcpr_123")
+    assert _identity_key(request) != _identity_key(response)
+    # Still nothing for a content-only item.
+    plain: TResponseInputItem = {"role": "assistant", "content": "hi", "type": "message"}
+    assert _identity_key(plain) is None
