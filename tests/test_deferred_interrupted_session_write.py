@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 import pytest
@@ -1516,3 +1517,61 @@ async def test_a_streamed_max_turns_completion_clears_the_held_record() -> None:
     assert resumed.final_output == "stopped at max turns"
     assert "pending_session_write" not in resumed.to_state().to_json()
     assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_the_park_records_the_store_the_response_was_produced_under(
+    streamed: bool,
+) -> None:
+    # The settle defers compaction for the parked response, and the deferral resolves a
+    # compaction mode from the store setting. That setting belongs to the turn the
+    # batch was withheld in, not to the resume, so the park records it.
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    agent.model_settings = replace(agent.model_settings, store=True)
+
+    first = await _run(agent, "do the thing", session, streamed=streamed)
+    assert len(first.interruptions) == 1
+
+    pending = first.to_state().to_json()["pending_session_write"]
+    assert pending["held"] is True
+    assert pending["store"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_entry_settle_defers_with_the_recorded_store() -> None:
+    # The recorded store reaches the deferral, so the hook resolves the same compaction
+    # mode the ordinary persistence path would have resolved for that response.
+    from agents.run_internal.run_steps import NextStepRunAgain
+    from agents.run_internal.session_persistence import resume_pending_session_write
+
+    session = _CompactionRecordingSession()
+    state = RunState(
+        context=None,
+        original_input="go",
+        starting_agent=_make_deferring_agent(),
+        max_turns=5,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": "test",
+        "items": [
+            {
+                "type": "function_call",
+                "call_id": "call_PARKED",
+                "name": "write_thing",
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_PARKED", "output": "wrote:x"},
+        ],
+        "before": None,
+        "persisted_count": 2,
+        "held": True,
+        "response_id": "resp_parked",
+        "store": True,
+    }
+
+    await resume_pending_session_write(state, session)  # type: ignore[arg-type]
+
+    assert session.compactions == [{"deferred": "resp_parked", "store": True}]
