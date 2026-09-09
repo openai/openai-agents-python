@@ -1442,6 +1442,7 @@ async def start_streaming(
                             extend_held_session_write(
                                 run_state,
                                 run_items=turn_session_items,
+                                run_items_are_the_session_view=True,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1465,10 +1466,9 @@ async def start_streaming(
                         elif turn_session_items:
                             reinterruption_items = list(turn_session_items)
                         else:
-                            # An emptied resolved turn still settles the pairs the
-                            # batch already holds: the approved tool ran, and dropping
-                            # its output with the filtered items would lose the
-                            # Session's only record of that.
+                            # An emptied resolved turn settles what the session view
+                            # left the batch: filtered outputs are gone with their
+                            # calls, carried prior-turn pairs still land.
                             streamed_result._current_turn_persisted_item_count = (
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
@@ -1510,22 +1510,23 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
-                        # A detached exit folds the resolved items into the held batch;
-                        # an emptied resolved turn (a handoff input_filter can drop
-                        # every item) discards the batch instead: a call written
-                        # without its output poisons the Session just as the orphaned
-                        # output does.
+                        # A detached exit folds the resolved session view into the
+                        # held batch, and the fold drops the batch's copies of this
+                        # turn's outputs so the view decides what rides to the
+                        # reattach.
                         if session is None:
                             extend_held_session_write(
                                 run_state,
                                 run_items=turn_session_items,
+                                run_items_are_the_session_view=True,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
                             )
                         elif not turn_session_items:
-                            # An emptied resolved turn still settles the pairs the
-                            # batch already holds; only the unpaired requests drop.
+                            # An emptied resolved turn settles what the session view
+                            # left the batch: filtered outputs are gone with their
+                            # calls, carried prior-turn pairs still land.
                             streamed_result._current_turn_persisted_item_count = (
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
@@ -1594,22 +1595,23 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
-                        # A detached exit folds the resolved items into the held batch;
-                        # an emptied resolved turn (a handoff input_filter can drop
-                        # every item) discards the batch instead: a call written
-                        # without its output poisons the Session just as the orphaned
-                        # output does.
+                        # A detached exit folds the resolved session view into the
+                        # held batch, and the fold drops the batch's copies of this
+                        # turn's outputs so the view decides what rides to the
+                        # reattach.
                         if session is None:
                             extend_held_session_write(
                                 run_state,
                                 run_items=turn_session_items,
+                                run_items_are_the_session_view=True,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
                             )
                         elif not turn_session_items:
-                            # An emptied resolved turn still settles the pairs the
-                            # batch already holds; only the unpaired requests drop.
+                            # An emptied resolved turn settles what the session view
+                            # left the batch: filtered outputs are gone with their
+                            # calls, carried prior-turn pairs still land.
                             streamed_result._current_turn_persisted_item_count = (
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
@@ -1722,6 +1724,9 @@ async def start_streaming(
             streamed_result._current_turn_persisted_item_count = 0
             if run_state is not None:
                 run_state._current_turn_persisted_item_count = 0
+                # A handoff filter's session authority covers one turn, so the
+                # folded-output record resets with the turn it described.
+                run_state._held_output_call_ids_folded_this_turn.clear()
 
             if max_turns is not None and current_turn > max_turns:
                 _error_tracing.attach_error_to_span(
@@ -2037,6 +2042,7 @@ async def start_streaming(
                     streamed_result._current_turn_persisted_item_count = 0
                     if run_state is not None:
                         run_state._current_turn_persisted_item_count = 0
+                        run_state._held_output_call_ids_folded_this_turn.clear()
 
                 if server_conversation_tracker is not None:
                     server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -2118,6 +2124,7 @@ async def start_streaming(
                         extend_held_session_write(
                             run_state,
                             run_items=turn_session_items,
+                            run_items_are_the_session_view=True,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                         )
                     elif parked_items_deferred and await _should_persist_stream_items(
