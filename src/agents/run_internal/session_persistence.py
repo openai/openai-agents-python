@@ -21,6 +21,7 @@ from ..items import (
     HandoffOutputItem,
     InputItem,
     ItemHelpers,
+    MCPApprovalResponseItem,
     ModelResponse,
     RunItem,
     ToolCallOutputItem,
@@ -95,9 +96,14 @@ __all__ = [
 
 _SESSION_LIMIT_UNSET = object()
 
-# Serialized item types that represent a locally produced tool output, i.e. the output
-# kinds of the canonical call-to-output map.
-_LOCAL_TOOL_OUTPUT_TYPES = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values())
+# Serialized item types produced locally as the continuation of a model response: the
+# output kinds of the canonical call-to-output map, plus the hosted MCP approval
+# response, which is the locally produced half of its approval pair. Compaction for
+# the response that carried the request must be deferred while any of these still
+# needs to be associated with that response chain.
+_LOCAL_CONTINUATION_OUTPUT_TYPES = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values()) | {
+    "mcp_approval_response"
+}
 
 
 async def admit_pending_input(
@@ -776,11 +782,12 @@ async def save_result_to_session(
         # landed. Only a settle reads that slot: on an ordinary save it holds the
         # caller's input, whose earlier outputs say nothing about this response.
         has_local_tool_outputs = any(
-            isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
+            isinstance(item, ToolCallOutputItem | HandoffOutputItem | MCPApprovalResponseItem)
+            for item in new_items
         ) or (
             settling_held_batch
             and any(
-                isinstance(item, dict) and item.get("type") in _LOCAL_TOOL_OUTPUT_TYPES
+                isinstance(item, dict) and item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
                 for item in items_to_save
             )
         )
@@ -797,7 +804,7 @@ async def save_result_to_session(
                 "skip: deferring compaction for response %s due to local tool outputs",
                 response_id,
             )
-            return saved_run_items_count
+            return saved_run_items_count + settled_batch_items
 
         deferred_response_id = None
         get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
