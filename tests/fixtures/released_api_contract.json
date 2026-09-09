@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.22.1",
-  "baseline_commit": "ee375635d57c9f1f5dbe80c4184965df41cbfcad",
+  "baseline": "v0.22.2",
+  "baseline_commit": "25af629b3c877ba3d0e95189141bb636b21167a5",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -46618,6 +46618,72 @@
         }
       ],
       "module": "agents.voice"
+    },
+    {
+      "class_name": "ImageGenerationToolConfig",
+      "fields": [
+        {
+          "annotation": "Required[Literal['image_generation']]",
+          "name": "type",
+          "required": true
+        },
+        {
+          "annotation": "Literal['generate', 'edit', 'auto']",
+          "name": "action",
+          "required": false
+        },
+        {
+          "annotation": "Literal['transparent', 'opaque', 'auto']",
+          "name": "background",
+          "required": false
+        },
+        {
+          "annotation": "Literal['high', 'low'] | None",
+          "name": "input_fidelity",
+          "required": false
+        },
+        {
+          "annotation": "_ImageGenerationInputImageMask",
+          "name": "input_image_mask",
+          "required": false
+        },
+        {
+          "annotation": "str",
+          "name": "model",
+          "required": false
+        },
+        {
+          "annotation": "Literal['auto', 'low']",
+          "name": "moderation",
+          "required": false
+        },
+        {
+          "annotation": "int",
+          "name": "output_compression",
+          "required": false
+        },
+        {
+          "annotation": "Literal['png', 'webp', 'jpeg']",
+          "name": "output_format",
+          "required": false
+        },
+        {
+          "annotation": "int",
+          "name": "partial_images",
+          "required": false
+        },
+        {
+          "annotation": "Literal['low', 'medium', 'high', 'xhigh', 'max', 'auto']",
+          "name": "quality",
+          "required": false
+        },
+        {
+          "annotation": "str",
+          "name": "size",
+          "required": false
+        }
+      ],
+      "module": "agents"
     }
   ],
   "required_submodule_exports": {
@@ -47591,7 +47657,8 @@
     "ModelTimeoutError",
     "OutputGuardrailBlockedMessageArgs",
     "OutputGuardrailBlockedMessageFormatter",
-    "WebSearchToolImageSettings"
+    "WebSearchToolImageSettings",
+    "ImageGenerationToolConfig"
   ],
   "submodule_export_exclusions": [
     "agents.sandbox.sandboxes"
