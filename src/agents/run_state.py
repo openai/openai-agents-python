@@ -109,6 +109,7 @@ from .logger import (
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
+    ReasoningItemIdPolicy,
     digest_input_item,
     ensure_nested_history_run_item_occurrence_key,
     nested_history_run_item_occurrence_key,
@@ -180,6 +181,11 @@ class _PendingSessionWrite(TypedDict):
     ``response_id`` records the model response the withheld batch belongs to, and
     ``store`` the store setting that response was produced under, so the settle runs
     the same compaction bookkeeping the ordinary persistence path would have run for
+    ``reasoning_item_id_policy`` records how the batch's items were converted, so a
+    detached re-park folds new items under the same conversion: a Conversations-origin
+    batch preserves server reasoning ids even when the resuming run's own policy would
+    omit them, and an id stripped at registration cannot be restored at the settle.
+
     it instead of appending behind its back.
     """
 
@@ -190,6 +196,7 @@ class _PendingSessionWrite(TypedDict):
     held: NotRequired[bool]
     response_id: NotRequired[str | None]
     store: NotRequired[bool | None]
+    reasoning_item_id_policy: NotRequired[ReasoningItemIdPolicy | None]
 
 
 def _default_run_state_validation_error(
@@ -248,7 +255,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.18": (
         "Persists the interrupted turn's withheld Session write, including the response it "
-        "belongs to, so an approval resume can settle it under the output-guardrail gate."
+        "belongs to and the conversion policy its items were registered under, so an "
+        "approval resume can settle it under the output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4403,7 +4411,11 @@ async def _build_run_state_from_json(
             for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
         )
         base_keys = {"session_id", "items", "before", "persisted_count"}
-        held_keys = {"held", "response_id", "store"} if held_keys_allowed else set()
+        held_keys = (
+            {"held", "response_id", "store", "reasoning_item_id_policy"}
+            if held_keys_allowed
+            else set()
+        )
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
@@ -4420,12 +4432,20 @@ async def _build_run_state_from_json(
                 and pending_write["store"] is not None
                 and type(pending_write["store"]) is not bool
             )
-            # Both keys describe the withheld response, so they are meaningless on an
+            or (
+                "reasoning_item_id_policy" in pending_write
+                and pending_write["reasoning_item_id_policy"] not in (None, "preserve", "omit")
+            )
+            # These keys describe the withheld batch, so they are meaningless on an
             # ordinary pending write and are refused there rather than restored as
             # state nothing consumes.
             or (
                 not pending_write.get("held")
-                and ("response_id" in pending_write or "store" in pending_write)
+                and (
+                    "response_id" in pending_write
+                    or "store" in pending_write
+                    or "reasoning_item_id_policy" in pending_write
+                )
             )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)

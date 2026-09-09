@@ -1487,6 +1487,80 @@ async def test_a_re_park_keeps_the_storage_setting_the_response_was_produced_und
     assert state._pending_session_write["response_id"] == "resp_parked"
 
 
+@pytest.mark.asyncio
+async def test_a_detached_re_park_folds_under_the_batch_registration_policy() -> None:
+    # A Conversations-origin batch was converted preserving server reasoning ids. The
+    # detached re-park cannot see the backend, so it must fold under the policy the
+    # record carries rather than the resuming run's own: an id stripped here is
+    # unrecoverable and the reattach would drop the reasoning item as unpersistable.
+    from agents.items import ReasoningItem
+    from agents.run_internal.session_persistence import extend_held_session_write
+
+    agent = _make_deferring_agent()
+    state = object.__new__(RunState)
+    state._pending_session_write = {
+        "session_id": "conv_abc",
+        "items": [
+            {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"}
+        ],
+        "before": None,
+        "persisted_count": 1,
+        "held": True,
+        "response_id": "resp_parked",
+        "store": None,
+        "reasoning_item_id_policy": None,
+    }
+    state._current_turn_persisted_item_count = 0
+    reasoning = ReasoningItem(
+        agent=agent,
+        raw_item={"id": "rs_SERVER_ID", "type": "reasoning", "summary": [], "content": []},
+    )
+
+    extend_held_session_write(state, run_items=[reasoning], reasoning_item_id_policy="omit")
+
+    items = state._pending_session_write["items"]
+    reasoning_ids = [i.get("id") for i in items if i.get("type") == "reasoning"]
+    assert reasoning_ids == ["rs_SERVER_ID"]
+    assert state._pending_session_write["reasoning_item_id_policy"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_park_records_the_conversion_policy_it_used() -> None:
+    # The record owns how its items were converted. A Conversations park forces the
+    # preserving policy regardless of the run's own setting, and the recorded value is
+    # what a later detached fold must reuse.
+    from agents.items import ToolCallItem
+    from agents.memory.openai_conversations_session import OpenAIConversationsSession
+    from agents.run_internal.session_persistence import defer_interrupted_session_write
+
+    session = object.__new__(OpenAIConversationsSession)
+    session._session_id = "conv_abc"
+    state = object.__new__(RunState)
+    state._pending_session_write = None
+    state._current_turn_persisted_item_count = 0
+    call = ToolCallItem(
+        agent=_make_deferring_agent(),
+        raw_item={
+            "type": "function_call",
+            "call_id": "call_PARKED",
+            "name": "t",
+            "arguments": "{}",
+        },
+    )
+
+    defer_interrupted_session_write(
+        state,
+        session,
+        run_items=[call],
+        reasoning_item_id_policy="omit",
+        response_id="resp_parked",
+        store=None,
+    )
+
+    assert state._pending_session_write is not None
+    assert state._pending_session_write["reasoning_item_id_policy"] is None
+
+
 class _CompactionRecordingSession(SimpleListSession):
     """Record the compaction bookkeeping a compaction-aware backend expects."""
 

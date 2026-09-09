@@ -1096,9 +1096,13 @@ def defer_interrupted_session_write(
 
     # The normal persistence path forces the reasoning-id policy to ``None`` for a
     # Conversations backend so a server-identified reasoning item stays persistable;
-    # the registration conversion must match or the sanitization later drops it.
+    # the registration conversion must match or the sanitization later drops it. A
+    # standing record owns the policy its items were converted under, so a re-park
+    # folds new items under the same conversion instead of the resuming run's own.
     if isinstance(session, OpenAIConversationsSession):
         reasoning_item_id_policy = None
+    if pending is not None and "reasoning_item_id_policy" in pending:
+        reasoning_item_id_policy = pending["reasoning_item_id_policy"]
     converted_run_items: list[TResponseInputItem] = []
     for run_item in run_items:
         as_input = run_item_to_input_item(run_item, reasoning_item_id_policy)
@@ -1140,6 +1144,7 @@ def defer_interrupted_session_write(
         if (pending is not None and "response_id" in pending)
         else response_id,
         "store": pending["store"] if (pending is not None and "store" in pending) else store,
+        "reasoning_item_id_policy": reasoning_item_id_policy,
     }
     run_state._pending_session_write = record
 
@@ -1155,7 +1160,9 @@ def extend_held_session_write(
     With no Session attached the resolved turn's save is a no-op, so the executed
     tool output exists only in this process; folding it into the held batch lets the
     reattaching resume settle call and output together. Does nothing when no held
-    batch stands.
+    batch stands. The fold converts under the batch's registration policy, not the
+    caller's: a detached run cannot see the original backend, and a server reasoning
+    id stripped here could not be restored at the settle.
     """
     if run_state is None or run_state._pending_session_write is None:
         return

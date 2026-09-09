@@ -508,6 +508,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
         "held-with-before",
         "held-under-1-17",
         "held-keys-without-held",
+        "policy-shape",
     ],
 )
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
@@ -526,6 +527,12 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         # response_id and store describe the withheld response, so they are refused on
         # an ordinary pending write where nothing consumes them.
         payload["pending_session_write"]["response_id"] = "resp_1"
+    elif invalid == "policy-shape":
+        # The conversion-policy key only speaks the two policy literals or None; any
+        # other value would silently change how a fold converts the batch's items.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
     elif invalid == "held-under-1-17":
         # 1.17 defined the pending write as exactly four keys, so the held variant is
         # only readable under the version that introduced it.
