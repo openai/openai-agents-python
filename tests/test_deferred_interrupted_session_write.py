@@ -1097,3 +1097,123 @@ def test_the_pairing_guard_speaks_every_approval_identity() -> None:
         [unpaired_mcp], [], None, pending_call_ids={"mcpr_1"}
     )
     assert still_pending == [unpaired_mcp]
+
+
+def test_the_pairing_guard_prunes_with_the_canonical_rule() -> None:
+    # The prune delegates to drop_orphan_function_calls, so every family that map
+    # owns pairs correctly (a shell call included) and a reasoning item riding
+    # immediately before a dropped call goes with it: the Responses API rejects
+    # reasoning without its required following item.
+    from agents.run_internal.session_persistence import _held_items_safe_to_settle
+
+    reasoning: TResponseInputItem = {"type": "reasoning", "id": "rs_1", "summary": []}
+    unpaired_shell: TResponseInputItem = {
+        "type": "shell_call",
+        "call_id": "sh_1",
+        "id": "sh_item_1",
+        "status": "completed",
+        "action": {"type": "exec", "command": "ls"},
+    }
+    paired_call: TResponseInputItem = {
+        "type": "function_call",
+        "call_id": "fn_1",
+        "name": "write_thing",
+        "arguments": "{}",
+    }
+    paired_output: TResponseInputItem = {
+        "type": "function_call_output",
+        "call_id": "fn_1",
+        "output": "ok",
+    }
+
+    kept = _held_items_safe_to_settle(
+        [reasoning, unpaired_shell, paired_call, paired_output], [], None
+    )
+    assert kept == [paired_call, paired_output]
+
+    still_pending = _held_items_safe_to_settle(
+        [reasoning, unpaired_shell], [], None, pending_call_ids={"sh_1"}
+    )
+    assert still_pending == [reasoning, unpaired_shell]
+
+
+@pytest.mark.asyncio
+async def test_settled_held_items_count_toward_the_turn_persisted_count() -> None:
+    # A held batch can settle with no accompanying run items (an approval-only turn
+    # converts to nothing persistable), so it lands through the original_input slot and
+    # save_result_to_session returns zero new items. The settled calls are still this
+    # turn's persisted items: leaving them uncounted would let a later gate-enabled
+    # resume pass the resumed-safety validation with a zero count and re-append them.
+    from agents.run_internal.run_steps import NextStepRunAgain
+    from agents.run_internal.session_persistence import save_resumed_turn_items
+
+    session = SimpleListSession()
+    state = RunState(
+        context=None,
+        original_input="go",
+        starting_agent=_make_deferring_agent(),
+        max_turns=5,
+    )
+    state._current_step = NextStepRunAgain()
+    held = [
+        {
+            "type": "function_call",
+            "call_id": "call_PARKED",
+            "name": "write_thing",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_PARKED", "output": "wrote:x"},
+    ]
+
+    count = await save_resumed_turn_items(
+        session=session,
+        items=[],
+        held_input=held,  # type: ignore[arg-type]
+        persisted_count=0,
+        response_id=None,
+        run_state=state,
+    )
+
+    assert count == 2
+    assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
+
+
+@pytest.mark.asyncio
+async def test_registration_forces_the_conversations_reasoning_policy() -> None:
+    # A Conversations backend keeps a server-identified reasoning item persistable by
+    # forcing the reasoning-id policy to None, exactly as the normal save path does; a
+    # deferred registration under "omit" must match or the sanitization drops it.
+    from openai.types.responses import ResponseReasoningItem
+    from openai.types.responses.response_reasoning_item import Summary
+
+    from agents.items import ReasoningItem
+    from agents.run_internal.session_persistence import defer_interrupted_session_write
+
+    agent = _make_deferring_agent()
+    state = RunState(
+        context=None,
+        original_input="go",
+        starting_agent=agent,
+        max_turns=5,
+    )
+    state._reasoning_item_id_policy = "omit"
+    reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            id="rs_server_1",
+            summary=[Summary(text="because", type="summary_text")],
+            type="reasoning",
+        ),
+    )
+
+    defer_interrupted_session_write(
+        state,
+        _RecordingConversationsSession(),  # type: ignore[arg-type]
+        run_items=[reasoning],
+        reasoning_item_id_policy="omit",
+    )
+
+    pending = state._pending_session_write
+    assert pending is not None
+    reasoning_items = [item for item in pending["items"] if item.get("type") == "reasoning"]
+    assert reasoning_items and reasoning_items[0].get("id") == "rs_server_1"
