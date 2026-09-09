@@ -391,6 +391,7 @@ async def _save_resumed_stream_items(
     response_id: str | None,
     store: bool | None = None,
     handoff_input_filtered: bool = False,
+    filtered_context_items: list[RunItem] | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -411,6 +412,7 @@ async def _save_resumed_stream_items(
         # re-park) or is discarded explicitly at the exit that owns that decision.
         claim_held=bool(items),
         handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
@@ -1162,6 +1164,7 @@ async def start_streaming(
             response_id: str | None,
             store_setting: bool | None,
             handoff_input_filtered: bool = False,
+            filtered_context_items: list[RunItem] | None = None,
         ) -> None:
             await _save_resumed_stream_items(
                 session=session,
@@ -1170,6 +1173,7 @@ async def start_streaming(
                 run_state=run_state,
                 items=items,
                 handoff_input_filtered=handoff_input_filtered,
+                filtered_context_items=filtered_context_items,
                 response_id=response_id,
                 store=store_setting,
             )
@@ -1447,6 +1451,7 @@ async def start_streaming(
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
                                 handoff_input_filtered=turn_result.handoff_input_filtered,
+                                filtered_context_items=turn_result.pre_step_items,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1478,6 +1483,7 @@ async def start_streaming(
                                     run_state,
                                     session,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
+                                    filtered_context_items=turn_result.pre_step_items,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1525,6 +1531,7 @@ async def start_streaming(
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
                                 handoff_input_filtered=turn_result.handoff_input_filtered,
+                                filtered_context_items=turn_result.pre_step_items,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1538,6 +1545,7 @@ async def start_streaming(
                                     run_state,
                                     session,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
+                                    filtered_context_items=turn_result.pre_step_items,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1554,6 +1562,7 @@ async def start_streaming(
                             turn_result.model_response.response_id,
                             store_setting,
                             handoff_input_filtered=turn_result.handoff_input_filtered,
+                            filtered_context_items=list(turn_result.pre_step_items),
                         )
                         if current_span is not None:
                             current_span.finish(reset_current=True)
@@ -1613,6 +1622,7 @@ async def start_streaming(
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
                                 handoff_input_filtered=turn_result.handoff_input_filtered,
+                                filtered_context_items=turn_result.pre_step_items,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1626,6 +1636,7 @@ async def start_streaming(
                                     run_state,
                                     session,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
+                                    filtered_context_items=turn_result.pre_step_items,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1642,6 +1653,7 @@ async def start_streaming(
                             turn_result.model_response.response_id,
                             store_setting,
                             handoff_input_filtered=turn_result.handoff_input_filtered,
+                            filtered_context_items=list(turn_result.pre_step_items),
                         )
                         run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
@@ -2139,6 +2151,7 @@ async def start_streaming(
                             run_items=turn_session_items,
                             run_items_are_the_session_view=True,
                             handoff_input_filtered=turn_result.handoff_input_filtered,
+                            filtered_context_items=turn_result.pre_step_items,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                         )
                     elif parked_items_deferred and await _should_persist_stream_items(

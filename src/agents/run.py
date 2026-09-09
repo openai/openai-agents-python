@@ -1181,6 +1181,7 @@ class AgentRunner:
                                         run_items=turn_session_items,
                                         run_items_are_the_session_view=True,
                                         handoff_input_filtered=(turn_result.handoff_input_filtered),
+                                        filtered_context_items=turn_result.pre_step_items,
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy
                                         ),
@@ -1213,6 +1214,7 @@ class AgentRunner:
                                             handoff_input_filtered=(
                                                 turn_result.handoff_input_filtered
                                             ),
+                                            filtered_context_items=turn_result.pre_step_items,
                                             persisted_count=(
                                                 run_state._current_turn_persisted_item_count
                                             ),
@@ -1236,6 +1238,7 @@ class AgentRunner:
                                             handoff_input_filtered=(
                                                 turn_result.handoff_input_filtered
                                             ),
+                                            filtered_context_items=turn_result.pre_step_items,
                                             persisted_count=(
                                                 run_state._current_turn_persisted_item_count
                                             ),
@@ -2214,6 +2217,7 @@ class AgentRunner:
                                     run_items=session_items_for_turn(turn_result),
                                     run_items_are_the_session_view=True,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
+                                    filtered_context_items=turn_result.pre_step_items,
                                     reasoning_item_id_policy=(run_state._reasoning_item_id_policy),
                                 )
                             append_model_response_if_new(

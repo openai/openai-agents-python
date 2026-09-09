@@ -845,6 +845,7 @@ async def save_resumed_turn_items(
     held_input: Sequence[TResponseInputItem] | None = None,
     claim_held: bool = False,
     handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count.
 
@@ -870,21 +871,46 @@ async def save_resumed_turn_items(
             and held_marker is not None
             and held_marker["turn"] == run_state._current_turn
         ):
-            # A handoff filter ran on this exit and these outputs belong to the turn
-            # it filtered: the batch's copy is not pairing evidence, so it drops
-            # unconditionally. A kept output arrives through the resolved view in this
-            # very save; a removed one must not land, and the pairing prune takes its
-            # call with it. The turn comparison is a cheap belt for a marker that
-            # outlived its turn, which the defer merge's rewrite excludes today.
+            # A handoff filter ran on this exit and the batch belongs to the turn it
+            # filtered: the batch's copies are not pairing evidence, so the owned
+            # outputs drop unconditionally (a kept one arrives through the resolved
+            # view in this very save, a removed one must not land, and the pairing
+            # prune takes its call with it), and the response's unkeyed companions (an
+            # assistant preamble, an id-less reasoning item) survive only if the view
+            # kept them, matched by the same fingerprint the dedup uses. Calls and
+            # request kinds stay with the pairing rule, and carried outputs from
+            # earlier turns are not the filter's to remove. The turn comparison is a
+            # cheap belt for a marker that outlived its turn, which the defer merge's
+            # rewrite excludes today.
             gated = set(held_marker["call_ids"])
-            held_input = [
-                item
-                for item in held_input
-                if not (
-                    item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
-                    and item.get("call_id") in gated
-                )
-            ]
+            ignore_ids = _ignore_ids_for_matching(session) if session is not None else False
+            view_fingerprints = set()
+            # The companions of the parked response ride the pre-step view, so the
+            # filter's verdict on them is only visible there: absent from the whole
+            # filtered view means removed on purpose, while absent from the resolved
+            # items alone says nothing (an additive filter keeps them in pre-step).
+            for run_item in [*items, *(filtered_context_items or [])]:
+                converted_view = run_item_to_input_item(run_item, reasoning_item_id_policy)
+                if converted_view is not None:
+                    view_fingerprints.add(
+                        _fingerprint_or_repr(converted_view, ignore_ids_for_matching=ignore_ids)
+                    )
+            kept_held: list[TResponseInputItem] = []
+            for item in held_input:
+                item_type = item.get("type")
+                if item_type in _LOCAL_CONTINUATION_OUTPUT_TYPES:
+                    if item.get("call_id") not in gated:
+                        kept_held.append(item)
+                    continue
+                if _held_pair_identity(item) is not None or "call_id" in item:
+                    kept_held.append(item)
+                    continue
+                if (
+                    _fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids)
+                    in view_fingerprints
+                ):
+                    kept_held.append(item)
+            held_input = kept_held
     if session is None or (not items and not held_input):
         return persisted_count
     # Whether this settle is claiming a held batch at all, captured before the dedup
@@ -947,6 +973,7 @@ async def settle_held_batch_for_emptied_turn(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
 ) -> int:
     """Settle what an emptied resolved turn's session view left in the held batch.
 
@@ -963,6 +990,7 @@ async def settle_held_batch_for_emptied_turn(
         items=[],
         claim_held=True,
         handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
         persisted_count=persisted_count,
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
@@ -1110,6 +1138,7 @@ def defer_interrupted_session_write(
     run_items_are_the_session_view: bool = False,
     handoff_input_filtered: bool = False,
     folded_output_call_ids: Sequence[str] | None = None,
+    filtered_context_items: Sequence[RunItem] | None = None,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
@@ -1167,18 +1196,42 @@ def defer_interrupted_session_write(
         # A detached exit folds through this merge, and the filter's view is exactly
         # ``run_items``: the batch's copy of an output this turn folded is never
         # pairing evidence, because a kept output rides back in through the view in
-        # this same merge and a removed one must not reach the reattach. An unpaired
-        # call this leaves behind is the entry settle's to prune, with the full
-        # batch-plus-view pairing in hand. Parks and re-parks are unaffected: their
-        # view always carries their own outputs (measured, nested history included).
-        base_items = [
-            item
-            for item in base_items
-            if not (
-                item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
-                and item.get("call_id") in gated_call_ids
-            )
-        ]
+        # this same merge and a removed one must not reach the reattach, and the
+        # response's unkeyed companions survive only if the view kept them, matched by
+        # the dedup's own fingerprint. An unpaired call this leaves behind is the
+        # entry settle's to prune, with the full batch-plus-view pairing in hand.
+        # Parks and re-parks are unaffected: their view always carries their own
+        # outputs (measured, nested history included).
+        merge_ignore_ids = _ignore_ids_for_matching(session) if session is not None else False
+        merge_context_fingerprints: set[str] = set()
+        for context_item in filtered_context_items or ():
+            converted_context = run_item_to_input_item(context_item, reasoning_item_id_policy)
+            if converted_context is not None:
+                merge_context_fingerprints.add(
+                    _fingerprint_or_repr(
+                        converted_context, ignore_ids_for_matching=merge_ignore_ids
+                    )
+                )
+        merge_view_fingerprints = {
+            _fingerprint_or_repr(item, ignore_ids_for_matching=merge_ignore_ids)
+            for item in converted_run_items
+        } | merge_context_fingerprints
+        kept_base: list[TResponseInputItem] = []
+        for item in base_items:
+            item_type = item.get("type")
+            if item_type in _LOCAL_CONTINUATION_OUTPUT_TYPES:
+                if item.get("call_id") not in gated_call_ids:
+                    kept_base.append(item)
+                continue
+            if _held_pair_identity(item) is not None or "call_id" in item:
+                kept_base.append(item)
+                continue
+            if (
+                _fingerprint_or_repr(item, ignore_ids_for_matching=merge_ignore_ids)
+                in merge_view_fingerprints
+            ):
+                kept_base.append(item)
+        base_items = kept_base
     items = deduplicate_input_items_preferring_latest(base_items + converted_run_items)
     if isinstance(session, OpenAIConversationsSession):
         items = [_sanitize_openai_conversation_item(item) for item in items]
@@ -1235,6 +1288,7 @@ def extend_held_session_write(
     run_items_are_the_session_view: bool = False,
     handoff_input_filtered: bool = False,
     folded_output_call_ids: Sequence[str] | None = None,
+    filtered_context_items: Sequence[RunItem] | None = None,
 ) -> None:
     """Fold a detached exit's resolved items into the standing held batch.
 
@@ -1257,6 +1311,7 @@ def extend_held_session_write(
         run_items_are_the_session_view=run_items_are_the_session_view,
         handoff_input_filtered=handoff_input_filtered,
         folded_output_call_ids=folded_output_call_ids,
+        filtered_context_items=filtered_context_items,
     )
 
 
