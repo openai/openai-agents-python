@@ -127,6 +127,15 @@
       "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving the Docker session payload.",
       "provenance": "canonical_compatibility",
       "version": "1.17"
+    },
+    {
+      "commit": "821afdc3f709f409a307c93f42a603704be63033",
+      "emitted_version": "1.18",
+      "feature": "held_pending_session_write",
+      "fixture": "features/v1_18_held_pending_session_write.json",
+      "note": "The held pending Session write was first emitted with the 1.18 writer in this branch. The fixture carries the withheld batch under the version that introduced it, which the 1.17 reader intentionally rejects.",
+      "provenance": "canonical_compatibility",
+      "version": "1.18"
     }
   ],
   "resume": {
@@ -193,6 +202,13 @@
       "emitted_version": "1.16",
       "fixture": "minimal/v1_17.json",
       "note": "The labels implementation was first emitted with the unreleased 1.16 writer. The fixture changes only the schema label to exercise the 1.17 compatibility reader while preserving older payload compatibility.",
+      "provenance": "canonical_compatibility"
+    },
+    "1.18": {
+      "commit": "821afdc3f709f409a307c93f42a603704be63033",
+      "emitted_version": "1.18",
+      "fixture": "minimal/v1_18.json",
+      "note": "The held pending Session write was first emitted with the 1.18 writer in this branch. The minimal fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving older payload compatibility.",
       "provenance": "canonical_compatibility"
     },
     "1.2": {
