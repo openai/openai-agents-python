@@ -4315,6 +4315,8 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         wrapper: RunContextWrapper[Any] | None = None,
         run_state: RunState | None = None,
         held_input: Any = None,
+        claim_held: bool = False,
+        handoff_input_filtered: bool = False,
     ) -> int:
         observed_counts.append(persisted_count)
         result = await real_save_resumed(
@@ -4327,6 +4329,8 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             wrapper=wrapper,
             run_state=run_state,
             held_input=held_input,
+            claim_held=claim_held,
+            handoff_input_filtered=handoff_input_filtered,
         )
         return int(result)
 
