@@ -843,6 +843,8 @@ async def save_resumed_turn_items(
     wrapper: RunContextWrapper[Any] | None = None,
     run_state: RunState | None = None,
     held_input: Sequence[TResponseInputItem] | None = None,
+    claim_held: bool = False,
+    handoff_input_filtered: bool = False,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count.
 
@@ -853,6 +855,36 @@ async def save_resumed_turn_items(
     batch separately would either trip the single-slot rule or advance the persisted
     count and slice the resolved items out of their own save.
     """
+    if claim_held and run_state is not None:
+        # The claim reads the fold marker before freeing the slot: the filter's
+        # removals are only visible against the resolved view, and the record is the
+        # marker's one durable home.
+        pending_record = run_state._pending_session_write
+        held_marker = (
+            pending_record.get("folded_tool_outputs") if pending_record is not None else None
+        )
+        held_input = take_held_session_write(run_state)
+        if (
+            handoff_input_filtered
+            and held_input
+            and held_marker is not None
+            and held_marker["turn"] == run_state._current_turn
+        ):
+            # A handoff filter ran on this exit and these outputs belong to the turn
+            # it filtered: the batch's copy is not pairing evidence, so it drops
+            # unconditionally. A kept output arrives through the resolved view in this
+            # very save; a removed one must not land, and the pairing prune takes its
+            # call with it. The turn comparison is a cheap belt for a marker that
+            # outlived its turn, which the defer merge's rewrite excludes today.
+            gated = set(held_marker["call_ids"])
+            held_input = [
+                item
+                for item in held_input
+                if not (
+                    item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
+                    and item.get("call_id") in gated
+                )
+            ]
     if session is None or (not items and not held_input):
         return persisted_count
     # Whether this settle is claiming a held batch at all, captured before the dedup
@@ -872,9 +904,6 @@ async def save_resumed_turn_items(
             items,
             reasoning_item_id_policy,
             pending_call_ids=_pending_approval_call_ids(run_state),
-            folded_output_call_ids=(
-                run_state._held_output_call_ids_folded_this_turn if run_state is not None else None
-            ),
         )
     saved_count = await save_result_to_session(
         session,
@@ -917,6 +946,7 @@ async def settle_held_batch_for_emptied_turn(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
+    handoff_input_filtered: bool = False,
 ) -> int:
     """Settle what an emptied resolved turn's session view left in the held batch.
 
@@ -931,7 +961,8 @@ async def settle_held_batch_for_emptied_turn(
         run_state=run_state,
         session=session,
         items=[],
-        held_input=take_held_session_write(run_state),
+        claim_held=True,
+        handoff_input_filtered=handoff_input_filtered,
         persisted_count=persisted_count,
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
@@ -981,20 +1012,19 @@ def _held_items_safe_to_settle(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
     *,
     pending_call_ids: set[str] | None = None,
-    folded_output_call_ids: set[str] | None = None,
 ) -> list[TResponseInputItem]:
     """Drop held calls whose outputs did not survive into the settling batch.
 
     A handoff ``input_filter`` may drop some resolved outputs while keeping others, so
     the settling batch being non-empty does not make it safe: a held ``function_call``
     settled without its output poisons the Session exactly as the orphaned output does.
-    Pairing is the safety predicate, and pairing evidence must come from the resolved
-    session view, not from the batch itself: ``HandoffInputData.new_items`` is the
-    session-history axis by contract, so an output the commit boundary folded into the
-    batch this run (``folded_output_call_ids``) settles only when the view kept it. A
-    dropped output takes its call with it, and a kept output keeps its call. Outputs
-    folded by an earlier process are carried prior-turn history and are not the
-    filter's to remove, exactly as the eager path cannot unpersist earlier turns.
+    Pairing is the safety predicate, and for outputs folded on the current turn the
+    pairing evidence comes from the resolved session view, not from the batch: the
+    claim (``take_held_session_write``) and the detached merge drop those copies
+    before this guard runs, so here a dropped output takes its call with it and a
+    kept output keeps its call. Outputs folded on earlier turns are carried history
+    and settle under the plain pairing rules, exactly as the eager path cannot
+    unpersist earlier turns.
 
     ``pending_call_ids`` names calls whose approvals are still open on the current
     step: their outputs are missing because they have not run yet, not because a
@@ -1002,21 +1032,6 @@ def _held_items_safe_to_settle(
     non-deferred park persists a call before its output exists.
     """
     pending_call_ids = pending_call_ids or set()
-    if folded_output_call_ids:
-        # An output the commit boundary folded this turn belongs to the resolved
-        # session view: when the view kept it, it arrives through ``run_items`` in
-        # this very save, and when the filter removed it, it must not settle from the
-        # batch. Either way the batch's copy is not pairing evidence, so it drops
-        # unconditionally and the view decides what lands.
-        held_items = [
-            item
-            for item in held_items
-            if not (
-                isinstance(item, dict)
-                and item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
-                and item.get("call_id") in folded_output_call_ids
-            )
-        ]
     working: list[TResponseInputItem] = list(held_items)
     # A call whose approval is still open is exempt from the orphan prune; the prune
     # only understands outputs, so the exemption rides in as a placeholder output that
@@ -1093,6 +1108,8 @@ def defer_interrupted_session_write(
     response_id: str | None = None,
     store: bool | None = None,
     run_items_are_the_session_view: bool = False,
+    handoff_input_filtered: bool = False,
+    folded_output_call_ids: Sequence[str] | None = None,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
@@ -1135,10 +1152,17 @@ def defer_interrupted_session_write(
         converted_run_items.append(ensure_input_item_format(as_input))
 
     base_items = list(pending["items"]) if pending is not None else []
+    standing_marker = pending.get("folded_tool_outputs") if pending is not None else None
+    gated_call_ids: set[str] = (
+        set(standing_marker["call_ids"])
+        if standing_marker is not None and standing_marker["turn"] == run_state._current_turn
+        else set()
+    )
     if (
         run_items_are_the_session_view
+        and handoff_input_filtered
         and pending is not None
-        and run_state._held_output_call_ids_folded_this_turn
+        and gated_call_ids
     ):
         # A detached exit folds through this merge, and the filter's view is exactly
         # ``run_items``: the batch's copy of an output this turn folded is never
@@ -1152,7 +1176,7 @@ def defer_interrupted_session_write(
             for item in base_items
             if not (
                 item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
-                and item.get("call_id") in run_state._held_output_call_ids_folded_this_turn
+                and item.get("call_id") in gated_call_ids
             )
         ]
     items = deduplicate_input_items_preferring_latest(base_items + converted_run_items)
@@ -1190,6 +1214,16 @@ def defer_interrupted_session_write(
         "store": pending["store"] if (pending is not None and "store" in pending) else store,
         "reasoning_item_id_policy": reasoning_item_id_policy,
     }
+    marker_call_ids = sorted(gated_call_ids | set(folded_output_call_ids or ()))
+    if marker_call_ids:
+        # Fold ownership rides the record with its turn, because a crashed resume can
+        # be serialized and retried: the retry's filter keeps its authority over the
+        # turn it is re-running, and the marker expires by itself once the turn moves
+        # on and the outputs become carried history.
+        record["folded_tool_outputs"] = {
+            "turn": run_state._current_turn,
+            "call_ids": marker_call_ids,
+        }
     run_state._pending_session_write = record
 
 
@@ -1199,6 +1233,8 @@ def extend_held_session_write(
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     run_items_are_the_session_view: bool = False,
+    handoff_input_filtered: bool = False,
+    folded_output_call_ids: Sequence[str] | None = None,
 ) -> None:
     """Fold a detached exit's resolved items into the standing held batch.
 
@@ -1219,6 +1255,8 @@ def extend_held_session_write(
         run_items=run_items,
         reasoning_item_id_policy=reasoning_item_id_policy,
         run_items_are_the_session_view=run_items_are_the_session_view,
+        handoff_input_filtered=handoff_input_filtered,
+        folded_output_call_ids=folded_output_call_ids,
     )
 
 
@@ -1230,6 +1268,10 @@ def take_held_session_write(run_state: RunState | None) -> list[TResponseInputIt
     ``save_result_to_session``), or drop them deliberately when the exit's contract is
     to discard the batch. The slot is freed first so the settling write can register
     itself as the one pending append and inherit the digest-based crash recovery.
+
+    A view-carrying settle that follows a handoff ``input_filter`` passes the record's
+    fold marker to ``save_resumed_turn_items`` before claiming, because the filter's
+    removals are only visible against the resolved view; the claim itself never drops.
     """
     if run_state is None:
         return []

@@ -1180,6 +1180,7 @@ class AgentRunner:
                                         run_state,
                                         run_items=turn_session_items,
                                         run_items_are_the_session_view=True,
+                                        handoff_input_filtered=(turn_result.handoff_input_filtered),
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy
                                         ),
@@ -1208,7 +1209,10 @@ class AgentRunner:
                                             run_state=run_state,
                                             session=session,
                                             items=turn_session_items,
-                                            held_input=take_held_session_write(run_state),
+                                            claim_held=True,
+                                            handoff_input_filtered=(
+                                                turn_result.handoff_input_filtered
+                                            ),
                                             persisted_count=(
                                                 run_state._current_turn_persisted_item_count
                                             ),
@@ -1229,6 +1233,9 @@ class AgentRunner:
                                         await settle_held_batch_for_emptied_turn(
                                             run_state,
                                             session,
+                                            handoff_input_filtered=(
+                                                turn_result.handoff_input_filtered
+                                            ),
                                             persisted_count=(
                                                 run_state._current_turn_persisted_item_count
                                             ),
@@ -1674,9 +1681,6 @@ class AgentRunner:
                         not resuming_turn or isinstance(run_state._current_step, NextStepRunAgain)
                     ):
                         run_state._current_turn_persisted_item_count = 0
-                        # A handoff filter's session authority covers one turn, so the
-                        # folded-output record resets with the turn it described.
-                        run_state._held_output_call_ids_folded_this_turn.clear()
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
 
@@ -2209,6 +2213,7 @@ class AgentRunner:
                                     run_state,
                                     run_items=session_items_for_turn(turn_result),
                                     run_items_are_the_session_view=True,
+                                    handoff_input_filtered=turn_result.handoff_input_filtered,
                                     reasoning_item_id_policy=(run_state._reasoning_item_id_policy),
                                 )
                             append_model_response_if_new(

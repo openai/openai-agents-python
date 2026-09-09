@@ -748,6 +748,7 @@ async def execute_handoffs(
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
         nested_history_owned_items=nested_history_owned_items,
+        handoff_input_filtered=input_filter is not None,
     )
 
 
@@ -2465,16 +2466,13 @@ async def resolve_interrupted_turn(
             # produces no new session items, and the batch would otherwise settle, or
             # be discarded as an emptied turn, without the output the tool produced.
             folded_call_id = extract_tool_call_id(getattr(item, "raw_item", None))
-            if folded_call_id:
-                # Only this run can tell a current-turn folded output from carried
-                # prior-turn history, and a handoff filter's session authority covers
-                # exactly the current turn. The committer only ever folds the function
-                # family (measured), so the raw call id is the right key.
-                run_state._held_output_call_ids_folded_this_turn.add(folded_call_id)
             extend_held_session_write(
                 run_state,
                 run_items=[item],
                 reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+                # The committer only ever folds the function family (measured), so the
+                # raw call id is the right ownership key for the record's marker.
+                folded_output_call_ids=[folded_call_id] if folded_call_id else None,
             )
         _register_tool_call_items(context_wrapper, [item])
 

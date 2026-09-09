@@ -168,6 +168,21 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
+class _FoldedToolOutputs(TypedDict):
+    """Outputs the commit boundary folded into the held batch, with the turn they belong to.
+
+    A handoff filter's authority over session history covers one turn, and a crashed
+    resume can be serialized and retried, so ownership must ride the record rather
+    than live process state: while ``turn`` is still the current turn, the batch's
+    copies of these outputs are not pairing evidence and the resolved session view
+    decides what lands. Once the turn advances the marker expires and the outputs are
+    carried prior-turn history, which a later turn's filter is not entitled to remove.
+    """
+
+    turn: int
+    call_ids: list[str]
+
+
 class _PendingSessionWrite(TypedDict):
     """One canonical resumed-output append awaiting acknowledgement.
 
@@ -187,6 +202,10 @@ class _PendingSessionWrite(TypedDict):
     detached re-park folds new items under the same conversion: a Conversations-origin
     batch preserves server reasoning ids even when the resuming run's own policy would
     omit them, and an id stripped at registration cannot be restored at the settle.
+
+    ``folded_tool_outputs`` records which of the batch's outputs the commit boundary
+    folded and on which turn, so the filter contract survives a serialized retry of
+    the crashed turn; see ``_FoldedToolOutputs``.
     """
 
     session_id: str
@@ -197,6 +216,7 @@ class _PendingSessionWrite(TypedDict):
     response_id: NotRequired[str | None]
     store: NotRequired[bool | None]
     reasoning_item_id_policy: NotRequired[ReasoningItemIdPolicy | None]
+    folded_tool_outputs: NotRequired[_FoldedToolOutputs]
 
 
 def _default_run_state_validation_error(
@@ -255,8 +275,9 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.18": (
         "Persists the interrupted turn's withheld Session write, including the response it "
-        "belongs to and the conversion policy its items were registered under, so an "
-        "approval resume can settle it under the output-guardrail gate."
+        "belongs to, the conversion policy its items were registered under, and the "
+        "fold ownership of its outputs, so an approval resume can settle it under the "
+        "output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -907,14 +928,6 @@ class RunState(Generic[TContext, TAgent]):
     _session_write_in_progress: bool = field(default=False, repr=False)
     """Live ownership guard; independent serialized copies require caller serialization."""
 
-    _held_output_call_ids_folded_this_turn: set[str] = field(default_factory=set, repr=False)
-    """Call ids of tool outputs the commit boundary folded into the held batch this
-    turn. Deliberately transient and reset at each turn boundary: a handoff filter's
-    authority over session history covers exactly one turn, and only the live run can
-    tell a folded output of the current turn from carried prior-turn history. After a
-    checkpoint the set is empty, so a reattaching entry settle keeps the carried batch
-    whole."""
-
     _terminal_unrecoverable: bool = field(default=False, repr=False)
     """Set once a final output, its guardrails, and its terminal hooks have all completed.
 
@@ -964,7 +977,6 @@ class RunState(Generic[TContext, TAgent]):
         self._schema_version = CURRENT_SCHEMA_VERSION
         self._pending_session_write = None
         self._session_write_in_progress = False
-        self._held_output_call_ids_folded_this_turn = set()
         self._terminal_unrecoverable = False
         from .agent_tool_state import get_agent_tool_state_scope
 
@@ -975,9 +987,6 @@ class RunState(Generic[TContext, TAgent]):
         copied = copy.copy(self)
         copied._pending_session_write = copy.deepcopy(self._pending_session_write)
         copied._session_write_in_progress = False
-        copied._held_output_call_ids_folded_this_turn = set(
-            self._held_output_call_ids_folded_this_turn
-        )
         if self._context is None:
             return copied
         copied._context = self._context._copy_for_run_state()
@@ -4424,7 +4433,7 @@ async def _build_run_state_from_json(
         )
         base_keys = {"session_id", "items", "before", "persisted_count"}
         held_keys = (
-            {"held", "response_id", "store", "reasoning_item_id_policy"}
+            {"held", "response_id", "store", "reasoning_item_id_policy", "folded_tool_outputs"}
             if held_keys_allowed
             else set()
         )
@@ -4448,6 +4457,21 @@ async def _build_run_state_from_json(
                 "reasoning_item_id_policy" in pending_write
                 and pending_write["reasoning_item_id_policy"] not in (None, "preserve", "omit")
             )
+            or (
+                "folded_tool_outputs" in pending_write
+                and (
+                    not isinstance(pending_write["folded_tool_outputs"], dict)
+                    or set(pending_write["folded_tool_outputs"]) != {"turn", "call_ids"}
+                    or type(pending_write["folded_tool_outputs"]["turn"]) is not int
+                    or pending_write["folded_tool_outputs"]["turn"] < 0
+                    or not isinstance(pending_write["folded_tool_outputs"]["call_ids"], list)
+                    or not pending_write["folded_tool_outputs"]["call_ids"]
+                    or not all(
+                        isinstance(call_id, str)
+                        for call_id in pending_write["folded_tool_outputs"]["call_ids"]
+                    )
+                )
+            )
             # These keys describe the withheld batch, so they are meaningless on an
             # ordinary pending write and are refused there rather than restored as
             # state nothing consumes.
@@ -4457,6 +4481,7 @@ async def _build_run_state_from_json(
                     "response_id" in pending_write
                     or "store" in pending_write
                     or "reasoning_item_id_policy" in pending_write
+                    or "folded_tool_outputs" in pending_write
                 )
             )
             or not isinstance(pending_write.get("session_id"), str)

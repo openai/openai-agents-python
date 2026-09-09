@@ -390,6 +390,7 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    handoff_input_filtered: bool = False,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
@@ -408,7 +409,8 @@ async def _save_resumed_stream_items(
         items=items,
         # An exit that saves nothing is not settling; the batch keeps riding (a
         # re-park) or is discarded explicitly at the exit that owns that decision.
-        held_input=take_held_session_write(run_state) if items else None,
+        claim_held=bool(items),
+        handoff_input_filtered=handoff_input_filtered,
         persisted_count=streamed_result._current_turn_persisted_item_count,
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
@@ -1156,7 +1158,10 @@ async def start_streaming(
                 streamed_result._original_input_for_persistence = session_items_snapshot
 
         async def _save_resumed_items(
-            items: list[RunItem], response_id: str | None, store_setting: bool | None
+            items: list[RunItem],
+            response_id: str | None,
+            store_setting: bool | None,
+            handoff_input_filtered: bool = False,
         ) -> None:
             await _save_resumed_stream_items(
                 session=session,
@@ -1164,6 +1169,7 @@ async def start_streaming(
                 streamed_result=streamed_result,
                 run_state=run_state,
                 items=items,
+                handoff_input_filtered=handoff_input_filtered,
                 response_id=response_id,
                 store=store_setting,
             )
@@ -1440,6 +1446,7 @@ async def start_streaming(
                                 run_state,
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
+                                handoff_input_filtered=turn_result.handoff_input_filtered,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1470,6 +1477,7 @@ async def start_streaming(
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
                                     session,
+                                    handoff_input_filtered=turn_result.handoff_input_filtered,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1516,6 +1524,7 @@ async def start_streaming(
                                 run_state,
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
+                                handoff_input_filtered=turn_result.handoff_input_filtered,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1528,6 +1537,7 @@ async def start_streaming(
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
                                     session,
+                                    handoff_input_filtered=turn_result.handoff_input_filtered,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1543,6 +1553,7 @@ async def start_streaming(
                             list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
                             store_setting,
+                            handoff_input_filtered=turn_result.handoff_input_filtered,
                         )
                         if current_span is not None:
                             current_span.finish(reset_current=True)
@@ -1601,6 +1612,7 @@ async def start_streaming(
                                 run_state,
                                 run_items=turn_session_items,
                                 run_items_are_the_session_view=True,
+                                handoff_input_filtered=turn_result.handoff_input_filtered,
                                 reasoning_item_id_policy=(
                                     streamed_result._reasoning_item_id_policy
                                 ),
@@ -1613,6 +1625,7 @@ async def start_streaming(
                                 await settle_held_batch_for_emptied_turn(
                                     run_state,
                                     session,
+                                    handoff_input_filtered=turn_result.handoff_input_filtered,
                                     persisted_count=(
                                         streamed_result._current_turn_persisted_item_count
                                     ),
@@ -1628,6 +1641,7 @@ async def start_streaming(
                             list(turn_session_items) if turn_session_items else [],
                             turn_result.model_response.response_id,
                             store_setting,
+                            handoff_input_filtered=turn_result.handoff_input_filtered,
                         )
                         run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
@@ -1726,9 +1740,6 @@ async def start_streaming(
             streamed_result._current_turn_persisted_item_count = 0
             if run_state is not None:
                 run_state._current_turn_persisted_item_count = 0
-                # A handoff filter's session authority covers one turn, so the
-                # folded-output record resets with the turn it described.
-                run_state._held_output_call_ids_folded_this_turn.clear()
 
             if max_turns is not None and current_turn > max_turns:
                 _error_tracing.attach_error_to_span(
@@ -2045,7 +2056,6 @@ async def start_streaming(
                     streamed_result._current_turn_persisted_item_count = 0
                     if run_state is not None:
                         run_state._current_turn_persisted_item_count = 0
-                        run_state._held_output_call_ids_folded_this_turn.clear()
 
                 if server_conversation_tracker is not None:
                     server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -2128,6 +2138,7 @@ async def start_streaming(
                             run_state,
                             run_items=turn_session_items,
                             run_items_are_the_session_view=True,
+                            handoff_input_filtered=turn_result.handoff_input_filtered,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                         )
                     elif parked_items_deferred and await _should_persist_stream_items(

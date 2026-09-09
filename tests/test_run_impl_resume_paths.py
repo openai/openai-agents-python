@@ -509,6 +509,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
         "held-under-1-17",
         "held-keys-without-held",
         "policy-shape",
+        "fold-marker-shape",
     ],
 )
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
@@ -533,6 +534,12 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         payload["pending_session_write"]["held"] = True
         payload["pending_session_write"]["before"] = None
         payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
+    elif invalid == "fold-marker-shape":
+        # The fold marker names outputs and the turn that owns them; a malformed
+        # marker would silently change which outputs the filter contract gates.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["folded_tool_outputs"] = {"turn": -1, "call_ids": []}
     elif invalid == "held-under-1-17":
         # 1.17 defined the pending write as exactly four keys, so the held variant is
         # only readable under the version that introduced it.

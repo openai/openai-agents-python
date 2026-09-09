@@ -1511,7 +1511,6 @@ async def test_a_re_park_keeps_the_storage_setting_the_response_was_produced_und
     }
     state._current_turn_persisted_item_count = 0
     state._reasoning_item_id_policy = None
-    state._held_output_call_ids_folded_this_turn = set()
 
     defer_interrupted_session_write(
         state,
@@ -1708,6 +1707,78 @@ async def test_a_carried_pair_survives_a_filtered_handoff_on_a_later_run(
     assert _parked_pair(items) == _EXPECTED_PAIR
 
 
+def _boom_extractor(ctx: Any) -> dict[str, Any]:
+    raise RuntimeError("extractor boom")
+
+
+@function_tool(needs_approval=True, custom_data_extractor=_boom_extractor)
+async def read_secret_with_failing_extractor(query: str) -> str:
+    return "SECRET-VALUE-42"
+
+
+def _make_secret_failing_extractor_handoff_agent() -> Agent:
+    """A secret-bearing gated tool whose extractor crashes, resolved into a filtered handoff."""
+    from agents import handoff
+    from agents.extensions.handoff_filters import remove_all_tools
+
+    target = Agent(
+        name="target",
+        instructions="x",
+        model=ScriptedModel([ModelStep(output=[assistant_message("done")])]),
+    )
+    return Agent(
+        name="deferred repro (secret, failing extractor)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call(
+                            "read_secret_with_failing_extractor",
+                            {"query": "x"},
+                            call_id="call_SECRET",
+                        ),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[read_secret_with_failing_extractor],
+        handoffs=[handoff(target, input_filter=remove_all_tools)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_the_filters_authority_survives_a_json_retry_of_the_crashed_turn(
+    streamed: bool,
+) -> None:
+    # A post-output callback crash leaves the folded output on the checkpoint, and the
+    # supported retry path serializes and reloads that state. The fold's ownership
+    # rides the record with the turn it belongs to, so the reloaded retry's filter
+    # keeps its authority over the turn it is re-running: the batch's copy is not
+    # pairing evidence and the filtered secret stays out of the Session.
+    session = SimpleListSession()
+    agent = _make_secret_failing_extractor_handoff_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+
+    with pytest.raises(Exception, match="extractor boom"):
+        await _run(agent, state, session, streamed=streamed)
+
+    reloaded = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    retry = await _run(agent, reloaded, session, streamed=streamed)
+    assert retry.final_output == "done"
+
+    items = await session.get_items()
+    assert not any("SECRET-VALUE-42" in json.dumps(item) for item in items)
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
+
+
 class _CompactionRecordingSession(SimpleListSession):
     """Record the compaction bookkeeping a compaction-aware backend expects."""
 
@@ -1891,7 +1962,6 @@ async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote
     state._pending_session_write = None
     state._current_turn_persisted_item_count = 0
     state._reasoning_item_id_policy = None
-    state._held_output_call_ids_folded_this_turn = set()
     state._current_step = None
     held: list[TResponseInputItem] = [
         {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"},
