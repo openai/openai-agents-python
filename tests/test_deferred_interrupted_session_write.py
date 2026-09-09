@@ -1526,6 +1526,134 @@ async def test_the_compaction_deferral_reads_the_settling_batch_not_the_callers_
 
 
 @pytest.mark.asyncio
+async def test_the_settled_count_survives_the_compaction_deferral_branch() -> None:
+    # The deferral branch is the one every held settle with outputs takes on a
+    # compaction-aware backend, so returning the run-item count alone there reports a
+    # turn that persisted less than it wrote. That count gates the final sweep's
+    # re-append protection on a later gate-enabled resume.
+    from agents.run_internal.session_persistence import save_result_to_session
+
+    session = _CompactionRecordingSession()
+    held: list[TResponseInputItem] = [
+        {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_PARKED", "output": "ok"},
+    ]
+
+    count = await save_result_to_session(
+        session, held, [], None, response_id="resp_parked", settling_held_batch=True
+    )
+
+    assert [entry for entry in session.compactions if "deferred" in entry] == [
+        {"deferred": "resp_parked", "store": None}
+    ]
+    assert count == len(await session.get_items())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_partial_settle_on_a_compaction_session_still_fails_the_gated_resume_fast(
+    streamed: bool,
+) -> None:
+    # Park two calls, approve one, and let the gate lapse for that resume so the batch
+    # settles into a compaction-aware session mid-run. Re-enable the gate and approve
+    # the rest: the settled turn's count must cover what the settle wrote, or the
+    # final sweep treats the turn as unpersisted and appends the stored items again.
+    from agents.exceptions import UserError
+
+    session = _CompactionRecordingSession()
+    agent = _make_multi_approval_agent()
+
+    first = await _run(agent, "go", session, streamed=streamed)
+    state = await _serialized_round_trip(first, agent)
+    state.approve(
+        next(
+            interruption
+            for interruption in state.get_interruptions()
+            if getattr(interruption.raw_item, "call_id", None) == "call_PARKED"
+        )
+    )
+    gate = agent.output_guardrails
+    agent.output_guardrails = []
+    second = await _run(agent, state, session, streamed=streamed)
+    assert len(second.interruptions) == 1
+    agent.output_guardrails = gate
+
+    state = await _serialized_round_trip(second, agent)
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    # The settled turn persisted items, so the re-enabled gate must refuse the resume
+    # outright; an undercounted turn is what would let it proceed and re-append the
+    # stored items through the final sweep.
+    with pytest.raises(UserError, match="output guardrails after current-turn items"):
+        await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    assert _call_ids(items).count("call_PARKED") == 1
+    assert _call_ids(items).count("call_PARKED_2") == 1
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    # Only the second call may still be awaiting its output; nothing is duplicated.
+    assert outputs == {"call_PARKED"}
+
+
+@pytest.mark.asyncio
+async def test_a_held_mcp_approval_pair_defers_compaction_when_it_settles() -> None:
+    # The approval response is the locally produced half of its pair and must stay
+    # associated with the response chain that carried the request; compacting that
+    # response before the model consumes the approval drops it in
+    # ``previous_response_id`` mode.
+    from agents.run_internal.session_persistence import save_result_to_session
+
+    session = _CompactionRecordingSession()
+    held: list[TResponseInputItem] = [
+        {
+            "type": "mcp_approval_request",
+            "id": "mcpr_1",
+            "server_label": "srv",
+            "name": "do_it",
+            "arguments": "{}",
+        },
+        {"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": True},
+    ]
+
+    count = await save_result_to_session(
+        session, held, [], None, response_id="resp_parked", settling_held_batch=True
+    )
+
+    assert [entry for entry in session.compactions if "deferred" in entry] == [
+        {"deferred": "resp_parked", "store": None}
+    ]
+    assert [entry for entry in session.compactions if "response_id" in entry] == []
+    assert count == len(await session.get_items())
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_mcp_approval_response_defers_compaction_too() -> None:
+    # The non-deferred resume commits the approval response as a run item, and the
+    # classification must treat both carriers alike: deferring for the settled dict
+    # but not for the run item would leave the same response compacted or not
+    # depending on which path persisted it.
+    from agents.items import MCPApprovalResponseItem
+    from agents.run_internal.session_persistence import save_result_to_session
+
+    session = _CompactionRecordingSession()
+    agent = _make_deferring_agent()
+    response_item = MCPApprovalResponseItem(
+        agent=agent,
+        raw_item={
+            "type": "mcp_approval_response",
+            "approval_request_id": "mcpr_1",
+            "approve": True,
+        },
+    )
+
+    await save_result_to_session(session, [], [response_item], None, response_id="resp_live")
+
+    assert [entry for entry in session.compactions if "deferred" in entry] == [
+        {"deferred": "resp_live", "store": None}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_the_entry_settle_runs_the_compaction_bookkeeping() -> None:
     # The entry settle goes through the canonical persistence path, so a
     # compaction-aware backend still gets the bookkeeping for the response the held
