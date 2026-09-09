@@ -257,12 +257,19 @@ async def test_pty_cleanup_raises_first_entry_error_deterministically() -> None:
         raise RuntimeError(f"cleanup {entry} failed")
 
     task = asyncio.create_task(_session()._cleanup_pty_entries((1, 2), cleanup))
-    await second_failed.wait()
-    assert not task.done()
-    release_first.set()
+    try:
+        await asyncio.wait_for(second_failed.wait(), timeout=0.5)
+        assert not task.done()
+        release_first.set()
 
-    with pytest.raises(RuntimeError, match="cleanup 1 failed"):
-        await task
+        with pytest.raises(RuntimeError, match="cleanup 1 failed"):
+            await task
+    finally:
+        release_first.set()
+        if not task.done():
+            task.cancel()
+        with suppress(BaseException):
+            await task
 
 
 @pytest.mark.asyncio

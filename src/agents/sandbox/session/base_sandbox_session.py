@@ -655,11 +655,29 @@ class BaseSandboxSession(abc.ABC):
         await self.run_pre_stop_hooks()
 
     async def _aclose_dependencies(self) -> None:
+        caller_cancellation = await self._wait_for_tracked_cleanup_tasks()
         dependencies = self._dependencies
-        if dependencies is None or self._dependencies_closed:
-            return
-        self._dependencies_closed = True
-        await dependencies.aclose()
+        if dependencies is not None and not self._dependencies_closed:
+            self._dependencies_closed = True
+            await dependencies.aclose()
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+    async def _wait_for_tracked_cleanup_tasks(self) -> asyncio.CancelledError | None:
+        """Wait for detached cleanup before closing dependencies it may still use."""
+
+        caller_cancellation: asyncio.CancelledError | None = None
+        while True:
+            tasks = tuple(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+            if not tasks:
+                break
+            completion = asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+
+        return caller_cancellation
 
     @staticmethod
     def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:

@@ -99,7 +99,7 @@ from agents.sandbox.session.runtime_helpers import RuntimeHelperScript
 from agents.sandbox.session.sandbox_client import BaseSandboxClient
 from agents.sandbox.session.sandbox_session import SandboxSession
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
-from agents.sandbox.snapshot import LocalSnapshotSpec, NoopSnapshot, SnapshotBase
+from agents.sandbox.snapshot import LocalSnapshotSpec, NoopSnapshot, RemoteSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
 from agents.stream_events import RunItemStreamEvent
 from agents.testing import ScriptedModel, scripted_sandbox_session
@@ -624,6 +624,79 @@ async def test_runner_owned_cleanup_preserves_backend_before_shutdown() -> None:
     assert inner.stop_calls == 1
     assert inner.shutdown_calls == 0
     assert client.delete_calls == 0
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_owned_cleanup_waits_for_detached_snapshot_before_closing_dependencies() -> (
+    None
+):
+    upload_started = asyncio.Event()
+    release_upload = asyncio.Event()
+    upload_finished = asyncio.Event()
+
+    class _RemoteSnapshotClient:
+        closed = False
+        closed_before_upload = False
+
+        async def upload(self, snapshot_id: str, data: io.IOBase) -> None:
+            _ = (snapshot_id, data)
+            upload_started.set()
+            await release_upload.wait()
+            upload_finished.set()
+
+        async def aclose(self) -> None:
+            self.closed = True
+            self.closed_before_upload = not upload_finished.is_set()
+
+    class _DetachedSnapshotSession(_FakeSession):
+        def __init__(self, manifest: Manifest) -> None:
+            super().__init__(manifest)
+            self.state.snapshot = RemoteSnapshot(
+                id="detached",
+                client_dependency_key="remote_snapshot_client",
+            )
+
+        def _pty_cleanup_timeout_s(self) -> float:
+            return 0.01
+
+        async def _before_stop(self) -> None:
+            raise asyncio.CancelledError("pty cleanup failed")
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self._running = False
+            await BaseSandboxSession.stop(self)
+
+    snapshot_client = _RemoteSnapshotClient()
+    inner = _DetachedSnapshotSession(Manifest())
+    inner.set_dependencies(
+        Dependencies().bind_factory(
+            "remote_snapshot_client",
+            lambda _dependencies: snapshot_client,
+            owns_result=True,
+        )
+    )
+    client = _FakeClient(inner)
+    resources = _SandboxSessionResources(
+        session=client.session,
+        client=client,
+        owns_session=True,
+    )
+
+    cleanup = asyncio.create_task(resources.cleanup())
+    await asyncio.wait_for(upload_started.wait(), timeout=0.5)
+    await asyncio.sleep(0.05)
+    assert not cleanup.done()
+    assert not snapshot_client.closed_before_upload
+
+    release_upload.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+
+    assert upload_finished.is_set()
+    assert snapshot_client.closed
+    assert not snapshot_client.closed_before_upload
     assert inner.close_dependency_calls == 1
 
 
