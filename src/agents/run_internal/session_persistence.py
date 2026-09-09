@@ -872,6 +872,9 @@ async def save_resumed_turn_items(
             items,
             reasoning_item_id_policy,
             pending_call_ids=_pending_approval_call_ids(run_state),
+            folded_output_call_ids=(
+                run_state._held_output_call_ids_folded_this_turn if run_state is not None else None
+            ),
         )
     saved_count = await save_result_to_session(
         session,
@@ -915,14 +918,14 @@ async def settle_held_batch_for_emptied_turn(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
-    """Settle the paired part of a held batch whose resolved turn came back empty.
+    """Settle what an emptied resolved turn's session view left in the held batch.
 
-    A handoff ``input_filter`` can drop every resolved item, but an approved tool has
-    already run by then and its output was folded into the batch. Emptiness of the turn
-    is therefore the wrong predicate: pairing is. The executed call and output settle
-    together and the unpaired requests drop, exactly as every other settle decides it,
-    so the Session keeps the only record that the tool ran and the next run does not
-    re-issue its side effect.
+    A handoff ``input_filter`` can drop every resolved item, and ``new_items`` is the
+    session-history axis by contract: an output the commit boundary folded this turn
+    is dropped with its call before this settle sees the batch, so a filtered pair
+    stays out of the Session. What still settles is carried prior-turn history (a
+    detached carry riding a checkpoint), which a later turn's filter is not entitled
+    to remove, under the same pairing rules as every other settle.
     """
     return await save_resumed_turn_items(
         run_state=run_state,
@@ -978,15 +981,20 @@ def _held_items_safe_to_settle(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
     *,
     pending_call_ids: set[str] | None = None,
+    folded_output_call_ids: set[str] | None = None,
 ) -> list[TResponseInputItem]:
     """Drop held calls whose outputs did not survive into the settling batch.
 
     A handoff ``input_filter`` may drop some resolved outputs while keeping others, so
     the settling batch being non-empty does not make it safe: a held ``function_call``
     settled without its output poisons the Session exactly as the orphaned output does.
-    Pairing is the safety predicate. The paired part of the batch still settles, which
-    honors the filter's decision symmetrically: a dropped output takes its call with it,
-    and a kept output keeps its call.
+    Pairing is the safety predicate, and pairing evidence must come from the resolved
+    session view, not from the batch itself: ``HandoffInputData.new_items`` is the
+    session-history axis by contract, so an output the commit boundary folded into the
+    batch this run (``folded_output_call_ids``) settles only when the view kept it. A
+    dropped output takes its call with it, and a kept output keeps its call. Outputs
+    folded by an earlier process are carried prior-turn history and are not the
+    filter's to remove, exactly as the eager path cannot unpersist earlier turns.
 
     ``pending_call_ids`` names calls whose approvals are still open on the current
     step: their outputs are missing because they have not run yet, not because a
@@ -994,6 +1002,21 @@ def _held_items_safe_to_settle(
     non-deferred park persists a call before its output exists.
     """
     pending_call_ids = pending_call_ids or set()
+    if folded_output_call_ids:
+        # An output the commit boundary folded this turn belongs to the resolved
+        # session view: when the view kept it, it arrives through ``run_items`` in
+        # this very save, and when the filter removed it, it must not settle from the
+        # batch. Either way the batch's copy is not pairing evidence, so it drops
+        # unconditionally and the view decides what lands.
+        held_items = [
+            item
+            for item in held_items
+            if not (
+                isinstance(item, dict)
+                and item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
+                and item.get("call_id") in folded_output_call_ids
+            )
+        ]
     working: list[TResponseInputItem] = list(held_items)
     # A call whose approval is still open is exempt from the orphan prune; the prune
     # only understands outputs, so the exemption rides in as a placeholder output that
@@ -1069,6 +1092,7 @@ def defer_interrupted_session_write(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     response_id: str | None = None,
     store: bool | None = None,
+    run_items_are_the_session_view: bool = False,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
@@ -1111,6 +1135,26 @@ def defer_interrupted_session_write(
         converted_run_items.append(ensure_input_item_format(as_input))
 
     base_items = list(pending["items"]) if pending is not None else []
+    if (
+        run_items_are_the_session_view
+        and pending is not None
+        and run_state._held_output_call_ids_folded_this_turn
+    ):
+        # A detached exit folds through this merge, and the filter's view is exactly
+        # ``run_items``: the batch's copy of an output this turn folded is never
+        # pairing evidence, because a kept output rides back in through the view in
+        # this same merge and a removed one must not reach the reattach. An unpaired
+        # call this leaves behind is the entry settle's to prune, with the full
+        # batch-plus-view pairing in hand. Parks and re-parks are unaffected: their
+        # view always carries their own outputs (measured, nested history included).
+        base_items = [
+            item
+            for item in base_items
+            if not (
+                item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
+                and item.get("call_id") in run_state._held_output_call_ids_folded_this_turn
+            )
+        ]
     items = deduplicate_input_items_preferring_latest(base_items + converted_run_items)
     if isinstance(session, OpenAIConversationsSession):
         items = [_sanitize_openai_conversation_item(item) for item in items]
@@ -1154,6 +1198,7 @@ def extend_held_session_write(
     *,
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    run_items_are_the_session_view: bool = False,
 ) -> None:
     """Fold a detached exit's resolved items into the standing held batch.
 
@@ -1173,6 +1218,7 @@ def extend_held_session_write(
         None,
         run_items=run_items,
         reasoning_item_id_policy=reasoning_item_id_policy,
+        run_items_are_the_session_view=run_items_are_the_session_view,
     )
 
 

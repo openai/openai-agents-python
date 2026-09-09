@@ -1179,6 +1179,7 @@ class AgentRunner:
                                     extend_held_session_write(
                                         run_state,
                                         run_items=turn_session_items,
+                                        run_items_are_the_session_view=True,
                                         reasoning_item_id_policy=(
                                             run_state._reasoning_item_id_policy
                                         ),
@@ -1220,11 +1221,10 @@ class AgentRunner:
                                         )
                                     )
                                 else:
-                                    # An emptied resolved turn (a handoff input_filter
-                                    # can drop every item) still settles the pairs the
-                                    # batch already holds: the approved tool ran, and
-                                    # dropping its output with the filtered items would
-                                    # lose the Session's only record of that.
+                                    # An emptied resolved turn settles what the session
+                                    # view left the batch: outputs the filter removed
+                                    # this turn dropped with their calls at the fold
+                                    # boundary, and carried prior-turn pairs still land.
                                     run_state._current_turn_persisted_item_count = (
                                         await settle_held_batch_for_emptied_turn(
                                             run_state,
@@ -1674,6 +1674,9 @@ class AgentRunner:
                         not resuming_turn or isinstance(run_state._current_step, NextStepRunAgain)
                     ):
                         run_state._current_turn_persisted_item_count = 0
+                        # A handoff filter's session authority covers one turn, so the
+                        # folded-output record resets with the turn it described.
+                        run_state._held_output_call_ids_folded_this_turn.clear()
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
 
@@ -2205,6 +2208,7 @@ class AgentRunner:
                                 extend_held_session_write(
                                     run_state,
                                     run_items=session_items_for_turn(turn_result),
+                                    run_items_are_the_session_view=True,
                                     reasoning_item_id_policy=(run_state._reasoning_item_id_policy),
                                 )
                             append_model_response_if_new(

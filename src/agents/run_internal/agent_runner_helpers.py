@@ -634,6 +634,9 @@ async def save_final_turn_items_after_guardrails(
             items,
             reasoning_item_id_policy,
             pending_call_ids=_pending_approval_call_ids(run_state),
+            folded_output_call_ids=(
+                run_state._held_output_call_ids_folded_this_turn if run_state is not None else None
+            ),
         )
     return await save_result_to_session(
         session,

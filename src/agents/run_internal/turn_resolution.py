@@ -2464,6 +2464,13 @@ async def resolve_interrupted_turn(
             # ``on_tool_end``) leaves a retry that skips the completed invocation and
             # produces no new session items, and the batch would otherwise settle, or
             # be discarded as an emptied turn, without the output the tool produced.
+            folded_call_id = extract_tool_call_id(getattr(item, "raw_item", None))
+            if folded_call_id:
+                # Only this run can tell a current-turn folded output from carried
+                # prior-turn history, and a handoff filter's session authority covers
+                # exactly the current turn. The committer only ever folds the function
+                # family (measured), so the raw call id is the right key.
+                run_state._held_output_call_ids_folded_this_turn.add(folded_call_id)
             extend_held_session_write(
                 run_state,
                 run_items=[item],

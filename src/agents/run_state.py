@@ -907,6 +907,14 @@ class RunState(Generic[TContext, TAgent]):
     _session_write_in_progress: bool = field(default=False, repr=False)
     """Live ownership guard; independent serialized copies require caller serialization."""
 
+    _held_output_call_ids_folded_this_turn: set[str] = field(default_factory=set, repr=False)
+    """Call ids of tool outputs the commit boundary folded into the held batch this
+    turn. Deliberately transient and reset at each turn boundary: a handoff filter's
+    authority over session history covers exactly one turn, and only the live run can
+    tell a folded output of the current turn from carried prior-turn history. After a
+    checkpoint the set is empty, so a reattaching entry settle keeps the carried batch
+    whole."""
+
     _terminal_unrecoverable: bool = field(default=False, repr=False)
     """Set once a final output, its guardrails, and its terminal hooks have all completed.
 
@@ -956,6 +964,7 @@ class RunState(Generic[TContext, TAgent]):
         self._schema_version = CURRENT_SCHEMA_VERSION
         self._pending_session_write = None
         self._session_write_in_progress = False
+        self._held_output_call_ids_folded_this_turn = set()
         self._terminal_unrecoverable = False
         from .agent_tool_state import get_agent_tool_state_scope
 
@@ -966,6 +975,9 @@ class RunState(Generic[TContext, TAgent]):
         copied = copy.copy(self)
         copied._pending_session_write = copy.deepcopy(self._pending_session_write)
         copied._session_write_in_progress = False
+        copied._held_output_call_ids_folded_this_turn = set(
+            self._held_output_call_ids_folded_this_turn
+        )
         if self._context is None:
             return copied
         copied._context = self._context._copy_for_run_state()
