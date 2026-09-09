@@ -269,3 +269,119 @@ async def test_partial_approval_reinterruption_persists_the_deferred_prefix() ->
     # written again by the later resumes (the persisted count now covers it).
     assert call_ids.count("call_PARKED") == 1
     assert call_ids.count("call_PARKED_2") == 1
+
+
+def make_terminal_tool_agent(with_guardrails: bool = True) -> Agent:
+    """The approved tool IS terminal, so the resume ends in a final output."""
+    return Agent(
+        name="deferred repro (terminal)",
+        instructions="Always call write_thing.",
+        model=ScriptedModel(
+            [
+                ModelStep(output=[function_call("look_up", {"query": "x"}, call_id="call_LOOKUP")]),
+                ModelStep(
+                    output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]
+                ),
+            ]
+        ),
+        tools=[look_up, write_thing],
+        output_guardrails=[always_fine] if with_guardrails else [],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["write_thing"]),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_with_guardrails", [True, False])
+@pytest.mark.parametrize("streamed", [True, False])
+async def test_deferred_prefix_reaches_a_resume_that_ends_in_final_output(
+    resume_with_guardrails: bool, streamed: bool
+) -> None:
+    """The final-output exit needs the prefix too, in both runners.
+
+    ``_final_turn_items_for_persistence`` rebuilds the whole current response ONLY when
+    the agent has output guardrails; without them it returns the turn's items verbatim.
+    A resume may legitimately run without the guardrails the park had, and then the
+    deferred ``function_call`` was dropped on this exit.
+    """
+    session = SimpleListSession()
+
+    async def go(agent: Agent, run_input: object) -> object:
+        if streamed:
+            result = Runner.run_streamed(agent, run_input, session=session)  # type: ignore[arg-type]
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, run_input, session=session)  # type: ignore[arg-type]
+
+    first = await go(make_terminal_tool_agent(), "do the thing")
+    assert len(first.interruptions) == 1  # type: ignore[attr-defined]
+
+    resume_agent = make_terminal_tool_agent(with_guardrails=resume_with_guardrails)
+    serialized = json.dumps(first.to_state().to_json())  # type: ignore[attr-defined]
+    state = await RunState.from_json(resume_agent, json.loads(serialized))
+    state.approve(state.get_interruptions()[0])
+    await go(resume_agent, state)
+
+    items = await session.get_items()
+    call_ids = {item.get("call_id") for item in items if item.get("type") == "function_call"}
+    orphaned = [
+        item
+        for item in items
+        if item.get("type") == "function_call_output" and item.get("call_id") not in call_ids
+    ]
+    assert orphaned == []
+    assert "call_PARKED" in call_ids
+
+
+@pytest.mark.asyncio
+async def test_a_detached_resume_does_not_make_the_next_one_rewrite_the_session() -> None:
+    """``persisted_count`` can lie, so the prefix is confirmed against the Session.
+
+    ``_validate_resumed_session_output_guardrail_safety`` resets the counter to zero for a
+    DETACHED resume ("a detached Session cannot contribute its old persisted prefix").
+    That reset outlives the run, so a later resume reconnecting the original Session sees
+    zero and would rewrite items the Session already holds.
+    """
+    session = SimpleListSession()
+
+    parked = Runner.run_streamed(
+        make_multi_approval_agent(tool_use_behavior="run_llm_again"), "go", session=session
+    )
+    async for _ in parked.stream_events():
+        pass
+    assert len(parked.interruptions) == 2
+    # No deferral at park time: the interrupted turn's items ARE persisted.
+    persisted_at_park = [item.get("call_id") for item in await session.get_items()]
+    assert "call_PARKED" in persisted_at_park
+
+    deferring_agent = make_multi_approval_agent()
+    state = await RunState.from_json(
+        deferring_agent, json.loads(json.dumps(parked.to_state().to_json()))
+    )
+    state.approve(
+        next(
+            interruption
+            for interruption in state.get_interruptions()
+            if getattr(interruption.raw_item, "call_id", None) == "call_PARKED"
+        )
+    )
+    detached = Runner.run_streamed(deferring_agent, state, session=None)
+    async for _ in detached.stream_events():
+        pass
+
+    state = await RunState.from_json(
+        deferring_agent, json.loads(json.dumps(detached.to_state().to_json()))
+    )
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    reconnected = Runner.run_streamed(deferring_agent, state, session=session)
+    async for _ in reconnected.stream_events():
+        pass
+
+    call_ids = [
+        item.get("call_id")
+        for item in await session.get_items()
+        if item.get("type") == "function_call"
+    ]
+    assert call_ids.count("call_PARKED") == 1
+    assert call_ids.count("call_PARKED_2") == 1
