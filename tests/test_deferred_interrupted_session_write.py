@@ -152,9 +152,7 @@ def _make_emptying_handoff_agent() -> Agent:
     from agents import HandoffInputData, handoff
 
     def empties(data: HandoffInputData) -> HandoffInputData:
-        return HandoffInputData(
-            input_history=data.input_history, pre_handoff_items=(), new_items=()
-        )
+        return HandoffInputData(input_history=data.input_history, pre_handoff_items=(), new_items=())
 
     target = Agent(
         name="target",
@@ -182,6 +180,61 @@ def _make_emptying_handoff_agent() -> Agent:
         ),
         tools=[write_thing],
         handoffs=[handoff(target, input_filter=empties)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+
+
+def _make_partial_filter_handoff_agent() -> Agent:
+    """Two gated calls plus a handoff whose filter drops exactly one resolved output.
+
+    An ``input_filter`` is an arbitrary caller callable, so dropping a subset of the
+    resolved outputs is a legitimate shape; the held batch must not settle a call whose
+    output the filter took away.
+    """
+    from agents import HandoffInputData, handoff
+
+    def drops_one_output(data: HandoffInputData) -> HandoffInputData:
+        def keep(items: tuple) -> tuple:
+            kept = []
+            for item in items:
+                raw = getattr(item, "raw_item", None)
+                call_id = (
+                    raw.get("call_id") if isinstance(raw, dict) else getattr(raw, "call_id", None)
+                )
+                if call_id == "call_PARKED_2" and item.type == "tool_call_output_item":
+                    continue
+                kept.append(item)
+            return tuple(kept)
+
+        return HandoffInputData(
+            input_history=data.input_history,
+            pre_handoff_items=keep(data.pre_handoff_items),
+            new_items=keep(data.new_items),
+        )
+
+    target = Agent(
+        name="target",
+        instructions="x",
+        model=ScriptedModel([ModelStep(output=[assistant_message("done")])]),
+    )
+    return Agent(
+        name="deferred repro (partial filter)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("write_other", {"query": "x"}, call_id="call_PARKED_2"),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing, write_other],
+        handoffs=[handoff(target, input_filter=drops_one_output)],
         output_guardrails=[always_fine],
         tool_use_behavior=_DEFERRING_BEHAVIOR,
     )
@@ -483,6 +536,52 @@ async def test_an_emptied_resolved_turn_corrupts_nothing_in_either_runner(
     # The discard must reach the live state too: a stale held record would invalidate
     # any checkpoint later taken from this completed run.
     assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_filter_that_drops_one_output_takes_its_held_call_with_it(
+    streamed: bool,
+) -> None:
+    # The resolved turn is non-empty (one output survived the filter), so batch
+    # emptiness is the wrong safety predicate: settling the whole held batch would land
+    # the filtered call dangling, and discarding the whole batch would orphan the
+    # output the filter kept. Pairing is the contract, per call.
+    session = SimpleListSession()
+    agent = _make_partial_filter_handoff_agent()
+    first = await _run(agent, "go", session, streamed=streamed)
+    state = await _serialized_round_trip(first, agent)
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    resumed = await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
+    assert outputs - calls == set(), f"orphaned outputs: {sorted(map(str, outputs - calls))}"
+    assert "call_PARKED" in calls
+    assert "pending_session_write" not in resumed.to_state().to_json()
+    assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_held_resume_with_a_different_session_is_refused(streamed: bool) -> None:
+    # The held entry skip must not bypass the same-session contract: resuming the
+    # approval checkpoint against another Session would execute the tool and settle the
+    # withheld batch into the wrong conversation.
+    from agents.exceptions import UserError
+
+    session = SimpleListSession()
+    agent = _make_deferring_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+
+    other_session = SimpleListSession("other")
+    with pytest.raises(UserError, match="pending Session write"):
+        await _run(agent, state, other_session, streamed=streamed)
+
+    assert await other_session.get_items() == []
 
 
 @pytest.mark.asyncio
