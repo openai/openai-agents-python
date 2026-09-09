@@ -226,6 +226,7 @@ class BaseSandboxSession(abc.ABC):
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
     _pty_cleanup_tasks: set[asyncio.Task[Any]] | None = None
+    _deferred_dependency_close_task: asyncio.Task[Any] | None = None
     # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
     # cleanup must retain the backend in that case so it can be resumed instead of deleting the
     # only remaining copy of the workspace.
@@ -445,6 +446,15 @@ class BaseSandboxSession(abc.ABC):
         snapshot_task = asyncio.create_task(
             self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
         )
+
+        def mark_snapshot_durable(task: asyncio.Task[Any]) -> None:
+            try:
+                task.result()
+            except BaseException:
+                return
+            self._backend_preservation_required = False
+
+        snapshot_task.add_done_callback(mark_snapshot_durable)
         completion = asyncio.create_task(asyncio.wait((snapshot_task,)))
         caller_cancellation: asyncio.CancelledError | None = None
         timed_out = False
@@ -586,9 +596,12 @@ class BaseSandboxSession(abc.ABC):
             if cleanup_error is None:
                 cleanup_error = exc
         finally:
+            pending_cleanup_before_dependencies = self._has_pending_pty_cleanup_tasks()
             try:
                 await self._aclose_dependencies()
             except BaseException as exc:
+                if pending_cleanup_before_dependencies or self._has_pending_pty_cleanup_tasks():
+                    self._schedule_deferred_dependency_close()
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None:
@@ -655,7 +668,13 @@ class BaseSandboxSession(abc.ABC):
         await self.run_pre_stop_hooks()
 
     async def _aclose_dependencies(self) -> None:
-        caller_cancellation = await self._wait_for_tracked_cleanup_tasks()
+        caller_cancellation, timed_out = await self._wait_for_tracked_cleanup_tasks(
+            timeout=self._pty_cleanup_timeout_s()
+        )
+        if timed_out:
+            if caller_cancellation is not None:
+                raise caller_cancellation
+            raise asyncio.TimeoutError()
         dependencies = self._dependencies
         if dependencies is not None and not self._dependencies_closed:
             self._dependencies_closed = True
@@ -663,21 +682,52 @@ class BaseSandboxSession(abc.ABC):
         if caller_cancellation is not None:
             raise caller_cancellation
 
-    async def _wait_for_tracked_cleanup_tasks(self) -> asyncio.CancelledError | None:
-        """Wait for detached cleanup before closing dependencies it may still use."""
+    def _has_pending_pty_cleanup_tasks(self) -> bool:
+        return any(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+
+    async def _wait_for_tracked_cleanup_tasks(
+        self, *, timeout: float | None = None
+    ) -> tuple[asyncio.CancelledError | None, bool]:
+        """Wait for detached cleanup without cancelling tasks that still own provider resources."""
 
         caller_cancellation: asyncio.CancelledError | None = None
+        deadline = (
+            None if timeout is None else asyncio.get_running_loop().time() + max(timeout, 0.0)
+        )
         while True:
             tasks = tuple(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
             if not tasks:
                 break
-            completion = asyncio.gather(*tasks, return_exceptions=True)
+            remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+            if remaining is not None and remaining <= 0:
+                return caller_cancellation, True
             try:
-                await asyncio.shield(completion)
+                await asyncio.wait(tasks, timeout=remaining)
             except asyncio.CancelledError as error:
                 caller_cancellation = caller_cancellation or error
 
-        return caller_cancellation
+        return caller_cancellation, False
+
+    def _schedule_deferred_dependency_close(self) -> None:
+        task = self._deferred_dependency_close_task
+        if task is not None and not task.done():
+            return
+
+        task = asyncio.create_task(
+            self._finish_deferred_dependency_close(),
+            name="agents.deferred_dependency_close",
+        )
+        self._deferred_dependency_close_task = task
+
+        def consume_task_exception(done: asyncio.Task[Any]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(consume_task_exception)
+
+    async def _finish_deferred_dependency_close(self) -> None:
+        await self._wait_for_tracked_cleanup_tasks()
+        await self._aclose_dependencies()
 
     @staticmethod
     def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:

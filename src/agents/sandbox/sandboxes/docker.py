@@ -1340,25 +1340,26 @@ class DockerSandboxSession(BaseSandboxSession):
         if entry.wait_task is not None:
             entry.wait_task.cancel()
 
-        await self._refresh_pty_exit_code(entry)
-
-        if entry.exit_code is None:
-            await self._kill_pty_pid_path(entry.pid_path)
-        else:
-            await self._rm_best_effort(entry.pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
-
         try:
-            cast(Any, entry.sock).close()
-        except Exception:
-            pass
+            await self._refresh_pty_exit_code(entry)
 
-        if entry.reader_thread is not None:
-            await asyncio.to_thread(entry.reader_thread.join, 1.0)
+            if entry.exit_code is None:
+                await self._kill_pty_pid_path(entry.pid_path)
+            else:
+                await self._rm_best_effort(entry.pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
+        finally:
+            try:
+                cast(Any, entry.sock).close()
+            except Exception:
+                pass
 
-        await asyncio.gather(
-            *(task for task in (entry.wait_task,) if task is not None),
-            return_exceptions=True,
-        )
+            if entry.reader_thread is not None:
+                await asyncio.to_thread(entry.reader_thread.join, 1.0)
+
+            await asyncio.gather(
+                *(task for task in (entry.wait_task,) if task is not None),
+                return_exceptions=True,
+            )
 
     async def _kill_pty_pid_path(self, pid_path: Path) -> None:
         command = [

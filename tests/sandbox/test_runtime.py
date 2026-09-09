@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 import uuid
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, ClassVar, Literal, TypedDict, cast
 
@@ -685,19 +686,33 @@ async def test_runner_owned_cleanup_waits_for_detached_snapshot_before_closing_d
     )
 
     cleanup = asyncio.create_task(resources.cleanup())
-    await asyncio.wait_for(upload_started.wait(), timeout=0.5)
-    await asyncio.sleep(0.05)
-    assert not cleanup.done()
-    assert not snapshot_client.closed_before_upload
+    try:
+        await asyncio.wait_for(upload_started.wait(), timeout=0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, timeout=0.5)
 
-    release_upload.set()
-    with pytest.raises(asyncio.CancelledError):
-        await cleanup
+        assert not upload_finished.is_set()
+        assert not snapshot_client.closed
+        assert inner.shutdown_calls == 0
+        assert client.delete_calls == 0
+    finally:
+        release_upload.set()
+        if not cleanup.done():
+            with suppress(BaseException):
+                await asyncio.wait_for(cleanup, timeout=0.5)
+
+    async def wait_for_deferred_cleanup() -> None:
+        while not snapshot_client.closed:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_deferred_cleanup(), timeout=0.5)
 
     assert upload_finished.is_set()
     assert snapshot_client.closed
     assert not snapshot_client.closed_before_upload
-    assert inner.close_dependency_calls == 1
+    assert inner.shutdown_calls == 1
+    assert client.delete_calls == 1
+    assert inner.close_dependency_calls == 2
 
 
 @pytest.mark.asyncio
