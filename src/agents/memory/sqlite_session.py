@@ -8,7 +8,7 @@ import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from ..items import TResponseInputItem
 from .session import SessionABC, _await_mutation as _await_mutation
@@ -278,7 +278,9 @@ class SQLiteSession(SessionABC):
             for (message_data,) in rows:
                 try:
                     item = json.loads(message_data)
-                    items.append(item)
+                    if not isinstance(item, dict):
+                        raise TypeError("Session item must be a JSON object")
+                    items.append(cast(TResponseInputItem, item))
                 except (json.JSONDecodeError, TypeError):
                     # Skip invalid JSON entries
                     continue
@@ -385,7 +387,9 @@ class SQLiteSession(SessionABC):
                     message_data = result[0]
                     try:
                         item = json.loads(message_data)
-                        return item
+                        if not isinstance(item, dict):
+                            raise TypeError("Session item must be a JSON object")
+                        return cast(TResponseInputItem, item)
                     except (json.JSONDecodeError, TypeError):
                         # Drop corrupted JSON entries and keep looking for a valid item.
                         cursor = conn.execute(

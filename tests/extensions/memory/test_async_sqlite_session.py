@@ -87,7 +87,8 @@ async def test_async_sqlite_session_pop_item():
         await session.close()
 
 
-async def test_async_sqlite_session_pop_item_skips_corrupt_most_recent():
+@pytest.mark.parametrize("corrupt_data", ["not valid json {{{", "null"])
+async def test_async_sqlite_session_pop_item_skips_corrupt_most_recent(corrupt_data: str):
     """pop_item skips corrupt newest rows and returns the next valid item."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "async_pop_corrupt.db"
@@ -99,7 +100,7 @@ async def test_async_sqlite_session_pop_item_skips_corrupt_most_recent():
         conn = await session._get_connection()
         await conn.execute(
             f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-            (session.session_id, "not valid json {{{"),
+            (session.session_id, corrupt_data),
         )
         await conn.commit()
 
@@ -150,7 +151,10 @@ async def test_async_sqlite_session_get_items_limit():
         await session.close()
 
 
-async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+@pytest.mark.parametrize("corrupt_data", ["not valid json {{{", "null"])
+async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows(
+    corrupt_data: str,
+):
     """limit counts valid items, expanding past corrupt newest rows."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "async_limit_corrupt.db"
@@ -167,7 +171,7 @@ async def test_async_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
         conn = await session._get_connection()
         await conn.execute(
             f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-            (session.session_id, "not valid json {{{"),
+            (session.session_id, corrupt_data),
         )
         await conn.commit()
 

@@ -391,8 +391,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             for (message_data,) in rows:
                 try:
                     item = json.loads(message_data)
-                    items.append(item)
-                except json.JSONDecodeError:
+                    if not isinstance(item, dict):
+                        raise TypeError("Session item must be a JSON object")
+                    items.append(cast(TResponseInputItem, item))
+                except (json.JSONDecodeError, TypeError):
                     continue
             return items
 
@@ -545,7 +547,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                             continue
 
                         try:
-                            return json.loads(message_row[0])
+                            item = json.loads(message_row[0])
+                            if not isinstance(item, dict):
+                                raise TypeError("Session item must be a JSON object")
+                            return cast(TResponseInputItem, item)
                         except (json.JSONDecodeError, TypeError):
                             # Drop corrupted JSON entries and keep looking for a valid item.
                             continue

@@ -243,8 +243,10 @@ class AsyncSQLiteSession(SessionABC):
             for (message_data,) in rows:
                 try:
                     item = json.loads(message_data)
-                    items.append(item)
-                except json.JSONDecodeError:
+                    if not isinstance(item, dict):
+                        raise TypeError("Session item must be a JSON object")
+                    items.append(cast(TResponseInputItem, item))
+                except (json.JSONDecodeError, TypeError):
                     continue
             return items
 
@@ -366,7 +368,10 @@ class AsyncSQLiteSession(SessionABC):
             while result:
                 message_data = result[0]
                 try:
-                    return cast(TResponseInputItem, json.loads(message_data))
+                    item = json.loads(message_data)
+                    if not isinstance(item, dict):
+                        raise TypeError("Session item must be a JSON object")
+                    return cast(TResponseInputItem, item)
                 except (json.JSONDecodeError, TypeError):
                     cursor = await conn.execute(
                         f"""

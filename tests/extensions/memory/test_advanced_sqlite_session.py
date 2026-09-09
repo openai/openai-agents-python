@@ -2700,7 +2700,8 @@ async def test_get_items_explicit_limit_overrides_session_settings():
     session.close()
 
 
-async def test_get_items_limit_skips_corrupt_newest_rows():
+@pytest.mark.parametrize("corrupt_data", ["not valid json {{{", "null"])
+async def test_get_items_limit_skips_corrupt_newest_rows(corrupt_data: str):
     """limit counts valid items, expanding past corrupt newest rows."""
     session = AdvancedSQLiteSession(session_id="limit_corrupt_test", create_tables=True)
 
@@ -2716,7 +2717,7 @@ async def test_get_items_limit_skips_corrupt_newest_rows():
     conn = session._get_connection()
     cursor = conn.execute(
         f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-        (session.session_id, "not valid json {{{"),
+        (session.session_id, corrupt_data),
     )
     next_sequence = conn.execute(
         "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM message_structure "
@@ -2737,6 +2738,8 @@ async def test_get_items_limit_skips_corrupt_newest_rows():
     # The explicit-branch call resolves to the same rows.
     limited_explicit = await session.get_items(limit=2, branch_id="main")
     assert [item.get("content") for item in limited_explicit] == ["valid 1", "valid 2"]
+
+    assert await session.pop_item() == {"role": "user", "content": "valid 2"}
 
     session.close()
 

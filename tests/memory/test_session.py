@@ -383,7 +383,8 @@ async def test_session_memory_pop_different_sessions():
 
 
 @pytest.mark.asyncio
-async def test_sqlite_session_pop_item_skips_corrupt_most_recent():
+@pytest.mark.parametrize("corrupt_data", ["not valid json {{{", "null"])
+async def test_sqlite_session_pop_item_skips_corrupt_most_recent(corrupt_data: str):
     """pop_item skips corrupt newest rows and returns the next valid item."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_pop_corrupt.db"
@@ -395,7 +396,7 @@ async def test_sqlite_session_pop_item_skips_corrupt_most_recent():
         with session._locked_connection() as conn:
             conn.execute(
                 f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-                (session.session_id, "not valid json {{{"),
+                (session.session_id, corrupt_data),
             )
             conn.commit()
 
@@ -479,7 +480,8 @@ async def test_sqlite_session_get_items_with_limit():
 
 
 @pytest.mark.asyncio
-async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+@pytest.mark.parametrize("corrupt_data", ["not valid json {{{", "null"])
+async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows(corrupt_data: str):
     """limit counts valid items, expanding past corrupt newest rows."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_limit_corrupt.db"
@@ -496,7 +498,7 @@ async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
         with session._locked_connection() as conn:
             conn.execute(
                 f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-                (session.session_id, "not valid json {{{"),
+                (session.session_id, corrupt_data),
             )
             conn.commit()
 
