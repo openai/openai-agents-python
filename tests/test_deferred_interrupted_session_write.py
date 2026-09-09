@@ -941,7 +941,9 @@ async def test_a_failed_final_settle_fails_closed_with_the_batch_recorded(
     # checkpoint is rejected on load on purpose: the run ended mid-settle, and failing
     # closed beats replaying an approved side effect as if nothing happened.
     session = _FailingResumeSession()
-    resume_agent = _make_terminal_tool_agent()
+    # A guardrail-less resume: the final sweep returns the resolved items verbatim, so
+    # the held batch itself rides the append that fails.
+    resume_agent = _make_terminal_tool_agent(with_guardrails=False)
     state = await _parked_and_approved(
         _make_terminal_tool_agent(), session, streamed=streamed, resume_agent=resume_agent
     )
@@ -1032,3 +1034,66 @@ async def test_entry_settle_restores_the_conversations_sanitization() -> None:
     assert state._pending_session_write is None
     assert [item.get("call_id") for item in session.added] == ["call_PARKED", "call_PARKED"]
     assert all("id" not in item for item in session.added)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_terminal_resume_with_a_preamble_lands_it_once(streamed: bool) -> None:
+    # With output guardrails the final sweep rebuilds the whole current response, held
+    # batch included; the deduplication cannot key the assistant preamble, so feeding
+    # the batch again used to land the preamble twice.
+    session = SimpleListSession()
+    agent = _make_terminal_tool_agent(with_preamble=True)
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    assert _orphaned_outputs(items) == []
+    assert _parked_pair(items) == _EXPECTED_PAIR
+    preambles = [item for item in items if _PREAMBLE_TEXT in json.dumps(item)]
+    assert len(preambles) == 1
+
+
+def test_the_pairing_guard_speaks_every_approval_identity() -> None:
+    # A hosted MCP approval request identifies itself with ``id`` and its response
+    # points back with ``approval_request_id``; custom calls pair by ``call_id``. A
+    # request kind the guard cannot key would settle alone and poison the Session the
+    # same way an unpaired function call does.
+    from agents.run_internal.session_persistence import _held_items_safe_to_settle
+
+    unpaired_mcp: TResponseInputItem = {
+        "type": "mcp_approval_request",
+        "id": "mcpr_1",
+        "name": "do_it",
+        "server_label": "srv",
+        "arguments": "{}",
+    }
+    paired_mcp: TResponseInputItem = {
+        "type": "mcp_approval_request",
+        "id": "mcpr_2",
+        "name": "do_it",
+        "server_label": "srv",
+        "arguments": "{}",
+    }
+    mcp_response: TResponseInputItem = {
+        "type": "mcp_approval_response",
+        "approval_request_id": "mcpr_2",
+        "approve": True,
+    }
+    unpaired_custom: TResponseInputItem = {
+        "type": "custom_tool_call",
+        "call_id": "cust_1",
+        "name": "custom",
+        "input": "",
+    }
+    preamble: TResponseInputItem = {"role": "assistant", "content": "hi", "type": "message"}
+
+    kept = _held_items_safe_to_settle(
+        [unpaired_mcp, paired_mcp, mcp_response, unpaired_custom, preamble], [], None
+    )
+    assert kept == [paired_mcp, mcp_response, preamble]
+
+    still_pending = _held_items_safe_to_settle(
+        [unpaired_mcp], [], None, pending_call_ids={"mcpr_1"}
+    )
+    assert still_pending == [unpaired_mcp]
