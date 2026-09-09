@@ -478,6 +478,9 @@ async def test_an_emptied_resolved_turn_corrupts_nothing_in_either_runner(
     assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
     assert outputs - calls == set(), f"orphaned outputs: {sorted(map(str, outputs - calls))}"
     assert "pending_session_write" not in resumed.to_state().to_json()
+    # The discard must reach the live state too: a stale held record would invalidate
+    # any checkpoint later taken from this completed run.
+    assert state._pending_session_write is None
 
 
 @pytest.mark.asyncio
@@ -653,6 +656,8 @@ async def test_a_guardrail_crash_still_persists_the_parked_call(streamed: bool) 
     else:
         with pytest.raises(RuntimeError, match="guardrail crashed"):
             await Runner.run(resume_agent, state, session=session)
+    # The crash-path save claims the batch, so no stale record survives on the state.
+    assert state._pending_session_write is None
 
     items = await session.get_items()
     assert _orphaned_outputs(items) == []
