@@ -94,6 +94,10 @@ __all__ = [
 
 _SESSION_LIMIT_UNSET = object()
 
+# Serialized item types that represent a locally produced tool output, i.e. the output
+# kinds of the canonical call-to-output map.
+_LOCAL_TOOL_OUTPUT_TYPES = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values())
+
 
 async def admit_pending_input(
     *,
@@ -751,8 +755,16 @@ async def save_result_to_session(
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
     if response_id and is_openai_responses_compaction_aware_session(session):
+        # A settling held batch carries its tool outputs as already-converted input
+        # items through ``original_input``, so looking only at ``new_items`` would
+        # report no local tool output and compact the very response whose outputs just
+        # landed. The question is whether this append persists any local tool output,
+        # whichever slot carried it.
         has_local_tool_outputs = any(
             isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
+        ) or any(
+            isinstance(item, dict) and item.get("type") in _LOCAL_TOOL_OUTPUT_TYPES
+            for item in items_to_save
         )
         if has_local_tool_outputs:
             defer_compaction = getattr(session, "_defer_compaction", None)
@@ -996,6 +1008,7 @@ def defer_interrupted_session_write(
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     response_id: str | None = None,
+    store: bool | None = None,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
 
@@ -1060,6 +1073,9 @@ def defer_interrupted_session_write(
         # compaction bookkeeping the ordinary persistence path runs for it. An extend
         # keeps the original response: the batch is that response's write.
         "response_id": (pending.get("response_id") if pending is not None else None) or response_id,
+        "store": (pending.get("store") if pending is not None else None)
+        if (pending is not None and pending.get("store") is not None)
+        else store,
     }
     run_state._pending_session_write = record
 
@@ -1146,6 +1162,7 @@ async def resume_pending_session_write(
         # detached handoff filter dropped must not land dangling here either.
         settling = _held_items_safe_to_settle(pending["items"], [], None)
         response_id = pending.get("response_id")
+        settle_store = pending.get("store")
         run_state._pending_session_write = None
         if not settling:
             return
@@ -1159,6 +1176,7 @@ async def resume_pending_session_write(
             [],
             run_state,
             response_id=response_id,
+            store=settle_store,
             wrapper=wrapper,
             resumed_write_state=run_state,
         )

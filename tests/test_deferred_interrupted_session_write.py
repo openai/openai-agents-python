@@ -1361,10 +1361,13 @@ async def test_the_entry_settle_runs_the_compaction_bookkeeping() -> None:
 
     assert state._pending_session_write is None
     assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
-    assert any(
-        entry.get("response_id") == "resp_parked" or entry.get("deferred") == "resp_parked"
-        for entry in session.compactions
-    ), f"no compaction bookkeeping for the parked response: {session.compactions}"
+    # The batch carries the approved tool's output, so this response's compaction must
+    # be DEFERRED, not run: compacting it here would discard the very output that just
+    # landed. Asserting the specific hook is the point; "some hook fired" would pass
+    # either way.
+    assert session.compactions == [{"deferred": "resp_parked", "store": None}], (
+        f"expected a deferred compaction for the parked response, got {session.compactions}"
+    )
 
 
 @pytest.mark.asyncio

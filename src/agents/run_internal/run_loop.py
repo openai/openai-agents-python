@@ -1448,6 +1448,7 @@ async def start_streaming(
                                     streamed_result._reasoning_item_id_policy
                                 ),
                                 response_id=turn_result.model_response.response_id,
+                                store=store_setting,
                             )
                             reinterruption_items = []
                         elif turn_session_items:
@@ -2070,6 +2071,7 @@ async def start_streaming(
                             run_items=turn_session_items,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                             response_id=turn_result.model_response.response_id,
+                            store=store_setting,
                         )
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,

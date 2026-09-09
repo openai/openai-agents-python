@@ -177,9 +177,10 @@ class _PendingSessionWrite(TypedDict):
     recovers a half-acknowledged append. Absent or ``False`` keeps the released
     meaning: an append already approved for eager settlement on resume entry.
 
-    ``response_id`` records the model response the withheld batch belongs to, so the
-    settle can run the same compaction bookkeeping the ordinary persistence path does
-    for that response instead of appending behind its back.
+    ``response_id`` records the model response the withheld batch belongs to, and
+    ``store`` the store setting that response was produced under, so the settle runs
+    the same compaction bookkeeping the ordinary persistence path would have run for
+    it instead of appending behind its back.
     """
 
     session_id: str
@@ -188,6 +189,7 @@ class _PendingSessionWrite(TypedDict):
     persisted_count: int
     held: NotRequired[bool]
     response_id: NotRequired[str | None]
+    store: NotRequired[bool | None]
 
 
 def _default_run_state_validation_error(
@@ -4399,7 +4401,7 @@ async def _build_run_state_from_json(
             for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
         )
         base_keys = {"session_id", "items", "before", "persisted_count"}
-        held_keys = {"held", "response_id"} if held_keys_allowed else set()
+        held_keys = {"held", "response_id", "store"} if held_keys_allowed else set()
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
@@ -4410,6 +4412,11 @@ async def _build_run_state_from_json(
             or (
                 "response_id" in pending_write
                 and not isinstance(pending_write["response_id"], str | type(None))
+            )
+            or (
+                "store" in pending_write
+                and pending_write["store"] is not None
+                and type(pending_write["store"]) is not bool
             )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
