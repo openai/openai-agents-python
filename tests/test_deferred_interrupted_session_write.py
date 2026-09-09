@@ -152,7 +152,9 @@ def _make_emptying_handoff_agent() -> Agent:
     from agents import HandoffInputData, handoff
 
     def empties(data: HandoffInputData) -> HandoffInputData:
-        return HandoffInputData(input_history=data.input_history, pre_handoff_items=(), new_items=())
+        return HandoffInputData(
+            input_history=data.input_history, pre_handoff_items=(), new_items=()
+        )
 
     target = Agent(
         name="target",

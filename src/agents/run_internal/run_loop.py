@@ -2038,9 +2038,7 @@ async def start_streaming(
                             run_state,
                             session,
                             run_items=turn_session_items,
-                            reasoning_item_id_policy=(
-                                streamed_result._reasoning_item_id_policy
-                            ),
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                         )
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,
