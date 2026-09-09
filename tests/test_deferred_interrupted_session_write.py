@@ -684,6 +684,10 @@ async def test_the_held_batch_rides_a_non_streamed_result_into_its_checkpoint() 
     assert pending is not None and pending.get("held") is True
     assert "call_PARKED" in {item.get("call_id") for item in pending["items"]}
     assert pending.get("before") is None
+    # The batch carries only the withheld response: the accepted input persists
+    # eagerly even at a deferred park, so a tripwire discard can never take the
+    # Session's only copy of the input with it.
+    assert not any(item.get("role") == "user" for item in pending["items"])
 
 
 @pytest.mark.asyncio
@@ -924,3 +928,107 @@ async def test_a_detached_completion_clears_the_held_record(streamed: bool) -> N
     assert detached.final_output == "done"
     assert "pending_session_write" not in detached.to_state().to_json()
     assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_failed_final_settle_fails_closed_with_the_batch_recorded(
+    streamed: bool,
+) -> None:
+    # The final-output settle registers the claimed batch before appending, so a crash
+    # inside that append leaves the batch recorded on the state instead of silently
+    # losing the only copy of the approved call and its output. The resulting
+    # checkpoint is rejected on load on purpose: the run ended mid-settle, and failing
+    # closed beats replaying an approved side effect as if nothing happened.
+    session = _FailingResumeSession()
+    resume_agent = _make_terminal_tool_agent()
+    state = await _parked_and_approved(
+        _make_terminal_tool_agent(), session, streamed=streamed, resume_agent=resume_agent
+    )
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run(resume_agent, state, session, streamed=streamed)
+
+    pending = state._pending_session_write
+    assert pending is not None
+    recorded = {item.get("call_id") for item in pending["items"]}
+    assert "call_PARKED" in recorded
+    with pytest.raises(Exception, match="pending Session write"):
+        await RunState.from_json(resume_agent, state.to_json())
+
+
+class _RecordingConversationsSession:
+    """Stand-in with the Conversations class identity, at the boundary the settle checks.
+
+    The real ``OpenAIConversationsSession`` talks to the Conversations API; the settle
+    only consults its class via ``isinstance`` to decide whether the batch needs the
+    Conversations sanitization, so the fake records what would be sent instead.
+    """
+
+    def __new__(cls) -> _RecordingConversationsSession:
+        from agents.memory.openai_conversations_session import OpenAIConversationsSession
+
+        instance = object.__new__(
+            type("_FakeConversations", (OpenAIConversationsSession,), dict(cls.__dict__))
+        )
+        instance.session_id = "conv-1"
+        instance.added: list[TResponseInputItem] = []
+        return instance
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        return []
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.added.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        return None
+
+    async def clear_session(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_entry_settle_restores_the_conversations_sanitization() -> None:
+    # A batch extended while detached missed the Conversations-specific sanitization;
+    # the attached entry settle must restore it or the create-items request rejects
+    # stale provider ids the normal persistence path strips.
+    from agents.run_internal.run_steps import NextStepRunAgain
+    from agents.run_internal.session_persistence import resume_pending_session_write
+
+    session = _RecordingConversationsSession()
+    state = RunState(
+        context=None,
+        original_input="go",
+        starting_agent=_make_deferring_agent(),
+        max_turns=5,
+    )
+    state._current_step = NextStepRunAgain()
+    state._pending_session_write = {
+        "session_id": "conv-1",
+        "items": [
+            {
+                "type": "function_call",
+                "call_id": "call_PARKED",
+                "name": "write_thing",
+                "arguments": "{}",
+                "id": "__fake_id__",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_PARKED",
+                "output": "wrote:x",
+                "id": "__fake_id__",
+            },
+        ],
+        "before": None,
+        "persisted_count": 2,
+        "held": True,
+    }
+
+    await resume_pending_session_write(state, session)  # type: ignore[arg-type]
+
+    assert state._pending_session_write is None
+    assert [item.get("call_id") for item in session.added] == ["call_PARKED", "call_PARKED"]
+    assert all("id" not in item for item in session.added)
