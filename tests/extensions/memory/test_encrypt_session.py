@@ -42,6 +42,13 @@ def _invalid_encrypted_envelope() -> TResponseInputItem:
     )
 
 
+def _malformed_encrypted_envelope(payload: Any = 7) -> TResponseInputItem:
+    return cast(
+        TResponseInputItem,
+        {"__enc__": 1, "v": 1, "kid": "hkdf-v1", "payload": payload},
+    )
+
+
 @pytest.fixture
 def agent() -> Agent:
     """Fixture for a basic agent with a scripted model."""
@@ -938,6 +945,24 @@ async def test_encrypted_session_pop_mixed_expired_valid(
     underlying_session.close()
 
 
+@pytest.mark.parametrize("payload", [7, "\ud800"])
+async def test_encrypted_session_pop_skips_malformed_envelope(
+    payload: Any, encryption_key: str, underlying_session: SQLiteSession
+):
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    await session.add_items([{"role": "user", "content": "valid"}])
+    await underlying_session.add_items([_malformed_encrypted_envelope(payload)])
+
+    assert await session.pop_item() == {"role": "user", "content": "valid"}
+
+    underlying_session.close()
+
+
 async def test_encrypted_session_raw_string_key(underlying_session: SQLiteSession):
     """Test using raw string as encryption key (not base64)."""
     session = EncryptedSession(
@@ -995,6 +1020,43 @@ async def test_encrypted_session_get_items_limit_skips_invalid_latest_envelope(
 
     limited = await session.get_items(limit=1)
     assert [item.get("content") for item in limited] == ["older valid"]
+
+    underlying_session.close()
+
+
+@pytest.mark.parametrize("payload", [7, "\ud800"])
+async def test_encrypted_session_get_items_skips_malformed_envelope(
+    payload: Any, encryption_key: str, underlying_session: SQLiteSession
+):
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    await underlying_session.add_items([_malformed_encrypted_envelope(payload)])
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    assert await session.get_items(limit=1) == [{"role": "user", "content": "valid"}]
+
+    underlying_session.close()
+
+
+async def test_encrypted_session_get_items_propagates_configuration_error(
+    encryption_key: str, underlying_session: SQLiteSession
+):
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+        ttl=cast(Any, "invalid"),
+    )
+    await session.add_items([{"role": "user", "content": "valid"}])
+
+    with pytest.raises(TypeError):
+        await session.get_items()
+
+    assert await underlying_session.get_items()
 
     underlying_session.close()
 

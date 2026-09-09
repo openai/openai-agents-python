@@ -208,11 +208,15 @@ class EncryptedSession(SessionABC):
         if not _is_encrypted_envelope(item):
             return cast(TResponseInputItem, item)
 
+        payload = item["payload"]
+        if not isinstance(payload, str):
+            return None
+
         try:
-            token = item["payload"].encode("utf-8")
+            token = payload.encode("utf-8")
             plaintext = self.cipher.decrypt(token, ttl=self.ttl)
             return cast(TResponseInputItem, _from_json_bytes(plaintext))
-        except (InvalidToken, KeyError):
+        except (InvalidToken, UnicodeError, json.JSONDecodeError):
             return None
 
     def _unwrap_valid_items(
