@@ -113,8 +113,15 @@ def _make_multi_approval_agent(
     )
 
 
+_PREAMBLE_TEXT = "About to write the thing."
+
+
 def _make_terminal_tool_agent(
-    *, with_guardrails: bool = True, tripping: bool = False, crashing: bool = False
+    *,
+    with_guardrails: bool = True,
+    tripping: bool = False,
+    crashing: bool = False,
+    with_preamble: bool = False,
 ) -> Agent:
     """The approved tool is terminal, so the resume ends in a final output."""
     guardrails = [always_fine]
@@ -122,15 +129,16 @@ def _make_terminal_tool_agent(
         guardrails = [always_trips]
     if crashing:
         guardrails = [always_crashes]
+    parked_response = [function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]
+    if with_preamble:
+        parked_response = [assistant_message(_PREAMBLE_TEXT), *parked_response]
     return Agent(
         name="deferred repro (terminal)",
         instructions="Always call write_thing.",
         model=ScriptedModel(
             [
                 ModelStep(output=[function_call("look_up", {"query": "x"}, call_id="call_LOOKUP")]),
-                ModelStep(
-                    output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")]
-                ),
+                ModelStep(output=parked_response),
             ]
         ),
         tools=[look_up, write_thing],
@@ -387,6 +395,10 @@ async def test_partial_approval_reinterruption_keeps_one_canonical_batch(
     assert _orphaned_outputs(items) == []
     assert _call_ids(items).count("call_PARKED") == 1
     assert _call_ids(items).count("call_PARKED_2") == 1
+    # Every call must also keep its output: losing the first approval's output while
+    # the batch rides the second park is the symmetric corruption.
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert set(_call_ids(items)) == outputs
 
 
 @pytest.mark.asyncio
@@ -595,9 +607,12 @@ async def test_the_settled_batch_and_the_resolved_turn_land_as_one_ordered_write
 @pytest.mark.parametrize("streamed", [False, True])
 async def test_a_tripwire_after_approval_keeps_the_sanitized_pair(streamed: bool) -> None:
     session = SimpleListSession()
-    resume_agent = _make_terminal_tool_agent(tripping=True)
+    resume_agent = _make_terminal_tool_agent(tripping=True, with_preamble=True)
     state = await _parked_and_approved(
-        _make_terminal_tool_agent(), session, streamed=streamed, resume_agent=resume_agent
+        _make_terminal_tool_agent(with_preamble=True),
+        session,
+        streamed=streamed,
+        resume_agent=resume_agent,
     )
 
     if streamed:
@@ -605,6 +620,9 @@ async def test_a_tripwire_after_approval_keeps_the_sanitized_pair(streamed: bool
         with pytest.raises(OutputGuardrailTripwireTriggered):
             async for _ in resumed.stream_events():
                 pass
+        # The declaration is discarded when the blocked outcome is decided; a record
+        # that outlives the tripwire would invalidate the run's checkpoint.
+        assert "pending_session_write" not in resumed.to_state().to_json()
     else:
         with pytest.raises(OutputGuardrailTripwireTriggered):
             await Runner.run(resume_agent, state, session=session)
@@ -612,6 +630,9 @@ async def test_a_tripwire_after_approval_keeps_the_sanitized_pair(streamed: bool
     items = await session.get_items()
     assert _orphaned_outputs(items) == []
     assert _parked_pair(items) == _EXPECTED_PAIR
+    # The redaction drops the blocked response's preamble; feeding the raw held batch
+    # into the blocked save would resurrect it.
+    assert not any(_PREAMBLE_TEXT in json.dumps(item) for item in items)
 
 
 @pytest.mark.asyncio
@@ -628,6 +649,7 @@ async def test_a_guardrail_crash_still_persists_the_parked_call(streamed: bool) 
         with pytest.raises(RuntimeError, match="guardrail crashed"):
             async for _ in resumed.stream_events():
                 pass
+        assert "pending_session_write" not in resumed.to_state().to_json()
     else:
         with pytest.raises(RuntimeError, match="guardrail crashed"):
             await Runner.run(resume_agent, state, session=session)
