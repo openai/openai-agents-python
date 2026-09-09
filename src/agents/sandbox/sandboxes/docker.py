@@ -1094,7 +1094,7 @@ class DockerSandboxSession(BaseSandboxSession):
         if pruned_entry is not None:
             try:
                 await self._settle_pty_cleanup(
-                    self._terminate_pty_entry(pruned_entry), propagate_timeout=False
+                    self._terminate_pty_entry(pruned_entry), propagate_timeout=True
                 )
             except BaseException:
                 await self._rollback_pty_start(
@@ -1309,7 +1309,9 @@ class DockerSandboxSession(BaseSandboxSession):
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._settle_pty_cleanup(self._terminate_pty_entry(removed))
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(removed), propagate_timeout=False
+                )
             live_process_id = None
 
         return PtyExecUpdate(
@@ -1374,8 +1376,11 @@ class DockerSandboxSession(BaseSandboxSession):
             "sh",
             sandbox_path_str(pid_path),
         ]
-        try:
-            await self._exec_run(
+        # Keep the whole executor operation independently owned. In particular, a kill queued
+        # behind all Docker workers must still start after this caller's deadline expires; a
+        # cancelled queued future would otherwise leave both the process and PID file orphaned.
+        kill_task = asyncio.create_task(
+            self._exec_run(
                 cmd=command,
                 workdir=None,
                 user=None,
@@ -1383,7 +1388,17 @@ class DockerSandboxSession(BaseSandboxSession):
                 command_for_errors=("kill", sandbox_path_str(pid_path)),
                 kill_on_timeout=False,
                 keep_running_on_timeout=True,
-            )
+            ),
+            name="agents.docker_pty_kill",
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(kill_task), timeout=_PTY_CLEANUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self._track_pty_cleanup_task(kill_task)
+        except asyncio.CancelledError:
+            if not kill_task.done():
+                self._track_pty_cleanup_task(kill_task)
+            raise
         except Exception:
             pass
 

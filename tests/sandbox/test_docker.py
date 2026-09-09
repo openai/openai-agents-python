@@ -4772,11 +4772,11 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
         release_first_kill.set()
         if first_kill_started.is_set():
             await asyncio.wait_for(asyncio.to_thread(first_kill_finished.wait), timeout=0.5)
-            if cleanup_task is not None:
-                if not cleanup_task.done():
-                    cleanup_task.cancel()
-                with suppress(BaseException):
-                    await cleanup_task
+        if cleanup_task is not None:
+            if not cleanup_task.done():
+                cleanup_task.cancel()
+            with suppress(BaseException):
+                await cleanup_task
 
     async def wait_for_first_socket_close() -> None:
         while not first_socket.closed:

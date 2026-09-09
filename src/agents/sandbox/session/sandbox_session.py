@@ -264,6 +264,9 @@ class SandboxSession(BaseSandboxSession):
     def _runtime_has_protected_mount_authority(self) -> bool:
         return self._inner._runtime_has_protected_mount_authority()
 
+    def _should_preserve_backend_on_cleanup(self) -> bool:
+        return self._inner._should_preserve_backend_on_cleanup()
+
     @property
     def dependencies(self) -> Dependencies:
         return self._inner.dependencies

@@ -102,7 +102,11 @@ class _SandboxSessionResources:
                     cleanup_error = exc
             finally:
                 try:
-                    if self._client is not None and isinstance(self._session, SandboxSession):
+                    if (
+                        self._client is not None
+                        and isinstance(self._session, SandboxSession)
+                        and not self._session._should_preserve_backend_on_cleanup()
+                    ):
                         await self._client.delete(self._session)
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:

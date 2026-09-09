@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
 
+from agents.sandbox.manifest import Manifest
 from agents.sandbox.session import base_sandbox_session
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 
@@ -262,7 +264,8 @@ async def test_pty_cleanup_batch_uses_one_deadline_and_starts_every_entry() -> N
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_for_all_started(), timeout=0.5)
-        await asyncio.wait_for(batch, timeout=0.5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(batch, timeout=0.5)
         assert completed == []
 
         release.set()
@@ -326,7 +329,7 @@ async def test_stop_persists_snapshot_after_cleanup_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _session()
-    session.state = SimpleNamespace(manifest=object(), type="test")
+    session.state = SimpleNamespace(manifest=Manifest(), type="test")
     monkeypatch.setattr(
         base_sandbox_session,
         "validate_manifest_mount_credential_boundaries",
@@ -359,3 +362,32 @@ async def test_stop_persists_snapshot_after_cleanup_cancellation(
         await stop_task
 
     assert persisted
+
+
+@pytest.mark.asyncio
+async def test_stop_preserves_original_cleanup_failure_when_snapshot_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.state = SimpleNamespace(manifest=Manifest(), type="test")
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+
+    async def before_stop() -> None:
+        raise RuntimeError("pty cleanup failed")
+
+    async def persist_snapshot() -> None:
+        raise ValueError("snapshot failed")
+
+    session._before_stop = before_stop
+    session._persist_snapshot = persist_snapshot
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await inspect.unwrap(BaseSandboxSession.stop)(session)
+
+    assert str(exc_info.value) == "pty cleanup failed"
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert session._should_preserve_backend_on_cleanup()

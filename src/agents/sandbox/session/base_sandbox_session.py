@@ -225,7 +225,11 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
-    _pty_cleanup_tasks: set[asyncio.Task[None]] | None = None
+    _pty_cleanup_tasks: set[asyncio.Task[Any]] | None = None
+    # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
+    # cleanup must retain the backend in that case so it can be resumed instead of deleting the
+    # only remaining copy of the workspace.
+    _backend_preservation_required: bool = False
     _pty_lock: asyncio.Lock
     _pty_processes: dict[int, Any]
     _reserved_pty_process_ids: set[int]
@@ -407,7 +411,14 @@ class BaseSandboxSession(abc.ABC):
             except BaseException as before_stop_error:
                 # Persist before re-raising cancellation or a cleanup deadline/error so the
                 # backend cannot be deleted with workspace state that exists only remotely.
-                await self._persist_snapshot_before_stop_error()
+                self._backend_preservation_required = True
+                snapshot_error = await self._persist_snapshot_before_stop_error()
+                if snapshot_error is None:
+                    self._backend_preservation_required = False
+                else:
+                    # Keep the cleanup failure that caused stop() to fail as the primary error,
+                    # while retaining the snapshot failure as diagnostic context.
+                    raise before_stop_error from snapshot_error
                 if isinstance(before_stop_error, Exception):
                     wrapped = self._wrap_stop_error(before_stop_error)
                     if wrapped is not before_stop_error:
@@ -415,6 +426,7 @@ class BaseSandboxSession(abc.ABC):
                 raise
             try:
                 await self._persist_snapshot()
+                self._backend_preservation_required = False
             except Exception as error:
                 wrapped = self._wrap_stop_error(error)
                 if wrapped is error:
@@ -423,18 +435,52 @@ class BaseSandboxSession(abc.ABC):
         finally:
             await self._after_stop()
 
-    async def _persist_snapshot_before_stop_error(self) -> None:
-        """Persist a snapshot even if stop is cancelled again while doing so."""
+    async def _persist_snapshot_before_stop_error(self) -> BaseException | None:
+        """Persist a snapshot with a deadline without replacing the original stop failure."""
 
         snapshot_task = asyncio.create_task(
             self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
         )
-        while not snapshot_task.done():
-            try:
-                await asyncio.shield(snapshot_task)
-            except asyncio.CancelledError:
-                continue
-        snapshot_task.result()
+        completion = asyncio.create_task(asyncio.wait((snapshot_task,)))
+        caller_cancellation: asyncio.CancelledError | None = None
+        timed_out = False
+        deadline = asyncio.get_running_loop().time() + self._pty_cleanup_timeout_s()
+        try:
+            while not completion.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
+                except asyncio.CancelledError as error:
+                    caller_cancellation = caller_cancellation or error
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+
+            if completion.done():
+                completion.result()
+                try:
+                    snapshot_task.result()
+                except BaseException as error:
+                    return error
+                return None
+
+            if timed_out:
+                # Keep the operation owned after the caller gives up waiting. The backend is
+                # retained because a snapshot that is still running cannot be treated as durable.
+                self._track_pty_cleanup_task(snapshot_task)
+                return asyncio.TimeoutError()
+            if caller_cancellation is not None:
+                # This branch is only reachable if the completion task became done between the
+                # loop condition and the cancellation; keep the original stop failure primary.
+                return caller_cancellation
+            return asyncio.TimeoutError()
+        finally:
+            if not completion.done():
+                completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
 
     async def _before_stop(self) -> None:
         """Run transient process cleanup before snapshot persistence."""
@@ -463,6 +509,11 @@ class BaseSandboxSession(abc.ABC):
 
     def supports_pty(self) -> bool:
         return False
+
+    def _should_preserve_backend_on_cleanup(self) -> bool:
+        """Return whether cleanup must retain the provider backend for a later resume."""
+
+        return self._backend_preservation_required
 
     @redact_mount_error_data
     async def shutdown(self) -> None:
@@ -747,14 +798,14 @@ class BaseSandboxSession(abc.ABC):
             return float(timeout)
         return _DEFAULT_PTY_CLEANUP_TIMEOUT_S
 
-    def _track_pty_cleanup_task(self, task: asyncio.Task[None]) -> None:
+    def _track_pty_cleanup_task(self, task: asyncio.Task[Any]) -> None:
         tasks = self._pty_cleanup_tasks
         if tasks is None:
             tasks = set()
             self._pty_cleanup_tasks = tasks
         tasks.add(task)
 
-        def forget_task(done: asyncio.Task[None]) -> None:
+        def forget_task(done: asyncio.Task[Any]) -> None:
             tasks.discard(done)
             if not done.cancelled():
                 done.exception()
@@ -859,7 +910,7 @@ class BaseSandboxSession(abc.ABC):
             for entry in entries
         ]
 
-        def consume_cleanup_task_exception(task: asyncio.Task[None]) -> None:
+        def consume_cleanup_task_exception(task: asyncio.Task[Any]) -> None:
             if not task.cancelled():
                 task.exception()
 
@@ -891,6 +942,8 @@ class BaseSandboxSession(abc.ABC):
             raise first_error
         if caller_cancellation is not None:
             raise caller_cancellation
+        if pending:
+            raise asyncio.TimeoutError()
 
     async def pty_exec_start(
         self,
