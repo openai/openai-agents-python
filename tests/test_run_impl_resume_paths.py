@@ -501,7 +501,14 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
-    ["old-schema", "batch-shape", "held-shape", "held-with-before", "held-under-1-17"],
+    [
+        "old-schema",
+        "batch-shape",
+        "held-shape",
+        "held-with-before",
+        "held-under-1-17",
+        "held-keys-without-held",
+    ],
 )
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
@@ -515,6 +522,10 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         payload["pending_session_write"]["items"] = "not an item batch"
     elif invalid == "held-shape":
         payload["pending_session_write"]["held"] = "yes"
+    elif invalid == "held-keys-without-held":
+        # response_id and store describe the withheld response, so they are refused on
+        # an ordinary pending write where nothing consumes them.
+        payload["pending_session_write"]["response_id"] = "resp_1"
     elif invalid == "held-under-1-17":
         # 1.17 defined the pending write as exactly four keys, so the held variant is
         # only readable under the version that introduced it.
