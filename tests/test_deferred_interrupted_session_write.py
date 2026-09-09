@@ -1728,6 +1728,45 @@ async def test_an_ordinary_mcp_approval_response_defers_compaction_too() -> None
 
 
 @pytest.mark.asyncio
+async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote() -> None:
+    # A reattached detached carry can reach the final exit with a zero persisted
+    # count, so the batch settles through the final sweep's direct save. That save
+    # must speak the same settle dialect as every other one: the deferral must see
+    # the batch's outputs even when the final turn carries none of its own, and the
+    # returned count must cover what the append actually wrote.
+    from agents.items import MessageOutputItem
+    from agents.run_internal.agent_runner_helpers import save_final_turn_items_after_guardrails
+    from agents.testing.model import assistant_message
+
+    session = _CompactionRecordingSession()
+    agent = _make_deferring_agent()
+    state = object.__new__(RunState)
+    state._pending_session_write = None
+    state._current_turn_persisted_item_count = 0
+    state._reasoning_item_id_policy = None
+    state._current_step = None
+    held: list[TResponseInputItem] = [
+        {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_PARKED", "output": "ok"},
+    ]
+
+    count = await save_final_turn_items_after_guardrails(
+        session=session,
+        run_state=state,
+        session_persistence_enabled=True,
+        input_guardrail_results=[],
+        items=[MessageOutputItem(agent=agent, raw_item=assistant_message("done"))],
+        response_id="resp_final",
+        held_input=held,
+    )
+
+    assert [entry for entry in session.compactions if "deferred" in entry] == [
+        {"deferred": "resp_final", "store": None}
+    ]
+    assert count == len(await session.get_items())
+
+
+@pytest.mark.asyncio
 async def test_the_entry_settle_runs_the_compaction_bookkeeping() -> None:
     # The entry settle goes through the canonical persistence path, so a
     # compaction-aware backend still gets the bookkeeping for the response the held
