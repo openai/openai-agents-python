@@ -530,13 +530,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             try:
                 popped = await self.underlying_session.pop_item()
             except (Exception, asyncio.CancelledError):
+                # The deletion may have committed before acknowledgement failed.
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
                 self._mutation_generation += 1
                 raise
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
                 self._mutation_generation += 1
             return popped
 

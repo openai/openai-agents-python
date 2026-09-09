@@ -2262,7 +2262,7 @@ class Converter:
                 None,
             )
         elif isinstance(tool, ImageGenerationTool):
-            return tool.tool_config, None
+            return cast(ResponsesToolParam, tool.tool_config), None
         elif isinstance(tool, CodeInterpreterTool):
             return tool.tool_config, None
         elif isinstance(tool, LocalShellTool):

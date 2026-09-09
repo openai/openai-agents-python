@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import threading
 import warnings as warnings_module
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -157,6 +160,139 @@ class TestOpenAIResponsesCompactionSession:
         await session.add_items(items)
 
         mock_session.add_items.assert_called_once_with(items)
+
+    @pytest.mark.asyncio
+    async def test_pop_item_invalidates_response_chain(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "remove me"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        # Seed deferred work through the runner's compaction hook.
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        assert await session.pop_item() == item
+        assert await session.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+        assert session._get_deferred_compaction_response_id() is None
+        assert session._last_unstored_response_id is None
+
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
+    async def test_empty_pop_preserves_response_chain(self) -> None:
+        underlying = self.create_mock_session()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        assert await session.pop_item() is None
+
+        assert session._get_deferred_compaction_response_id() == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
+        await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-old"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["cancelled", "error"])
+    async def test_settled_pop_failure_invalidates_response_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        # Gate the real SQLite commit acknowledgement so cancellation cannot undo the pop.
+        committed = threading.Event()
+        allow_return = threading.Event()
+
+        class PausingCommitConnection(sqlite3.Connection):
+            pause_commit = True
+
+            def commit(self) -> None:
+                super().commit()
+                if self.pause_commit:
+                    self.pause_commit = False
+                    committed.set()
+                    assert allow_return.wait(timeout=10)
+                    if outcome == "error":
+                        raise RuntimeError("commit acknowledgement failed")
+
+        underlying = SQLiteSession("settled-pop", tmp_path / "settled-pop.db")
+        history: list[TResponseInputItem] = [
+            {"role": "user", "content": "keep me"},
+            {"role": "assistant", "content": "remove me"},
+        ]
+        await underlying.add_items(history)
+        connection = sqlite3.connect(
+            str(tmp_path / "settled-pop.db"),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with underlying._connections_lock:
+            underlying._connections.add(connection)
+        monkeypatch.setattr(underlying, "_get_connection", lambda: connection)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="settled-pop",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+        mutation = asyncio.create_task(session.pop_item())
+        try:
+            assert await asyncio.to_thread(committed.wait, 10)
+            if outcome == "cancelled":
+                mutation.cancel()
+            allow_return.set()
+            if outcome == "cancelled":
+                with pytest.raises(asyncio.CancelledError):
+                    await mutation
+            else:
+                with pytest.raises(RuntimeError, match="commit acknowledgement failed"):
+                    await mutation
+
+            assert await session.get_items() == history[:1]
+            assert not session._mutation_lock.locked()
+            with pytest.raises(ValueError, match="requires a response_id"):
+                await session.run_compaction({"force": True})
+            mock_client.responses.compact.assert_not_awaited()
+            assert session._get_deferred_compaction_response_id() is None
+            assert session._last_unstored_response_id is None
+            assert await underlying.get_items() == history[:1]
+        finally:
+            allow_return.set()
+            if not mutation.done():
+                mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+            underlying.close()
 
     @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:
