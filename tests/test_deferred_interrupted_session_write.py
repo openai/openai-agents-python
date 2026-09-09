@@ -960,6 +960,32 @@ async def test_a_failed_final_settle_fails_closed_with_the_batch_recorded(
         await RunState.from_json(resume_agent, state.to_json())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_failed_guarded_final_settle_fails_closed(streamed: bool) -> None:
+    # With output guardrails the final sweep rebuilds the response and the held batch
+    # is deduplicated out of the append, but the append still lands the approved call
+    # and output, so the recovery registration must stay armed: a crash inside it must
+    # leave the batch recorded, not silently lost. Guards the interaction between the
+    # dedup and the crash-safe registration.
+    session = _FailingResumeSession()
+    resume_agent = _make_terminal_tool_agent(with_preamble=True)
+    state = await _parked_and_approved(
+        _make_terminal_tool_agent(with_preamble=True),
+        session,
+        streamed=streamed,
+        resume_agent=resume_agent,
+    )
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run(resume_agent, state, session, streamed=streamed)
+
+    pending = state._pending_session_write
+    assert pending is not None
+    assert "call_PARKED" in {item.get("call_id") for item in pending["items"]}
+
+
 class _RecordingConversationsSession:
     """Stand-in with the Conversations class identity, at the boundary the settle checks.
 
@@ -1217,3 +1243,64 @@ async def test_registration_forces_the_conversations_reasoning_policy() -> None:
     assert pending is not None
     reasoning_items = [item for item in pending["items"] if item.get("type") == "reasoning"]
     assert reasoning_items and reasoning_items[0].get("id") == "rs_server_1"
+
+
+@pytest.mark.asyncio
+async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> None:
+    # The zero-count branch of the final save: with guardrails the rebuilt items carry
+    # the held batch, so it deduplicates out of the append, yet the append still lands
+    # the approved call and output. The recovery registration must stay armed off the
+    # claimed-batch flag, not the emptied payload, or a failing append loses the batch
+    # with no pending record to reconcile.
+    from openai.types.responses import ResponseFunctionToolCall
+
+    from agents.items import ToolCallItem, ToolCallOutputItem
+    from agents.run_internal.agent_runner_helpers import save_final_turn_items_after_guardrails
+
+    session = _FailingResumeSession()
+    agent = _make_deferring_agent()
+    state = RunState(context=None, original_input="go", starting_agent=agent, max_turns=5)
+    state._current_turn_persisted_item_count = 0
+
+    call = ResponseFunctionToolCall(
+        call_id="call_PARKED", name="write_thing", arguments="{}", type="function_call"
+    )
+    held = [
+        {
+            "type": "function_call",
+            "call_id": "call_PARKED",
+            "name": "write_thing",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_PARKED", "output": "wrote:x"},
+    ]
+    # The rebuilt final items already contain the held batch (guardrail rebuild), so the
+    # held payload deduplicates out of the append.
+    final_items = [
+        ToolCallItem(agent=agent, raw_item=call),
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call_output",
+                "call_id": "call_PARKED",
+                "output": "wrote:x",
+            },
+            output="wrote:x",
+        ),
+    ]
+
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await save_final_turn_items_after_guardrails(
+            session=session,
+            run_state=state,
+            session_persistence_enabled=True,
+            input_guardrail_results=[],
+            items=final_items,
+            response_id=None,
+            held_input=held,  # type: ignore[arg-type]
+        )
+
+    # The append was registered before it ran, so the batch is recorded to reconcile.
+    assert state._pending_session_write is not None
+    assert "call_PARKED" in {i.get("call_id") for i in state._pending_session_write["items"]}
