@@ -320,6 +320,30 @@ def _should_defer_interrupted_session_items(
     return _has_output_guardrails(agent, run_config) and agent.tool_use_behavior != "run_llm_again"
 
 
+def _deferred_interrupted_session_prefix(
+    agent: Agent[Any],
+    run_config: RunConfig,
+    *,
+    base_session_items: Sequence[RunItem],
+    persisted_count: int,
+    session_start: int | None,
+) -> list[RunItem]:
+    """Return the interrupted response's session items whose write was deferred.
+
+    When ``_should_defer_interrupted_session_items`` gated the interruption-time write,
+    nothing of the current response reached the Session. Once a resume commits to
+    continuing the run, this prefix must be persisted ahead of the resolved turn's items
+    so a tool output never lands without its ``function_call``. Empty whenever the
+    interruption-time write actually ran, something of the current turn is already
+    persisted, or the resumed response boundary could not locate the session start.
+    """
+    if not _should_defer_interrupted_session_items(agent, run_config):
+        return []
+    if persisted_count != 0 or session_start is None:
+        return []
+    return list(base_session_items[session_start:])
+
+
 def _validate_resumed_session_output_guardrail_safety(
     *,
     agent: Agent[Any],
