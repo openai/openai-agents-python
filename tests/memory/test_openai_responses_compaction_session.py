@@ -159,6 +159,76 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.add_items.assert_called_once_with(items)
 
     @pytest.mark.asyncio
+    async def test_pop_item_invalidates_response_chain(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "remove me"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        # Seed deferred work through the runner's compaction hook.
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        assert await session.pop_item() == item
+        assert await session.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+        assert session._get_deferred_compaction_response_id() is None
+        assert session._last_unstored_response_id is None
+
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["empty", "error", "cancelled"])
+    async def test_pop_item_preserves_response_chain_without_removal(self, outcome: str) -> None:
+        underlying = self.create_mock_session()
+        if outcome == "error":
+            underlying.pop_item.side_effect = RuntimeError("pop failed")
+        elif outcome == "cancelled":
+            underlying.pop_item.side_effect = asyncio.CancelledError()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        if outcome == "empty":
+            assert await session.pop_item() is None
+        elif outcome == "error":
+            with pytest.raises(RuntimeError, match="pop failed"):
+                await session.pop_item()
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await session.pop_item()
+
+        assert session._get_deferred_compaction_response_id() == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
+        await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-old"
+
+    @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:
         mock_session = self.create_mock_session()
         mock_session.get_items.return_value = [{"type": "message", "content": "test"}]
