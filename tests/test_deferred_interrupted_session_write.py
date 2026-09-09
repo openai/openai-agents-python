@@ -1753,6 +1753,115 @@ def _make_secret_failing_extractor_handoff_agent() -> Agent:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_a_filtered_unkeyed_sibling_stays_out_of_the_session(streamed: bool) -> None:
+    # The batch carries the parked response's unkeyed companions (an assistant
+    # preamble, an id-less reasoning item), and the filter's authority covers them
+    # exactly as it covers the outputs: removed from the view means removed from
+    # session history, keyed or not.
+    from agents import HandoffInputData, handoff
+
+    def drops_preamble(data: HandoffInputData) -> HandoffInputData:
+        def keep(items: tuple) -> tuple:
+            return tuple(item for item in items if item.type != "message_output_item")
+
+        return HandoffInputData(
+            input_history=data.input_history,
+            pre_handoff_items=keep(data.pre_handoff_items),
+            new_items=keep(data.new_items),
+        )
+
+    target = Agent(
+        name="target",
+        instructions="x",
+        model=ScriptedModel([ModelStep(output=[assistant_message("done")])]),
+    )
+    agent = Agent(
+        name="deferred repro (unkeyed sibling)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        assistant_message("PREAMBLE-THE-FILTER-REMOVED"),
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing],
+        handoffs=[handoff(target, input_filter=drops_preamble)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    assert not any("PREAMBLE-THE-FILTER-REMOVED" in json.dumps(item) for item in items)
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert "call_PARKED" in calls and "call_PARKED" in outputs
+    assert calls - outputs == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_an_additive_filter_keeps_the_batchs_companions(streamed: bool) -> None:
+    # A filter that only appends removed nothing, so the parked response's unkeyed
+    # companions must persist: their absence from the resolved items says nothing,
+    # because they ride the filtered pre-step view, and only absence from the whole
+    # filtered view is the filter's verdict.
+    from agents import HandoffInputData, handoff
+    from agents.items import MessageOutputItem
+
+    def additive(data: HandoffInputData) -> HandoffInputData:
+        injected = MessageOutputItem(
+            agent=Agent(name="filler", instructions="x"),
+            raw_item=assistant_message("INJECTED-BY-FILTER"),
+        )
+        return data.clone(new_items=(*data.new_items, injected))
+
+    target = Agent(
+        name="target",
+        instructions="x",
+        model=ScriptedModel([ModelStep(output=[assistant_message("done")])]),
+    )
+    agent = Agent(
+        name="deferred repro (additive filter)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        assistant_message("COMPANION-KEPT-BY-FILTER"),
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing],
+        handoffs=[handoff(target, input_filter=additive)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    assert any("COMPANION-KEPT-BY-FILTER" in json.dumps(item) for item in items)
+    calls = set(_call_ids(items))
+    outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
+    assert "call_PARKED" in calls and "call_PARKED" in outputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 async def test_the_filters_authority_survives_a_json_retry_of_the_crashed_turn(
     streamed: bool,
 ) -> None:
