@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 
@@ -36,7 +37,12 @@ async def always_fine(
     return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
 
 
-def make_agent() -> Agent:
+DEFERRING_BEHAVIOR = StopAtTools(stop_at_tool_names=["finish"])
+
+
+def make_agent(
+    tool_use_behavior: StopAtTools | Literal["run_llm_again"] = DEFERRING_BEHAVIOR,
+) -> Agent:
     return Agent(
         name="deferred repro",
         instructions="Always call write_thing.",
@@ -58,7 +64,7 @@ def make_agent() -> Agent:
         # tool is NOT in the stop list, so the resume resolves into
         # ``next_step_run_again`` rather than a terminal tool output.
         output_guardrails=[always_fine],
-        tool_use_behavior=StopAtTools(stop_at_tool_names=["finish"]),
+        tool_use_behavior=tool_use_behavior,
     )
 
 
@@ -106,3 +112,76 @@ async def test_deferred_parked_call_is_persisted_when_the_resume_runs_again() ->
         f"orphaned outputs: {[item.get('call_id') for item in orphaned]}"
     )
     assert "call_PARKED" in call_ids
+
+
+@pytest.mark.asyncio
+async def test_park_time_deferral_survives_a_tool_use_behavior_change_on_resume() -> None:
+    """The deferral decision is the checkpoint's, not the resuming configuration's.
+
+    Parking defers the interrupted turn's write (guardrails + non-default
+    ``tool_use_behavior``); the caller then resumes with ``"run_llm_again"``. Deriving
+    the decision from today's gate would conclude nothing was deferred and drop the
+    parked ``function_call`` again — it must come from checkpoint state instead
+    (``_current_turn_persisted_item_count``).
+    """
+    session = SimpleListSession()
+
+    first = Runner.run_streamed(make_agent(), "do the thing", session=session)
+    async for _ in first.stream_events():
+        pass
+    assert len(first.interruptions) == 1
+
+    resume_agent = make_agent(tool_use_behavior="run_llm_again")
+    serialized = json.dumps(first.to_state().to_json())
+    state = await RunState.from_json(resume_agent, json.loads(serialized))
+    state.approve(state.get_interruptions()[0])
+
+    resumed = Runner.run_streamed(resume_agent, state, session=session)
+    async for _ in resumed.stream_events():
+        pass
+
+    items = await session.get_items()
+    call_ids = {item.get("call_id") for item in items if item.get("type") == "function_call"}
+    orphaned = [
+        item
+        for item in items
+        if item.get("type") == "function_call_output" and item.get("call_id") not in call_ids
+    ]
+    assert orphaned == []
+    assert "call_PARKED" in call_ids
+
+
+@pytest.mark.asyncio
+async def test_non_deferred_park_is_not_double_written_on_resume() -> None:
+    """The other direction of deriving from state: with ``"run_llm_again"`` throughout,
+    the interruption-time write runs (no deferral) and bumps the persisted count, so the
+    resume must not write the parked ``function_call`` a second time."""
+    session = SimpleListSession()
+    agent = make_agent(tool_use_behavior="run_llm_again")
+
+    first = Runner.run_streamed(agent, "do the thing", session=session)
+    async for _ in first.stream_events():
+        pass
+    assert len(first.interruptions) == 1
+
+    serialized = json.dumps(first.to_state().to_json())
+    state = await RunState.from_json(agent, json.loads(serialized))
+    state.approve(state.get_interruptions()[0])
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    async for _ in resumed.stream_events():
+        pass
+
+    items = await session.get_items()
+    parked_calls = [
+        item
+        for item in items
+        if item.get("type") == "function_call" and item.get("call_id") == "call_PARKED"
+    ]
+    parked_outputs = [
+        item
+        for item in items
+        if item.get("type") == "function_call_output" and item.get("call_id") == "call_PARKED"
+    ]
+    assert len(parked_calls) == 1
+    assert len(parked_outputs) == 1
