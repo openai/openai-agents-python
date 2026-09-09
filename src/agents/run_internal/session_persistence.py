@@ -1169,7 +1169,10 @@ async def resume_pending_session_write(
         # Settle through the canonical persistence path rather than appending behind
         # its back: it owns the Conversations sanitization, the ordered dedup, the
         # pending-write registration that makes a failed append recoverable, and the
-        # compaction bookkeeping for the response this batch belongs to.
+        # compaction bookkeeping for the response this batch belongs to. The slot is
+        # released first, so the re-entry this causes (``save_result_to_session``
+        # registers the batch and calls back into here) sees an ordinary pending write
+        # and takes the append-and-reconcile path below, never this branch again.
         await save_result_to_session(
             session,
             settling,

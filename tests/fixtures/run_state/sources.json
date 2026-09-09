@@ -130,10 +130,10 @@
     },
     {
       "commit": "821afdc3f709f409a307c93f42a603704be63033",
-      "emitted_version": "1.18",
+      "emitted_version": "1.17",
       "feature": "held_pending_session_write",
       "fixture": "features/v1_18_held_pending_session_write.json",
-      "note": "The held pending Session write was first emitted with the 1.18 writer in this branch. The fixture carries the withheld batch under the version that introduced it, which the 1.17 reader intentionally rejects.",
+      "note": "The held pending Session write was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving the withheld batch payload.",
       "provenance": "canonical_compatibility",
       "version": "1.18"
     }
@@ -206,9 +206,9 @@
     },
     "1.18": {
       "commit": "821afdc3f709f409a307c93f42a603704be63033",
-      "emitted_version": "1.18",
+      "emitted_version": "1.17",
       "fixture": "minimal/v1_18.json",
-      "note": "The held pending Session write was first emitted with the 1.18 writer in this branch. The minimal fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving older payload compatibility.",
+      "note": "The held pending Session write was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving older payload compatibility.",
       "provenance": "canonical_compatibility"
     },
     "1.2": {

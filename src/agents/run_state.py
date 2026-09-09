@@ -4393,9 +4393,11 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
-        # The held variant carries two keys the released 1.17 reader rejects, so it is
-        # gated to its own schema version; a 1.17 payload keeps exactly the four keys
-        # that version defined and settles eagerly as it always did.
+        # 1.17 defines this object as exactly four keys and its readers are already on
+        # main, so writing the held variant under that label would emit checkpoints
+        # those readers reject. The held keys are therefore gated to the version that
+        # introduced them, and a 1.17 payload keeps the four keys it defined and
+        # settles eagerly as it always did.
         held_keys_allowed = (schema_major, schema_minor) >= tuple(
             int(part)
             for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
@@ -4417,6 +4419,13 @@ async def _build_run_state_from_json(
                 "store" in pending_write
                 and pending_write["store"] is not None
                 and type(pending_write["store"]) is not bool
+            )
+            # Both keys describe the withheld response, so they are meaningless on an
+            # ordinary pending write and are refused there rather than restored as
+            # state nothing consumes.
+            or (
+                not pending_write.get("held")
+                and ("response_id" in pending_write or "store" in pending_write)
             )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
