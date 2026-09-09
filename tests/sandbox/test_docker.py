@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import errno
 import io
+import os
 import queue
 import shutil
 import socket
@@ -501,9 +502,10 @@ class _HostBackedDockerSession(DockerSandboxSession):
             src = self._host_path(cmd[3])
             dst = self._host_path(cmd[4])
             if src.is_dir():
-                shutil.copytree(src, dst)
+                # Like `cp -R`, keep symlinks as symlinks instead of following them.
+                shutil.copytree(src, dst, symlinks=True)
             else:
-                shutil.copy2(src, dst)
+                shutil.copy2(src, dst, follow_symlinks=False)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd[:2] == ["cat", "--"]:
             src = self._host_path(cmd[2])
@@ -749,6 +751,54 @@ async def test_docker_persist_workspace_stages_copy_before_get_archive(
     assert "." in names
     assert "README.md" in names
     assert not any(name == "workspace" or name.startswith("workspace/") for name in names)
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_and_hydrate_keep_absolute_workspace_symlinks_resolving(
+    tmp_path: Path,
+) -> None:
+    """Persist stages the workspace with `cp -R`, the daemon archives the copy, and the
+    archive is normalized for the strict hydrate extractor. An absolute in-workspace
+    symlink must come back relative *with its components intact*: `alias -> sub/deep`
+    makes `/workspace/alias/../data.txt` name `sub/data.txt`, not `data.txt`."""
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    (workspace / "sub" / "deep").mkdir(parents=True)
+    (workspace / "data.txt").write_text("wrong", encoding="utf-8")
+    (workspace / "sub" / "data.txt").write_text("right", encoding="utf-8")
+    (workspace / "alias").symlink_to("sub/deep")
+    (workspace / "abs_alias").symlink_to("/workspace/alias/../data.txt")
+    (workspace / "sub" / "abs_up").symlink_to("/workspace/sub/data.txt")
+    session = _HostBackedDockerSession(host_root=host_root, manifest=Manifest(root="/workspace"))
+
+    archive = await session.persist_workspace()
+
+    restored_host_root = tmp_path / "restored-container"
+    (restored_host_root / "workspace").mkdir(parents=True)
+    restored = _HostBackedDockerSession(
+        host_root=restored_host_root, manifest=Manifest(root="/workspace")
+    )
+
+    async def _extract_like_tar(
+        *,
+        cmd: list[str],
+        stream: io.IOBase,
+        error_path: Path,
+        user: object = None,
+    ) -> None:
+        _ = (error_path, user)
+        assert cmd[:3] == ["tar", "-x", "-C"]
+        with tarfile.open(fileobj=stream, mode="r|*") as tar:
+            tar.extractall(restored._host_path(cmd[3]))
+
+    restored._stream_into_exec = _extract_like_tar  # type: ignore[method-assign]
+    await restored.hydrate_workspace(archive)
+
+    restored_workspace = restored_host_root / "workspace"
+    assert os.readlink(restored_workspace / "abs_alias") == "alias/../data.txt"
+    assert os.readlink(restored_workspace / "sub" / "abs_up") == "../sub/data.txt"
+    assert (restored_workspace / "abs_alias").read_text(encoding="utf-8") == "right"
+    assert (restored_workspace / "sub" / "abs_up").read_text(encoding="utf-8") == "right"
 
 
 @pytest.mark.asyncio
