@@ -15,6 +15,8 @@ from agents import (
     GuardrailFunctionOutput,
     RunContextWrapper,
     Runner,
+    RunResult,
+    RunResultStreaming,
     RunState,
     StopAtTools,
     function_tool,
@@ -485,3 +487,91 @@ async def test_hosted_mcp_approval_identities_are_recognized() -> None:
     # Still nothing for a content-only item.
     plain: TResponseInputItem = {"role": "assistant", "content": "hi", "type": "message"}
     assert _identity_key(plain) is None
+
+
+def make_emptying_handoff_agent() -> Agent:
+    """One response carrying the gated call AND a handoff whose filter empties the turn.
+
+    Resolving the approval then produces a turn with no session items at all: the shape
+    where a deferred prefix has nothing to ride on.
+    """
+    from agents import HandoffInputData, handoff
+
+    def empties(data: HandoffInputData) -> HandoffInputData:
+        return HandoffInputData(
+            input_history=data.input_history, pre_handoff_items=(), new_items=()
+        )
+
+    target = Agent(
+        name="target",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(output=[assistant_message("done")]),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+    )
+    return Agent(
+        name="deferred repro (emptied turn)",
+        instructions="x",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing],
+        handoffs=[handoff(target, input_filter=empties)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["finish"]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_emptied_resolved_turn_corrupts_nothing_in_either_runner() -> None:
+    """When the resolved turn has no session items, the deferred prefix must not be
+    written on its own: a call with no output poisons the Session exactly as the orphaned
+    output does. Both runners must also agree, item for item; a divergence here is how a
+    dangling-call regression would first show up.
+    """
+
+    async def run_case(streamed: bool) -> list[TResponseInputItem]:
+        session = SimpleListSession()
+        agent = make_emptying_handoff_agent()
+        first: RunResult | RunResultStreaming
+        if streamed:
+            first = Runner.run_streamed(agent, "go", session=session)
+            async for _ in first.stream_events():
+                pass
+        else:
+            first = await Runner.run(agent, "go", session=session)
+        assert len(first.interruptions) == 1
+        serialized = json.dumps(first.to_state().to_json())
+        state = await RunState.from_json(agent, json.loads(serialized))
+        state.approve(state.get_interruptions()[0])
+        if streamed:
+            resumed = Runner.run_streamed(agent, state, session=session)
+            async for _ in resumed.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state, session=session)
+        return await session.get_items()
+
+    streamed_items = await run_case(streamed=True)
+    non_streamed_items = await run_case(streamed=False)
+
+    for items in (streamed_items, non_streamed_items):
+        calls = {i.get("call_id") for i in items if i.get("type") == "function_call"}
+        outputs = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+        assert calls - outputs == set(), f"dangling calls: {sorted(map(str, calls - outputs))}"
+        assert outputs - calls == set(), f"orphaned outputs: {sorted(map(str, outputs - calls))}"
+
+    assert [(i.get("type") or i.get("role"), i.get("call_id")) for i in streamed_items] == [
+        (i.get("type") or i.get("role"), i.get("call_id")) for i in non_streamed_items
+    ]
