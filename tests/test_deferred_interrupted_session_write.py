@@ -185,3 +185,87 @@ async def test_non_deferred_park_is_not_double_written_on_resume() -> None:
     ]
     assert len(parked_calls) == 1
     assert len(parked_outputs) == 1
+
+
+@function_tool(name_override="write_other", needs_approval=True)
+def write_other(query: str) -> str:
+    return f"other:{query}"
+
+
+def make_multi_approval_agent(
+    tool_use_behavior: StopAtTools | Literal["run_llm_again"] = DEFERRING_BEHAVIOR,
+) -> Agent:
+    """One deferred model response carrying TWO approval-required calls."""
+    return Agent(
+        name="deferred repro (multi)",
+        instructions="Call both tools.",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("write_other", {"query": "x"}, call_id="call_PARKED_2"),
+                    ]
+                ),
+                ModelStep(output=[assistant_message("done")]),
+            ]
+        ),
+        tools=[write_thing, write_other],
+        output_guardrails=[always_fine],
+        tool_use_behavior=tool_use_behavior,
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_approval_reinterruption_persists_the_deferred_prefix() -> None:
+    """A resume that interrupts AGAIN must not strand the deferred calls.
+
+    Two approval-required calls in one deferred response; the caller approves only one
+    and resumes with ``"run_llm_again"`` (gate closed). The resume resolves back into
+    ``NextStepInterruption``, and that re-interruption write is the deferred prefix's
+    last chance: it bumps the persisted count, so writing only the approved tool's
+    output there would orphan BOTH parked calls for every later resume.
+    """
+    session = SimpleListSession()
+
+    first = Runner.run_streamed(make_multi_approval_agent(), "go", session=session)
+    async for _ in first.stream_events():
+        pass
+    assert len(first.interruptions) == 2
+
+    resume_agent = make_multi_approval_agent(tool_use_behavior="run_llm_again")
+    serialized = json.dumps(first.to_state().to_json())
+    state = await RunState.from_json(resume_agent, json.loads(serialized))
+    first_approval = next(
+        interruption
+        for interruption in state.get_interruptions()
+        if "call_PARKED" == getattr(interruption.raw_item, "call_id", None)
+    )
+    state.approve(first_approval)
+
+    second = Runner.run_streamed(resume_agent, state, session=session)
+    async for _ in second.stream_events():
+        pass
+    assert len(second.interruptions) == 1
+
+    serialized = json.dumps(second.to_state().to_json())
+    state = await RunState.from_json(resume_agent, json.loads(serialized))
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+    final = Runner.run_streamed(resume_agent, state, session=session)
+    async for _ in final.stream_events():
+        pass
+    assert final.final_output == "done"
+
+    items = await session.get_items()
+    call_ids = [item.get("call_id") for item in items if item.get("type") == "function_call"]
+    orphaned = [
+        item
+        for item in items
+        if item.get("type") == "function_call_output" and item.get("call_id") not in call_ids
+    ]
+    assert orphaned == []
+    # Each parked call exactly once: recovered by the re-interruption write, and not
+    # written again by the later resumes (the persisted count now covers it).
+    assert call_ids.count("call_PARKED") == 1
+    assert call_ids.count("call_PARKED_2") == 1
