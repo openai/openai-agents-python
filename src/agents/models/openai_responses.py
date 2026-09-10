@@ -53,7 +53,7 @@ from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import log_model_action_debug, log_model_action_error, logger
 from ..model_settings import MCPToolChoice
-from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
+from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -444,15 +444,41 @@ def _get_wrapped_websocket_replay_safety(error: Exception) -> str | None:
     return replay_safety if replay_safety in {"safe", "unsafe"} else None
 
 
+def _mark_websocket_close_invalidation(error: Exception) -> None:
+    setattr(error, "_openai_agents_ws_close_invalidated", True)  # noqa: B010
+
+
+def _did_websocket_close_invalidate(error: Exception) -> bool:
+    return any(
+        getattr(candidate, "_openai_agents_ws_close_invalidated", False)
+        for candidate in _iter_retry_error_chain(error)
+    )
+
+
+def _websocket_close_invalidation_error() -> RuntimeError:
+    error = RuntimeError("Responses websocket connection closed while establishing a connection.")
+    _mark_websocket_close_invalidation(error)
+    return error
+
+
 def _did_start_websocket_response(error: Exception) -> bool:
     return bool(getattr(error, "_openai_agents_ws_response_started", False))
 
 
+def _is_websocket_disconnect_error(error: Exception) -> bool:
+    exc_module = error.__class__.__module__
+    exc_name = error.__class__.__name__
+    # websockets reports a peer closing before a valid HTTP upgrade as InvalidMessage. Only an
+    # InvalidMessage caused by EOFError is transient according to websockets' retry policy.
+    return exc_module.startswith("websockets") and (
+        exc_name.startswith("ConnectionClosed")
+        or (exc_name == "InvalidMessage" and isinstance(error.__cause__, EOFError))
+    )
+
+
 def _is_never_sent_websocket_error(error: Exception) -> bool:
     for candidate in _iter_retry_error_chain(error):
-        if candidate.__class__.__module__.startswith(
-            "websockets"
-        ) and candidate.__class__.__name__.startswith("ConnectionClosed"):
+        if _is_websocket_disconnect_error(candidate):
             if "client closed" not in str(candidate).lower():
                 return True
     return False
@@ -1153,6 +1179,13 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         return super()._supports_default_prompt_cache_key()
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
+        if _did_websocket_close_invalidate(request.error):
+            return ModelRetryAdvice(
+                suggested=False,
+                reason=str(request.error),
+                normalized=ModelRetryNormalizedError(is_abort=True),
+            )
+
         stateful_request = bool(request.previous_response_id or request.conversation_id)
         wrapped_replay_safety = _get_wrapped_websocket_replay_safety(request.error)
         if wrapped_replay_safety == "unsafe":
@@ -1343,17 +1376,26 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
             )
             retry_pre_event_disconnect = _should_retry_pre_event_websocket_disconnect()
             while True:
-                connection = await self._await_websocket_with_timeout(
-                    self._ensure_websocket_connection(
-                        ws_url, request_headers, connect_timeout=request_timeouts.connect
-                    ),
-                    request_timeouts.connect,
-                    "connect",
-                )
+                connection: Any = None
                 received_any_event = False
                 yielded_terminal_event = False
                 sent_request_frame = False
                 try:
+                    connection = await self._await_websocket_with_timeout(
+                        self._ensure_websocket_connection(
+                            ws_url,
+                            request_headers,
+                            connect_timeout=request_timeouts.connect,
+                            request_close_generation=request_close_generation,
+                        ),
+                        request_timeouts.connect,
+                        "connect",
+                    )
+                    if self._ws_client_close_generation != request_close_generation:
+                        await self._drop_websocket_connection()
+                        connection = None
+                        raise _websocket_close_invalidation_error()
+
                     # Once we begin awaiting `send()`, treat the request as potentially
                     # transmitted to avoid replaying it on send/close races.
                     sent_request_frame = True
@@ -1410,11 +1452,15 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                     is_non_terminal_generator_exit = (
                         isinstance(exc, GeneratorExit) and not yielded_terminal_event
                     )
-                    if isinstance(exc, asyncio.CancelledError) or is_non_terminal_generator_exit:
-                        self._force_abort_websocket_connection(connection)
-                        self._clear_websocket_connection_state()
-                    elif not (yielded_terminal_event and isinstance(exc, GeneratorExit)):
-                        await self._drop_websocket_connection()
+                    if connection is not None:
+                        if (
+                            isinstance(exc, asyncio.CancelledError)
+                            or is_non_terminal_generator_exit
+                        ):
+                            self._force_abort_websocket_connection(connection)
+                            self._clear_websocket_connection_state()
+                        elif not (yielded_terminal_event and isinstance(exc, GeneratorExit)):
+                            await self._drop_websocket_connection()
 
                     if (
                         isinstance(exc, Exception)
@@ -1435,10 +1481,12 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                         is_pre_event_disconnect and not sent_request_frame
                     )
                     if (
-                        is_pre_event_disconnect
+                        isinstance(exc, Exception)
                         and self._ws_client_close_generation != request_close_generation
                     ):
-                        raise
+                        _mark_websocket_close_invalidation(exc)
+                        if is_pre_event_disconnect:
+                            raise
                     if retry_pre_event_disconnect and is_retryable_pre_event_disconnect:
                         retry_pre_event_disconnect = False
                         continue
@@ -1472,9 +1520,7 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 "Responses websocket connection closed before a terminal response event."
             )
 
-        exc_module = exc.__class__.__module__
-        exc_name = exc.__class__.__name__
-        return exc_module.startswith("websockets") and exc_name.startswith("ConnectionClosed")
+        return _is_websocket_disconnect_error(exc)
 
     def _get_websocket_request_timeouts(self, timeout: Any) -> _WebsocketRequestTimeouts:
         if timeout is None or _is_openai_omitted_value(timeout):
@@ -1593,12 +1639,19 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         headers: Mapping[str, str],
         *,
         connect_timeout: float | None,
+        request_close_generation: int | None = None,
     ) -> Any:
         running_loop = asyncio.get_running_loop()
         identity = (
             ws_url,
             tuple(sorted((str(key).lower(), str(value)) for key, value in headers.items())),
         )
+
+        if (
+            request_close_generation is not None
+            and self._ws_client_close_generation != request_close_generation
+        ):
+            raise _websocket_close_invalidation_error()
 
         if self._ws_connection is not None and self._ws_connection_identity == identity:
             if (
@@ -1609,6 +1662,11 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
                 return self._ws_connection
         if self._ws_connection is not None:
             await self._drop_websocket_connection()
+        if (
+            request_close_generation is not None
+            and self._ws_client_close_generation != request_close_generation
+        ):
+            raise _websocket_close_invalidation_error()
         self._ws_connection = await self._open_websocket_connection(
             ws_url,
             headers,

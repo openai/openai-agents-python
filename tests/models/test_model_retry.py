@@ -18,6 +18,7 @@ from agents.models._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
+from agents.models.openai_responses import OpenAIResponsesWSModel
 from agents.retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -1626,6 +1627,82 @@ async def test_get_response_with_retry_honors_provider_hard_veto() -> None:
             previous_response_id=None,
             conversation_id=None,
         )
+
+    assert calls == 1
+
+
+def _ws_close_invalidated_error() -> RuntimeError:
+    error = RuntimeError("Responses websocket connection closed while establishing a connection.")
+    setattr(error, "_openai_agents_ws_close_invalidated", True)  # noqa: B010
+    return error
+
+
+@pytest.mark.asyncio
+async def test_get_response_with_retry_does_not_replay_websocket_close_invalidated_request() -> (
+    None
+):
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, object()))
+    calls = 0
+
+    async def get_response() -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise _ws_close_invalidated_error()
+
+    async def rewind() -> None:
+        raise AssertionError("A close-invalidated request must not be rewound for retry")
+
+    with pytest.raises(RuntimeError, match="closed while establishing"):
+        await get_response_with_retry(
+            get_response=get_response,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=retry_policies.network_error(),
+            ),
+            get_retry_advice=model.get_retry_advice,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_response_with_retry_does_not_replay_websocket_close_invalidated_request() -> (
+    None
+):
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, object()))
+    calls = 0
+
+    def get_stream() -> AsyncIterator[TResponseStreamEvent]:
+        nonlocal calls
+        calls += 1
+
+        async def iterator() -> AsyncIterator[TResponseStreamEvent]:
+            raise _ws_close_invalidated_error()
+            yield  # pragma: no cover
+
+        return iterator()
+
+    async def rewind() -> None:
+        raise AssertionError("A close-invalidated request must not be rewound for retry")
+
+    with pytest.raises(RuntimeError, match="closed while establishing"):
+        async for _event in stream_response_with_retry(
+            get_stream=get_stream,
+            rewind=rewind,
+            retry_settings=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=retry_policies.network_error(),
+            ),
+            get_retry_advice=model.get_retry_advice,
+            previous_response_id=None,
+            conversation_id=None,
+        ):
+            pass
 
     assert calls == 1
 

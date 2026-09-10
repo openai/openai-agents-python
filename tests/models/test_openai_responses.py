@@ -450,6 +450,17 @@ def _connection_closed_error(message: str) -> Exception:
     return ConnectionClosedError(message)
 
 
+def _invalid_message_error(message: str, *, cause: BaseException | None = None) -> Exception:
+    class InvalidMessage(Exception):
+        pass
+
+    InvalidMessage.__module__ = "websockets.exceptions"
+    error = InvalidMessage(message)
+    if cause is not None:
+        error.__cause__ = cause
+    return error
+
+
 @pytest.mark.parametrize("parallel_tool_calls", [True, False, None])
 @pytest.mark.parametrize("tool_source", ["none", "function", "handoff"])
 def test_parallel_tool_calls_follow_converted_responses_tools(
@@ -3133,6 +3144,292 @@ async def test_websocket_model_reconnects_if_cached_connection_is_closed(monkeyp
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_websocket_model_retries_if_handshake_fails_before_request(monkeypatch):
+    client = DummyWSClient()
+
+    ws = DummyWSConnection([_response_completed_frame("resp-retried", 1)])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 1:
+            raise _invalid_message_error(
+                "did not receive a valid HTTP response",
+                cause=EOFError("connection closed while reading HTTP status line"),
+            )
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert response.response_id == "resp-retried"
+    assert open_calls == 2
+    assert len(ws.sent_messages) == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_does_not_retry_malformed_handshake(monkeypatch):
+    client = DummyWSClient()
+    error = _invalid_message_error("malformed HTTP status line")
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        raise error
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    with pytest.raises(type(error)) as exc_info:
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    assert exc_info.value is error
+    assert open_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_exhausts_one_retry_after_repeated_eof_handshake_failures(
+    monkeypatch,
+):
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        raise _invalid_message_error(
+            "did not receive a valid HTTP response",
+            cause=EOFError("connection closed while reading HTTP status line"),
+        )
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    with pytest.raises(RuntimeError, match="before any response events were received"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    assert open_calls == 2
+    assert model._ws_connection is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_close_during_failing_handshake_prevents_retry(monkeypatch):
+    client = DummyWSClient()
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    handshake_started = asyncio.Event()
+    release_handshake = asyncio.Event()
+    error = _invalid_message_error(
+        "did not receive a valid HTTP response",
+        cause=EOFError("connection closed while reading HTTP status line"),
+    )
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal open_calls
+        open_calls += 1
+        handshake_started.set()
+        await release_handshake.wait()
+        raise error
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    request_task = asyncio.create_task(
+        model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    )
+    await handshake_started.wait()
+    await model.close()
+    release_handshake.set()
+
+    with pytest.raises(type(error)) as exc_info:
+        await request_task
+
+    assert exc_info.value is error
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(error=exc_info.value, attempt=1, stream=False)
+    )
+    assert advice is not None
+    assert advice.normalized is not None
+    assert advice.normalized.is_abort is True
+    assert open_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_close_during_retry_handshake_discards_acquired_connection(
+    monkeypatch,
+):
+    client = DummyWSClient()
+    ws = DummyWSConnection([_response_completed_frame("resp-after-close", 1)])
+    first_handshake = True
+    second_handshake_started = asyncio.Event()
+    release_second_handshake = asyncio.Event()
+    error = _invalid_message_error(
+        "did not receive a valid HTTP response",
+        cause=EOFError("connection closed while reading HTTP status line"),
+    )
+    open_calls = 0
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        nonlocal first_handshake, open_calls
+        open_calls += 1
+        if first_handshake:
+            first_handshake = False
+            raise error
+        second_handshake_started.set()
+        await release_second_handshake.wait()
+        return ws
+
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    request_task = asyncio.create_task(
+        model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    )
+    await second_handshake_started.wait()
+    await model.close()
+    release_second_handshake.set()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await request_task
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(error=exc_info.value, attempt=1, stream=False)
+    )
+    assert advice is not None
+    assert advice.normalized is not None
+    assert advice.normalized.is_abort is True
+    assert open_calls == 2
+    assert ws.sent_messages == []
+    assert ws.close_calls == 1
+    assert model._ws_connection is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_websocket_model_close_during_cached_connection_drop_prevents_replacement(
+    monkeypatch,
+):
+    client = DummyWSClient()
+
+    class BlockingCloseWSConnection(DummyWSConnection):
+        def __init__(self, frames: list[str]):
+            super().__init__(frames)
+            self.close_started = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def close(self) -> None:
+            self.close_started.set()
+            await self.release_close.wait()
+            await super().close()
+
+    ws1 = BlockingCloseWSConnection([_response_completed_frame("resp-1", 1)])
+    ws2 = DummyWSConnection([_response_completed_frame("resp-2", 1)])
+    opened: list[DummyWSConnection] = []
+
+    async def fake_open(
+        ws_url: str, headers: dict[str, str], *, connect_timeout: float | None = None
+    ) -> DummyWSConnection:
+        connection = ws1 if not opened else ws2
+        opened.append(connection)
+        return connection
+
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    first = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+    assert first.response_id == "resp-1"
+
+    ws1.close_code = 1001
+    request_task = asyncio.create_task(
+        model.get_response(
+            system_instructions=None,
+            input="next",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    )
+    await ws1.close_started.wait()
+    await model.close()
+    ws1.release_close.set()
+
+    with pytest.raises(RuntimeError):
+        await request_task
+
+    assert opened == [ws1]
+    assert ws2.sent_messages == []
+    assert model._ws_connection is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_websocket_model_does_not_retry_if_send_raises_after_writing_on_reused_connection(
     monkeypatch,
 ):
@@ -4418,6 +4715,65 @@ def test_websocket_get_retry_advice_marks_connect_timeout_replay_safe() -> None:
     assert advice is not None
     assert advice.suggested is True
     assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_handshake_failure_replay_safe() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = _invalid_message_error(
+        "did not receive a valid HTTP response",
+        cause=EOFError("connection closed while reading HTTP status line"),
+    )
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is True
+    assert advice.replay_safety == "safe"
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_ignores_malformed_handshake() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = _invalid_message_error("malformed HTTP status line")
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=True,
+            previous_response_id="resp_prev",
+        )
+    )
+
+    assert advice is None
+
+
+@pytest.mark.allow_call_model_methods
+def test_websocket_get_retry_advice_marks_close_invalidation_non_retryable() -> None:
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=cast(Any, DummyWSClient()))
+    error = RuntimeError("Responses websocket connection closed while establishing a connection.")
+    setattr(error, "_openai_agents_ws_close_invalidated", True)  # noqa: B010
+
+    advice = model.get_retry_advice(
+        ModelRetryAdviceRequest(
+            error=error,
+            attempt=1,
+            stream=False,
+        )
+    )
+
+    assert advice is not None
+    assert advice.suggested is False
+    assert advice.normalized is not None
+    assert advice.normalized.is_abort is True
 
 
 @pytest.mark.allow_call_model_methods
