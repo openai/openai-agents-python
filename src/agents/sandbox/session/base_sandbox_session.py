@@ -2,9 +2,7 @@ import abc
 import asyncio
 import io
 import shlex
-import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
 from pathlib import Path, PurePath
 from typing import Literal, NoReturn, TypeVar
 
@@ -151,31 +149,6 @@ while :; do
     fi
 done
 """.strip()
-_EXCLUSIVE_CREATE_EXISTS_CODE = 13
-# Classify an already-visible target before any payload is staged. Without this the
-# staging write runs first, so a target inside an executable but non-writable parent
-# fails on permissions and the caller sees a write error instead of the collision error
-# that tells it to use update_file. The atomic claim below still decides real races.
-_TARGET_EXISTS_SCRIPT = 'target="$1"\nif [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
-
-# ``ln`` claims the target name and fails when that name is already taken. Linking a
-# fully written staging file means the content is complete before the name exists, so a
-# failed or cancelled upload cannot leave a file behind that holds the name. The leading
-# test rejects a name held by a directory, which ``ln`` would otherwise treat as a target
-# directory and populate; the trailing test only classifies a failure, so "already
-# exists" stays separable from any other error without parsing shell-specific stderr.
-# ``ln`` is a regular command, unlike ``:``, so its failure still reaches the explicit
-# exit mapping on shells where ``:`` is a special builtin. The caller creates the parent,
-# so this script never has to create one as a different identity.
-_EXCLUSIVE_CREATE_SCRIPT = (
-    'target="$1"\n'
-    'source="$2"\n'
-    'if [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
-    'ln "$source" "$target" 2>/dev/null && exit 0\n'
-    'if [ -e "$target" ] || [ -L "$target" ]; then exit 13; fi\n'
-    "exit 14\n"
-)
-
 _WRITE_ACCESS_CHECK_SCRIPT = (
     'target="$1"\n'
     'if [ -e "$target" ]; then\n'
@@ -981,69 +954,27 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Write a file that must not already exist.
 
-        The target name is claimed in a single atomic step once the payload is complete,
-        so a concurrent creator either loses the race or keeps its own content, and a
-        failed write does not leave a partial file holding the name.
+        This default checks the target and then writes, so it rejects the ordinary case of
+        a create aimed at a path that is already occupied and leaves the existing content
+        alone. It is not atomic: a creator that arrives between the check and the write is
+        overwritten. A backend that can express an exclusive create should override this
+        and claim the name in one step; ``UnixLocalSandboxSession`` does.
 
         :param path: Absolute path in the container or path relative to the
                 workspace root.
         :param data: A file-like object positioned at the start of the payload.
         :param user: Optional sandbox user to perform the write as.
-        :raises FileExistsError: If the path already exists, including a dangling symlink.
+        :raises FileExistsError: If the path already exists.
         """
-        # Validate the parent so grants and symlinked parents are still enforced, then
-        # keep the final component unresolved. A path policy that resolves symlinks would
-        # otherwise turn a dangling link at the target name into its absent target and let
-        # the create land there instead of being rejected.
-        requested = Path(path)
-        parent_path = await self._validate_path_access(requested.parent, for_write=True)
-        workspace_path = parent_path / requested.name
-        path_arg = sandbox_path_str(workspace_path)
-        # A fixed-length staging basename. Deriving it from the destination made the
-        # staging name longer than the destination, so a name that fits the filesystem's
-        # component limit could still fail to stage.
-        staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
-        staging_arg = sandbox_path_str(staging_path)
-
-        preflight = await self.exec(
-            "sh", "-c", _TARGET_EXISTS_SCRIPT, "sh", path_arg, shell=False, user=user
-        )
-        if preflight.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
-            raise FileExistsError(path_arg)
-
+        workspace_path = await self._validate_path_access(path, for_write=True)
         try:
-            # Create the parent as the bound user so a fresh nested path is owned the same
-            # way the ordinary write path owned it.
-            await self.mkdir(parent_path, parents=True, user=user)
-            await self.write(staging_path, data, user=user)
-            # -c rather than -lc: this runs on a filesystem-only capability set, so it
-            # must not source workspace-writable shell startup files.
-            result = await self.exec(
-                "sh",
-                "-c",
-                _EXCLUSIVE_CREATE_SCRIPT,
-                "sh",
-                path_arg,
-                staging_arg,
-                shell=False,
-                user=user,
-            )
-            if result.exit_code == _EXCLUSIVE_CREATE_EXISTS_CODE:
-                raise FileExistsError(path_arg)
-            if not result.ok():
-                raise WorkspaceArchiveWriteError(
-                    path=workspace_path,
-                    context={
-                        "command": ["sh", "-c", "<exclusive_create>", path_arg, staging_arg],
-                        "stdout": result.stdout.decode("utf-8", errors="replace"),
-                        "stderr": result.stderr.decode("utf-8", errors="replace"),
-                    },
-                )
-        finally:
-            # The staging entry is an implementation detail, and removing it must not
-            # replace the outcome of the create.
-            with suppress(Exception):
-                await self.rm(staging_path, user=user)
+            handle = await self.read(workspace_path, user=user)
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
+            pass
+        else:
+            handle.close()
+            raise FileExistsError(sandbox_path_str(workspace_path))
+        await self.write(workspace_path, data, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None

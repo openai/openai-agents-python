@@ -25,6 +25,9 @@ _TRAVERSE_FLAGS = (
 )
 
 
+_EXISTING_TARGET_EXIT_CODE = 13
+
+
 class _FileOps:
     """Operate on canonical absolute paths already authorized by the owning session."""
 
@@ -65,6 +68,28 @@ class _FileOps:
             fd = os.open(
                 name,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=parent_fd,
+            )
+        try:
+            out = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with out:
+            shutil.copyfileobj(stream, out)
+
+    def write_new(self, path: Path, stream: io.IOBase) -> None:
+        """Create a file that must not already exist.
+
+        O_EXCL fails with EEXIST when the name is taken by anything, including a directory
+        or a dangling symlink, and it claims the name in the same syscall that creates the
+        file, so a concurrent creator either loses the race or keeps its own content.
+        """
+        with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o666,
                 dir_fd=parent_fd,
             )
@@ -167,6 +192,12 @@ def _main() -> None:
     path = Path(raw_path)
     if operation == "write":
         files.write(path, cast(io.IOBase, sys.stdin.buffer))
+    elif operation == "write_new":
+        try:
+            files.write_new(path, cast(io.IOBase, sys.stdin.buffer))
+        except FileExistsError:
+            # A distinct status keeps "already exists" separable from a real write failure.
+            sys.exit(_EXISTING_TARGET_EXIT_CODE)
     elif operation == "ls":
         print(json.dumps(files.listing(path), ensure_ascii=True))
     else:
