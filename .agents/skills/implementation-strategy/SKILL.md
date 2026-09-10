@@ -1,6 +1,6 @@
 ---
 name: implementation-strategy
-description: Choose compatibility-aware scope for runtime and API changes in openai-agents-python. Use before initial implementation and each review-feedback batch to decide whether to patch, reset the design, preserve compatibility, or reject unsupported cases.
+description: Choose supported scope and compatibility boundaries for SDK behavior changes; revisit when feedback changes the design.
 ---
 
 # Implementation Strategy
@@ -8,7 +8,7 @@ description: Choose compatibility-aware scope for runtime and API changes in ope
 ## Workflow
 
 1. Identify the surface you are changing or reviewing: released public API, unreleased branch-local API, internal helper, persisted schema, wire protocol, CLI/config/env surface, or docs/examples only.
-2. Determine the latest release tag to use as the compatibility baseline from `origin` first, and only fall back to local tags when remote tags are unavailable:
+2. When released compatibility is relevant, determine the latest release tag from `origin` first, falling back to local tags only when remote tags are unavailable. Reuse an already verified baseline within the task unless new release evidence or changed scope makes it stale:
    ```bash
    BASE_TAG="$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*' 2>/dev/null || git tag -l 'v*' --sort=-v:refname | head -n1)"
    echo "$BASE_TAG"
@@ -17,12 +17,12 @@ description: Choose compatibility-aware scope for runtime and API changes in ope
 3. Record the implementation scope contract below before coding.
 4. Identify the nearest existing implementation pipeline and the functions, types, or modules that are the source of truth for each affected concern. Prefer adapting the required input into that pipeline over creating parallel schema, metadata, validation, naming, or execution machinery.
 5. Choose the smallest coherent change using the core decision rules. Add compatibility machinery only for a required supported boundary.
-6. Before editing each review-feedback batch, run the review gate against the complete branch diff, not only the latest revision.
+6. Revisit the review gate when feedback changes supported behavior, compatibility, ownership, protocol paths, implementation shape, or test permutations, or triggers a complexity reset. Otherwise retain the scope contract and proceed with the focused fix.
 7. Before handoff, run the effectiveness check. If any answer is no, revise the design.
 
 ## Implementation scope contract
 
-Record these four items in the plan or working notes, and update them before widening or narrowing the implementation:
+Record these four items in the existing plan or working notes, and update them before widening or narrowing the implementation. A local fix can use one concise paragraph; mark unaffected dimensions as not applicable rather than inventing unsupported cases or creating another document:
 
 1. **Required behavior:** The smallest user-visible scenario that must work.
 2. **Compatibility requirements:** Supported released behavior or a durable boundary that must remain usable.
@@ -35,7 +35,7 @@ A released-version reproducer proves reachability, not support. Treat the exact 
 
 ## Review-feedback gate
 
-Repeat this gate before editing each new feedback batch:
+Use this checkpoint only when feedback changes the scope contract or implementation shape. Reuse unchanged evidence instead of reconstructing it:
 
 ```text
 Review checkpoint:
@@ -140,6 +140,8 @@ Before declaring the design complete, answer all of these with concrete evidence
 - Define `None` semantics deliberately for public configuration. For example, use separate meanings for "feature disabled or no SDK limit", "use SDK default limits", and "disable only this specific limit" rather than relying on implicit truthiness checks.
 
 ## When to stop and confirm
+
+Confirm a consequential choice below only when it is not already resolved by the user's request or an approved scope contract. Ordinary remediation within that contract continues through review and verification.
 
 - The change would alter supported behavior shipped in the latest release tag, or concrete evidence shows material reliance on behavior that the release incidentally accepted.
 - The change would modify durable external data, protocol formats, or serialized state.

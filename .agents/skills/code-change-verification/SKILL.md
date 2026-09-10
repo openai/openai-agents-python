@@ -1,6 +1,6 @@
 ---
 name: code-change-verification
-description: Run the mandatory verification stack when changes affect runtime code, tests, or build/test behavior in the OpenAI Agents Python repository.
+description: Run the required final formatting, lint, type, and test checks after eligible SDK changes pass review.
 ---
 
 # Code Change Verification
@@ -15,8 +15,8 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 2. Codex on macOS/Linux: `/usr/bin/env -u OPENAI_API_KEY OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
 3. Other macOS/Linux environments: `env UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
 4. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
-5. The scripts run `make format` first, then run `make lint`, `make typecheck`, and `make tests` in parallel with fail-fast semantics.
-6. While the parallel steps are still running, the scripts emit periodic heartbeat updates so you can tell that work is still in progress.
+5. On macOS/Linux, the script runs `make format`, `make lint`, `make typecheck`, and `make tests` sequentially and stops at the first failure. Parallelism inside each Make target, including pytest workers, is unchanged.
+6. The Bash script streams each command's output directly. The Windows wrapper retains parallel lint, typecheck, and test steps with periodic heartbeat updates.
 7. If any command fails, fix the issue, rerun the script, and report the failing output.
 8. Confirm completion only when all commands succeed with no remaining issues.
 
@@ -46,14 +46,14 @@ On Linux, some Python packages with native extensions may require system package
 - For a fresh checkout, or if dependencies are not installed or have changed, run `make sync` first to install dev requirements via `uv`.
 - Run from the repository root with `make format` first, then `make lint`, `make typecheck`, and `make tests`.
 - Do not skip steps; stop and fix issues immediately when a command fails.
-- If you run the steps manually, you may parallelize `make lint`, `make typecheck`, and `make tests` after `make format` completes, but you must stop the remaining steps as soon as one fails.
+- Run the manual steps sequentially and stop at the first failure. Keep the parallelism provided by each Make target.
 - Re-run the full stack after applying fixes so the commands execute in the required order.
 
 ## Resources
 
 ### scripts/run.sh
 
-- Executes `make format` first, then runs `make lint`, `make typecheck`, and `make tests` in parallel with fail-fast semantics from the repository root. It also emits periodic heartbeat updates while the parallel steps are still running. Prefer this entry point to preserve the required ordering while reducing total runtime.
+- Runs `make format`, `make lint`, `make typecheck`, and `make tests` sequentially from the repository root. It streams output, preserves the first failure or cancellation status, and cleans up the active step's process group before continuing or exiting.
 
 ### scripts/run.ps1
 

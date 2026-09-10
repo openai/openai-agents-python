@@ -217,6 +217,34 @@ async def test_unix_local_rejects_host_path_before_creating_workspace(
 @pytest.mark.review_optional
 class TestUnixLocalPty:
     @pytest.mark.asyncio
+    async def test_tty_start_cancellation_closes_open_file_descriptors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(unix_local_module.sys, "platform", "linux")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+        close_calls: list[int] = []
+
+        def openpty() -> tuple[int, int]:
+            return 101, 102
+
+        async def create_subprocess(*args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(unix_local_module.os, "openpty", openpty)
+        monkeypatch.setattr(unix_local_module.os, "close", close_calls.append)
+        monkeypatch.setattr(unix_local_module.asyncio, "create_subprocess_exec", create_subprocess)
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.pty_exec_start("echo", "hello", shell=False, tty=True)
+
+        assert close_calls == [101, 102]
+
+    @pytest.mark.asyncio
     async def test_tty_fd_close_is_owned_without_blocking_termination(
         self,
         tmp_path: Path,
@@ -250,6 +278,75 @@ class TestUnixLocalPty:
         await asyncio.sleep(0)
 
         assert session._fd_close_tasks == set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("prefix", "tail", "first_output", "final_output"),
+        [
+            (b"before close", b" terminal", b"before close", b" terminal"),
+            (b"\xc3", b"\xa9", b"", "é".encode()),
+        ],
+    )
+    async def test_pty_exit_waits_for_output_close_before_terminal_cleanup(
+        self,
+        tmp_path: Path,
+        prefix: bytes,
+        tail: bytes,
+        first_output: bytes,
+        final_output: bytes,
+    ) -> None:
+        session = _RecordingUnixLocalSession(tmp_path)
+        process = cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(returncode=0, pid=None),
+        )
+        entry = _UnixPtyProcessEntry(process=process, tty=False)
+        process_id = 1234
+        session._pty_processes[process_id] = entry
+        session._reserved_pty_process_ids.add(process_id)
+
+        entry.output_chunks.append(prefix)
+        output, token_count, output_closed = await session._collect_pty_output(
+            entry=entry,
+            yield_time_ms=0,
+            max_output_tokens=None,
+        )
+        # The producer can close and queue a terminal tail after collection returns but
+        # before finalization observes the entry. Removal must follow the collector's
+        # settled result, not a later read of the mutable close event.
+        entry.output_chunks.append(tail)
+        entry.output_closed.set()
+        still_live = await session._finalize_pty_update(
+            process_id=process_id,
+            entry=entry,
+            output=output,
+            original_token_count=token_count,
+            output_closed=output_closed,
+        )
+
+        assert still_live.process_id == process_id
+        assert still_live.exit_code is None
+        assert still_live.output == first_output
+        assert process_id in session._pty_processes
+
+        terminal_output, terminal_token_count, terminal_closed = await session._collect_pty_output(
+            entry=entry,
+            yield_time_ms=0,
+            max_output_tokens=None,
+        )
+        terminal = await session._finalize_pty_update(
+            process_id=process_id,
+            entry=entry,
+            output=terminal_output,
+            original_token_count=terminal_token_count,
+            output_closed=terminal_closed,
+        )
+
+        assert terminal.process_id is None
+        assert terminal.exit_code == 0
+        assert terminal.output == final_output
+        assert process_id not in session._pty_processes
+        assert process_id not in session._reserved_pty_process_ids
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_macos_sandbox

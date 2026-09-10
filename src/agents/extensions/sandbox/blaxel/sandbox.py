@@ -51,6 +51,7 @@ from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
     PtyExecUpdate,
+    _settle_pty_cleanup,
     allocate_pty_process_id,
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
@@ -839,11 +840,18 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                await self._terminate_pty_entry(entry)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=exec_timeout, cause=e) from e
+        except asyncio.CancelledError as cancellation:
+            if not registered:
+                await _settle_pty_cleanup(
+                    self._terminate_pty_entry(entry),
+                    initial_cancellation=cancellation,
+                )
+            raise
         except Exception as e:
             if not registered:
-                await self._terminate_pty_entry(entry)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise _blaxel_exec_transport_error(command=command, cause=e) from e
 
         if pruned is not None:
@@ -856,7 +864,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -866,6 +874,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -890,7 +899,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -903,6 +912,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -964,7 +974,7 @@ class BlaxelSandboxSession(BaseSandboxSession):
         entry: _BlaxelPtySessionEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, bool]:
         return await collect_pty_output(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
@@ -981,11 +991,12 @@ class BlaxelSandboxSession(BaseSandboxSession):
         entry: _BlaxelPtySessionEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = entry.exit_code if entry.done else None
+        exit_code = entry.exit_code if output_closed else None
         live_process_id: int | None = process_id
 
-        if entry.done:
+        if output_closed:
             async with self._pty_lock:
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)

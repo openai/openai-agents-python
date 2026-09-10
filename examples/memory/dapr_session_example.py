@@ -27,7 +27,7 @@ PRODUCTION FEATURES (provided by Dapr):
 - Built-in observability: Distributed tracing, metrics, telemetry (zero code)
 - Data isolation: App-level or namespace-level state scoping for multi-tenancy
 - TTL support: Automatic session expiration (store-dependent)
-- Consistency levels: Eventual (faster) or strong (read-after-write guarantee)
+- Consistency levels: Eventual (faster) or strong (requests strong write consistency; store-dependent)
 - State encryption: AES-GCM encryption at the Dapr component level
 - Cloud-native: Seamless Kubernetes integration (Dapr runs as sidecar)
 - Cloud Service Provider (CSP) native authentication and authorization support.
@@ -263,7 +263,7 @@ async def demonstrate_advanced_features():
                 print("Eventual consistency: Better performance, may have slight delays")
                 await eventual_session.add_items([{"role": "user", "content": "Test eventual"}])
 
-        # Strong consistency (guaranteed read-after-write)
+        # Strong consistency (requests strong write consistency; store-dependent)
         async with DaprSession.from_address(
             "strong_session",
             state_store_name=DEFAULT_STATE_STORE,
@@ -271,7 +271,9 @@ async def demonstrate_advanced_features():
             consistency=DAPR_CONSISTENCY_STRONG,
         ) as strong_session:
             if await strong_session.ping():
-                print("Strong consistency: Guaranteed immediate consistency")
+                print(
+                    "Strong consistency: Requested for write operations (guarantees depend on state store)"
+                )
                 await strong_session.add_items([{"role": "user", "content": "Test strong"}])
 
         # Multi-tenancy example

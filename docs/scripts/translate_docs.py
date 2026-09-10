@@ -741,7 +741,7 @@ def translate_single_source_file(
     file_path: str, *, check_translation_outdated: bool = True
 ) -> None:
     relative_path = os.path.relpath(file_path, source_dir)
-    if "ref/" in relative_path or not file_path.endswith(".md"):
+    if "ref/" in relative_path.replace("\\", "/") or not file_path.endswith(".md"):
         return
     if check_translation_outdated and not should_translate_based_on_translation(file_path):
         print(f"Skipping {file_path}: The translated one is up-to-date.")

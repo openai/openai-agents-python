@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, get_args, get_origin
 
+from .._run_state_agent_identity import (
+    _build_agent_identity_keys_by_id,
+    _build_agent_identity_map,
+    _build_agent_map,
+)
 from .._tool_identity import get_function_tool_trace_name
 from ..agent import Agent
 from ..items import (
@@ -16,11 +21,6 @@ from ..items import (
     ToolCallOutputItem,
     ToolSearchCallItem,
     ToolSearchOutputItem,
-)
-from ..run_state import (
-    _build_agent_identity_keys_by_id,
-    _build_agent_identity_map,
-    _build_agent_map,
 )
 from .run_steps import ProcessedResponse, ToolRunFunction
 

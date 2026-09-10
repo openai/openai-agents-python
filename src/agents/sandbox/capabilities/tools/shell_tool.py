@@ -82,7 +82,8 @@ def _resolve_workdir_command(
     resolved_workdir = session.normalize_path(
         sandbox_path_str(workspace_scope.anchor(coerce_posix_path(workdir)))
     )
-    return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} && {command}"
+    # Complete the directory change before any shell list or background job runs.
+    return f"cd {shlex.quote(sandbox_path_str(resolved_workdir))} || exit\n{command}"
 
 
 def _resolve_shell(shell: str | None, login: bool) -> bool | list[str]:

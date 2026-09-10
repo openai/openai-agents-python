@@ -37,7 +37,7 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 Advanced hosted search options:
 
 -   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`. Set `max_num_results` to an integer from 1 through 50; `None` or zero uses the provider default.
--   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
+-   `WebSearchTool` supports `filters`, `user_location`, `search_context_size`, `external_web_access`, `search_content_types`, and `image_settings`.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -45,7 +45,10 @@ from agents import Agent, FileSearchTool, Runner, WebSearchTool
 agent = Agent(
     name="Assistant",
     tools=[
-        WebSearchTool(),
+        WebSearchTool(
+            search_content_types=["image", "text"],
+            image_settings={"max_results": 3, "caption": True},
+        ),
         FileSearchTool(
             max_num_results=3,
             vector_store_ids=["VECTOR_STORE_ID"],
@@ -54,9 +57,11 @@ agent = Agent(
 )
 
 async def main():
-    result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
+    result = await Runner.run(agent, "Find recent images and supporting text about the Golden Gate Bridge at sunset.")
     print(result.final_output)
 ```
+
+Set `search_content_types` to include `"image"` when the web search should return images, and also include `"text"` when the model needs supporting text results. `image_settings.max_results` requests a positive number of image results, while `image_settings.caption` requests short descriptions when available. When `"image"` is present, the SDK automatically requests `web_search_call.results`. Those raw results are stored on the `web_search_call` item in [`RunResult.raw_responses`](results.md#raw-responses), separately from the assistant message, and can include `image_url`, `source_website_url`, `thumbnail_url`, and `caption`. See the OpenAI [image search results guide](https://developers.openai.com/api/docs/guides/tools-web-search#image-search-results).
 
 ### Hosted tool search
 
@@ -245,23 +250,25 @@ Shell action timeouts use positive integer milliseconds for a finite timeout. Th
 
 `ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.
 
-For explicit [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) requests, the SDK sends the GA built-in tool payload `{"type": "computer"}`. For requests to the older `computer-use-preview` model, the SDK continues to send the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform migration described in OpenAI's [Computer use guide](https://developers.openai.com/api/docs/guides/tools-computer-use/):
+When an [`Agent`][agents.agent.Agent] does not set `model`, normal SDK model-selection precedence applies. The built-in SDK default, currently [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna), supports computer use. If `OPENAI_DEFAULT_MODEL` or `RunConfig.model` overrides that default, select a model that supports computer use. Set `model` on the agent when you want to choose a different capability and cost profile for the computer-use workload. The example below uses the [`gpt-5.6`](https://developers.openai.com/api/docs/models/gpt-5.6) alias, which OpenAI routes to GPT-5.6 Sol; you can instead select another model that supports computer use, such as [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra) or [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
 
--   Model: `computer-use-preview` -> `gpt-5.5`
+For explicit requests to a model that supports the GA built-in computer tool, such as `gpt-5.6`, the SDK sends the payload `{"type": "computer"}`. For requests to the older `computer-use-preview` model, the SDK continues to send the preview payload `{"type": "computer_use_preview", "environment": ..., "display_width": ..., "display_height": ...}`. This mirrors the platform's [migration from `computer-use-preview`](https://developers.openai.com/api/docs/guides/tools-computer-use-integration#migration-from-computer-use-preview):
+
+-   Model: `computer-use-preview` -> `gpt-5.6-sol`
 -   Tool selector: `computer_use_preview` -> `computer`
 -   Computer call shape: one `action` per `computer_call` -> batched `actions[]` on `computer_call`
 -   Truncation: `ModelSettings(truncation="auto")` required on the preview path -> not required on the GA path
 
-The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either keep `model="gpt-5.5"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+The SDK chooses that wire shape from the effective model on the actual Responses request. If you use a prompt template and the request omits `model` because the prompt owns it, the SDK keeps the preview-compatible computer payload unless you either make a supported GA model such as `model="gpt-5.6"` explicit or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 When a [`ComputerTool`][agents.tool.ComputerTool] is present, `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are all accepted and normalized to the built-in selector that matches the effective request model. Without a `ComputerTool`, those strings still behave like ordinary function names.
 
 This distinction matters when `ComputerTool` is backed by a [`ComputerProvider`][agents.tool.ComputerProvider] factory. The GA `computer` payload does not need `environment` or dimensions at serialization time, so serialization can occur before a factory has produced a `Computer` or `AsyncComputer` instance. Preview-compatible serialization still needs a resolved `Computer` or `AsyncComputer` instance so the SDK can send `environment`, `display_width`, and `display_height`.
 
-At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; `gpt-5.5` can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
+At runtime, both paths still use the same local harness. Preview responses emit `computer_call` items with a single `action`; GA responses can emit batched `actions[]`, and the SDK executes them in order before producing a `computer_call_output` screenshot item. See `examples/tools/computer_use.py` for a runnable Playwright-based harness.
 
 ```python
-from agents import Agent, ApplyPatchTool, ShellTool
+from agents import Agent, ApplyPatchTool, ComputerTool, ShellTool
 from agents.computer import AsyncComputer
 from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEditor
 
@@ -295,8 +302,10 @@ agent = Agent(
     tools=[
         ShellTool(executor=run_shell),
         ApplyPatchTool(editor=NoopEditor()),
-        # ComputerTool expects a Computer/AsyncComputer implementation; omitted here for brevity.
+        ComputerTool(computer=NoopComputer()),
     ],
+    # Optional: omit this argument to use the configured or built-in default model.
+    model="gpt-5.6",
 )
 ```
 
@@ -501,6 +510,8 @@ The code for the schema extraction lives in [`agents.function_schema`][].
 ### Constraining and describing arguments with Pydantic Field
 
 You can use Pydantic's [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) to add constraints (e.g. min/max for numbers, length or pattern for strings) and descriptions to tool arguments. As in Pydantic, both forms are supported: default-based (`arg: int = Field(..., ge=1)`) and `Annotated` (`arg: Annotated[int, Field(..., ge=1)]`). The generated JSON schema and validation include these constraints.
+
+For variadic parameters, an annotation describes each collected value. The SDK therefore applies `Annotated[..., Field(...)]` constraints to each value supplied through `*args` or `**kwargs`, while omitted variadic parameters remain valid empty collections. Annotate scalar positional values as `*args: T`. If each positional value is itself a homogeneous tuple, use `*args: tuple[T, ...]`; the SDK rejects fixed-length tuple annotations such as `*args: tuple[int, str]` because one fixed tuple shape cannot describe a variadic sequence of positional values.
 
 ```python
 from typing import Annotated

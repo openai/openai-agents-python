@@ -21,7 +21,7 @@ from agents import Agent, RunState, UserError
 from agents.run_context import RunContextWrapper
 from agents.run_state import SUPPORTED_SCHEMA_VERSIONS
 from agents.sandbox.entries.mounts.patterns import FuseMountConfig
-from integration_tests._contract_support import (
+from integration_tests._contract_state import (
     _deserialize_common_sandbox_session_state,
     _find_subset_errors,
     _normalized_durable_state,
