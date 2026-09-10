@@ -365,6 +365,70 @@ def validate_tar_bytes(
         raise UnsafeTarMemberError(member="<tar>", reason="invalid tar stream") from e
 
 
+def _reject_symlink_leaves_over_existing_dirs(
+    members: list[tarfile.TarInfo], *, root: Path
+) -> None:
+    """Reject symlink members whose destination is an existing directory.
+
+    ``_prepare_replaceable_leaf`` already raises this, but only once the symlink
+    pass reaches that member - after :func:`_raise_if_symlinks_unsupported` has
+    run. This read-only pre-scan keeps the archive-level diagnostic ahead of the
+    host-capability one, so a host that cannot create symlinks still reports why
+    the archive is unsafe rather than masking it. It writes nothing.
+    """
+
+    for member in members:
+        if not member.issym():
+            continue
+        rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
+        if rel_path is None:
+            continue
+        dest = root / rel_path
+        if dest.is_dir() and not dest.is_symlink():
+            raise UnsafeTarMemberError(
+                member=member.name,
+                reason=f"destination directory already exists: {rel_path.as_posix()}",
+            )
+
+
+def _raise_if_symlinks_unsupported(members: list[tarfile.TarInfo], *, root: Path) -> None:
+    """Fail before anything is written when the archive needs symlinks this process
+    cannot create.
+
+    A non-elevated Windows process without Developer Mode enabled cannot call
+    ``os.symlink``: it raises ``OSError`` with ``winerror == 1314`` ("A required
+    privilege is not held by the client"). Symlink members are deliberately the last
+    thing ``safe_extract_tarfile`` writes, so probing for this once up front - before
+    any directory or file has been restored - means a host that cannot satisfy the
+    archive rejects it outright instead of aborting partway through extraction.
+    """
+
+    if os.name != "nt":
+        # The privilege this guards against is Windows-only, and the probe costs a
+        # temp directory plus a symlink on every extraction of a symlink-bearing
+        # archive (venv-style symlinks are the common case here).
+        return
+    if not any(member.issym() for member in members):
+        return
+
+    # Probe inside *root* rather than the system temp directory: the privilege is
+    # process-wide, but a probe on a different filesystem could pass while the real
+    # extraction target rejects symlinks, reintroducing the partial state this
+    # guards against.
+    with tempfile.TemporaryDirectory(dir=root, prefix=".agents-symlink-probe-") as probe_dir:
+        try:
+            os.symlink("probe-target", Path(probe_dir) / "probe-link")
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 1314:
+                raise
+            raise OSError(
+                "cannot extract archive: it contains a symlink, and this process "
+                "cannot create filesystem symlinks. On Windows, enable Developer "
+                "Mode (Settings > Privacy & security > For developers) or run "
+                "with an elevated (Administrator) process. No files were extracted."
+            ) from exc
+
+
 def safe_extract_tarfile(
     tar: tarfile.TarFile,
     *,
@@ -382,7 +446,11 @@ def safe_extract_tarfile(
     - archive members nested underneath archive symlink members
 
     It also ensures extraction doesn't traverse through existing symlink parents
-    and creates archive symlinks only after directories and regular files.
+    and creates archive symlinks only after directories and regular files. If the
+    archive contains symlink members that this process cannot create (for example,
+    a non-elevated Windows host without Developer Mode), extraction is rejected
+    up front, before any directory or file is written, rather than aborting after
+    partially extracting the archive.
     """
 
     root.mkdir(parents=True, exist_ok=True)
@@ -393,6 +461,11 @@ def safe_extract_tarfile(
         tar,
         allow_external_symlink_targets=allow_external_symlink_targets,
     )
+    # An error about the ARCHIVE outranks one about the HOST: without this, a
+    # symlink-incapable host reports "cannot create filesystem symlinks" for an
+    # archive that is itself unsafe, hiding the more specific diagnostic.
+    _reject_symlink_leaves_over_existing_dirs(members, root=root_resolved)
+    _raise_if_symlinks_unsupported(members, root=root)
 
     def _prepare_replaceable_leaf(*, dest: Path, rel_path: Path, name: str) -> None:
         _ensure_no_symlink_parents(root=root_resolved, dest=dest, check_leaf=False)

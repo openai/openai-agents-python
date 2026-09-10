@@ -285,6 +285,86 @@ def test_safe_extract_tarfile_rejects_existing_leaf_directory_for_symlink(
         _safe_extract(raw, tmp_path)
 
 
+def _raise_symlink_privilege_error(*_args: object, **_kwargs: object) -> None:
+    exc = OSError(22, "A required privilege is not held by the client")
+    exc.winerror = 1314  # type: ignore[attr-defined]
+    raise exc
+
+
+def test_unsafe_archive_error_outranks_symlink_privilege_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsafe *archive* must be reported as unsafe even on a host that cannot
+    create symlinks, rather than being masked by the capability probe."""
+
+    monkeypatch.setattr(os, "symlink", _raise_symlink_privilege_error)
+    (tmp_path / "link.txt").mkdir()
+    raw = _tar_bytes(_symlink("link.txt", "target.txt"))
+
+    with pytest.raises(UnsafeTarMemberError, match="destination directory already exists"):
+        _safe_extract(raw, tmp_path)
+
+
+def test_safe_extract_tarfile_rejects_archive_up_front_when_symlinks_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulates a non-elevated Windows host: extraction is rejected before any
+    directory or file is written, rather than aborting after partial extraction."""
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os, "symlink", _raise_symlink_privilege_error)
+
+    raw = _tar_bytes(
+        _dir("."),
+        _dir("./pkg"),
+        _file("./pkg/main.py", b"print('hi')\n"),
+        _symlink("./pkg/link.txt", "main.py"),
+    )
+
+    with pytest.raises(OSError, match="cannot extract archive: it contains a symlink"):
+        _safe_extract(raw, tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_safe_extract_tarfile_ignores_symlink_incapability_without_symlink_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An archive with no symlink members never probes symlink support, so it
+    extracts normally even on a host that cannot create symlinks."""
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os, "symlink", _raise_symlink_privilege_error)
+
+    raw = _tar_bytes(_dir("."), _file("./main.py", b"print('hi')\n"))
+
+    _safe_extract(raw, tmp_path)
+
+    assert (tmp_path / "main.py").read_bytes() == b"print('hi')\n"
+
+
+def test_safe_extract_tarfile_reraises_unrelated_symlink_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the specific non-elevated-Windows privilege error is translated into
+    the actionable message; any other OSError from os.symlink propagates as-is."""
+
+    def _raise_other_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os, "symlink", _raise_other_error)
+
+    raw = _tar_bytes(_symlink("link.txt", "target.txt"))
+
+    with pytest.raises(OSError, match="No space left on device"):
+        _safe_extract(raw, tmp_path)
+
+
 def test_validate_tar_bytes_rejects_members_under_archive_symlink() -> None:
     raw = _tar_bytes(
         _symlink("escape", "/tmp/outside"),
