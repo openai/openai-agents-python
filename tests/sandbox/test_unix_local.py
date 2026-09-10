@@ -870,3 +870,27 @@ async def test_apply_patch_create_supports_a_symlinked_parent(tmp_path: Path) ->
             ApplyPatchOperation(type="create_file", path="internal/dangling.txt", diff="+x\n")
         )
     assert not (tmp_path / "real" / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_allows_a_missing_parent(tmp_path: Path) -> None:
+    """A nested create must still reach write() when the parent does not exist yet.
+
+    The probe reports absent for a missing parent instead of failing, so backends whose
+    write path creates parents keep working. Probing by listing the parent broke this
+    because the listing itself fails when the directory is not there.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="newdir/file.txt", diff="+hello\n")
+    )
+
+    assert (workspace / "newdir" / "file.txt").read_text() == "hello"
