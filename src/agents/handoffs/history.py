@@ -403,20 +403,47 @@ def _format_transcript_item(item: TResponseInputItem) -> str:
     role = item.get("role")
     if isinstance(role, str):
         content = item.get("content")
-        if content is None or (isinstance(content, str) and not _contains_newline(content)):
-            return _format_transcript_item_legacy(item)
+        if content is None or isinstance(content, str):
+            legacy = _format_transcript_item_legacy(item)
+            # Keep the compact form only while it stays a single record. Otherwise the
+            # reader would split it, turning one turn into several.
+            if not _spans_line_boundary(legacy):
+                return legacy
     return _format_transcript_item_json(item)
 
 
-def _contains_newline(value: str) -> bool:
-    return "\n" in value or "\r" in value
+def _spans_line_boundary(value: str) -> bool:
+    """Whether ``str.splitlines()`` would break ``value`` into more than one piece.
+
+    Records are split with ``str.splitlines()`` when a later handoff flattens the generated
+    history, and that splits on more than CR/LF: vertical tab, form feed, the file/group/record
+    separators, the C1 NEL, and U+2028/U+2029. Comparing against ``[value]`` also catches a
+    trailing boundary, which ``splitlines()`` drops instead of splitting on.
+    """
+    return bool(value) and value.splitlines() != [value]
+
+
+# Line boundaries that ``str.splitlines()`` splits on but ``json.dumps`` emits verbatim when
+# ``ensure_ascii`` is false. Escaping them keeps a serialized record on one line, and
+# ``json.loads`` restores the original character.
+_JSON_UNESCAPED_LINE_BOUNDARIES = (
+    ("\x85", "\\u0085"),
+    (" ", "\\u2028"),
+    (" ", "\\u2029"),
+)
+
+
+def _escape_json_line_boundaries(serialized: str) -> str:
+    for character, escape in _JSON_UNESCAPED_LINE_BOUNDARIES:
+        serialized = serialized.replace(character, escape)
+    return serialized
 
 
 def _format_transcript_item_json(item: TResponseInputItem) -> str:
     payload = cast(dict[str, Any], deepcopy(item))
     payload.pop("provider_data", None)
     try:
-        return json.dumps(payload, ensure_ascii=False, default=str)
+        return _escape_json_line_boundaries(json.dumps(payload, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
         return _format_transcript_item_legacy(item)
 
@@ -436,7 +463,7 @@ def _format_transcript_item_legacy(item: TResponseInputItem) -> str:
     item_type = item.get("type", "item")
     rest = {k: v for k, v in item.items() if k not in ("type", "provider_data")}
     try:
-        serialized = json.dumps(rest, ensure_ascii=False, default=str)
+        serialized = _escape_json_line_boundaries(json.dumps(rest, ensure_ascii=False, default=str))
     except TypeError:
         serialized = str(rest)
     return f"{item_type}: {serialized}" if serialized else str(item_type)
@@ -448,7 +475,7 @@ def _stringify_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     try:
-        return json.dumps(content, ensure_ascii=False, default=str)
+        return _escape_json_line_boundaries(json.dumps(content, ensure_ascii=False, default=str))
     except TypeError:
         return str(content)
 
