@@ -149,6 +149,12 @@ while :; do
     fi
 done
 """.strip()
+_EXISTING_TARGET_EXIT_CODE = 13
+# A bare existence test. It needs only execute permission on the parent, never reads the
+# target, and reports absent when the parent itself is missing, so a nested create still
+# reaches write() and lets the backend create the parents.
+_TARGET_EXISTS_SCRIPT = 'if [ -e "$1" ] || [ -L "$1" ]; then exit 13; fi\n'
+
 _WRITE_ACCESS_CHECK_SCRIPT = (
     'target="$1"\n'
     'if [ -e "$target" ]; then\n'
@@ -967,16 +973,15 @@ class BaseSandboxSession(abc.ABC):
         :raises FileExistsError: If the path already exists.
         """
         workspace_path = await self._validate_path_access(path, for_write=True)
-        # List the parent rather than reading the target. read() eagerly fetches the whole
-        # payload on the remote backends that inherit this default, so probing an existing
-        # large file would download it, and an existing file the bound user cannot read
-        # would report a read failure instead of the collision.
-        try:
-            entries = await self.ls(workspace_path.parent, user=user)
-        except (FileNotFoundError, WorkspaceReadNotFoundError):
-            entries = []
-        if any(Path(entry.path).name == workspace_path.name for entry in entries):
-            raise FileExistsError(sandbox_path_str(workspace_path))
+        path_arg = sandbox_path_str(workspace_path)
+        # Only a positive result rejects the create. Anything else, including a missing
+        # parent or an unexpected probe failure, falls through to write(), which keeps a
+        # nested create working on backends whose write path creates parents.
+        probe = await self.exec(
+            "sh", "-c", _TARGET_EXISTS_SCRIPT, "sh", path_arg, shell=False, user=user
+        )
+        if probe.exit_code == _EXISTING_TARGET_EXIT_CODE:
+            raise FileExistsError(path_arg)
         await self.write(workspace_path, data, user=user)
 
     async def _check_read_with_exec(
