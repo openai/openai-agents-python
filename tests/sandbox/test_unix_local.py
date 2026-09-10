@@ -31,6 +31,7 @@ from agents.sandbox.sandboxes.unix_local import (
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
 
 
 class _RecordingUnixLocalSession(UnixLocalSandboxSession):
@@ -806,3 +807,66 @@ async def test_write_new_file_maps_the_worker_exists_status(tmp_path: Path) -> N
         )
 
     assert recorded == ["write_new"]
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_probe_does_not_fetch_the_payload(tmp_path: Path) -> None:
+    """The inherited default must not read the target to decide a collision.
+
+    read() eagerly fetches the whole payload on the remote backends that inherit the
+    default, so probing an existing large file would download it, and an existing file the
+    bound user cannot read would report a read failure instead of the collision. This uses
+    a filesystem double that does not override write_new_file, so it exercises the base.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+    reads: list[Path] = []
+    original_read = session.read
+
+    async def counting_read(path: Path, *, user: object = None) -> io.IOBase:
+        reads.append(Path(path))
+        return await original_read(path, user=user)
+
+    session.read = counting_read  # type: ignore[assignment,method-assign]
+    (workspace / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert reads == []
+    assert (workspace / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_supports_a_symlinked_parent(tmp_path: Path) -> None:
+    """A supported internal symlink parent must still work.
+
+    The ordinary write path resolves these safe aliases, so the exclusive create has to
+    resolve the parent too and keep only the leaf name unresolved. Passing the whole path
+    through unresolved made the file ops open the parent with O_NOFOLLOW and fail.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "internal").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="internal/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "real" / "new.txt").read_text() == "hello"
+
+    # The leaf is still unresolved, so a dangling link at the target name is rejected.
+    (tmp_path / "real" / "dangling.txt").symlink_to(tmp_path / "real" / "missing.txt")
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="internal/dangling.txt", diff="+x\n")
+        )
+    assert not (tmp_path / "real" / "missing.txt").exists()

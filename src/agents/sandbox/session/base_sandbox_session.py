@@ -967,12 +967,15 @@ class BaseSandboxSession(abc.ABC):
         :raises FileExistsError: If the path already exists.
         """
         workspace_path = await self._validate_path_access(path, for_write=True)
+        # List the parent rather than reading the target. read() eagerly fetches the whole
+        # payload on the remote backends that inherit this default, so probing an existing
+        # large file would download it, and an existing file the bound user cannot read
+        # would report a read failure instead of the collision.
         try:
-            handle = await self.read(workspace_path, user=user)
+            entries = await self.ls(workspace_path.parent, user=user)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
-            pass
-        else:
-            handle.close()
+            entries = []
+        if any(Path(entry.path).name == workspace_path.name for entry in entries):
             raise FileExistsError(sandbox_path_str(workspace_path))
         await self.write(workspace_path, data, user=user)
 
