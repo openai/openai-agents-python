@@ -436,8 +436,9 @@ async def test_apply_patch_create_rejects_an_existing_file() -> None:
 class _AlwaysMissingReadApplyPatchSession(ApplyPatchSession):
     """Reports every path as missing while still holding the file.
 
-    A create that only probed with read() would be told the path is free and would
-    overwrite the stored content, so this pins the rejection to the write boundary.
+    This stands in for a backend that provides an exclusive create. A create that only
+    probed with read() would be told the path is free and would overwrite the stored
+    content, so this pins the rejection to the backend primitive rather than to a probe.
     """
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:

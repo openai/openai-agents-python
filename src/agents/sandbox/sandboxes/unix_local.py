@@ -1061,48 +1061,49 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
+        payload = coerce_write_payload(path=path, data=data)
+        # The path is handed over unresolved. The descriptor-relative file ops authorize it
+        # without following symlinks and then open the leaf with O_NOFOLLOW, so a symlink at
+        # the target name is rejected rather than followed to its target.
         if user is not None:
-            await super().write_new_file(path, data, user=user)
+            await self._write_new_stream_with_exec(Path(path), payload.stream, user=user)
             return
 
-        payload = coerce_write_payload(path=path, data=data)
-        # Validate the parent with the normal policy so grants and symlinked parents are
-        # still enforced, then keep the final component unresolved. normalize_path()
-        # resolves symlinks, which would turn a dangling link at the target name into its
-        # absent target and let the write land there instead of being rejected.
-        requested = Path(path)
-        parent_path = self.normalize_path(requested.parent, for_write=True)
-        workspace_path = parent_path / requested.name
-        staging_path = parent_path / f".apply-patch-create-{uuid.uuid4().hex}"
-        # Classify a visible collision before staging, so a target inside a non-writable
-        # parent reports the collision rather than a permission failure from the staging
-        # write. os.path.lexists does not follow a symlink at the target name.
-        if os.path.lexists(workspace_path):
-            raise FileExistsError(str(workspace_path))
-
         try:
-            # Only the link may report a collision. A parent that is a regular file also
-            # raises FileExistsError from mkdir, and reporting that as "the target already
-            # exists" would send the model to update_file for a target that is absent.
-            try:
-                parent_path.mkdir(parents=True, exist_ok=True)
-                with staging_path.open("wb") as staged:
-                    shutil.copyfileobj(payload.stream, staged)
-            except OSError as e:
-                raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+            self._files.write_new(Path(path), payload.stream)
+        except FileExistsError:
+            raise
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=Path(path), cause=e) from e
 
-            # os.link claims the name in one step and fails with EEXIST when it is taken
-            # by anything, including a directory or a dangling symlink. Linking a complete
-            # payload means a failed write never leaves a file holding the name.
-            try:
-                os.link(staging_path, workspace_path)
-            except FileExistsError:
-                raise
-            except OSError as e:
-                raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
-        finally:
-            with suppress(OSError):
-                staging_path.unlink()
+    async def _write_new_stream_with_exec(
+        self,
+        path: Path,
+        stream: io.IOBase,
+        *,
+        user: str | User,
+    ) -> None:
+        payload = stream.read()
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        elif not isinstance(payload, bytes):
+            payload = bytes(payload)
+        try:
+            result = await self._run_file_operation_as_user(
+                "write_new", path, user=user, payload=payload
+            )
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=path, cause=e) from e
+        if result.returncode == _unix_local_file_ops._EXISTING_TARGET_EXIT_CODE:
+            raise FileExistsError(str(path))
+        if result.returncode:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    "operation": "write_new",
+                },
+            )
 
     async def _write_stream_with_exec(
         self,
@@ -1133,14 +1134,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def _run_file_operation_as_user(
         self,
-        operation: Literal["ls", "write"],
+        operation: Literal["ls", "write", "write_new"],
         path: Path,
         *,
         user: str | User,
         payload: bytes = b"",
     ) -> subprocess.CompletedProcess[bytes]:
         # Authorization is synchronous and captured for this operation before dispatch.
-        path = self._files.authorize(path, for_write=operation == "write")
+        path = self._files.authorize(path, for_write=operation != "ls")
         command = self._prepare_exec_command(
             "python3",
             "-I",

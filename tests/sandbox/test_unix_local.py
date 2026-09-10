@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import io
 import os
-import shutil
 import signal
 import subprocess
 import tarfile
@@ -23,16 +22,12 @@ from agents.sandbox.errors import (
     WorkspaceArchiveWriteError,
 )
 from agents.sandbox.manifest import Environment, Manifest
-from agents.sandbox.sandboxes import unix_local as unix_local_module
+from agents.sandbox.sandboxes import _unix_local_file_ops, unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
     _UnixPtyProcessEntry,
-)
-from agents.sandbox.session.base_sandbox_session import (
-    _EXCLUSIVE_CREATE_EXISTS_CODE,
-    _EXCLUSIVE_CREATE_SCRIPT,
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
@@ -647,202 +642,6 @@ async def test_write_new_file_keeps_an_intervening_creator_content(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_write_new_file_rejects_a_dangling_symlink(tmp_path: Path) -> None:
-    """A symlink entry is not absent, and the write must not follow it to its target."""
-    session = _exclusive_write_session(tmp_path)
-    link = tmp_path / "link.txt"
-    link.symlink_to(tmp_path / "missing.txt")
-
-    with pytest.raises(FileExistsError):
-        await session.write_new_file(Path("link.txt"), io.BytesIO(b"clobbered"))
-
-    assert link.is_symlink()
-    assert not (tmp_path / "missing.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_write_new_file_creates_a_file_and_its_parents(tmp_path: Path) -> None:
-    session = _exclusive_write_session(tmp_path)
-
-    await session.write_new_file(Path("nested/dir/new.txt"), io.BytesIO(b"payload"))
-
-    assert (tmp_path / "nested" / "dir" / "new.txt").read_bytes() == b"payload"
-
-
-class _ExitCodeUnixLocalSession(UnixLocalSandboxSession):
-    """Drives the shared exec-based exclusive create with a chosen exit code."""
-
-    def __init__(self, root: Path, exit_code: int, *, preflight_exit_code: int = 0) -> None:
-        super().__init__(
-            state=UnixLocalSandboxSessionState(
-                manifest=Manifest(root=str(root)),
-                snapshot=NoopSnapshot(id="noop"),
-            )
-        )
-        self._exit_code = exit_code
-        self._preflight_exit_code = preflight_exit_code
-        self.exec_commands: list[tuple[str, ...]] = []
-        self.writes: list[Path] = []
-        self.removed: list[Path] = []
-        self.made_dirs: list[Path] = []
-
-    async def _exec_internal(
-        self,
-        *command: str | Path,
-        timeout: float | None = None,
-    ) -> ExecResult:
-        _ = timeout
-        parts = tuple(str(part) for part in command)
-        self.exec_commands.append(parts)
-        # The collision preflight is the invocation that receives only the target.
-        is_preflight = not any("ln " in part for part in parts)
-        code = self._preflight_exit_code if is_preflight else self._exit_code
-        return ExecResult(stdout=b"", stderr=b"", exit_code=code)
-
-    async def write(self, path: Path, data: io.IOBase, *, user: object = None) -> None:
-        _ = (data, user)
-        self.writes.append(path)
-
-    async def rm(
-        self,
-        path: Path | str,
-        *,
-        recursive: bool = False,
-        user: object = None,
-    ) -> None:
-        _ = (recursive, user)
-        self.removed.append(Path(path))
-
-    async def mkdir(
-        self,
-        path: Path | str,
-        *,
-        parents: bool = False,
-        user: object = None,
-    ) -> None:
-        _ = (parents, user)
-        self.made_dirs.append(Path(path))
-
-
-@pytest.mark.asyncio
-async def test_write_new_file_with_a_bound_user_reports_an_existing_name(tmp_path: Path) -> None:
-    """A target that is already visible is rejected before any payload is staged."""
-    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=0, preflight_exit_code=13)
-
-    with pytest.raises(FileExistsError):
-        await session.write_new_file(
-            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
-        )
-
-    # No payload bytes were uploaded, so a create onto an occupied name costs one probe
-    # rather than a full staged write that is then discarded.
-    assert session.writes == []
-    assert session.removed == []
-
-
-@pytest.mark.asyncio
-async def test_write_new_file_with_a_bound_user_reports_a_racing_creator(tmp_path: Path) -> None:
-    """A creator that wins between the preflight and the link still loses the name."""
-    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13, preflight_exit_code=0)
-
-    with pytest.raises(FileExistsError):
-        await session.write_new_file(
-            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
-        )
-
-    # Here the payload was staged before the race was detected, and the staging entry is
-    # still cleaned up rather than left in the workspace.
-    assert all(path.name.startswith(".apply-patch-create-") for path in session.writes)
-    assert session.removed == session.writes
-    assert session.made_dirs != []
-
-
-@pytest.mark.asyncio
-async def test_write_new_file_with_a_bound_user_links_the_completed_payload(
-    tmp_path: Path,
-) -> None:
-    """The payload is written first, then the target name is claimed by linking it."""
-    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=0)
-
-    await session.write_new_file(
-        Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
-    )
-
-    staged = session.writes[0]
-    assert staged.name.startswith(".apply-patch-create-")
-    dispatched = [part for cmd in session.exec_commands for part in cmd]
-    assert any("ln " in part for part in dispatched)
-    assert any(part.endswith("notes.txt") for part in dispatched)
-    assert str(staged) in dispatched
-    assert session.removed == [staged]
-
-
-@pytest.mark.asyncio
-async def test_write_new_file_with_a_bound_user_keeps_a_symlink_name_unresolved(
-    tmp_path: Path,
-) -> None:
-    """The exclusive create must act on the link name, not on the target it points at."""
-    session = _ExitCodeUnixLocalSession(tmp_path, exit_code=13)
-    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
-
-    with pytest.raises(FileExistsError):
-        await session.write_new_file(
-            Path("link.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
-        )
-
-    dispatched = [part for cmd in session.exec_commands for part in cmd]
-    assert any(part.endswith("link.txt") for part in dispatched)
-    assert not any(part.endswith("missing.txt") for part in dispatched)
-
-
-@pytest.mark.parametrize("shell", ["sh", "dash", "bash"])
-def test_exclusive_create_script_reports_a_taken_name_on_each_shell(
-    shell: str, tmp_path: Path
-) -> None:
-    """Run the shipped script through real shells.
-
-    The script is dispatched as ``sh -lc``, so whichever shell provides ``/bin/sh``
-    decides how a failing command is handled. An earlier version used ``:``, which is a
-    POSIX special builtin, so a redirection failure terminated dash before the explicit
-    exit mapping ran and the collision surfaced as a generic write error. This lives with
-    the Unix-local tests because tests/conftest.py already skips them on Windows.
-    """
-    executable = shutil.which(shell)
-    if executable is None:
-        pytest.skip(f"{shell} is not available")
-
-    staging = tmp_path / "staging"
-    staging.write_bytes(b"payload")
-    taken = tmp_path / "taken.txt"
-    taken.write_bytes(b"existing\n")
-    dangling = tmp_path / "dangling.txt"
-    dangling.symlink_to(tmp_path / "missing.txt")
-
-    def run(target: Path) -> int:
-        return subprocess.run(
-            [executable, "-c", _EXCLUSIVE_CREATE_SCRIPT, shell, str(target), str(staging)],
-            capture_output=True,
-        ).returncode
-
-    assert run(taken) == _EXCLUSIVE_CREATE_EXISTS_CODE
-    assert taken.read_bytes() == b"existing\n"
-
-    assert run(dangling) == _EXCLUSIVE_CREATE_EXISTS_CODE
-    assert not (tmp_path / "missing.txt").exists()
-
-    # The caller creates the parent, so the script only has to claim the name.
-    fresh = tmp_path / "nested" / "fresh.txt"
-    fresh.parent.mkdir()
-    assert run(fresh) == 0
-    assert fresh.read_bytes() == b"payload"
-
-    existing_directory = tmp_path / "adir"
-    existing_directory.mkdir()
-    assert run(existing_directory) == _EXCLUSIVE_CREATE_EXISTS_CODE
-    assert list(existing_directory.iterdir()) == []
-
-
-@pytest.mark.asyncio
 async def test_apply_patch_create_through_the_session_rejects_a_dangling_symlink(
     tmp_path: Path,
 ) -> None:
@@ -977,3 +776,33 @@ async def test_apply_patch_create_reports_collision_inside_a_read_only_parent(
         assert target.read_bytes() == b"important\n"
     finally:
         parent.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_maps_the_worker_exists_status(tmp_path: Path) -> None:
+    """The bound-user path runs the same exclusive create in a worker process.
+
+    A real sandbox user is not available here, so this pins the status mapping: the
+    worker exits with a distinct code for an existing target, and the caller has to turn
+    that into FileExistsError rather than a generic write error.
+    """
+    session = _exclusive_write_session(tmp_path)
+    recorded: list[str] = []
+
+    async def fake_worker(
+        operation: str, path: Path, *, user: object, payload: bytes = b""
+    ) -> subprocess.CompletedProcess[bytes]:
+        _ = (path, user, payload)
+        recorded.append(operation)
+        return subprocess.CompletedProcess(
+            args=[], returncode=_unix_local_file_ops._EXISTING_TARGET_EXIT_CODE
+        )
+
+    session._run_file_operation_as_user = fake_worker  # type: ignore[assignment,method-assign]
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(
+            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+        )
+
+    assert recorded == ["write_new"]
