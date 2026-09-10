@@ -514,6 +514,7 @@ async def test_codex_exec_run_cancels_pending_timeout_read_before_draining_stdou
             except asyncio.CancelledError:
                 readline_cancelled.set()
                 raise
+            raise AssertionError("readline unexpectedly completed")
 
         async def read(self, _size: int) -> bytes:
             assert readline_cancelled.is_set()
