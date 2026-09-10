@@ -158,7 +158,10 @@ class TestGuardrailFunctionality:
         ]
         assert len(records) == 1
         context = records[0].__dict__["openai_agents_diagnostic_context"]
-        assert context["guardrail_type"].endswith("._FailingGuardrailCallable")
+        # get_name() now falls back to the callable's type name instead of raising, so the
+        # diagnostic context carries a guardrail_name and never reaches the guardrail_type
+        # fallback branch.
+        assert context["guardrail_name"] == "_FailingGuardrailCallable"
         assert records[0].exc_info is not None
 
     @pytest.mark.asyncio

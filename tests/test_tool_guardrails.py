@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -58,6 +59,66 @@ def get_async_input_guardrail(triggers: bool, output_info: Any | None = None):
             return ToolGuardrailFunctionOutput.allow(output_info=output_info)
 
     return async_guardrail
+
+
+def _partial_tool_input_guardrail_target(
+    data: ToolInputGuardrailData, threshold: int | None = None
+) -> ToolGuardrailFunctionOutput:
+    return ToolGuardrailFunctionOutput.allow()
+
+
+def _partial_tool_output_guardrail_target(
+    data: ToolOutputGuardrailData, threshold: int | None = None
+) -> ToolGuardrailFunctionOutput:
+    return ToolGuardrailFunctionOutput.allow()
+
+
+class _CallableToolInputGuardrail:
+    def __call__(self, data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+
+class _CallableToolOutputGuardrail:
+    def __call__(self, data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+
+def test_tool_input_guardrail_get_name_with_functools_partial() -> None:
+    guardrail = ToolInputGuardrail(
+        guardrail_function=functools.partial(_partial_tool_input_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
+
+
+def test_tool_input_guardrail_get_name_with_callable_instance() -> None:
+    guardrail = ToolInputGuardrail(guardrail_function=_CallableToolInputGuardrail())
+    assert guardrail.get_name() == "_CallableToolInputGuardrail"
+
+
+def test_tool_output_guardrail_get_name_with_functools_partial() -> None:
+    guardrail = ToolOutputGuardrail(
+        guardrail_function=functools.partial(_partial_tool_output_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
+
+
+def test_tool_output_guardrail_get_name_with_callable_instance() -> None:
+    guardrail = ToolOutputGuardrail(guardrail_function=_CallableToolOutputGuardrail())
+    assert guardrail.get_name() == "_CallableToolOutputGuardrail"
+
+
+def test_tool_input_guardrail_decorator_with_functools_partial() -> None:
+    guardrail = tool_input_guardrail(
+        functools.partial(_partial_tool_input_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
+
+
+def test_tool_output_guardrail_decorator_with_functools_partial() -> None:
+    guardrail = tool_output_guardrail(
+        functools.partial(_partial_tool_output_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
 
 
 def get_sync_output_guardrail(triggers: bool, output_info: Any | None = None):

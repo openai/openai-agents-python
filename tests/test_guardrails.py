@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import Any
 from unittest.mock import patch
@@ -44,6 +45,96 @@ def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
         )
 
     return sync_guardrail
+
+
+def _partial_input_guardrail_target(
+    context: RunContextWrapper[Any],
+    agent: Agent[Any],
+    input: str | list[TResponseInputItem],
+    threshold: int | None = None,
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+
+def _partial_output_guardrail_target(
+    context: RunContextWrapper[Any],
+    agent: Agent[Any],
+    agent_output: Any,
+    threshold: int | None = None,
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+
+class _CallableInputGuardrail:
+    def __call__(
+        self,
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+
+class _CallableOutputGuardrail:
+    def __call__(
+        self, context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+
+def test_input_guardrail_get_name_with_functools_partial() -> None:
+    guardrail = InputGuardrail(
+        guardrail_function=functools.partial(_partial_input_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
+
+
+def test_input_guardrail_get_name_with_callable_instance() -> None:
+    guardrail = InputGuardrail(guardrail_function=_CallableInputGuardrail())
+    assert guardrail.get_name() == "_CallableInputGuardrail"
+
+
+def test_output_guardrail_get_name_with_functools_partial() -> None:
+    guardrail = OutputGuardrail(
+        guardrail_function=functools.partial(_partial_output_guardrail_target, threshold=1)
+    )
+    assert guardrail.get_name() == "partial"
+
+
+def test_output_guardrail_get_name_with_callable_instance() -> None:
+    guardrail = OutputGuardrail(guardrail_function=_CallableOutputGuardrail())
+    assert guardrail.get_name() == "_CallableOutputGuardrail"
+
+
+def test_input_guardrail_decorator_with_functools_partial() -> None:
+    guardrail = input_guardrail(functools.partial(_partial_input_guardrail_target, threshold=1))
+    assert guardrail.get_name() == "partial"
+
+
+def test_output_guardrail_decorator_with_functools_partial() -> None:
+    guardrail = output_guardrail(functools.partial(_partial_output_guardrail_target, threshold=1))
+    assert guardrail.get_name() == "partial"
+
+
+@pytest.mark.asyncio
+async def test_run_with_functools_partial_input_guardrail_does_not_crash() -> None:
+    model = ScriptedModel()
+    agent = Agent(
+        name="test_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[
+            InputGuardrail(
+                guardrail_function=functools.partial(_partial_input_guardrail_target, threshold=1)
+            )
+        ],
+        model=model,
+    )
+    model.enqueue([get_text_message("hello")])
+
+    result = await Runner.run(agent, "test input")
+
+    assert result.final_output is not None
+    assert result.input_guardrail_results[0].guardrail.get_name() == "partial"
 
 
 @pytest.mark.asyncio
