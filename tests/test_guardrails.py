@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import Any
 from unittest.mock import patch
@@ -2268,3 +2269,93 @@ async def test_output_guardrail_exception_reports_completed_results_streamed():
             pass
 
     assert _result_names(result.output_guardrail_results) == ["passes"]
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_name_falls_back_for_nameless_callables() -> None:
+    """Guardrails built from partials or callable instances still resolve a span name."""
+
+    def check(
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+        threshold: int | None = None,
+    ) -> GuardrailFunctionOutput:
+        del context, agent, input, threshold
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    class Checker:
+        def __call__(
+            self,
+            context: RunContextWrapper[Any],
+            agent: Agent[Any],
+            input: str | list[TResponseInputItem],
+        ) -> GuardrailFunctionOutput:
+            del context, agent, input
+            return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    assert InputGuardrail(guardrail_function=check).get_name() == "check"
+    assert isinstance(
+        InputGuardrail(guardrail_function=functools.partial(check, threshold=1)).get_name(), str
+    )
+    assert isinstance(InputGuardrail(guardrail_function=Checker()).get_name(), str)
+    assert InputGuardrail(guardrail_function=Checker(), name="explicit").get_name() == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_name_falls_back_for_nameless_callables() -> None:
+    """Output guardrails built from nameless callables still resolve a span name."""
+
+    async def check(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        del context, agent, output
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    assert OutputGuardrail(guardrail_function=check).get_name() == "check"
+    assert isinstance(OutputGuardrail(guardrail_function=functools.partial(check)).get_name(), str)
+
+
+@pytest.mark.asyncio
+async def test_guardrail_decorators_accept_nameless_callables() -> None:
+    """The guardrail decorators fall back to a type-based name instead of raising."""
+
+    def check(
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+        threshold: int | None = None,
+    ) -> GuardrailFunctionOutput:
+        del context, agent, input, threshold
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    assert isinstance(input_guardrail(functools.partial(check, threshold=1)).get_name(), str)
+    assert isinstance(output_guardrail(functools.partial(check)).get_name(), str)
+
+
+@pytest.mark.asyncio
+async def test_run_with_partial_input_guardrail_succeeds() -> None:
+    """A run using a partial guardrail function completes instead of raising AttributeError."""
+
+    def check(
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+        threshold: int | None = None,
+    ) -> GuardrailFunctionOutput:
+        del context, agent, input, threshold
+        return GuardrailFunctionOutput(output_info="partial_ok", tripwire_triggered=False)
+
+    model = ScriptedModel()
+    agent = Agent(
+        name="partial_guardrail_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[InputGuardrail(guardrail_function=functools.partial(check, threshold=1))],
+        model=model,
+    )
+    model.enqueue([get_text_message("hello")])
+
+    result = await Runner.run(agent, "test input")
+
+    assert result.final_output == "hello"
+    assert result.input_guardrail_results[0].output.output_info == "partial_ok"

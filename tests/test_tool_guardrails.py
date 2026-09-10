@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -656,3 +657,25 @@ if __name__ == "__main__":
         print("✅ All basic tests passed!")
 
     asyncio.run(main())
+
+
+def test_tool_guardrail_names_fall_back_for_nameless_callables() -> None:
+    """Tool guardrails built from nameless callables still resolve a span name."""
+
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        del data
+        return ToolGuardrailFunctionOutput.allow(output_info=None)
+
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        del data
+        return ToolGuardrailFunctionOutput.allow(output_info=None)
+
+    assert ToolInputGuardrail(guardrail_function=check_input).get_name() == "check_input"
+    assert isinstance(
+        ToolInputGuardrail(guardrail_function=functools.partial(check_input)).get_name(), str
+    )
+    assert isinstance(
+        ToolOutputGuardrail(guardrail_function=functools.partial(check_output)).get_name(), str
+    )
+    assert isinstance(tool_input_guardrail(functools.partial(check_input)).get_name(), str)
+    assert isinstance(tool_output_guardrail(functools.partial(check_output)).get_name(), str)

@@ -9,7 +9,7 @@ from typing_extensions import TypedDict, TypeVar
 
 from .exceptions import UserError
 from .tool_context import ToolContext
-from .util._types import MaybeAwaitable
+from .util._types import MaybeAwaitable, _callable_name
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -165,7 +165,7 @@ class ToolInputGuardrail(Generic[TContext_co]):
     """
 
     def get_name(self) -> str:
-        return self.name or self.guardrail_function.__name__
+        return self.name or _callable_name(self.guardrail_function)
 
     async def run(self, data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
         if not callable(self.guardrail_function):
@@ -194,7 +194,7 @@ class ToolOutputGuardrail(Generic[TContext_co]):
     """
 
     def get_name(self) -> str:
-        return self.name or self.guardrail_function.__name__
+        return self.name or _callable_name(self.guardrail_function)
 
     async def run(self, data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
         if not callable(self.guardrail_function):
@@ -236,7 +236,7 @@ def tool_input_guardrail(
     """Decorator to create a ToolInputGuardrail from a function."""
 
     def decorator(f: _ToolInputFuncSync | _ToolInputFuncAsync) -> ToolInputGuardrail[Any]:
-        return ToolInputGuardrail(guardrail_function=f, name=name or f.__name__)
+        return ToolInputGuardrail(guardrail_function=f, name=name or _callable_name(f))
 
     if func is not None:
         return decorator(func)
@@ -272,7 +272,7 @@ def tool_output_guardrail(
     """Decorator to create a ToolOutputGuardrail from a function."""
 
     def decorator(f: _ToolOutputFuncSync | _ToolOutputFuncAsync) -> ToolOutputGuardrail[Any]:
-        return ToolOutputGuardrail(guardrail_function=f, name=name or f.__name__)
+        return ToolOutputGuardrail(guardrail_function=f, name=name or _callable_name(f))
 
     if func is not None:
         return decorator(func)

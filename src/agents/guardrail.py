@@ -10,7 +10,7 @@ from typing_extensions import TypeVar
 from .exceptions import UserError
 from .items import TResponseInputItem
 from .run_context import RunContextWrapper, TContext
-from .util._types import MaybeAwaitable
+from .util._types import MaybeAwaitable, _callable_name
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -106,7 +106,7 @@ class InputGuardrail(Generic[TContext]):
         if self.name:
             return self.name
 
-        return self.guardrail_function.__name__
+        return _callable_name(self.guardrail_function)
 
     async def run(
         self,
@@ -160,7 +160,7 @@ class OutputGuardrail(Generic[TContext]):
         if self.name:
             return self.name
 
-        return self.guardrail_function.__name__
+        return _callable_name(self.guardrail_function)
 
     async def run(
         self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any
@@ -258,7 +258,7 @@ def input_guardrail(
         return InputGuardrail(
             guardrail_function=f,
             # If not set, guardrail name uses the function’s name by default.
-            name=name if name else f.__name__,
+            name=name if name else _callable_name(f),
             run_in_parallel=run_in_parallel,
         )
 
@@ -332,7 +332,7 @@ def output_guardrail(
         return OutputGuardrail(
             guardrail_function=f,
             # Guardrail name defaults to function's name when not specified (None).
-            name=name if name else f.__name__,
+            name=name if name else _callable_name(f),
         )
 
     if func is not None:
