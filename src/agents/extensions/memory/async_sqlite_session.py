@@ -54,7 +54,7 @@ class AsyncSQLiteSession(SessionABC):
             if session_settings is not None
             else SessionSettings()
         )
-        self.db_path = db_path
+        self.db_path = db_path if str(db_path) == ":memory:" else Path(db_path).expanduser()
         self.sessions_table = sessions_table
         self.messages_table = messages_table
         self._connection: aiosqlite.Connection | None = None
