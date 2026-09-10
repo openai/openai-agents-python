@@ -106,7 +106,7 @@ class InputGuardrail(Generic[TContext]):
         if self.name:
             return self.name
 
-        return self.guardrail_function.__name__
+        return getattr(self.guardrail_function, "__name__", type(self.guardrail_function).__name__)
 
     async def run(
         self,
@@ -160,7 +160,7 @@ class OutputGuardrail(Generic[TContext]):
         if self.name:
             return self.name
 
-        return self.guardrail_function.__name__
+        return getattr(self.guardrail_function, "__name__", type(self.guardrail_function).__name__)
 
     async def run(
         self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any
@@ -258,7 +258,7 @@ def input_guardrail(
         return InputGuardrail(
             guardrail_function=f,
             # If not set, guardrail name uses the function’s name by default.
-            name=name if name else f.__name__,
+            name=name if name else getattr(f, "__name__", type(f).__name__),
             run_in_parallel=run_in_parallel,
         )
 
@@ -332,7 +332,7 @@ def output_guardrail(
         return OutputGuardrail(
             guardrail_function=f,
             # Guardrail name defaults to function's name when not specified (None).
-            name=name if name else f.__name__,
+            name=name if name else getattr(f, "__name__", type(f).__name__),
         )
 
     if func is not None:

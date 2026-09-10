@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -82,6 +83,18 @@ def get_async_output_guardrail(triggers: bool, output_info: Any | None = None):
             return ToolGuardrailFunctionOutput.allow(output_info=output_info)
 
     return async_guardrail
+
+
+def test_guardrail_names_fall_back_for_partials():
+    input_guardrail = ToolInputGuardrail(
+        guardrail_function=functools.partial(get_sync_input_guardrail, triggers=False)
+    )
+    output_guardrail = ToolOutputGuardrail(
+        guardrail_function=functools.partial(get_sync_output_guardrail, triggers=False)
+    )
+
+    assert input_guardrail.get_name() == "partial"
+    assert output_guardrail.get_name() == "partial"
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import Any
 from unittest.mock import patch
@@ -347,6 +348,54 @@ async def test_input_guardrail_decorator_with_name_and_run_in_parallel():
 
     assert named_blocking_guardrail.get_name() == "custom_name"
     assert named_blocking_guardrail.run_in_parallel is False
+
+
+@pytest.mark.asyncio
+async def test_guardrail_names_fall_back_for_partials():
+    def check(
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+        threshold: int,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    def check_output(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any, threshold: int
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    input_guardrail = InputGuardrail(guardrail_function=functools.partial(check, threshold=1))
+    output_guardrail = OutputGuardrail(
+        guardrail_function=functools.partial(check_output, threshold=1)
+    )
+
+    assert input_guardrail.get_name() == "partial"
+    assert output_guardrail.get_name() == "partial"
+
+
+@pytest.mark.asyncio
+async def test_runner_accepts_partial_input_guardrail():
+    def check(
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+        threshold: int,
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel()
+    agent = Agent(
+        name="partial_guardrail_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[InputGuardrail(guardrail_function=functools.partial(check, threshold=1))],
+        model=model,
+    )
+    model.enqueue([get_text_message("hello")])
+
+    result = await Runner.run(agent, "hi")
+
+    assert result.final_output == "hello"
 
 
 @pytest.mark.asyncio
