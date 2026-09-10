@@ -1062,19 +1062,22 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         payload = coerce_write_payload(path=path, data=data)
-        # The path is handed over unresolved. The descriptor-relative file ops authorize it
-        # without following symlinks and then open the leaf with O_NOFOLLOW, so a symlink at
-        # the target name is rejected rather than followed to its target.
+        # Resolve the parent the way the ordinary write path does, so a supported internal
+        # symlink such as "internal -> real" still works, then keep the leaf name
+        # unresolved so the file ops open it with O_NOFOLLOW and a symlink at the target
+        # name is rejected rather than followed.
+        requested = Path(path)
+        target = self.normalize_path(requested.parent, for_write=True) / requested.name
         if user is not None:
-            await self._write_new_stream_with_exec(Path(path), payload.stream, user=user)
+            await self._write_new_stream_with_exec(target, payload.stream, user=user)
             return
 
         try:
-            self._files.write_new(Path(path), payload.stream)
+            self._files.write_new(target, payload.stream)
         except FileExistsError:
             raise
         except OSError as e:
-            raise WorkspaceArchiveWriteError(path=Path(path), cause=e) from e
+            raise WorkspaceArchiveWriteError(path=target, cause=e) from e
 
     async def _write_new_stream_with_exec(
         self,
