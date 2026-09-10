@@ -168,22 +168,26 @@ class CodexExec:
                 return await stdout.readline()
 
             read_task: asyncio.Task[bytes] = asyncio.create_task(stdout.readline())
-            done, _ = await asyncio.wait(
-                {read_task}, timeout=args.idle_timeout_seconds, return_when=asyncio.FIRST_COMPLETED
-            )
-            if read_task in done:
-                return read_task.result()
+            try:
+                done, _ = await asyncio.wait(
+                    {read_task},
+                    timeout=args.idle_timeout_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if read_task in done:
+                    return read_task.result()
 
-            if args.signal is not None:
-                args.signal.set()
-            if process.returncode is None:
-                process.terminate()
+                if args.signal is not None:
+                    args.signal.set()
+                if process.returncode is None:
+                    process.terminate()
 
-            read_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(read_task, timeout=1)
-
-            raise RuntimeError(f"Codex stream idle for {args.idle_timeout_seconds} seconds.")
+                raise RuntimeError(f"Codex stream idle for {args.idle_timeout_seconds} seconds.")
+            finally:
+                if not read_task.done():
+                    read_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await read_task
 
         try:
             while True:
@@ -210,9 +214,13 @@ class CodexExec:
             if process.returncode is None:
                 process.kill()
             try:
-                await stderr_task
+                while await stdout.read(1024):
+                    pass
             finally:
-                await process.wait()
+                try:
+                    await stderr_task
+                finally:
+                    await process.wait()
 
     def _build_env(self, args: CodexExecArgs) -> dict[str, str]:
         # Respect env overrides when provided; otherwise copy from os.environ.

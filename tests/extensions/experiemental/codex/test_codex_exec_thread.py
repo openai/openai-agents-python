@@ -55,6 +55,11 @@ class FakeStdout:
             return b""
         return self._lines.pop(0)
 
+    async def read(self, _size: int) -> bytes:
+        if not self._lines:
+            return b""
+        return self._lines.pop(0)
+
 
 class FakeStderr:
     def __init__(self, chunks: list[bytes]) -> None:
@@ -423,20 +428,38 @@ async def test_codex_exec_run_handles_large_single_line_events(
 
 
 @pytest.mark.asyncio
-async def test_codex_exec_run_closes_live_process_before_draining_stderr(
+async def test_codex_exec_run_drains_stdout_before_waiting_for_live_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stderr_eof = asyncio.Event()
+    stdout_drained = asyncio.Event()
 
     class BlockingStderr:
         async def read(self, _size: int) -> bytes:
             await stderr_eof.wait()
             return b""
 
+    class BackpressuredStdout:
+        def __init__(self) -> None:
+            self._line_read = False
+            self._unread_chunks = [b"discarded output", b""]
+
+        async def readline(self) -> bytes:
+            if self._line_read:
+                return b""
+            self._line_read = True
+            return b"line\n"
+
+        async def read(self, _size: int) -> bytes:
+            chunk = self._unread_chunks.pop(0)
+            if not chunk:
+                stdout_drained.set()
+            return chunk
+
     class LiveProcess:
         def __init__(self) -> None:
             self.stdin = FakeStdin()
-            self.stdout = FakeStdout(["line\n"])
+            self.stdout = BackpressuredStdout()
             self.stderr = BlockingStderr()
             self.returncode: int | None = None
             self.killed = False
@@ -444,12 +467,11 @@ async def test_codex_exec_run_closes_live_process_before_draining_stderr(
 
         async def wait(self) -> None:
             self.wait_called = True
-            await stderr_eof.wait()
+            await stdout_drained.wait()
             self.returncode = -9
 
         def kill(self) -> None:
             self.killed = True
-            stderr_eof.set()
 
         def terminate(self) -> None:
             raise AssertionError("terminate() should not be used when the stream is closed")
@@ -469,10 +491,70 @@ async def test_codex_exec_run_closes_live_process_before_draining_stderr(
     await asyncio.sleep(0)
     killed_before_stderr_eof = process.killed
     stderr_eof.set()
-    await close_task
+    await asyncio.wait_for(close_task, timeout=1)
 
     assert killed_before_stderr_eof is True
+    assert stdout_drained.is_set()
     assert process.wait_called is True
+    assert process.returncode == -9
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_cancels_pending_timeout_read_before_draining_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_started = asyncio.Event()
+    readline_cancelled = asyncio.Event()
+
+    class BlockingStdout:
+        async def readline(self) -> bytes:
+            read_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                readline_cancelled.set()
+                raise
+
+        async def read(self, _size: int) -> bytes:
+            assert readline_cancelled.is_set()
+            return b""
+
+    class LiveProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = BlockingStdout()
+            self.stderr = FakeStderr([])
+            self.returncode: int | None = None
+            self.killed = False
+
+        async def wait(self) -> None:
+            self.returncode = -9
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate() should not be used before the idle timeout")
+
+    process = LiveProcess()
+
+    async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> LiveProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello", idle_timeout_seconds=60))
+    read_task = asyncio.create_task(anext(stream))
+    await read_started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert readline_cancelled.is_set()
+    assert process.killed is True
+    assert process.returncode == -9
 
 
 @pytest.mark.asyncio
