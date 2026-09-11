@@ -974,14 +974,30 @@ class BaseSandboxSession(abc.ABC):
         """
         workspace_path = await self._validate_path_access(path, for_write=True)
         path_arg = sandbox_path_str(workspace_path)
-        # Only a positive result rejects the create. Anything else, including a missing
-        # parent or an unexpected probe failure, falls through to write(), which keeps a
-        # nested create working on backends whose write path creates parents.
+        # The probe reports absent as 0, including when the parent does not exist, so 0 is
+        # the only status that may proceed. Any other status means the probe itself did not
+        # run, and write() can still succeed through a separate upload API on provider
+        # sessions, which would overwrite an existing target exactly when the precondition
+        # could not be checked.
         probe = await self.exec(
             "sh", "-c", _TARGET_EXISTS_SCRIPT, "sh", path_arg, shell=False, user=user
         )
         if probe.exit_code == _EXISTING_TARGET_EXIT_CODE:
             raise FileExistsError(path_arg)
+        if probe.exit_code != 0:
+            raise WorkspaceArchiveWriteError(
+                path=workspace_path,
+                context={
+                    "command": ["sh", "-c", "<target_exists>", path_arg],
+                    "exit_code": probe.exit_code,
+                    "stdout": probe.stdout.decode("utf-8", errors="replace"),
+                    "stderr": probe.stderr.decode("utf-8", errors="replace"),
+                },
+            )
+        # Create the parents explicitly, the way the previous create path did, so the call
+        # sequence a caller can observe is unchanged and backends that do not create them
+        # during write() still work.
+        await self.mkdir(workspace_path.parent, parents=True, user=user)
         await self.write(workspace_path, data, user=user)
 
     async def _check_read_with_exec(

@@ -894,3 +894,43 @@ async def test_base_default_create_allows_a_missing_parent(tmp_path: Path) -> No
     )
 
     assert (workspace / "newdir" / "file.txt").read_text() == "hello"
+
+
+class _ProbeFailureSession(FilesystemTestSandboxSession):
+    """Reports an unexpected status from the existence probe."""
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = (command, timeout)
+        return ExecResult(stdout=b"", stderr=b"sh: not found", exit_code=127)
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_fails_closed_when_the_probe_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """A probe that did not run must not be read as "absent".
+
+    write() can still succeed through a separate upload API on provider sessions, so
+    treating an unexpected status as absent would overwrite an existing target exactly
+    when the precondition could not be checked.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = _ProbeFailureSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+    (workspace / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (workspace / "notes.txt").read_bytes() == b"important\n"

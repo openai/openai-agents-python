@@ -10,7 +10,9 @@ import pytest
 from typing_extensions import assert_type
 
 from agents import RunConfig, Runner
+from agents.editor import ApplyPatchOperation
 from agents.sandbox import ExecResult, Manifest, SandboxAgent
+from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.files import FileEntry
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -573,3 +575,24 @@ async def test_scripted_sandbox_drives_black_box_sandbox_agent_workflow() -> Non
     assert len(model.calls) == 2
     session.assert_complete()
     model.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_scripted_sandbox_supports_apply_patch_create() -> None:
+    """An exclusive create has to stay scriptable with ordinary file steps.
+
+    The inherited default probes with `exec`, and a script that configures only file
+    steps hides `exec`, so without a scripted implementation a previously valid
+    mkdir-and-write script fails with AttributeError.
+    """
+    session = scripted_sandbox_session(
+        [{"method": "mkdir", "result": None}, {"method": "write", "result": None}]
+    )
+
+    result = await WorkspaceEditor(session).apply_operation(
+        ApplyPatchOperation(type="create_file", path="notes.txt", diff="+hello\n")
+    )
+
+    assert result.output == "Created notes.txt"
+    assert session.remaining_steps == 0
+    assert [call.method for call in session.calls] == ["mkdir", "write"]
