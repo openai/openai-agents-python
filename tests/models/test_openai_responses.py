@@ -2257,30 +2257,44 @@ async def _capture_tool_choice_request(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_kind", ["function", "custom"])
 @pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
-async def test_builtin_tool_choice_prefers_coexisting_callable_tool(
-    tool_choice: str, target_kind: str
-) -> None:
+async def test_builtin_tool_choice_prefers_coexisting_function_tool(tool_choice: str) -> None:
     builtin_tool = _builtin_tool_choice_tool(tool_choice)
-    callable_target: Tool = (
-        function_tool(lambda: "ok", name_override=tool_choice)
-        if target_kind == "function"
-        else CustomTool(
-            name=tool_choice,
-            description="A callable target sharing the built-in name.",
-            on_invoke_tool=cast(Any, lambda *args, **kwargs: "ok"),
-        )
-    )
+    function_target = function_tool(lambda: "ok", name_override=tool_choice)
 
     called_kwargs = await _capture_tool_choice_request(
         tool_choice=tool_choice,
-        tools=[builtin_tool, callable_target],
+        tools=[builtin_tool, function_target],
         handoffs=[],
     )
 
     assert called_kwargs["tool_choice"] == {"type": "function", "name": tool_choice}
-    assert tool_choice in [dict(tool).get("type") for tool in called_kwargs["tools"]]
+    assert ("function", tool_choice) in [
+        (dict(tool).get("type"), dict(tool).get("name")) for tool in called_kwargs["tools"]
+    ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
+async def test_builtin_tool_choice_ignores_coexisting_custom_tool(tool_choice: str) -> None:
+    builtin_tool = _builtin_tool_choice_tool(tool_choice)
+    custom_target = CustomTool(
+        name=tool_choice,
+        description="A custom tool sharing the built-in name.",
+        on_invoke_tool=cast(Any, lambda *args, **kwargs: "ok"),
+    )
+
+    called_kwargs = await _capture_tool_choice_request(
+        tool_choice=tool_choice,
+        tools=[builtin_tool, custom_target],
+        handoffs=[],
+    )
+
+    sent = [(dict(tool).get("type"), dict(tool).get("name")) for tool in called_kwargs["tools"]]
+    assert ("custom", tool_choice) in sent
+    assert not any(entry == ("function", tool_choice) for entry in sent)
+    assert called_kwargs["tool_choice"] == {"type": tool_choice}
 
 
 @pytest.mark.allow_call_model_methods

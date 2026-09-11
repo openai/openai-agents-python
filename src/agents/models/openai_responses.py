@@ -1968,8 +1968,7 @@ class Converter:
         if any(handoff.tool_name == tool_choice for handoff in handoffs or ()):
             return False
         return not any(
-            isinstance(tool, FunctionTool | CustomTool) and tool.name == tool_choice
-            for tool in tools or ()
+            isinstance(tool, FunctionTool) and tool.name == tool_choice for tool in tools or ()
         )
 
     @classmethod
