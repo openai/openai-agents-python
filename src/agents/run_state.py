@@ -36,7 +36,7 @@ from openai.types.responses.response_output_item import (
     ProgramOutput,
 )
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
-from typing_extensions import TypedDict, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
@@ -174,6 +174,7 @@ class _PendingSessionWrite(TypedDict):
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    pending_input: NotRequired[list[TResponseInputItem]]
 
 
 def _default_run_state_validation_error(
@@ -190,7 +191,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -229,6 +230,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
+    "1.18": "Persists ownership of pending input during unresolved Session writes.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -279,6 +281,24 @@ _PYDANTIC_PUBLIC_COPY_INSTANCE_ATTRIBUTES = frozenset(
     {"__dict__", "__pydantic_extra__", "__pydantic_fields_set__"}
 )
 _MISSING_CONTEXT_SENTINEL = object()
+
+
+def _validate_pending_session_write_item(item: Any) -> TResponseInputItem:
+    """Validate a checkpoint item, including SDK-generated local-shell replay outputs."""
+    provider_data: Any = None
+    if isinstance(item, Mapping) and isinstance(item.get("provider_data"), Mapping):
+        provider_data = _copy_json_compatible_value(item["provider_data"], set())
+    validated: Any
+    try:
+        validated = _HANDOFF_OUTPUT_ADAPTER.validate_python(item)
+    except ValidationError:
+        validated = _LOCAL_SHELL_OUTPUT_ADAPTER.validate_python(item)
+    materialized = _to_dump_compatible(validated)
+    if provider_data is not None and isinstance(materialized, dict):
+        materialized["provider_data"] = provider_data
+    return cast(TResponseInputItem, materialized)
+
+
 _ALLOWED_MISSING_MESSAGE_FIELDS = frozenset({"status"})
 
 
@@ -1020,6 +1040,13 @@ class RunState(Generic[TContext, TAgent]):
 
     def clear_pending_input(self) -> None:
         """Remove all input staged for the next resumed model call."""
+        if (
+            self._pending_session_write is not None
+            and "pending_input" in self._pending_session_write
+        ):
+            raise UserError(
+                "Cannot clear pending input while its Session write is awaiting reconciliation"
+            )
         self._pending_input = []
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
@@ -4128,10 +4155,12 @@ async def _build_run_state_from_json(
     pending_input_raw = state_json.get("pending_input", [])
     if not isinstance(pending_input_raw, list):
         raise validation_error_factory("Run state pending_input must be a list", UserError)
-    state._pending_input = cast(
-        list[TResponseInputItem],
-        [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
-    )
+    try:
+        state._pending_input = [
+            _validate_pending_session_write_item(item) for item in pending_input_raw
+        ]
+    except ValidationError:
+        raise validation_error_factory("Run state pending_input is invalid", UserError) from None
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
     serialized_generated_items = state_json.get("generated_items", [])
     state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
@@ -4372,15 +4401,48 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
+        pending_input_write = (
+            pending_write.get("pending_input") if isinstance(pending_write, dict) else None
+        )
+        pending_input_field_present = (
+            isinstance(pending_write, dict) and "pending_input" in pending_write
+        )
+        pending_write_items = (
+            pending_write.get("items") if isinstance(pending_write, dict) else None
+        )
+        try:
+            validated_pending_write_items = (
+                [_validate_pending_session_write_item(item) for item in pending_write_items]
+                if isinstance(pending_write_items, list)
+                else None
+            )
+            validated_pending_input_write = (
+                [_validate_pending_session_write_item(item) for item in pending_input_write]
+                if isinstance(pending_input_write, list)
+                else None
+            )
+        except ValidationError:
+            validated_pending_write_items = None
+            validated_pending_input_write = None
+        valid_pending_input = not pending_input_field_present or (
+            (schema_major, schema_minor) >= (1, 18)
+            and isinstance(pending_input_write, list)
+            and bool(validated_pending_input_write)
+        )
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
+            or set(pending_write)
+            not in (
+                {"session_id", "items", "before", "persisted_count"},
+                {"session_id", "items", "before", "persisted_count", "pending_input"},
+            )
             or not isinstance(pending_write.get("session_id"), str)
-            or not isinstance(pending_write.get("items"), list)
+            or not isinstance(pending_write_items, list)
             or not pending_write["items"]
             or not all(isinstance(item, dict) for item in pending_write["items"])
+            or not validated_pending_write_items
             or (
                 pending_write.get("before") is not None
                 and (
@@ -4390,9 +4452,13 @@ async def _build_run_state_from_json(
             )
             or type(pending_write.get("persisted_count")) is not int
             or pending_write["persisted_count"] < 0
+            or not valid_pending_input
         ):
             raise validation_error_factory("Run state pending Session write is invalid", UserError)
         state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))
+        state._pending_session_write["items"] = validated_pending_write_items
+        if validated_pending_input_write is not None:
+            state._pending_session_write["pending_input"] = validated_pending_input_write
     terminal_unrecoverable = state_json.get("terminal_unrecoverable")
     if terminal_unrecoverable is not None:
         # An older label never wrote this marker, so honoring one would let a snapshot claim a

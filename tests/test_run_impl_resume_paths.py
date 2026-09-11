@@ -343,6 +343,46 @@ async def test_resumed_committed_append_refreshes_compaction_input(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_pending_input_recovery_refreshes_compaction_generation(round_trip: bool) -> None:
+    backend = _FailingResumeSession()
+    compaction_inputs: list[list[TResponseInputItem]] = []
+    compact_enabled = False
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compaction_inputs.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: compact_enabled,
+    )
+    agent, model, _, state, effects = await _approved_session_state(False, session)
+    await session.run_compaction()
+    state.add_input("Late input")
+    backend.failure = "before"
+
+    try:
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, False)
+        assert error.value is backend.error
+        if round_trip:
+            state = await RunState.from_json(agent, state.to_json())
+
+        compact_enabled = True
+        result = await _run_session_resume(agent, state, session, False)
+        assert result.final_output == "done"
+        assert effects == [7]
+        assert len(compaction_inputs) == 1
+    finally:
+        await backend.clear_session()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["input", "auto"])
 async def test_compaction_reload_preserves_session_retrieval_window(
     mode: Literal["input", "auto"], tmp_path: Path
@@ -499,7 +539,7 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape", "pending-input-null"])
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"
@@ -508,10 +548,115 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     payload = state.to_json()
     if invalid == "old-schema":
         payload["$schemaVersion"] = "1.16"
-    else:
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    else:
+        payload["pending_session_write"]["pending_input"] = None
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_pending_session_write_accepts_local_shell_replay_output() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_session_write"]["items"] = [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_session_write"]["items"] == [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_top_level_pending_input_accepts_local_shell_replay_output() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_input"] = [
+        {
+            "type": "local_shell_call_output",
+            "call_id": "shell-1",
+            "output": "replayed",
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_input"] == payload["pending_input"]
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_input"] == payload["pending_input"]
+
+
+@pytest.mark.asyncio
+async def test_pending_input_preserves_provider_data_during_restore() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    provider_item = {
+        "type": "function_call_output",
+        "call_id": "call-provider-data",
+        "output": "answer",
+        "provider_data": {
+            "thinking_blocks": [{"type": "thinking", "thinking": "hidden", "signature": "sig-1"}]
+        },
+    }
+    payload = state.to_json()
+    payload["pending_input"] = [provider_item]
+    pending_write = cast(dict[str, Any], payload["pending_session_write"])
+    pending_write["pending_input"] = [provider_item]
+    pending_write["items"] = [provider_item]
+
+    restored = await RunState.from_json(agent, payload)
+    assert restored.to_json()["pending_input"] == [provider_item]
+    assert restored.to_json()["pending_session_write"]["pending_input"] == [provider_item]
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_input"] == [provider_item]
+    assert roundtripped.to_json()["pending_session_write"]["items"] == [provider_item]
+
+
+@pytest.mark.asyncio
+async def test_pending_session_write_materializes_computer_safety_checks() -> None:
+    agent, _, session, state, _ = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    payload["pending_session_write"]["items"] = [
+        {
+            "type": "computer_call_output",
+            "call_id": "computer-1",
+            "output": {"type": "computer_screenshot", "image_url": "img"},
+            "acknowledged_safety_checks": [
+                {"id": "check-1", "code": "confirm", "message": "approved"}
+            ],
+        }
+    ]
+
+    restored = await RunState.from_json(agent, payload)
+    expected = payload["pending_session_write"]["items"]
+    assert restored.to_json()["pending_session_write"]["items"] == expected
+    roundtripped = await RunState.from_string(agent, restored.to_string())
+    assert roundtripped.to_json()["pending_session_write"]["items"] == expected
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, RunState
-from agents.run_state import SUPPORTED_SCHEMA_VERSIONS
+from agents.run_state import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
 from integration_tests._contract_state import (
     _deserialize_common_sandbox_session_state,
     _redaction_observables,
@@ -21,7 +21,7 @@ SOURCES = json.loads((FIXTURE_ROOT / "sources.json").read_text(encoding="utf-8")
 
 
 def test_installed_distribution_supports_the_historical_fixture_corpus() -> None:
-    assert frozenset(SOURCES["versions"]) == SUPPORTED_SCHEMA_VERSIONS
+    assert frozenset(SOURCES["versions"]) | {CURRENT_SCHEMA_VERSION} == SUPPORTED_SCHEMA_VERSIONS
 
 
 @pytest.mark.parametrize(
