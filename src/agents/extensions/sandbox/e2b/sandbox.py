@@ -1202,10 +1202,10 @@ class E2BSandboxSession(BaseSandboxSession):
             path = await self._validate_path_access(path, for_write=True)
 
         if user is None and not parents:
-            parent = path.parent
-            test = await self.exec("test", "-d", str(parent), shell=False)
+            parent = sandbox_path_str(path.parent)
+            test = await self.exec("test", "-d", parent, shell=False)
             if not test.ok():
-                raise ExecNonZeroError(test, command=("test", "-d", str(parent)))
+                raise ExecNonZeroError(test, command=("test", "-d", parent))
         await self._ensure_dir(path, reason="mkdir_failed")
 
     async def _collect_pty_output(
