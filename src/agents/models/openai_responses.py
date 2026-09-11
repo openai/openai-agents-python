@@ -1829,6 +1829,18 @@ class Converter:
             return {
                 "type": "code_interpreter",
             }
+        elif tool_choice == "shell" and cls._prefers_builtin_tool_selector(
+            tool_choice, ShellTool, tools=tools, handoffs=handoffs
+        ):
+            return {
+                "type": "shell",
+            }
+        elif tool_choice == "apply_patch" and cls._prefers_builtin_tool_selector(
+            tool_choice, ApplyPatchTool, tools=tools, handoffs=handoffs
+        ):
+            return {
+                "type": "apply_patch",
+            }
         elif tool_choice == "mcp":
             # Note that this is still here for backwards compatibility,
             # but migrating to MCPToolChoice is recommended.
@@ -1940,6 +1952,24 @@ class Converter:
                 "tools on the OpenAI Responses API. Use `auto`, `required`, `none`, or load "
                 "the tool via ToolSearchTool() first."
             )
+
+    @classmethod
+    def _prefers_builtin_tool_selector(
+        cls,
+        tool_choice: str,
+        builtin_type: type[Any],
+        *,
+        tools: Sequence[Tool] | None,
+        handoffs: Sequence[Handoff[Any, Any]] | None,
+    ) -> bool:
+        """Select a built-in tool only when no callable target claims the same name."""
+        if not any(isinstance(tool, builtin_type) for tool in tools or ()):
+            return False
+        if any(handoff.tool_name == tool_choice for handoff in handoffs or ()):
+            return False
+        return not any(
+            isinstance(tool, FunctionTool) and tool.name == tool_choice for tool in tools or ()
+        )
 
     @classmethod
     def _has_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
