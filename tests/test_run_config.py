@@ -20,6 +20,7 @@ from agents.models.interface import Model, ModelProvider
 from agents.run import __all__ as run_exports
 from agents.run_config import SandboxConcurrencyLimits, SandboxRunConfig
 from agents.sandbox.manifest import Manifest
+from agents.sandbox.sandboxes import UnixLocalSandboxClient
 from agents.sandbox.snapshot import NoopSnapshotSpec
 from agents.testing import ScriptedModel
 
@@ -170,6 +171,10 @@ def test_run_config_accepts_serialized_manifest_without_path_grants(
             {"tool_execution": {"max_function_tool_concurrenc": 2}},
             "Unknown run_config.tool_execution settings: max_function_tool_concurrenc",
         ),
+        (
+            {"sandbox": {"manifest_path": "/tmp/manifest.json"}},
+            "Unknown run_config.sandbox settings: manifest_path",
+        ),
     ],
 )
 def test_run_config_rejects_unknown_first_party_dictionary_fields(
@@ -177,6 +182,44 @@ def test_run_config_rejects_unknown_first_party_dictionary_fields(
 ) -> None:
     with pytest.raises(TypeError, match=message):
         RunConfig(**settings)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            {"model_settings": "hot"},
+            "model_settings must be a ModelSettings instance or a dict, got str",
+        ),
+        (
+            {"sandbox": "docker"},
+            "run_config.sandbox must be a SandboxRunConfig instance or a dict, got str",
+        ),
+    ],
+)
+def test_run_config_rejects_non_dictionary_typed_settings(
+    settings: dict[str, object], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        RunConfig(**settings)  # type: ignore[arg-type]
+
+
+def test_run_config_rejects_unknown_sandbox_options_settings() -> None:
+    client = UnixLocalSandboxClient()
+
+    with pytest.raises(TypeError, match="Unknown sandbox.options settings: nope"):
+        RunConfig(sandbox={"client": client, "options": {"nope": 1}})  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_non_dictionary_run_config() -> None:
+    model = ScriptedModel(steps=[[get_text_message("done")]])
+    agent = Agent(name="test", model=model)
+
+    with pytest.raises(
+        TypeError, match="run_config must be a RunConfig instance or a dict, got int"
+    ):
+        await Runner.run(agent, "hello", run_config=42)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

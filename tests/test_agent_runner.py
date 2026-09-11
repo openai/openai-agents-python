@@ -2142,6 +2142,42 @@ class _RevokedReasoningIdModel(ScriptedModel):
 
 
 @pytest.mark.asyncio
+async def test_session_settings_dictionary_merge_overrides_runner_session_limit() -> None:
+    """A `SessionSettings` dictionary passed to `Runner.run` overlays the per-session
+    default instead of silently replacing it: fields the dictionary omits keep the
+    session's configured value, and omitted fields do not reset the base to None.
+    """
+    session = SQLiteSession("session-settings-merge", ":memory:")
+    await session.add_items(
+        [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+    )
+    session.session_settings = SessionSettings(limit=1)
+    model = ScriptedModel()
+    model.extend([[get_text_message("done")]])
+
+    result = await Runner.run(
+        Agent(name="test", model=model),
+        "third",
+        session=session,
+        run_config=RunConfig(session_settings={}),
+    )
+
+    assert result.final_output is not None
+    last_call = model.last_call
+    assert last_call is not None
+    replayed = [item for item in last_call.input if isinstance(item, dict)]
+    assert replayed == [
+        {"role": "assistant", "content": "second answer"},
+        {"role": "user", "content": "third"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_omit_policy_strips_reasoning_ids_already_stored_in_the_session() -> None:
     """Adopting `omit` must also cover reasoning IDs a session recorded before it was set.
 

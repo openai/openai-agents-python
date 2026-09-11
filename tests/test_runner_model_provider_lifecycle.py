@@ -270,6 +270,72 @@ async def test_run_streamed_cancel_before_start_propagates_through_cleanup_wrapp
     assert sandbox_cleanup_completed.is_set()
 
 
+@pytest.mark.asyncio
+async def test_run_cancellation_waits_for_provider_cleanup_then_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A blocking Model double is used instead of ScriptedModel because this test needs
+    # a run suspended at a controlled await point so cancellation can be delivered once
+    # before and once during provider cleanup, which scripted steps cannot express.
+    model_started = asyncio.Event()
+    blocked = asyncio.Event()
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    close_completed = asyncio.Event()
+
+    class BlockingModel(Model):
+        async def get_response(
+            self,
+            system_instructions: Any,
+            input: Any,
+            model_settings: Any,
+            tools: Any,
+            output_schema: Any,
+            handoffs: Any,
+            tracing: Any,
+            *,
+            previous_response_id: Any,
+            conversation_id: Any,
+            prompt: Any,
+        ) -> Any:
+            model_started.set()
+            await blocked.wait()
+            raise AssertionError("unreachable: the run is cancelled while blocked")
+
+        async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            raise AssertionError("streaming is not exercised by this test")
+            yield
+
+    async def slow_close(_provider: MultiProvider) -> None:
+        close_started.set()
+        await close_release.wait()
+        close_completed.set()
+
+    monkeypatch.setattr(MultiProvider, "aclose", slow_close)
+    agent = Agent(name="test", model=BlockingModel())
+    run_task = asyncio.create_task(Runner.run(agent, "hello"))
+    try:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+
+        run_task.cancel()
+        await asyncio.wait_for(close_started.wait(), timeout=1)
+        for _ in range(2):
+            run_task.cancel()
+            await asyncio.sleep(0)
+
+        close_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+    finally:
+        blocked.set()
+        close_release.set()
+        if not run_task.done():
+            run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    assert close_completed.is_set()
+
+
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_run_streamed_closes_implicit_responses_websocket_connection() -> None:

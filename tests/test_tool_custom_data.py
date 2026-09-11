@@ -111,6 +111,77 @@ async def test_function_tool_custom_data_rejects_non_finite_floats(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bad_extractor", "message"),
+    [
+        (lambda _ctx: "not a mapping", "custom_data_extractor must return a mapping or None"),
+        (
+            lambda _ctx: {42: "value"},
+            "custom_data_extractor must return a mapping with string keys",
+        ),
+    ],
+)
+async def test_function_tool_custom_data_rejects_invalid_extractor_results(
+    bad_extractor: Any, message: str
+) -> None:
+    @function_tool(custom_data_extractor=bad_extractor)
+    def get_data() -> str:
+        return "tool_result"
+
+    model = ScriptedModel()
+    model.extend([[get_text_message("call tool"), get_function_tool_call("get_data", "{}")]])
+    agent = Agent(name="test", model=model, tools=[get_data])
+
+    with pytest.raises(UserError, match=message):
+        await Runner.run(agent, input="user")
+
+
+@pytest.mark.asyncio
+async def test_function_tool_custom_data_empty_mapping_normalizes_to_none() -> None:
+    @function_tool(custom_data_extractor=lambda _ctx: {})
+    def get_data() -> str:
+        return "tool_result"
+
+    model = ScriptedModel()
+    model.extend(
+        [
+            [get_text_message("call tool"), get_function_tool_call("get_data", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test", model=model, tools=[get_data])
+
+    result = await Runner.run(agent, input="user")
+
+    tool_output = _tool_output_items(result.new_items)[0]
+    assert tool_output.custom_data is None
+
+
+@pytest.mark.asyncio
+async def test_function_tool_custom_data_awaits_async_extractor() -> None:
+    async def extract_custom_data(_ctx: Any) -> dict[str, Any]:
+        return {"source": "async"}
+
+    @function_tool(custom_data_extractor=extract_custom_data)
+    def get_data() -> str:
+        return "tool_result"
+
+    model = ScriptedModel()
+    model.extend(
+        [
+            [get_text_message("call tool"), get_function_tool_call("get_data", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test", model=model, tools=[get_data])
+
+    result = await Runner.run(agent, input="user")
+
+    tool_output = _tool_output_items(result.new_items)[0]
+    assert tool_output.custom_data == {"source": "async"}
+
+
+@pytest.mark.asyncio
 async def test_mcp_custom_data_extractor_maps_result_meta_to_tool_output_item() -> None:
     def extract_custom_data(ctx: Any) -> dict[str, Any]:
         return {"mcp_response_meta": dict(ctx.result_meta or {})}
