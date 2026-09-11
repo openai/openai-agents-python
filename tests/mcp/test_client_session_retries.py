@@ -225,6 +225,7 @@ async def test_call_tool_validates_required_parameters_before_remote_call():
             },
         )
     ]
+    server._cache_dirty = False  # noqa: SLF001
 
     with pytest.raises(UserError, match="missing required parameters: param_a"):
         await server.call_tool("tool", {})
@@ -246,6 +247,7 @@ async def test_call_tool_with_required_parameters_still_calls_remote_tool():
             },
         )
     ]
+    server._cache_dirty = False  # noqa: SLF001
 
     result = await server.call_tool("tool", {"param_a": "value"})
     assert isinstance(result, CallToolResult)
@@ -257,6 +259,7 @@ async def test_call_tool_skips_validation_when_tool_is_missing_from_cache():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
     server._tools_list = [MCPTool(name="different_tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._cache_dirty = False  # noqa: SLF001
 
     await server.call_tool("tool", {})
     assert session.call_tool_attempts == 1
@@ -267,6 +270,7 @@ async def test_call_tool_skips_validation_when_required_list_is_absent():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
     server._tools_list = [MCPTool(name="tool", inputSchema={"type": "object"})]  # noqa: SLF001
+    server._cache_dirty = False  # noqa: SLF001
 
     await server.call_tool("tool", None)
     assert session.call_tool_attempts == 1
@@ -277,6 +281,7 @@ async def test_call_tool_validates_required_parameters_when_arguments_is_none():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
     server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._cache_dirty = False  # noqa: SLF001
 
     with pytest.raises(UserError, match="missing required parameters: param_a"):
         await server.call_tool("tool", None)
@@ -289,6 +294,7 @@ async def test_call_tool_rejects_non_object_arguments_before_remote_call():
     session = DummySession()
     server = DummyServer(session=session, retries=0)
     server._tools_list = [MCPTool(name="tool", inputSchema={"required": ["param_a"]})]  # noqa: SLF001
+    server._cache_dirty = False  # noqa: SLF001
 
     with pytest.raises(UserError, match="arguments must be an object"):
         await server.call_tool("tool", cast(dict[str, object] | None, ["bad"]))
