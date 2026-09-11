@@ -5,6 +5,7 @@ import io
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path, PureWindowsPath
+from typing import cast
 
 import pytest
 
@@ -982,7 +983,29 @@ async def test_git_repo_root_subpath_alias_copies_repo_root(subpath: str) -> Non
     assert copy_call[3].startswith("/tmp/sandbox-git-")
     assert copy_call[3].endswith("/.")
     assert not copy_call[3].endswith("//.")
-    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
+    assert copy_call[4] == "/workspace/repo/"
+
+
+@pytest.mark.asyncio
+async def test_git_repo_copies_to_a_posix_destination_from_a_windows_host() -> None:
+    """The copy destination must stay POSIX so the clone lands inside the sandbox.
+
+    A Windows host resolves a sandbox destination to a native path, and interpolating that into the
+    argument sends ``\\workspace\\repo/`` to a POSIX container. ``cp`` accepts it, creating a
+    directory with that literal name and leaving the real destination empty, so the misplacement is
+    silent. ``PureWindowsPath`` reproduces the host-native shape on every platform.
+
+    This reuses the file-local recording session rather than ``scripted_sandbox_session`` because
+    the assertion targets one argument inside the clone's fixed multi-command sequence.
+    """
+    session = _RecordingSession()
+    repo = GitRepo(repo="openai/example", ref="main")
+
+    await repo.apply(session, cast(Path, PureWindowsPath("/workspace/repo")), Path("/ignored"))
+
+    copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
+    assert copy_call[4] == "/workspace/repo/"
+    assert not any("\\" in argument for argument in copy_call)
 
 
 @pytest.mark.asyncio
@@ -994,7 +1017,7 @@ async def test_git_repo_allows_relative_subpath_copy() -> None:
 
     copy_call = next(call for call in session.exec_calls if call[:1] == ("cp",))
     assert copy_call[3].endswith("/docs/reference/.")
-    assert copy_call[4].replace("\\", "/") == "/workspace/repo/"
+    assert copy_call[4] == "/workspace/repo/"
 
 
 def _git_temp_cleanup_calls(session: _RecordingSession) -> list[tuple[str, ...]]:
