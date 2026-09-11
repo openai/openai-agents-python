@@ -239,10 +239,14 @@ class WorkspaceEditor:
         and reported as the patched file. Closing either race needs an operation tied to the entry
         whose identity was checked, which no backend here offers.
 
-        The staging file is a new inode, so a rename the filesystem folds onto the source path
-        replaces the original's mode and extended attributes. Carrying those across would mean
-        reading and reapplying them per backend; committing the content in a single `mv` is
-        worth more than the mode bits.
+        The staging file is a new inode. Committing it replaces the mode, ownership and
+        extended attributes of whatever entry was at the destination: the original, when the
+        filesystem folds the two names onto one entry, and an existing distinct file, when the
+        rename lands on one. An update without `move_to` keeps them, because it writes into the
+        existing inode. Carrying them across would mean reading and reapplying them per backend,
+        or asking the sandbox whether the destination exists and writing in place when it does,
+        which gives up the single-`mv` commit for that case. The committed content is worth more
+        than the mode bits.
 
         The staging name is a fixed length rather than a decoration of the destination name,
         because a destination basename near the filesystem's 255-byte limit would make the
