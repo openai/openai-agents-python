@@ -30,6 +30,30 @@ def test_default_model_is_gpt_5_6_luna():
     assert get_default_model_settings() == _gpt_5_default_settings("none")
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_get_default_model_treats_blank_env_as_unconfigured(
+    blank: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", blank)
+
+    assert get_default_model() == "gpt-5.6-luna"
+    assert is_gpt_5_default() is True
+    assert get_default_model_settings() == _gpt_5_default_settings("none")
+
+    agent = Agent(name="test")
+    assert agent.model is None
+    assert agent.model_settings == _gpt_5_default_settings("none")
+
+
+def test_get_default_model_strips_whitespace_around_configured_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "  GPT-4.1  ")
+
+    assert get_default_model() == "gpt-4.1"
+    assert is_gpt_5_default() is False
+
+
 @patch.dict(os.environ, {"OPENAI_DEFAULT_MODEL": "gpt-5.4"})
 def test_is_gpt_5_default_with_real_model_name():
     assert get_default_model() == "gpt-5.4"

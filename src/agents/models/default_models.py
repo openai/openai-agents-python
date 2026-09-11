@@ -97,10 +97,14 @@ def is_gpt_5_default() -> bool:
 
 
 def get_default_model() -> str:
+    """Return the default model name.
+
+    ``OPENAI_DEFAULT_MODEL`` overrides the built-in default only when it is set to a
+    non-empty value. Blank or whitespace-only values are treated as unconfigured.
     """
-    Returns the default model name.
-    """
-    return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-5.6-luna").lower()
+    configured = os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME)
+    stripped = configured.strip() if configured is not None else ""
+    return stripped.lower() if stripped else "gpt-5.6-luna"
 
 
 def get_default_model_settings(model: str | None = None) -> ModelSettings:
