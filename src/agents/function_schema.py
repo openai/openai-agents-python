@@ -436,9 +436,12 @@ def function_schema(
         value_ann = ann
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             field_info = _extract_field_info_from_metadata(param_metadata.get(name, ()))
-            if field_info is not None and field_info.metadata:
-                # Constraints apply to each value, not the collected container or its defaults.
-                value_ann = Annotated[(ann, *cast(Any, field_info).metadata)]
+            if field_info is not None:
+                if field_info.metadata:
+                    # Constraints apply to each value, not the collected container or its defaults.
+                    value_ann = Annotated[(ann, *cast(Any, field_info).metadata)]
+                if field_description is None:
+                    field_description = field_info.description
 
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:

@@ -636,6 +636,58 @@ def test_variadic_field_constraints_do_not_bypass_fixed_tuple_rejection():
         function_schema(func)
 
 
+def _var_positional_field_description(
+    *scores: Annotated[int, Field(description="A score to record.", ge=0, le=10)],
+) -> int:
+    return sum(scores)
+
+
+def _var_keyword_field_description(
+    **scores: Annotated[int, Field(description="A score to record.", ge=0, le=10)],
+) -> int:
+    return sum(scores.values())
+
+
+@pytest.mark.parametrize(
+    "func, strict, container_type, value_key",
+    [
+        (_var_positional_field_description, True, "array", "items"),
+        (_var_keyword_field_description, False, "object", "additionalProperties"),
+    ],
+)
+def test_variadic_field_description_in_schema(func, strict, container_type, value_key):
+    fs = function_schema(func, strict_json_schema=strict)
+    scores = fs.params_json_schema["properties"]["scores"]
+
+    assert scores["description"] == "A score to record."
+    assert scores["type"] == container_type
+    assert scores[value_key] == {"type": "integer", "minimum": 0, "maximum": 10}
+    assert "description" not in scores[value_key]
+
+
+def test_variadic_field_description_yields_to_docstring():
+    def func(*scores: Annotated[int, Field(description="From the field.")]) -> int:
+        """Sum the scores.
+
+        Args:
+            scores: From the docstring.
+        """
+        return sum(scores)
+
+    fs = function_schema(func, strict_json_schema=False)
+    assert fs.params_json_schema["properties"]["scores"]["description"] == "From the docstring."
+
+
+def test_variadic_field_description_yields_to_annotated_string():
+    def func(
+        *scores: Annotated[int, Field(description="From the field."), "From the string."],
+    ) -> int:
+        return sum(scores)
+
+    fs = function_schema(func, strict_json_schema=False)
+    assert fs.params_json_schema["properties"]["scores"]["description"] == "From the string."
+
+
 def test_schema_with_mapping_raises_strict_mode_error():
     """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
 
