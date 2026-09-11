@@ -331,6 +331,20 @@ class _ScriptedSandboxSession(ScriptedSandboxSession):
         self._calls: list[SandboxCall] = []
         self._running = False
 
+    async def write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        # A scripted session has no filesystem to hold a colliding entry, so an exclusive
+        # create is scripted as the same mkdir and write pair the ordinary create path uses.
+        # Delegating here also keeps the inherited default from reaching for `exec`, which a
+        # script that only configures file steps hides.
+        await self.mkdir(path.parent, parents=True, user=user)
+        await self.write(path, data, user=user)
+
     def __getattribute__(self, name: str) -> Any:
         if name in _SCRIPTABLE_METHODS:
             configured = object.__getattribute__(self, "_configured_methods")
