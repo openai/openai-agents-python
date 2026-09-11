@@ -98,7 +98,7 @@ class OpenAIConversationsSession(SessionABC):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
         else:
-            # Omit provider page size. The OpenAI client paginates; apply the session cutoff locally.
+            # Omit provider page size. Apply the session cutoff locally after pagination.
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 order="desc",
