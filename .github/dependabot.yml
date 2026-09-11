@@ -1,9 +1,45 @@
 version: 2
+# Ordinary updates wait seven days after release, matching uv's exclude-newer.
+# Dependabot security updates bypass this cooldown and the version-update schedule;
+# an administrator must enable security updates in the repository settings.
+# uv's own exclude-newer policy still applies when resolving a security fix.
+# If it blocks an urgent fix, a maintainer must obtain a package-specific exception
+# under CONTRIBUTING.md, recording the advisory, fixed version, owner, mitigation,
+# approval, and expiry. Temporarily add that package to exclude-newer-package in
+# the applicable [tool.uv] / [tool.uv.pip] table using a fixed timestamp just after
+# the approved release. Update only the affected dependency and necessary transitives,
+# review the diff, and run the required checks. Remove the exception and revalidate
+# once the release is seven days old; never disable the global policy for this.
 updates:
+  # The root pyproject.toml and uv.lock cover runtime, extras, and development tools.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+  # These independent requirements files are outside the root lockfile.
+  # Unpinned requirements do not provide a locked transitive dependency inventory.
+  - package-ecosystem: "pip"
+    directories:
+      - "/examples/realtime/twilio"
+      - "/examples/realtime/twilio_sip"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
