@@ -113,7 +113,7 @@ def _detect(
         (".github/workflows/publish.yml", True, False, False),
         (".github/workflows/repo-skills.yml", True, False, False),
         ("pyproject.toml", True, False, False),
-        ("uv.lock", True, False, False),
+        ("uv.lock", True, True, False),
         ("Makefile", True, False, False),
         ("pyrightconfig.json", True, False, False),
         (".agents/skills/code-change-verification/SKILL.md", True, False, False),
@@ -141,7 +141,12 @@ def test_changed_paths_select_owning_checks(
     repo, base = change_repo
     head = _commit(repo, path)
 
-    for mode, expected in (("code", code), ("docs", docs), ("docs-only", docs_only)):
+    for mode, expected in (
+        ("code", code),
+        ("docs", docs),
+        ("docs-only", docs_only),
+        ("docs-deploy", docs),
+    ):
         assert _detect(repo, mode, base, head) is expected, mode
 
 
@@ -155,6 +160,7 @@ def test_mixed_push_builds_docs_and_checks_code_without_deploying(
     assert _detect(repo, "code", base, head)
     assert _detect(repo, "docs", base, head)
     assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
 
 
 @pytest.mark.parametrize(
@@ -176,6 +182,7 @@ def test_shallow_checkout_fetches_missing_event_commit(
     assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
 
     assert _detect(clone, "docs-only", base, head) is docs_only
+    assert _detect(clone, "docs-deploy", base, head) is docs_only
     _git(clone, "cat-file", "-e", f"{base}^{{commit}}")
     _git(clone, "cat-file", "-e", f"{head}^{{commit}}")
 
@@ -205,6 +212,7 @@ def test_unknown_base_requires_checks_and_denies_deployment(
     assert _detect(repo, "code", base, head)
     assert _detect(repo, "docs", base, head)
     assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
 
 
 def test_unknown_head_requires_checks_and_denies_deployment(
@@ -216,6 +224,8 @@ def test_unknown_head_requires_checks_and_denies_deployment(
     assert _detect(repo, "docs", base, MISSING_SHA)
     assert not _detect(repo, "docs-only", base, MISSING_SHA)
     assert not _detect(repo, "docs-only", base, "")
+    assert not _detect(repo, "docs-deploy", base, MISSING_SHA)
+    assert not _detect(repo, "docs-deploy", base, "")
 
 
 def test_failed_diff_cannot_skip_checks_or_authorize_deployment(
@@ -247,14 +257,19 @@ def test_failed_diff_cannot_skip_checks_or_authorize_deployment(
         bin_dir.as_posix(),
         DETECTOR.as_posix(),
     ]
-    for mode, expected in (("code", True), ("docs", True), ("docs-only", False)):
+    for mode, expected in (
+        ("code", True),
+        ("docs", True),
+        ("docs-only", False),
+        ("docs-deploy", False),
+    ):
         assert _detect(repo, mode, base, head, bash_args=[*bash_args, mode, base, head]) is expected
 
 
 def test_empty_diff_does_not_run_checks_or_deploy(change_repo: tuple[Path, str]) -> None:
     repo, base = change_repo
 
-    for mode in ("code", "docs", "docs-only"):
+    for mode in ("code", "docs", "docs-only", "docs-deploy"):
         assert not _detect(repo, mode, base, base)
 
 
@@ -268,6 +283,7 @@ def test_rename_into_docs_still_counts_removed_code(change_repo: tuple[Path, str
     assert _detect(repo, "code", base, head)
     assert _detect(repo, "docs", base, head)
     assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
 
 
 def test_code_mode_retains_merge_base_and_head_fallback(change_repo: tuple[Path, str]) -> None:
@@ -290,15 +306,17 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
     workflow = yaml.load(
         (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
     )
-    assert workflow["on"] == {"push": {"branches": ["main"], "paths": ["docs/**", "mkdocs.yml"]}}
+    assert workflow["on"] == {
+        "push": {"branches": ["main"], "paths": ["docs/**", "mkdocs.yml", "uv.lock"]}
+    }
     steps = workflow["jobs"]["deploy_docs"]["steps"]
-    detection = next(step for step in steps if step.get("id") == "docs-only")
+    detection = next(step for step in steps if step.get("id") == "docs-deploy")
     assert detection["env"] == {
         "BASE_SHA": "${{ github.event.before }}",
         "HEAD_SHA": "${{ github.sha }}",
     }
     for step in steps[steps.index(detection) + 1 :]:
-        assert step["if"] == "steps.docs-only.outputs.run == 'true'"
+        assert step["if"] == "steps.docs-deploy.outputs.run == 'true'"
 
     repo, base = change_repo
     script = repo / DETECTOR.relative_to(ROOT)
@@ -314,3 +332,27 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
     assert not _detect(
         repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
     )
+    head = _commit(repo, "uv.lock")
+    assert _detect(
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+    )
+
+
+@pytest.mark.parametrize(
+    "mixed_paths",
+    [
+        (),
+        (".github/workflows/docs.yml", "tests/test_change_detection.py"),
+        ("docs/index.md", "src/agents/run.py"),
+    ],
+)
+def test_lockfile_changes_build_and_deploy_docs(
+    change_repo: tuple[Path, str], mixed_paths: tuple[str, ...]
+) -> None:
+    repo, base = change_repo
+    head = _commit(repo, "uv.lock", *mixed_paths)
+
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+    assert _detect(repo, "docs-deploy", base, head)
+    assert not _detect(repo, "docs-only", base, head)
