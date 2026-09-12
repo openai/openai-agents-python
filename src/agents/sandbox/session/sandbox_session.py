@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import ipaddress
 import time
@@ -263,6 +264,17 @@ class SandboxSession(BaseSandboxSession):
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         return self._inner._runtime_has_protected_mount_authority()
+
+    def _should_preserve_backend_on_cleanup(self) -> bool:
+        return self._inner._should_preserve_backend_on_cleanup()
+
+    def _has_pending_pty_cleanup_tasks(self) -> bool:
+        return self._inner._has_pending_pty_cleanup_tasks()
+
+    async def _wait_for_tracked_cleanup_tasks(
+        self, *, timeout: float | None = None
+    ) -> tuple[asyncio.CancelledError | None, bool]:
+        return await self._inner._wait_for_tracked_cleanup_tasks(timeout=timeout)
 
     @property
     def dependencies(self) -> Dependencies:

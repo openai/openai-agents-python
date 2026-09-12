@@ -905,7 +905,18 @@ class ModalSandboxSession(BaseSandboxSession):
             raise _modal_exec_transport_error(command=command, cause=e) from e
 
         if pruned_entry is not None:
-            await self._terminate_pty_entry(pruned_entry)
+            try:
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(pruned_entry), propagate_timeout=True
+                )
+            except BaseException:
+                await self._rollback_pty_start(
+                    process_id,
+                    entry,
+                    self._pty_processes,
+                    lambda: self._terminate_pty_entry(entry),
+                )
+                raise
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -970,8 +981,7 @@ class ModalSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
-            await self._terminate_pty_entry(entry)
+        await self._cleanup_pty_entries(entries, self._terminate_pty_entry)
 
     async def _write_pty_stdin(self, process: ContainerProcess[bytes], payload: bytes) -> None:
         stdin = process.stdin
@@ -1176,7 +1186,9 @@ class ModalSandboxSession(BaseSandboxSession):
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(removed), propagate_timeout=False
+                )
             live_process_id = None
 
         return PtyExecUpdate(

@@ -3,8 +3,9 @@ import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path, PurePath
-from typing import Literal, NoReturn, TypeVar
+from typing import Any, Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
 
@@ -53,6 +54,7 @@ from .utils import _safe_decode
 
 _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
+_DEFAULT_PTY_CLEANUP_TIMEOUT_S = 5.0
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_SCRIPT = """
@@ -223,6 +225,15 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
+    _pty_cleanup_tasks: set[asyncio.Task[Any]] | None = None
+    _deferred_dependency_close_task: asyncio.Task[Any] | None = None
+    # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
+    # cleanup must retain the backend in that case so it can be resumed instead of deleting the
+    # only remaining copy of the workspace.
+    _backend_preservation_required: bool = False
+    _pty_lock: asyncio.Lock
+    _pty_processes: dict[int, Any]
+    _reserved_pty_process_ids: set[int]
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -398,14 +409,92 @@ class BaseSandboxSession(abc.ABC):
         try:
             try:
                 await self._before_stop()
+            except BaseException as before_stop_error:
+                # Persist before re-raising cancellation or a cleanup deadline/error so the
+                # backend cannot be deleted with workspace state that exists only remotely.
+                self._backend_preservation_required = True
+                snapshot_error = await self._persist_snapshot_before_stop_error()
+                if snapshot_error is None:
+                    self._backend_preservation_required = False
+                else:
+                    # Keep the cleanup failure that caused stop() to fail as the primary error,
+                    # while retaining the snapshot failure as diagnostic context.
+                    if isinstance(before_stop_error, Exception):
+                        wrapped = self._wrap_stop_error(before_stop_error)
+                        if wrapped is not before_stop_error:
+                            raise wrapped from snapshot_error
+                    raise before_stop_error from snapshot_error
+                if isinstance(before_stop_error, Exception):
+                    wrapped = self._wrap_stop_error(before_stop_error)
+                    if wrapped is not before_stop_error:
+                        raise wrapped from before_stop_error
+                raise
+            try:
                 await self._persist_snapshot()
-            except Exception as e:
-                wrapped = self._wrap_stop_error(e)
-                if wrapped is e:
+                self._backend_preservation_required = False
+            except Exception as error:
+                wrapped = self._wrap_stop_error(error)
+                if wrapped is error:
                     raise
-                raise wrapped from e
+                raise wrapped from error
         finally:
             await self._after_stop()
+
+    async def _persist_snapshot_before_stop_error(self) -> BaseException | None:
+        """Persist a snapshot with a deadline without replacing the original stop failure."""
+
+        snapshot_task = asyncio.create_task(
+            self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
+        )
+
+        def mark_snapshot_durable(task: asyncio.Task[Any]) -> None:
+            try:
+                task.result()
+            except BaseException:
+                return
+            self._backend_preservation_required = False
+
+        snapshot_task.add_done_callback(mark_snapshot_durable)
+        completion = asyncio.create_task(asyncio.wait((snapshot_task,)))
+        caller_cancellation: asyncio.CancelledError | None = None
+        timed_out = False
+        deadline = asyncio.get_running_loop().time() + self._pty_cleanup_timeout_s()
+        try:
+            while not completion.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
+                except asyncio.CancelledError as error:
+                    caller_cancellation = caller_cancellation or error
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+
+            if completion.done():
+                completion.result()
+                try:
+                    snapshot_task.result()
+                except BaseException as error:
+                    return error
+                return None
+
+            if timed_out:
+                # Keep the operation owned after the caller gives up waiting. The backend is
+                # retained because a snapshot that is still running cannot be treated as durable.
+                self._track_pty_cleanup_task(snapshot_task)
+                return asyncio.TimeoutError()
+            if caller_cancellation is not None:
+                # This branch is only reachable if the completion task became done between the
+                # loop condition and the cancellation; keep the original stop failure primary.
+                return caller_cancellation
+            return asyncio.TimeoutError()
+        finally:
+            if not completion.done():
+                completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
 
     async def _before_stop(self) -> None:
         """Run transient process cleanup before snapshot persistence."""
@@ -434,6 +523,11 @@ class BaseSandboxSession(abc.ABC):
 
     def supports_pty(self) -> bool:
         return False
+
+    def _should_preserve_backend_on_cleanup(self) -> bool:
+        """Return whether cleanup must retain the provider backend for a later resume."""
+
+        return self._backend_preservation_required
 
     @redact_mount_error_data
     async def shutdown(self) -> None:
@@ -502,9 +596,12 @@ class BaseSandboxSession(abc.ABC):
             if cleanup_error is None:
                 cleanup_error = exc
         finally:
+            pending_cleanup_before_dependencies = self._has_pending_pty_cleanup_tasks()
             try:
                 await self._aclose_dependencies()
             except BaseException as exc:
+                if pending_cleanup_before_dependencies or self._has_pending_pty_cleanup_tasks():
+                    self._schedule_deferred_dependency_close()
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None:
@@ -571,11 +668,66 @@ class BaseSandboxSession(abc.ABC):
         await self.run_pre_stop_hooks()
 
     async def _aclose_dependencies(self) -> None:
+        caller_cancellation, timed_out = await self._wait_for_tracked_cleanup_tasks(
+            timeout=self._pty_cleanup_timeout_s()
+        )
+        if timed_out:
+            if caller_cancellation is not None:
+                raise caller_cancellation
+            raise asyncio.TimeoutError()
         dependencies = self._dependencies
-        if dependencies is None or self._dependencies_closed:
+        if dependencies is not None and not self._dependencies_closed:
+            self._dependencies_closed = True
+            await dependencies.aclose()
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+    def _has_pending_pty_cleanup_tasks(self) -> bool:
+        return any(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+
+    async def _wait_for_tracked_cleanup_tasks(
+        self, *, timeout: float | None = None
+    ) -> tuple[asyncio.CancelledError | None, bool]:
+        """Wait for detached cleanup without cancelling tasks that still own provider resources."""
+
+        caller_cancellation: asyncio.CancelledError | None = None
+        deadline = (
+            None if timeout is None else asyncio.get_running_loop().time() + max(timeout, 0.0)
+        )
+        while True:
+            tasks = tuple(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+            if not tasks:
+                break
+            remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+            if remaining is not None and remaining <= 0:
+                return caller_cancellation, True
+            try:
+                await asyncio.wait(tasks, timeout=remaining)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+
+        return caller_cancellation, False
+
+    def _schedule_deferred_dependency_close(self) -> None:
+        task = self._deferred_dependency_close_task
+        if task is not None and not task.done():
             return
-        self._dependencies_closed = True
-        await dependencies.aclose()
+
+        task = asyncio.create_task(
+            self._finish_deferred_dependency_close(),
+            name="agents.deferred_dependency_close",
+        )
+        self._deferred_dependency_close_task = task
+
+        def consume_task_exception(done: asyncio.Task[Any]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(consume_task_exception)
+
+    async def _finish_deferred_dependency_close(self) -> None:
+        await self._wait_for_tracked_cleanup_tasks()
+        await self._aclose_dependencies()
 
     @staticmethod
     def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:
@@ -710,6 +862,164 @@ class BaseSandboxSession(abc.ABC):
         if entry is None:
             raise PtySessionNotFoundError(session_id=session_id)
         return entry
+
+    def _pty_cleanup_timeout_s(self) -> float:
+        timeouts = getattr(getattr(self, "state", None), "timeouts", None)
+        timeout = getattr(timeouts, "cleanup_s", None)
+        if timeout is not None:
+            return float(timeout)
+        return _DEFAULT_PTY_CLEANUP_TIMEOUT_S
+
+    def _track_pty_cleanup_task(self, task: asyncio.Task[Any]) -> None:
+        tasks = self._pty_cleanup_tasks
+        if tasks is None:
+            tasks = set()
+            self._pty_cleanup_tasks = tasks
+        tasks.add(task)
+
+        def forget_task(done: asyncio.Task[Any]) -> None:
+            tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(forget_task)
+
+    async def _settle_pty_cleanup(
+        self,
+        operation: Awaitable[None],
+        *,
+        timeout: float | None = None,
+        propagate_timeout: bool = True,
+    ) -> None:
+        """Settle cleanup after PTY ownership leaves the session registry.
+
+        The cleanup task is independently owned so caller cancellation cannot
+        abandon it. A timeout bounds how long the caller waits while leaving
+        the provider operation running to finish its ordered cleanup.
+        """
+
+        async def run_operation() -> None:
+            await operation
+
+        task = asyncio.create_task(run_operation(), name="agents.pty_cleanup")
+        self._track_pty_cleanup_task(task)
+        completion = asyncio.create_task(asyncio.wait((task,)))
+        caller_cancellation: asyncio.CancelledError | None = None
+        deadline = asyncio.get_running_loop().time() + (
+            self._pty_cleanup_timeout_s() if timeout is None else timeout
+        )
+        timed_out = False
+        try:
+            while not completion.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
+                except asyncio.CancelledError as error:
+                    caller_cancellation = caller_cancellation or error
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+
+            if completion.done():
+                completion.result()
+                task.result()
+                if caller_cancellation is not None:
+                    raise caller_cancellation
+            elif caller_cancellation is not None:
+                raise caller_cancellation
+            elif timed_out and propagate_timeout:
+                raise asyncio.TimeoutError()
+        finally:
+            if not completion.done():
+                completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
+
+    async def _rollback_pty_start(
+        self,
+        process_id: int,
+        entry: Any,
+        pty_registry: dict[int, Any],
+        terminate_entry: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Remove and terminate a PTY whose start failed after registration."""
+
+        async def rollback() -> None:
+            async with self._pty_lock:
+                if pty_registry.get(process_id) is not entry:
+                    return
+                pty_registry.pop(process_id)
+                self._reserved_pty_process_ids.discard(process_id)
+
+            await terminate_entry()
+
+        with suppress(BaseException):
+            await self._settle_pty_cleanup(
+                rollback(),
+                propagate_timeout=False,
+            )
+
+    async def _cleanup_pty_entries(
+        self,
+        entries: Sequence[_PtyEntryT],
+        cleanup_entry: Callable[[_PtyEntryT], Awaitable[None]],
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Attempt every PTY cleanup and re-raise the first failure."""
+
+        loop = asyncio.get_running_loop()
+        batch_timeout = self._pty_cleanup_timeout_s() if timeout is None else timeout
+        deadline = loop.time() + batch_timeout
+        cleanup_tasks = [
+            asyncio.create_task(
+                self._settle_pty_cleanup(
+                    cleanup_entry(entry),
+                    timeout=batch_timeout,
+                    propagate_timeout=False,
+                ),
+                name="agents.pty_cleanup_batch",
+            )
+            for entry in entries
+        ]
+
+        def consume_cleanup_task_exception(task: asyncio.Task[Any]) -> None:
+            if not task.cancelled():
+                task.exception()
+
+        for task in cleanup_tasks:
+            task.add_done_callback(consume_cleanup_task_exception)
+
+        pending = set(cleanup_tasks)
+        caller_cancellation: asyncio.CancelledError | None = None
+        cleanup_errors: dict[int, BaseException] = {}
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                done, pending = await asyncio.wait(pending, timeout=remaining)
+            except BaseException as error:
+                if isinstance(error, asyncio.CancelledError):
+                    caller_cancellation = caller_cancellation or error
+                    continue
+                raise
+
+            for index, task in enumerate(cleanup_tasks):
+                if task not in done:
+                    continue
+                try:
+                    task.result()
+                except BaseException as error:
+                    cleanup_errors.setdefault(index, error)
+        if cleanup_errors:
+            raise cleanup_errors[min(cleanup_errors)]
+        if caller_cancellation is not None:
+            raise caller_cancellation
+        if pending:
+            raise asyncio.TimeoutError()
 
     async def pty_exec_start(
         self,

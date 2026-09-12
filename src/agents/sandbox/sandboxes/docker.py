@@ -97,6 +97,12 @@ logger = logging.getLogger(__name__)
 # RAM and spill larger ones to a temp file so a big upload can't OOM the process.
 _STREAM_SPOOL_MAX_SIZE = 16 * 1024 * 1024
 _DEFERRED_CLEANUP_TIMEOUT_S = 30.0
+_PTY_CLEANUP_TIMEOUT_S = 5.0
+
+
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    if not future.cancelled():
+        future.exception()
 
 
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
@@ -500,9 +506,20 @@ class DockerSandboxSession(BaseSandboxSession):
             )
         return staging_parent, staging_workspace
 
-    async def _rm_best_effort(self, path: Path) -> None:
+    async def _rm_best_effort(self, path: Path, *, timeout: float | None = None) -> None:
         try:
-            await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
+            if timeout is None:
+                await self.exec("rm", "-rf", "--", sandbox_path_str(path), shell=False)
+            else:
+                command = ["rm", "-rf", "--", sandbox_path_str(path)]
+                await self._exec_run(
+                    cmd=command,
+                    workdir=self.state.manifest.root if self._workspace_root_ready else None,
+                    user=None,
+                    timeout=timeout,
+                    command_for_errors=tuple(command),
+                    kill_on_timeout=False,
+                )
         except Exception:
             pass
 
@@ -553,6 +570,7 @@ class DockerSandboxSession(BaseSandboxSession):
         timeout: float | None,
         command_for_errors: tuple[str | Path, ...],
         kill_on_timeout: bool,
+        keep_running_on_timeout: bool = False,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
@@ -564,9 +582,12 @@ class DockerSandboxSession(BaseSandboxSession):
                 user=user or "",
             ),
         )
+        wait_target = asyncio.shield(future) if keep_running_on_timeout else future
         try:
-            exec_result = await asyncio.wait_for(future, timeout=timeout)
+            exec_result = await asyncio.wait_for(wait_target, timeout=timeout)
         except asyncio.TimeoutError as e:
+            if keep_running_on_timeout and not future.done():
+                future.add_done_callback(_consume_future_exception)
             if kill_on_timeout:
                 # Best-effort: kill processes matching the command line.
                 # If this fails, the caller still gets a timeout error.
@@ -1071,7 +1092,18 @@ class DockerSandboxSession(BaseSandboxSession):
             raise
 
         if pruned_entry is not None:
-            await self._terminate_pty_entry(pruned_entry)
+            try:
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(pruned_entry), propagate_timeout=True
+                )
+            except BaseException:
+                await self._rollback_pty_start(
+                    process_id,
+                    entry,
+                    self._pty_processes,
+                    lambda: self._terminate_pty_entry(entry),
+                )
+                raise
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -1149,8 +1181,11 @@ class DockerSandboxSession(BaseSandboxSession):
             self._pty_processes.clear()
             self._reserved_pty_process_ids.clear()
 
-        for entry in entries:
-            await self._terminate_pty_entry(entry)
+        await self._cleanup_pty_entries(
+            entries,
+            self._terminate_pty_entry,
+            timeout=_PTY_CLEANUP_TIMEOUT_S,
+        )
 
     def _pump_pty_socket(
         self, entry: _DockerPtyProcessEntry, loop: asyncio.AbstractEventLoop
@@ -1224,9 +1259,12 @@ class DockerSandboxSession(BaseSandboxSession):
         api = container_client.api
 
         try:
-            inspect_result = await loop.run_in_executor(
-                _DOCKER_EXECUTOR,
-                lambda: api.exec_inspect(entry.exec_id),
+            inspect_result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _DOCKER_EXECUTOR,
+                    lambda: api.exec_inspect(entry.exec_id),
+                ),
+                timeout=_PTY_CLEANUP_TIMEOUT_S,
             )
         except Exception:
             return
@@ -1274,7 +1312,9 @@ class DockerSandboxSession(BaseSandboxSession):
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await self._settle_pty_cleanup(
+                    self._terminate_pty_entry(removed), propagate_timeout=False
+                )
             live_process_id = None
 
         return PtyExecUpdate(
@@ -1303,53 +1343,68 @@ class DockerSandboxSession(BaseSandboxSession):
         if entry.wait_task is not None:
             entry.wait_task.cancel()
 
-        await self._refresh_pty_exit_code(entry)
-
-        if entry.exit_code is None:
-            await self._kill_pty_pid_path(entry.pid_path)
-        else:
-            await self._rm_best_effort(entry.pid_path)
-
         try:
-            cast(Any, entry.sock).close()
-        except Exception:
-            pass
+            await self._refresh_pty_exit_code(entry)
 
-        if entry.reader_thread is not None:
-            await asyncio.to_thread(entry.reader_thread.join, 1.0)
+            if entry.exit_code is None:
+                await self._kill_pty_pid_path(entry.pid_path)
+            else:
+                await self._rm_best_effort(entry.pid_path, timeout=_PTY_CLEANUP_TIMEOUT_S)
+        finally:
+            try:
+                cast(Any, entry.sock).close()
+            except Exception:
+                pass
 
-        await asyncio.gather(
-            *(task for task in (entry.wait_task,) if task is not None),
-            return_exceptions=True,
-        )
+            if entry.reader_thread is not None:
+                await asyncio.to_thread(entry.reader_thread.join, 1.0)
+
+            await asyncio.gather(
+                *(task for task in (entry.wait_task,) if task is not None),
+                return_exceptions=True,
+            )
 
     async def _kill_pty_pid_path(self, pid_path: Path) -> None:
-        loop = asyncio.get_running_loop()
+        command = [
+            "sh",
+            "-lc",
+            (
+                'if [ -f "$1" ]; then '
+                'pid="$(cat "$1" 2>/dev/null || true)"; '
+                'if [ -n "$pid" ]; then '
+                'kill -KILL "$pid" >/dev/null 2>&1 || true; '
+                "fi; "
+                'rm -f -- "$1" >/dev/null 2>&1 || true; '
+                "fi"
+            ),
+            "sh",
+            sandbox_path_str(pid_path),
+        ]
+        # Keep the whole executor operation independently owned. In particular, a kill queued
+        # behind all Docker workers must still start after this caller's deadline expires; a
+        # cancelled queued future would otherwise leave both the process and PID file orphaned.
+        kill_task = asyncio.create_task(
+            self._exec_run(
+                cmd=command,
+                workdir=None,
+                user=None,
+                timeout=_PTY_CLEANUP_TIMEOUT_S,
+                command_for_errors=("kill", sandbox_path_str(pid_path)),
+                kill_on_timeout=False,
+                keep_running_on_timeout=True,
+            ),
+            name="agents.docker_pty_kill",
+        )
         try:
-            await loop.run_in_executor(
-                _DOCKER_EXECUTOR,
-                lambda: self._container.exec_run(
-                    cmd=[
-                        "sh",
-                        "-lc",
-                        (
-                            'if [ -f "$1" ]; then '
-                            'pid="$(cat "$1" 2>/dev/null || true)"; '
-                            'if [ -n "$pid" ]; then '
-                            'kill -KILL "$pid" >/dev/null 2>&1 || true; '
-                            "fi; "
-                            "fi"
-                        ),
-                        "sh",
-                        sandbox_path_str(pid_path),
-                    ],
-                    demux=True,
-                ),
-            )
+            await asyncio.wait_for(asyncio.shield(kill_task), timeout=_PTY_CLEANUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self._track_pty_cleanup_task(kill_task)
+        except asyncio.CancelledError:
+            if not kill_task.done():
+                self._track_pty_cleanup_task(kill_task)
+            raise
         except Exception:
             pass
-
-        await self._rm_best_effort(pid_path)
 
     async def exists(self) -> bool:
         try:

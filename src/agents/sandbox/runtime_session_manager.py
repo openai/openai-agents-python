@@ -57,6 +57,7 @@ class _SandboxSessionResources:
         self._cleanup_lock = asyncio.Lock()
         self._cleaned = False
         self._started = False
+        self._deferred_cleanup_task: asyncio.Task[Any] | None = None
 
     @property
     def session(self) -> BaseSandboxSession:
@@ -74,6 +75,50 @@ class _SandboxSessionResources:
             return
         await self._session.start()
         self._started = True
+
+    def _schedule_deferred_cleanup(self) -> None:
+        task = self._deferred_cleanup_task
+        if task is not None and not task.done():
+            return
+
+        task = asyncio.create_task(
+            self._finish_deferred_cleanup(),
+            name="agents.deferred_session_cleanup",
+        )
+        self._deferred_cleanup_task = task
+
+        def consume_task_exception(done: asyncio.Task[Any]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(consume_task_exception)
+
+    async def _finish_deferred_cleanup(self) -> None:
+        try:
+            while True:
+                await self._session._wait_for_tracked_cleanup_tasks()
+                if self._session._should_preserve_backend_on_cleanup():
+                    return
+
+                try:
+                    await self._session.shutdown()
+                except BaseException:
+                    if self._session._has_pending_pty_cleanup_tasks():
+                        continue
+
+                if self._session._has_pending_pty_cleanup_tasks():
+                    continue
+                if self._session._should_preserve_backend_on_cleanup():
+                    return
+                if self._client is not None and isinstance(self._session, SandboxSession):
+                    await self._client.delete(self._session)
+                return
+        finally:
+            if not self._session._has_pending_pty_cleanup_tasks():
+                try:
+                    await self._session._aclose_dependencies()
+                except BaseException:
+                    pass
 
     @redact_mount_error_data
     async def cleanup(self) -> None:
@@ -95,24 +140,49 @@ class _SandboxSessionResources:
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:
                         cleanup_error = exc
+            preserve_backend = (
+                isinstance(self._session, SandboxSession)
+                and self._session._should_preserve_backend_on_cleanup()
+            )
+            if not preserve_backend:
+                try:
+                    await self._session.shutdown()
+                except BaseException as exc:  # pragma: no cover
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            pending_cleanup_after_shutdown = self._session._has_pending_pty_cleanup_tasks()
+            preserve_backend = (
+                preserve_backend
+                or pending_cleanup_after_shutdown
+                or (
+                    isinstance(self._session, SandboxSession)
+                    and self._session._should_preserve_backend_on_cleanup()
+                )
+            )
             try:
-                await self._session.shutdown()
+                if (
+                    self._client is not None
+                    and isinstance(self._session, SandboxSession)
+                    and not preserve_backend
+                ):
+                    await self._client.delete(self._session)
             except BaseException as exc:  # pragma: no cover
                 if cleanup_error is None:
                     cleanup_error = exc
             finally:
+                pending_cleanup_before_dependencies = (
+                    pending_cleanup_after_shutdown or self._session._has_pending_pty_cleanup_tasks()
+                )
                 try:
-                    if self._client is not None and isinstance(self._session, SandboxSession):
-                        await self._client.delete(self._session)
+                    await self._session._aclose_dependencies()
                 except BaseException as exc:  # pragma: no cover
                     if cleanup_error is None:
                         cleanup_error = exc
-                finally:
-                    try:
-                        await self._session._aclose_dependencies()
-                    except BaseException as exc:  # pragma: no cover
-                        if cleanup_error is None:
-                            cleanup_error = exc
+                if (
+                    pending_cleanup_before_dependencies
+                    or self._session._has_pending_pty_cleanup_tasks()
+                ):
+                    self._schedule_deferred_cleanup()
             if cleanup_error is not None:
                 raise cleanup_error
 
