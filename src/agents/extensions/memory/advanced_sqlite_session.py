@@ -1140,8 +1140,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         if not branch_id or not branch_id.strip():
             raise ValueError("Branch ID cannot be empty")
 
-        branch_id = branch_id.strip()
-
         # Protect main branch
         if branch_id == "main":
             raise ValueError("Cannot delete the 'main' branch")
