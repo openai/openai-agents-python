@@ -7,6 +7,7 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "uv.lock"
 
 permissions:
   contents: write # This allows pushing to gh-pages
@@ -17,14 +18,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Determine docs-only push
-        id: docs-only
+      - name: Determine docs deployment changes
+        id: docs-deploy
         env:
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: ./.github/scripts/detect-changes.sh docs-only
+        run: ./.github/scripts/detect-changes.sh docs-deploy
       - name: Setup uv
-        if: steps.docs-only.outputs.run == 'true'
+        if: steps.docs-deploy.outputs.run == 'true'
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
@@ -32,8 +33,8 @@ jobs:
           prune-cache: true
           python-version: "3.14"
       - name: Install dependencies
-        if: steps.docs-only.outputs.run == 'true'
+        if: steps.docs-deploy.outputs.run == 'true'
         run: make sync
       - name: Deploy docs
-        if: steps.docs-only.outputs.run == 'true'
+        if: steps.docs-deploy.outputs.run == 'true'
         run: make deploy-docs

@@ -13,7 +13,7 @@ fi
 # Unknown changes require checks, but cannot authorize deployment.
 unknown_changes() {
   echo "Unable to determine changed files." >&2
-  if [ "$mode" = "docs-only" ]; then
+  if [[ "$mode" = docs-only || "$mode" = docs-deploy ]]; then
     echo "run=false" >> "$GITHUB_OUTPUT"
   else
     echo "run=true" >> "$GITHUB_OUTPUT"
@@ -21,7 +21,7 @@ unknown_changes() {
   exit 0
 }
 
-if [ "$mode" = "docs-only" ] && { [ -z "$base_sha" ] || [ -z "$head_sha" ]; }; then
+if [[ "$mode" = docs-only || "$mode" = docs-deploy ]] && { [ -z "$base_sha" ] || [ -z "$head_sha" ]; }; then
   unknown_changes
 fi
 
@@ -63,11 +63,25 @@ if ! git diff --name-only --no-renames -z "$base_sha" "$head_sha" -- > "$changed
 fi
 
 docs_pattern='^(docs/|mkdocs\.yml$)'
+# Dependency updates must refresh deployed assets even in a mixed push.
+if [ "$mode" = "docs-deploy" ]; then
+  while IFS= read -r -d '' path; do
+    if [ "$path" = "uv.lock" ]; then
+      echo "run=true" >> "$GITHUB_OUTPUT"
+      exit 0
+    fi
+  done < "$changed_files"
+  mode=docs-only
+fi
+
 case "$mode" in
   code)
     pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills)\.yml$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
-  docs|docs-only)
+  docs)
+    pattern='^(docs/|mkdocs\.yml$|uv\.lock$)'
+    ;;
+  docs-only)
     pattern="$docs_pattern"
     ;;
   *)
