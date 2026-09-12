@@ -1955,6 +1955,45 @@ async def test_branch_error_handling():
     session.close()
 
 
+@pytest.mark.parametrize("force", [False, True])
+async def test_delete_branch_preserves_exact_branch_id(force: bool):
+    """Deleting a returned branch ID must leave a distinct whitespace-free ID intact."""
+    session = AdvancedSQLiteSession(session_id="exact_branch_deletion", create_tables=True)
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+    ]
+    survivor_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Keep this branch's history"},
+    ]
+    target_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Delete this branch's history"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "draft")
+        await session.add_items(survivor_items)
+        await session.switch_to_branch("main")
+        target_id = await session.create_branch_from_turn(2, " draft ")
+        await session.add_items(target_items)
+        if not force:
+            await session.switch_to_branch("main")
+
+        await session.delete_branch(target_id, force=force)
+
+        assert await session.get_items(branch_id="draft") == main_items[:2] + survivor_items
+        assert await session.get_items(branch_id=target_id) == []
+        assert await session.get_items() == main_items
+        assert {branch["branch_id"] for branch in await session.list_branches()} == {
+            "main",
+            "draft",
+        }
+    finally:
+        session.close()
+
+
 async def test_branch_deletion_with_force():
     """Test branch deletion with force parameter."""
     session_id = "force_delete_test"
