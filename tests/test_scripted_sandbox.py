@@ -595,4 +595,10 @@ async def test_scripted_sandbox_supports_apply_patch_create() -> None:
 
     assert result.output == "Created notes.txt"
     assert session.remaining_steps == 0
-    assert [call.method for call in session.calls] == ["mkdir", "write"]
+    # The recorded paths matter as much as the methods. The create path hands over an
+    # unresolved path so a symlinked leaf is not followed, and a script matching on
+    # arguments still expects the workspace paths these calls have always carried.
+    assert [(call.method, call.args[0]) for call in session.calls] == [
+        ("mkdir", Path("/workspace")),
+        ("write", Path("/workspace/notes.txt")),
+    ]
