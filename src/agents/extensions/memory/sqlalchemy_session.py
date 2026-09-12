@@ -48,8 +48,14 @@ from sqlalchemy import (
     text as sql_text,
     update,
 )
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.dialects import mysql as mysql_dialect
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
@@ -61,6 +67,24 @@ from ...memory.session_settings import (
 from ...memory.sqlite_session import _await_mutation
 
 _T = TypeVar("_T")
+
+# MySQL-family dialects require a bounded VARCHAR for indexed string columns.
+_MYSQL_SESSION_ID_MAX_LENGTH = 190
+# ``CHARACTER SET`` is declared alongside the collation: a column given only a
+# collation inherits the database character set, and the server rejects
+# ``utf8mb4_bin`` against a non-utf8mb4 inherited set with
+# "ERROR 1253 COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET '<set>'".
+# A MySQL 5.7 install defaulting to latin1 would otherwise fail in
+# ``create_all()`` before either table exists.
+_SESSION_ID_TYPE = String().with_variant(
+    mysql_dialect.VARCHAR(
+        _MYSQL_SESSION_ID_MAX_LENGTH,
+        charset="utf8mb4",
+        collation="utf8mb4_bin",
+    ),
+    "mysql",
+    "mariadb",
+)
 
 
 class SQLAlchemySession(SessionABC):
@@ -163,7 +187,9 @@ class SQLAlchemySession(SessionABC):
                 'mysql+aiomysql://', or 'sqlite+aiosqlite://').
             create_tables (bool, optional): Whether to automatically create the required
                 tables and indexes. Defaults to False for production use. Set to True for
-                development and testing when migrations aren't used.
+                development and testing when migrations aren't used. Automatically created
+                MySQL and MariaDB schemas store session IDs in VARCHAR(190) columns, and
+                session IDs longer than that are rejected only for those schemas.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
@@ -189,7 +215,7 @@ class SQLAlchemySession(SessionABC):
         self._sessions = Table(
             sessions_table,
             self._metadata,
-            Column("session_id", String, primary_key=True),
+            Column("session_id", _SESSION_ID_TYPE, primary_key=True),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
@@ -211,7 +237,7 @@ class SQLAlchemySession(SessionABC):
             Column("id", Integer, primary_key=True, autoincrement=True),
             Column(
                 "session_id",
-                String,
+                _SESSION_ID_TYPE,
                 ForeignKey(f"{sessions_table}.session_id", ondelete="CASCADE"),
                 nullable=False,
             ),
@@ -234,6 +260,7 @@ class SQLAlchemySession(SessionABC):
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
         self._create_tables = create_tables
+        self._session_id_collation_validated = False
 
     # ---------------------------------------------------------------------
     # Convenience constructors
@@ -278,9 +305,70 @@ class SQLAlchemySession(SessionABC):
     # ------------------------------------------------------------------
     # Session protocol implementation
     # ------------------------------------------------------------------
+    async def _validate_session_id_collation(self, conn: AsyncConnection) -> None:
+        """Reject trailing-space IDs only when the actual MySQL collation pads spaces."""
+        if self._engine.dialect.name not in {"mysql", "mariadb"}:
+            return
+        if not self.session_id.endswith(" "):
+            return
+
+        try:
+            collation_result = await conn.execute(
+                sql_text(
+                    "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name "
+                    "AND COLUMN_NAME = 'session_id'"
+                ),
+                {"table_name": self._sessions.name},
+            )
+            collation = collation_result.scalar_one_or_none()
+            if not collation:
+                return
+
+            pad_attribute: str | None
+            if getattr(self._engine.dialect, "is_mariadb", False):
+                pad_attribute = "NO PAD" if "_nopad_" in collation.casefold() else "PAD SPACE"
+            else:
+                try:
+                    pad_result = await conn.execute(
+                        sql_text(
+                            "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
+                            "WHERE COLLATION_NAME = :collation"
+                        ),
+                        {"collation": collation},
+                    )
+                    pad_attribute = pad_result.scalar_one_or_none()
+                except SQLAlchemyError:
+                    version_result = await conn.execute(sql_text("SELECT VERSION()"))
+                    version = version_result.scalar_one_or_none()
+                    pad_attribute = (
+                        "PAD SPACE"
+                        if version
+                        and version.partition(".")[0].isdigit()
+                        and int(version.partition(".")[0]) < 8
+                        else None
+                    )
+        except SQLAlchemyError:
+            return
+
+        if pad_attribute == "PAD SPACE":
+            raise ValueError(
+                f"session_id {self.session_id!r} ends with a space, which is not distinct "
+                f"under the column's PAD SPACE collation {collation!r}; two sessions would "
+                "silently share one history"
+            )
+
     async def _ensure_tables(self) -> None:
         """Ensure tables are created before any database operations."""
         if not self._create_tables:
+            if (
+                not self._session_id_collation_validated
+                and self._engine.dialect.name in {"mysql", "mariadb"}
+                and self.session_id.endswith(" ")
+            ):
+                async with self._engine.connect() as conn:
+                    await self._validate_session_id_collation(conn)
+                self._session_id_collation_validated = True
             return
 
         assert self._init_lock is not None
@@ -294,6 +382,8 @@ class SQLAlchemySession(SessionABC):
 
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
+                await self._validate_session_id_collation(conn)
+                self._session_id_collation_validated = True
             self._create_tables = False  # Only create once
         finally:
             self._init_lock.release()
