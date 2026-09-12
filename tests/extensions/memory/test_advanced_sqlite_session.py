@@ -3384,6 +3384,113 @@ async def test_store_run_usage_waits_for_database_lock_off_event_loop(
         session.close()
 
 
+@pytest.mark.parametrize("create_tables", [False, True])
+async def test_store_run_usage_after_reopening_cleared_session(
+    tmp_path: Path, usage_data: Usage, create_tables: bool
+):
+    """Reopening existing history must not discard its first usage update."""
+    db_path = tmp_path / "reopened_usage.db"
+    original = AdvancedSQLiteSession(
+        session_id="reopened_usage", db_path=db_path, create_tables=True
+    )
+    items: list[TResponseInputItem] = [{"role": "user", "content": "current turn"}]
+    try:
+        await original.add_items([{"role": "user", "content": "old turn"}])
+        await original.clear_session()
+        await original.add_items(items)
+    finally:
+        original.close()
+
+    reopened = AdvancedSQLiteSession(
+        session_id="reopened_usage", db_path=db_path, create_tables=create_tables
+    )
+    try:
+        # Store before any read can refresh the reopened session's local state.
+        await reopened.store_run_usage(create_mock_run_result(usage_data))
+        recorded_usage = await reopened.get_turn_usage(1)
+        assert isinstance(recorded_usage, dict)
+        assert recorded_usage["total_tokens"] == usage_data.total_tokens
+        assert await reopened.get_items() == items
+    finally:
+        reopened.close()
+
+
+async def test_store_run_usage_cancellation_during_capture_waits_for_commit(usage_data: Usage):
+    """Cancellation during capture must settle the complete usage mutation."""
+    session = AdvancedSQLiteSession(session_id="usage_capture_cancel", create_tables=True)
+    task: asyncio.Task[None] | None = None
+    try:
+        await session.add_items([{"role": "user", "content": "usage turn"}])
+        with _gate_worker("_capture_current_turn") as (started, real_to_thread, release):
+            try:
+                task = asyncio.create_task(
+                    session.store_run_usage(create_mock_run_result(usage_data))
+                )
+                assert await real_to_thread(started.wait, 5)
+                task.cancel("capture-cancel")
+                await asyncio.sleep(0)
+                cancelled_before_release = task.done()
+                release.set()
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await task
+                _assert_cancel_message(exc_info.value, "capture-cancel")
+            finally:
+                release.set()
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+
+        recorded_usage = await session.get_turn_usage(1)
+        assert isinstance(recorded_usage, dict)
+        assert recorded_usage["total_tokens"] == usage_data.total_tokens
+        assert not cancelled_before_release
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("operation", ["switch", "clear"])
+async def test_store_run_usage_keeps_target_while_capture_is_waiting(
+    usage_data: Usage, operation: str
+):
+    """Usage must not move to another branch or replacement session history."""
+    session = AdvancedSQLiteSession(session_id=f"usage_capture_{operation}", create_tables=True)
+    task: asyncio.Task[None] | None = None
+    try:
+        await session.add_items([{"role": "user", "content": "main turn"}])
+        if operation == "switch":
+            await session.create_branch_from_turn(1, "branch_a")
+            await session.add_items([{"role": "user", "content": "branch turn"}])
+
+        with _gate_worker("_capture_current_turn") as (started, real_to_thread, release):
+            try:
+                task = asyncio.create_task(
+                    session.store_run_usage(create_mock_run_result(usage_data))
+                )
+                assert await real_to_thread(started.wait, 5)
+                if operation == "switch":
+                    await session.switch_to_branch("main")
+                else:
+                    await session.clear_session()
+                    await session.add_items([{"role": "user", "content": "replacement turn"}])
+                release.set()
+                await task
+            finally:
+                release.set()
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+
+        assert await session.get_turn_usage(branch_id="main") == []
+        if operation == "switch":
+            branch_usage = await session.get_turn_usage(branch_id="branch_a")
+            assert isinstance(branch_usage, list)
+            assert len(branch_usage) == 1
+            assert branch_usage[0]["total_tokens"] == usage_data.total_tokens
+            assert await session.get_items() == [{"role": "user", "content": "main turn"}]
+        else:
+            assert await session.get_items() == [{"role": "user", "content": "replacement turn"}]
+    finally:
+        session.close()
+
+
 async def test_stale_store_run_usage_skipped_when_turn_removed_by_pop(usage_data: Usage):
     """A store_run_usage that reads a turn and then races with pop_item removing
     that turn must not reinsert usage for the now-nonexistent turn.
