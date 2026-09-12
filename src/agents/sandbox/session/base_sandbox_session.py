@@ -149,6 +149,12 @@ while :; do
     fi
 done
 """.strip()
+_EXISTING_TARGET_EXIT_CODE = 13
+# A bare existence test. It needs only execute permission on the parent, never reads the
+# target, and reports absent when the parent itself is missing, so a nested create still
+# reaches write() and lets the backend create the parents.
+_TARGET_EXISTS_SCRIPT = 'if [ -e "$1" ] || [ -L "$1" ]; then exit 13; fi\n'
+
 _WRITE_ACCESS_CHECK_SCRIPT = (
     'target="$1"\n'
     'if [ -e "$target" ]; then\n'
@@ -944,6 +950,55 @@ class BaseSandboxSession(abc.ABC):
         :param data: A file-like object positioned at the start of the payload.
         :param user: Optional sandbox user to perform the write as.
         """
+
+    async def write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Write a file that must not already exist.
+
+        This default checks the target and then writes, so it rejects the ordinary case of
+        a create aimed at a path that is already occupied and leaves the existing content
+        alone. It is not atomic: a creator that arrives between the check and the write is
+        overwritten. A backend that can express an exclusive create should override this
+        and claim the name in one step; ``UnixLocalSandboxSession`` does.
+
+        :param path: Absolute path in the container or path relative to the
+                workspace root.
+        :param data: A file-like object positioned at the start of the payload.
+        :param user: Optional sandbox user to perform the write as.
+        :raises FileExistsError: If the path already exists.
+        """
+        workspace_path = await self._validate_path_access(path, for_write=True)
+        path_arg = sandbox_path_str(workspace_path)
+        # The probe reports absent as 0, including when the parent does not exist, so 0 is
+        # the only status that may proceed. Any other status means the probe itself did not
+        # run, and write() can still succeed through a separate upload API on provider
+        # sessions, which would overwrite an existing target exactly when the precondition
+        # could not be checked.
+        probe = await self.exec(
+            "sh", "-c", _TARGET_EXISTS_SCRIPT, "sh", path_arg, shell=False, user=user
+        )
+        if probe.exit_code == _EXISTING_TARGET_EXIT_CODE:
+            raise FileExistsError(path_arg)
+        if probe.exit_code != 0:
+            raise WorkspaceArchiveWriteError(
+                path=workspace_path,
+                context={
+                    "command": ["sh", "-c", "<target_exists>", path_arg],
+                    "exit_code": probe.exit_code,
+                    "stdout": probe.stdout.decode("utf-8", errors="replace"),
+                    "stderr": probe.stderr.decode("utf-8", errors="replace"),
+                },
+            )
+        # Create the parents explicitly, the way the previous create path did, so the call
+        # sequence a caller can observe is unchanged and backends that do not create them
+        # during write() still work.
+        await self.mkdir(workspace_path.parent, parents=True, user=user)
+        await self.write(workspace_path, data, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None

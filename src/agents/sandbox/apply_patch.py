@@ -127,7 +127,11 @@ class WorkspaceEditor:
                     path=operation.path,
                     cause=exc,
                 ) from exc
-            await self._write_text(destination, created_text)
+            # Hand over the unresolved path. destination has already been through
+            # normalize_path(), which resolves leaf symlinks on some backends, so passing
+            # it would ask the backend to create the link target instead of the requested
+            # name and a dangling link would be reported as a successful create.
+            await self._write_new_text(relative_path, created_text, display_path=display_path)
             return ApplyPatchResult(output=f"Created {display_path}")
 
         raise ApplyPatchDiffError(
@@ -185,6 +189,25 @@ class WorkspaceEditor:
             raise ApplyPatchFileNotFoundError(path=Path(display_path), cause=exc) from exc
         else:
             handle.close()
+
+    async def _write_new_text(self, destination: Path, text: str, *, display_path: str) -> None:
+        # Add File is documented as creating a new file, so the name is claimed
+        # exclusively by the backend rather than checked and then overwritten.
+        try:
+            await self._session.write_new_file(
+                destination,
+                io.BytesIO(text.encode("utf-8")),
+                user=self._user,
+            )
+        except FileExistsError as exc:
+            raise ApplyPatchDiffError(
+                message=(
+                    f"apply_patch cannot create {display_path} because it already exists. "
+                    "Use an update_file operation to change an existing file."
+                ),
+                path=display_path,
+                cause=exc,
+            ) from exc
 
     async def _read_text(self, destination: Path, *, op_path: str, decode_path: Path) -> str:
         try:

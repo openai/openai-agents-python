@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import signal
+import subprocess
 import tarfile
 import threading
 import time
@@ -12,10 +14,15 @@ from typing import cast
 
 import pytest
 
+from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.errors import (
+    ApplyPatchDiffError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
-from agents.sandbox.sandboxes import unix_local as unix_local_module
+from agents.sandbox.sandboxes import _unix_local_file_ops, unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
     UnixLocalSandboxSession,
@@ -24,6 +31,7 @@ from agents.sandbox.sandboxes.unix_local import (
 )
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
 
 
 class _RecordingUnixLocalSession(UnixLocalSandboxSession):
@@ -610,3 +618,319 @@ async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     # the workspace root are only released once nothing is still writing to them.
     assert events == ["extract-start", "extract-end"]
     assert not buf.closed
+
+
+def _exclusive_write_session(root: Path) -> UnixLocalSandboxSession:
+    return UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(root)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_keeps_an_intervening_creator_content(tmp_path: Path) -> None:
+    """The name is claimed by the write itself, so a creator that got there first wins."""
+    session = _exclusive_write_session(tmp_path)
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"written by someone else\n")
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(Path("notes.txt"), io.BytesIO(b"clobbered"))
+
+    assert target.read_bytes() == b"written by someone else\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    """Drive the real caller path.
+
+    WorkspaceEditor normalizes the destination before dispatching, and this backend
+    resolves leaf symlinks, so a create aimed at a dangling link used to land on the
+    link's absent target and report success.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="link.txt", diff="+clobbered\n")
+        )
+
+    assert not (tmp_path / "missing.txt").exists()
+    assert (tmp_path / "link.txt").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_directory(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "adir").mkdir()
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="adir", diff="+clobbered\n")
+        )
+
+    assert list((tmp_path / "adir").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_keeps_existing_content(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (tmp_path / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_writes_a_new_nested_file(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="nested/dir/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "nested" / "dir" / "new.txt").read_text() == "hello"
+    assert not any(p.name.startswith(".") for p in (tmp_path / "nested" / "dir").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_reports_a_file_parent_as_a_write_error(
+    tmp_path: Path,
+) -> None:
+    """A parent that is a regular file is not a collision on the requested name.
+
+    Reporting it as one would tell the model to use update_file for a target that does
+    not exist and cannot be updated.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "parent").write_bytes(b"i am a file\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="parent/child.txt", diff="+hi\n")
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_accepts_a_destination_at_the_component_limit(
+    tmp_path: Path,
+) -> None:
+    """Staging must not push a valid destination name past the filesystem's limit.
+
+    Deriving the staging basename from the destination made it longer than the
+    destination itself, so a name the ordinary write path accepts failed to create.
+    """
+    session = _exclusive_write_session(tmp_path)
+    long_name = "a" * 250 + ".txt"
+    # Confirm the platform really does accept this name, so the test fails for the
+    # right reason rather than because the limit is lower here.
+    probe = tmp_path / long_name
+    probe.write_text("probe")
+    probe.unlink()
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path=long_name, diff="+hello\n")
+    )
+
+    assert (tmp_path / long_name).read_text() == "hello"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+@pytest.mark.asyncio
+async def test_apply_patch_create_reports_collision_inside_a_read_only_parent(
+    tmp_path: Path,
+) -> None:
+    """A visible collision must classify as a collision, not as a permission failure.
+
+    Staging before classifying meant a target inside an executable but non-writable
+    parent failed on the staging write, so the caller was told the write failed instead
+    of being told to use update_file.
+    """
+    session = _exclusive_write_session(tmp_path)
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "notes.txt"
+    target.write_bytes(b"important\n")
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(ApplyPatchDiffError):
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="create_file", path="locked/notes.txt", diff="+clobbered\n"
+                )
+            )
+        assert target.read_bytes() == b"important\n"
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_write_new_file_maps_the_worker_exists_status(tmp_path: Path) -> None:
+    """The bound-user path runs the same exclusive create in a worker process.
+
+    A real sandbox user is not available here, so this pins the status mapping: the
+    worker exits with a distinct code for an existing target, and the caller has to turn
+    that into FileExistsError rather than a generic write error.
+    """
+    session = _exclusive_write_session(tmp_path)
+    recorded: list[str] = []
+
+    async def fake_worker(
+        operation: str, path: Path, *, user: object, payload: bytes = b""
+    ) -> subprocess.CompletedProcess[bytes]:
+        _ = (path, user, payload)
+        recorded.append(operation)
+        return subprocess.CompletedProcess(
+            args=[], returncode=_unix_local_file_ops._EXISTING_TARGET_EXIT_CODE
+        )
+
+    session._run_file_operation_as_user = fake_worker  # type: ignore[assignment,method-assign]
+
+    with pytest.raises(FileExistsError):
+        await session.write_new_file(
+            Path("notes.txt"), io.BytesIO(b"payload"), user=User(name="sandbox-user")
+        )
+
+    assert recorded == ["write_new"]
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_probe_does_not_fetch_the_payload(tmp_path: Path) -> None:
+    """The inherited default must not read the target to decide a collision.
+
+    read() eagerly fetches the whole payload on the remote backends that inherit the
+    default, so probing an existing large file would download it, and an existing file the
+    bound user cannot read would report a read failure instead of the collision. This uses
+    a filesystem double that does not override write_new_file, so it exercises the base.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+    reads: list[Path] = []
+    original_read = session.read
+
+    async def counting_read(path: Path, *, user: object = None) -> io.IOBase:
+        reads.append(Path(path))
+        return await original_read(path, user=user)
+
+    session.read = counting_read  # type: ignore[assignment,method-assign]
+    (workspace / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert reads == []
+    assert (workspace / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_supports_a_symlinked_parent(tmp_path: Path) -> None:
+    """A supported internal symlink parent must still work.
+
+    The ordinary write path resolves these safe aliases, so the exclusive create has to
+    resolve the parent too and keep only the leaf name unresolved. Passing the whole path
+    through unresolved made the file ops open the parent with O_NOFOLLOW and fail.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "internal").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="internal/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "real" / "new.txt").read_text() == "hello"
+
+    # The leaf is still unresolved, so a dangling link at the target name is rejected.
+    (tmp_path / "real" / "dangling.txt").symlink_to(tmp_path / "real" / "missing.txt")
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="internal/dangling.txt", diff="+x\n")
+        )
+    assert not (tmp_path / "real" / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_allows_a_missing_parent(tmp_path: Path) -> None:
+    """A nested create must still reach write() when the parent does not exist yet.
+
+    The probe reports absent for a missing parent instead of failing, so backends whose
+    write path creates parents keep working. Probing by listing the parent broke this
+    because the listing itself fails when the directory is not there.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="newdir/file.txt", diff="+hello\n")
+    )
+
+    assert (workspace / "newdir" / "file.txt").read_text() == "hello"
+
+
+class _ProbeFailureSession(FilesystemTestSandboxSession):
+    """Reports an unexpected status from the existence probe."""
+
+    async def _exec_internal(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        _ = (command, timeout)
+        return ExecResult(stdout=b"", stderr=b"sh: not found", exit_code=127)
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_fails_closed_when_the_probe_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """A probe that did not run must not be read as "absent".
+
+    write() can still succeed through a separate upload API on provider sessions, so
+    treating an unexpected status as absent would overwrite an existing target exactly
+    when the precondition could not be checked.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = _ProbeFailureSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+    (workspace / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (workspace / "notes.txt").read_bytes() == b"important\n"

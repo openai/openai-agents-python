@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,9 @@ from agents.sandbox.errors import (
     ApplyPatchDiffError,
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
+    WorkspaceReadNotFoundError,
 )
+from agents.sandbox.types import User
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
@@ -411,3 +414,50 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
         )
 
     assert session.files[Path("/workspace/old.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_rejects_an_existing_file() -> None:
+    session = ApplyPatchSession()
+    session.files[Path("/workspace/notes.txt")] = b"alpha\n"
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="create_file",
+                path="notes.txt",
+                diff="+beta\n",
+            )
+        )
+
+    assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
+
+
+class _AlwaysMissingReadApplyPatchSession(ApplyPatchSession):
+    """Reports every path as missing while still holding the file.
+
+    This stands in for a backend that provides an exclusive create. A create that only
+    probed with read() would be told the path is free and would overwrite the stored
+    content, so this pins the rejection to the backend primitive rather than to a probe.
+    """
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        _ = (path, user)
+        raise WorkspaceReadNotFoundError(path=path)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_rejects_an_existing_file_without_reading_it() -> None:
+    session = _AlwaysMissingReadApplyPatchSession()
+    session.files[Path("/workspace/notes.txt")] = b"alpha\n"
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="create_file",
+                path="notes.txt",
+                diff="+beta\n",
+            )
+        )
+
+    assert session.files[Path("/workspace/notes.txt")] == b"alpha\n"
