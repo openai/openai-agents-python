@@ -233,6 +233,32 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_limit_is_applied_after_provider_pagination(self, mock_openai_client):
+        """A session limit must not be used as the Conversations API page size."""
+
+        async def conversation_items():
+            for index in range(4, 0, -1):
+                if index == 1:
+                    raise AssertionError("get_items should stop after collecting the limit")
+                item = MagicMock()
+                item.model_dump.return_value = {"id": str(index), "role": "user"}
+                yield item
+
+        mock_openai_client.conversations.items.list = MagicMock(return_value=conversation_items())
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        assert await session.get_items(limit=3) == [
+            {"id": "2", "role": "user"},
+            {"id": "3", "role": "user"},
+            {"id": "4", "role": "user"},
+        ]
+        mock_openai_client.conversations.items.list.assert_called_once_with(
+            conversation_id="test_id", order="desc"
+        )
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
