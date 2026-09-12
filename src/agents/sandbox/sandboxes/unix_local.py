@@ -1271,7 +1271,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if unmount_failed:
             return session
         try:
-            shutil.rmtree(Path(inner.state.manifest.root), ignore_errors=False)
+            await run_blocking_workspace_io(shutil.rmtree, Path(inner.state.manifest.root))
         except FileNotFoundError:
             pass
         except Exception:
