@@ -72,6 +72,11 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
+        self._current_branch_id = "main"
+        # Synchronized with durable history during initialization and whenever a
+        # branch pointer is established or a write begins. A mismatch means
+        # another instance cleared the session, so the local pointer resets to main.
+        self._generation = 0
         self._create_structure_tables_on_init = create_tables
         try:
             super().__init__(
@@ -86,11 +91,6 @@ class AdvancedSQLiteSession(SQLiteSession):
             except BaseException:
                 pass
             raise
-        self._current_branch_id = "main"
-        # Synchronized with the durable session_clear_generations row whenever a
-        # branch pointer is established or a write begins. A mismatch means
-        # another instance cleared the session, so the local pointer resets to main.
-        self._generation = 0
         self._logger = logger if logger is not None else logging.getLogger(__name__)
 
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
@@ -103,6 +103,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             self._claim_structure_tables(conn)
             self._create_schema_for_connection(conn)
         conn.commit()
+        self._refresh_branch_after_external_clear(conn, initialize=False)
 
     def _commit_branch_pointer(self, branch_id: str, generation: int) -> bool:
         """Set the current-branch pointer unless a clear has committed meanwhile.
@@ -634,14 +635,24 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # write is skipped. The anchor is scoped to this branch/turn, so
                 # unrelated removals (e.g. delete_branch on another branch) do
                 # not drop this write.
-                current_turn, branch_id, turn_anchor = self._capture_current_turn()
-                # Only update turn-level usage - session usage is aggregated on demand
-                await self._update_turn_usage_internal(
-                    current_turn,
-                    result.context_wrapper.usage,
-                    branch_id=branch_id,
-                    turn_anchor=turn_anchor,
-                )
+                branch_id = self._current_branch_id
+                generation = self._generation
+                usage = result.context_wrapper.usage
+
+                async def _store_usage() -> None:
+                    current_turn, captured_branch, turn_anchor = await asyncio.to_thread(
+                        self._capture_current_turn, branch_id, generation
+                    )
+                    # Only update turn-level usage; session usage is aggregated on demand.
+                    await self._update_turn_usage_internal(
+                        current_turn,
+                        usage,
+                        branch_id=captured_branch,
+                        turn_anchor=turn_anchor,
+                    )
+
+                # Capture and write must both settle before caller cancellation propagates.
+                await _await_mutation(_store_usage())
         except Exception as e:
 
             def diagnostic_extra() -> dict[str, object]:
@@ -654,17 +665,20 @@ class AdvancedSQLiteSession(SQLiteSession):
                 diagnostic_extra=diagnostic_extra,
             )
 
-    def _capture_current_turn(self) -> tuple[int, str, int | None]:
+    def _capture_current_turn(self, branch_id: str, generation: int) -> tuple[int, str, int | None]:
         """Return (current_turn, branch_id, turn_anchor) in one locked read.
 
         ``turn_anchor`` is the smallest ``message_structure.id`` of the current
-        turn on the current branch (``None`` if the turn has no rows). Because
+        turn on the captured branch (``None`` if the turn has no rows). Because
         ids are monotonic and never reused, it uniquely identifies this turn
         incarnation, so a later pop+recreate that reuses the numeric turn id
         yields a different anchor.
         """
         with self._locked_connection() as conn:
-            branch_id = self._resolve_read_branch(conn, None)
+            self._refresh_branch_after_external_clear(conn, initialize=False)
+            if self._generation != generation:
+                # A clear invalidates usage belonging to the previous session history.
+                return 0, branch_id, None
             with closing(conn.cursor()) as cursor:
                 cursor.execute(
                     """
@@ -1901,15 +1915,15 @@ class AdvancedSQLiteSession(SQLiteSession):
                 turn reused the same numeric id. Because the check is scoped to
                 this branch/turn, unrelated removals (e.g. delete_branch on
                 another branch) do not drop this write. ``None`` means the branch
-                had no turn when it was read, so there is nothing to attribute
-                the usage to and the write is skipped.
+                had no turn when it was read or a session clear invalidated the
+                pending capture, so the write is skipped.
         """
 
         target_branch = branch_id if branch_id is not None else self._current_branch_id
 
         if turn_anchor is None:
-            # ``_capture_current_turn`` returns no anchor only when the branch has no
-            # turn rows; recording usage would invent a phantom turn 0.
+            # A missing anchor means there is no captured turn or a session clear
+            # invalidated the capture; neither case can safely receive usage.
             self._logger.debug("Skipping usage store: no current turn on branch %r", target_branch)
             return
 
