@@ -100,7 +100,6 @@ class OpenAIConversationsSession(SessionABC):
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
-                limit=session_limit,
                 order="desc",
             ):
                 # calling model_dump() to make this serializable
