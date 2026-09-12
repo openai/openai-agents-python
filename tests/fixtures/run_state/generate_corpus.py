@@ -460,6 +460,38 @@ state._sandbox = {
             "reader while preserving the Docker session payload."
         ),
     ),
+    Scenario(
+        "1.18",
+        "821afdc3f709f409a307c93f42a603704be63033",
+        "held_pending_session_write",
+        """
+from agents.run_internal.run_steps import NextStepRunAgain
+
+state._current_step = NextStepRunAgain()
+state._pending_session_write = {
+    "session_id": "session-118",
+    "items": [
+        {
+            "type": "function_call",
+            "call_id": "call_held_1",
+            "name": "write_thing",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_held_1", "output": "wrote"},
+    ],
+    "before": None,
+    "persisted_count": 2,
+    "held": True,
+}
+""",
+        provenance="canonical_compatibility",
+        emitted_version="1.17",
+        note=(
+            "The held pending Session write was first emitted with the unreleased 1.17 writer. "
+            "The fixture changes only the schema label to exercise the 1.18 compatibility "
+            "reader while preserving the withheld batch payload."
+        ),
+    ),
 )
 
 
@@ -487,6 +519,19 @@ MINIMAL_SCENARIOS = (
         note=(
             "The labels implementation was first emitted with the unreleased 1.16 writer. "
             "The fixture changes only the schema label to exercise the 1.17 compatibility "
+            "reader while preserving older payload compatibility."
+        ),
+    ),
+    Scenario(
+        "1.18",
+        "821afdc3f709f409a307c93f42a603704be63033",
+        "minimal",
+        "",
+        provenance="canonical_compatibility",
+        emitted_version="1.17",
+        note=(
+            "The held pending Session write was first emitted with the unreleased 1.17 writer. "
+            "The fixture changes only the schema label to exercise the 1.18 compatibility "
             "reader while preserving older payload compatibility."
         ),
     ),

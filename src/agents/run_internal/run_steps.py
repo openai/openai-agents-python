@@ -209,6 +209,11 @@ class SingleStepResult:
     """Full unfiltered items for session history. When set, these are used instead of
     new_step_items for session saving and generated_items property."""
 
+    handoff_input_filtered: bool = False
+    """Whether a ``Handoff.input_filter`` ran while resolving this step. A filter's
+    authority over session history covers the turn it filtered, so held settlement
+    consults this to know whether an absent output was removed on purpose."""
+
     nested_history_owned_items: list[NestedHistoryOwnedItem] | None = None
     """Items moved verbatim into SDK-default nested history for this handoff.
 

@@ -152,6 +152,7 @@ from .run_steps import (
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
 )
+from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
 from .tool_execution import (
     build_litellm_json_tool_call,
@@ -747,6 +748,7 @@ async def execute_handoffs(
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
         nested_history_owned_items=nested_history_owned_items,
+        handoff_input_filtered=input_filter is not None,
     )
 
 
@@ -2457,6 +2459,21 @@ async def resolve_interrupted_turn(
         )
         if run_state is not None:
             run_state._generated_items = [*original_pre_step_items, *committed_tool_outputs]
+            # The approved tool's side effect is done and its output is committed, so
+            # the withheld batch takes it at this boundary rather than at the turn
+            # exit. A post-output callback that raises (``custom_data_extractor``,
+            # ``on_tool_end``) leaves a retry that skips the completed invocation and
+            # produces no new session items, and the batch would otherwise settle, or
+            # be discarded as an emptied turn, without the output the tool produced.
+            folded_call_id = extract_tool_call_id(getattr(item, "raw_item", None))
+            extend_held_session_write(
+                run_state,
+                run_items=[item],
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+                # The committer only ever folds the function family (measured), so the
+                # raw call id is the right ownership key for the record's marker.
+                folded_output_call_ids=[folded_call_id] if folded_call_id else None,
+            )
         _register_tool_call_items(context_wrapper, [item])
 
     (
