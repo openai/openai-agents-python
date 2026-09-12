@@ -341,9 +341,12 @@ class _ScriptedSandboxSession(ScriptedSandboxSession):
         # A scripted session has no filesystem to hold a colliding entry, so an exclusive
         # create is scripted as the same mkdir and write pair the ordinary create path uses.
         # Delegating here also keeps the inherited default from reaching for `exec`, which a
-        # script that only configures file steps hides.
-        await self.mkdir(path.parent, parents=True, user=user)
-        await self.write(path, data, user=user)
+        # script that only configures file steps hides. Normalize first: the create path
+        # hands over an unresolved path so a symlinked leaf is not followed, but a script
+        # matching on arguments expects the workspace paths these calls have always carried.
+        target = self.normalize_path(path)
+        await self.mkdir(target.parent, parents=True, user=user)
+        await self.write(target, data, user=user)
 
     def __getattribute__(self, name: str) -> Any:
         if name in _SCRIPTABLE_METHODS:
