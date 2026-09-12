@@ -14,6 +14,12 @@ dependencies = [
     "requests>=2.0, <3",
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
+    # Security floors for transitive runtime dependencies.
+    "httpx2>=2.12.0",
+    "pyjwt>=2.13.0",
+    "python-multipart>=0.0.31",
+    "starlette>=1.3.1",
+    "urllib3>=2.7.0",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -34,41 +40,71 @@ Homepage = "https://openai.github.io/openai-agents-python/"
 Repository = "https://github.com/openai/openai-agents-python"
 
 [project.optional-dependencies]
+# Protobuf exclusions retain patched 5.x and 6.x releases (GHSA-7gcm-g887-7qv7).
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <17"]
 viz = ["graphviz>=0.17"]
-litellm = ["litellm>=1.83.0"]
-any-llm = ["any-llm-sdk>=1.11.0, <2; python_version >= '3.11'"]
+litellm = ["litellm>=1.83.0", "aiohttp>=3.14.3,<4", "filelock>=3.20.3"]
+any-llm = [
+    "any-llm-sdk>=1.11.0, <2; python_version >= '3.11'",
+    "pygments>=2.20.0; python_version >= '3.11'",
+]
 realtime = ["websockets>=15.0, <17"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
-dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
+dapr = [
+    "dapr>=1.16.0",
+    "grpcio>=1.60.0",
+    "aiohttp>=3.14.3,<4",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+]
 mongodb = ["pymongo>=4.14"]
 docker = ["docker>=6.1"]
-blaxel = ["blaxel>=0.2.50", "aiohttp>=3.12,<4"]
-daytona = ["daytona>=0.155.0"]
-cloudflare = ["aiohttp>=3.12,<4"]
-e2b = ["e2b==2.31.0", "e2b-code-interpreter==2.8.1"]
-modal = ["modal==1.4.3"]
+blaxel = ["blaxel>=0.2.50", "aiohttp>=3.14.3,<4"]
+daytona = [
+    "daytona>=0.155.0",
+    "aiohttp>=3.14.3,<4",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+]
+cloudflare = ["aiohttp>=3.14.3,<4"]
+e2b = [
+    "e2b==2.31.0",
+    "e2b-code-interpreter==2.8.1",
+    "h2>=4.4.1",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
+]
+modal = [
+    "modal==1.4.3",
+    "aiohttp>=3.14.3,<4",
+    "cbor2>=5.9.0",
+    "h2>=4.4.1",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
+]
 runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
-vercel = ["vercel>=0.5.6,<0.6"]
+vercel = ["vercel>=0.5.6,<0.6", "cbor2>=5.9.0"]
 s3 = ["boto3>=1.34"]
 temporal = [
     "temporalio==1.26.0",
     "textual>=8.2.3,<8.3",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
 ]
 
 [dependency-groups]
 dev = [
   "mypy",
   "ruff==0.9.2",
-  "pytest",
+  "pytest>=9.0.3",
   "pytest-asyncio",
   "pytest-mock>=3.14.0",
   "pytest-xdist",
   "rich>=13.1.0, <15",
   "mkdocs>=1.6.0",
-  "mkdocs-material>=9.6.0",
+  "mkdocs-material>=9.7.7",
+  "pymdown-extensions>=11.0.1",
+  "pygments>=2.20.0",
   "mkdocstrings[python]>=0.28.0",
   "mkdocs-static-i18n",
   "coverage>=7.6.12",
@@ -87,6 +123,8 @@ dev = [
   "cryptography>=45.0, <46",
   "fakeredis>=2.31.3",
   "dapr>=1.14.0",
+  "aiohttp>=3.14.3,<4",
+  "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
   "grpcio>=1.60.0",
   "pyright==1.1.408",
   "pymongo>=4.14",
