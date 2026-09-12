@@ -1847,11 +1847,7 @@ async def resolve_interrupted_turn(
         Sequence[RunItem],
         [deepcopy(getattr(item, "raw_item", item)) for item in original_pre_step_items],
     )
-    classifier_server_managed_input_items = (
-        deepcopy(ItemHelpers.input_to_new_input_list(original_input))
-        if server_manages_conversation
-        else None
-    )
+    classifier_input_items = deepcopy(ItemHelpers.input_to_new_input_list(original_input))
 
     custom_calls_to_reconcile: list[ResponseCustomToolCall] = []
     custom_call_identities: dict[str, tuple[str, str, str, str]] = {}
@@ -2031,7 +2027,7 @@ async def resolve_interrupted_turn(
         existing_items=classifier_existing_items,
         run_config=replace(run_config, tool_not_found_behavior="return_error_to_model"),
         server_manages_conversation=server_manages_conversation,
-        server_managed_input_items=classifier_server_managed_input_items,
+        input_items=classifier_input_items,
         allow_apply_patch_function_fallback=False,
     )
     current_functions = {run.tool_call.call_id: run for run in classified.functions}
@@ -2691,7 +2687,7 @@ def process_model_response(
     existing_items: Sequence[RunItem] | None = None,
     run_config: RunConfig | None = None,
     server_manages_conversation: bool = False,
-    server_managed_input_items: Sequence[Any] | None = None,
+    input_items: Sequence[Any] | None = None,
     allow_apply_patch_function_fallback: bool = True,
 ) -> ProcessedResponse:
     items: list[RunItem] = []
@@ -2730,8 +2726,11 @@ def process_model_response(
     hosted_mcp_tool_metadata = collect_mcp_list_tools_metadata(existing_items or ())
     hosted_mcp_tool_metadata.update(collect_mcp_list_tools_metadata(response.output))
 
+    # A program replayed as input, for example when a run resumes after a
+    # human-in-the-loop pause with client-managed history, is a parent the
+    # model may still complete, so the input counts alongside this run's items.
     program_call_ids, completed_program_call_ids = _collect_program_parent_state(
-        [*(server_managed_input_items or ()), *(existing_items or ())],
+        [*(input_items or ()), *(existing_items or ())],
         server_manages_conversation=server_manages_conversation,
     )
     _, response_completed_program_call_ids = _collect_program_parent_state(response.output)
@@ -3565,11 +3564,7 @@ async def get_single_step_result_from_response(
             existing_items=pre_step_items,
             run_config=run_config,
             server_manages_conversation=server_manages_conversation,
-            server_managed_input_items=(
-                ItemHelpers.input_to_new_input_list(original_input)
-                if server_manages_conversation
-                else None
-            ),
+            input_items=ItemHelpers.input_to_new_input_list(original_input),
         )
     except ModelBehaviorError:
         _preflight_response_invocations_after_processing_error(
