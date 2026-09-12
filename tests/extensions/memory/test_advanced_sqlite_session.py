@@ -3332,6 +3332,58 @@ async def test_clear_before_branch_transaction_prevents_stale_reservation():
         session.close()
 
 
+async def test_store_run_usage_waits_for_database_lock_off_event_loop(
+    tmp_path: Path,
+    usage_data: Usage,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A contended usage read must let the event loop release the database lock."""
+    session = AdvancedSQLiteSession(
+        session_id="responsive_usage",
+        db_path=tmp_path / "responsive_usage.db",
+        create_tables=True,
+    )
+    await session.add_items([{"role": "user", "content": "first turn"}])
+    loop = asyncio.get_running_loop()
+    database_lock = session._lock
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    event_loop_progress: list[bool] = []
+
+    def hold_database_lock() -> None:
+        with database_lock:
+            lock_held.set()
+            # Bound a broken implementation so the test cannot deadlock its event loop.
+            event_loop_progress.append(release_lock.wait(timeout=2))
+
+    class ObservedLock:
+        # Instrument the existing lock acquisition without replacing SQLite or usage writes.
+        def __enter__(self):
+            loop.call_soon_threadsafe(release_lock.set)
+            return database_lock.__enter__()
+
+        def __exit__(self, *args: Any):
+            return database_lock.__exit__(*args)
+
+    holder = asyncio.create_task(asyncio.to_thread(hold_database_lock))
+    try:
+        assert await asyncio.to_thread(lock_held.wait, 2)
+        with monkeypatch.context() as patcher:
+            patcher.setattr(session, "_lock", ObservedLock())
+            await session.store_run_usage(create_mock_run_result(usage_data))
+        await holder
+
+        assert event_loop_progress == [True]
+        assert await session.get_items() == [{"role": "user", "content": "first turn"}]
+        recorded_usage = await session.get_turn_usage(1)
+        assert isinstance(recorded_usage, dict)
+        assert recorded_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        release_lock.set()
+        await holder
+        session.close()
+
+
 async def test_stale_store_run_usage_skipped_when_turn_removed_by_pop(usage_data: Usage):
     """A store_run_usage that reads a turn and then races with pop_item removing
     that turn must not reinsert usage for the now-nonexistent turn.
