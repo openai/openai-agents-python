@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,9 +14,17 @@ from agents.sandbox.errors import (
     ApplyPatchFileNotFoundError,
     ApplyPatchPathError,
 )
+from agents.sandbox.session.sandbox_session import SandboxSession
 from tests.sandbox._apply_patch_test_session import (
     ApplyPatchSession,
+    CaseFoldingApplyPatchSession,
+    CaseFoldingHostApplyPatchSession,
+    ConcurrentWriterApplyPatchSession,
+    NormalizationFoldingApplyPatchSession,
+    ParentAliasApplyPatchSession,
+    PosixHostApplyPatchSession,
     ProviderNotFoundApplyPatchSession,
+    WriteFailureApplyPatchSession,
 )
 
 
@@ -245,6 +255,300 @@ async def test_apply_patch_normalizes_backslashes_in_move_to() -> None:
 
     assert session.files[Path("/workspace/nested/moved.txt")] == b"beta\n"
     assert Path("/workspace/source.txt") not in session.files
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_keeps_file_on_case_folding_filesystem() -> None:
+    """A case-folding filesystem stores both names as one file, which the removal must keep."""
+    session = CaseFoldingApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+    assert len(session.mv_calls) == 2
+    assert session.mv_calls[1] == (
+        PurePosixPath("/workspace/notes.txt"),
+        PurePosixPath("/workspace/Notes.txt"),
+    )
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_moves_file_on_case_sensitive_filesystem() -> None:
+    """A case-sensitive filesystem keeps the names apart, so the source must still be removed."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_case_only_move_to_renames_from_a_case_folding_host() -> None:
+    """The host's path comparison must not decide whether two sandbox paths are one file.
+
+    On a Windows host `Path` equality folds case, so a case-only `move_to` looked like a
+    `move_to` that names the path it already has. The update was written in place and reported
+    as a success while the requested name was never created in the case-sensitive sandbox.
+    """
+    session = CaseFoldingHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {PurePosixPath("/workspace/Notes.txt"): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_same_leaf_through_parent_alias_does_not_move_twice() -> None:
+    """A parent symlink alias does not require renaming the file's directory entry."""
+    session = ParentAliasApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/real/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="real/notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="alias/notes.txt",
+        )
+    )
+
+    assert session.files == {source: b"alpha\ngamma\n"}
+    assert len(session.mv_calls) == 1
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_leaves_the_source_alone_when_the_write_fails() -> None:
+    """Nothing is removed until the replacement is committed, so a failed write changes nothing."""
+    session = WriteFailureApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    with pytest.raises(ConnectionError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="Notes.txt",
+            )
+        )
+
+    assert session.files == {PurePosixPath("/workspace/notes.txt"): b"alpha\nbeta\n"}
+    # The file surviving is not enough. The refused implementation removed the source and then
+    # wrote it back, which also ends here. The source may not be removed at all, and the only
+    # path this is allowed to remove is the staging file it was in the middle of writing.
+    assert PurePosixPath("/workspace/notes.txt") not in [path for path, _ in session.rm_calls]
+    assert all(path.name.startswith(".apply_patch-") for path, _ in session.rm_calls)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_does_not_overwrite_a_concurrent_writer_after_a_failure() -> None:
+    """A failed move must not restore the original over a file another writer just created.
+
+    The operation cannot finish once the move fails. The question is what it leaves behind. An
+    implementation that kept the original text in memory and wrote it back at the source path
+    would destroy whatever arrived there in the meantime.
+    """
+    session = ConcurrentWriterApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+    session.concurrent_source = source
+
+    with pytest.raises(ConnectionError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="Notes.txt",
+            )
+        )
+
+    assert session.files[source] == b"written by someone else\n"
+    assert PurePosixPath("/workspace/Notes.txt") not in session.files
+    assert not [path for path in session.files if path.name.endswith(".tmp")]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_keeps_the_file_when_only_unicode_normalization_changes() -> None:
+    """APFS folds NFC against NFD, so the two spellings of one accented name are one file.
+
+    `str.casefold` does not normalize, so any fix that compares folded strings sends this pair
+    down the path that destroys it. Asking the filesystem covers it without naming the case.
+    """
+    session = NormalizationFoldingApplyPatchSession()
+    decomposed = "/workspace/cafe\u0301.txt"
+    composed = "/workspace/caf\u00e9.txt"
+    session.files[cast(Path, PurePosixPath(decomposed))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path=decomposed,
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to=composed,
+        )
+    )
+
+    assert session.files == {PurePosixPath(composed): b"alpha\ngamma\n"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_an_existing_directory_keeps_the_source() -> None:
+    """`mv` moves a file into a directory destination and calls that success.
+
+    The source would then be removed on the strength of that success, and the operation would
+    report a move that did not happen. `move_to` comes from the model, so this is reachable.
+    """
+    session = PosixHostApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+    session.directories.add(cast(Path, PurePosixPath("/workspace/docs")))
+
+    with pytest.raises(IsADirectoryError):
+        await session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="notes.txt",
+                diff="@@\n alpha\n-beta\n+gamma\n",
+                move_to="docs",
+            )
+        )
+
+    assert session.files[source] == b"alpha\nbeta\n"
+    assert not [path for path in session.files if path.name.endswith(".tmp")]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_commits_the_destination_before_removing_the_source() -> None:
+    """The order is the fix. Assert it directly, so a future reordering fails here."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert len(session.mv_calls) == 1
+    staging, moved_to = session.mv_calls[0]
+    assert staging.parent == PurePosixPath("/workspace")
+    assert staging.name.endswith(".tmp")
+    assert moved_to == PurePosixPath("/workspace/Notes.txt")
+    assert session.rm_calls == [(cast(Path, PurePosixPath("/workspace/notes.txt")), False)]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_removes_a_source_symlink_pointing_at_the_destination() -> None:
+    """A source symlink is a separate entry even when `test -ef` follows it to the destination."""
+    session = PosixHostApplyPatchSession()
+    link = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    target = cast(Path, PurePosixPath("/workspace/Notes.txt"))
+    session.files[link] = b"alpha\nbeta\n"
+    session.files[target] = b"alpha\nbeta\n"
+    session.symlinks[link] = target
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="Notes.txt",
+        )
+    )
+
+    assert session.files == {target: b"alpha\ngamma\n"}
+    assert session.mv_calls[-1][1] == target
+    assert session.rm_calls == [(link, False)]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_forwards_follow_symlinks_to_the_inner_session() -> None:
+    """The wrapper every client receives must preserve the destructive check's argument."""
+    inner = MagicMock()
+    inner.same_file = AsyncMock(return_value=True)
+    session = SandboxSession(inner)
+
+    await session.same_file("/workspace/link.txt", "/workspace/target.txt", follow_symlinks=False)
+
+    assert inner.same_file.await_args.kwargs.get("follow_symlinks") is False
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_the_same_path_writes_in_place() -> None:
+    """A `move_to` that names the path it already has is an update, not a rename.
+
+    Committing it through a staging file would replace the inode, and with it the mode and the
+    extended attributes, for an operation that moves nothing.
+    """
+    session = PosixHostApplyPatchSession()
+    source = cast(Path, PurePosixPath("/workspace/notes.txt"))
+    session.files[source] = b"alpha\nbeta\n"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to="notes.txt",
+        )
+    )
+
+    assert session.files == {source: b"alpha\ngamma\n"}
+    assert session.mv_calls == []
+    assert session.rm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_move_to_a_long_name_keeps_the_staging_name_within_the_limit() -> None:
+    """A staging name built from the destination name overflows the 255-byte basename limit."""
+    session = PosixHostApplyPatchSession()
+    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+    long_name = "n" * 250 + ".txt"
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file",
+            path="notes.txt",
+            diff="@@\n alpha\n-beta\n+gamma\n",
+            move_to=long_name,
+        )
+    )
+
+    assert len(session.mv_calls) == 1
+    staging, _ = session.mv_calls[0]
+    assert len(staging.name.encode("utf-8")) <= 255
+    assert session.files == {PurePosixPath(f"/workspace/{long_name}"): b"alpha\ngamma\n"}
 
 
 @pytest.mark.asyncio

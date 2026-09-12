@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import unicodedata
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
+from typing import cast
 
 from agents.sandbox import Manifest
 from agents.sandbox.errors import WorkspaceReadNotFoundError
@@ -21,6 +23,18 @@ class ApplyPatchSession(BaseSandboxSession):
         self.files: dict[Path, bytes] = {}
         self.mkdir_calls: list[tuple[Path, bool]] = []
         self.rm_calls: list[tuple[Path, bool]] = []
+        self.mv_calls: list[tuple[Path, Path]] = []
+        # Link path -> target path, for the paths a test declares to be symlinks.
+        self.symlinks: dict[Path, Path] = {}
+        self.directories: set[Path] = set()
+
+    def _stored_path(self, path: Path | str) -> Path:
+        """Return the key this store holds `path` under.
+
+        A store that folds names overrides this. Here every distinct spelling is a distinct
+        file, which is what a case-sensitive filesystem does.
+        """
+        return self.normalize_path(path)
 
     async def start(self) -> None:
         return None
@@ -93,6 +107,328 @@ class ApplyPatchSession(BaseSandboxSession):
         self.rm_calls.append((normalized, recursive))
         self.files.pop(normalized, None)
 
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        if self.normalize_path(destination) in self.directories:
+            # A real `mv` would move the source inside this directory and report success.
+            raise IsADirectoryError(self.normalize_path(destination))
+        stored_source = self._stored_path(source)
+        if stored_source not in self.files:
+            raise FileNotFoundError(stored_source)
+        stored_destination = self._stored_path(destination)
+        destination_exists = stored_destination in self.files
+        payload = self.files.pop(stored_source)
+        normalized_destination = self.normalize_path(destination)
+        if destination_exists and stored_destination != stored_source:
+            # APFS keeps an existing entry's spelling when a different inode replaces it
+            # through a case-variant path. A later rename of that same entry changes the case.
+            self.files[stored_destination] = payload
+        else:
+            self.files.pop(stored_destination, None)
+            self.files[normalized_destination] = payload
+        self.mv_calls.append((stored_source, normalized_destination))
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        follow_symlinks: bool = True,
+        user: str | User | None = None,
+    ) -> bool:
+        _ = user
+        if not follow_symlinks and (
+            self._stored_path(left) in self.symlinks or self._stored_path(right) in self.symlinks
+        ):
+            return False
+        return self._resolved_path(left) == self._resolved_path(right)
+
+    def _resolved_path(self, path: Path | str) -> Path:
+        stored = self._stored_path(path)
+        seen: set[Path] = set()
+        while stored in self.symlinks and stored not in seen:
+            seen.add(stored)
+            stored = self._stored_path(self.symlinks[stored])
+        return stored
+
+
+class PosixHostApplyPatchSession(ApplyPatchSession):
+    """An apply_patch session whose workspace paths compare case-sensitively on every host.
+
+    Linux and macOS hosts compare sandbox paths case-sensitively, while a Windows host folds
+    case in `Path` comparisons. `PurePosixPath` keeps the host comparison case-sensitive
+    everywhere so case-only rename coverage does not depend on the operating system that runs
+    the tests.
+    """
+
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        normalized = super().normalize_path(path, for_write=for_write)
+        return cast(Path, PurePosixPath(normalized.as_posix()))
+
+
+class _CaseFoldingHostPath(PurePosixPath):
+    """A pure path that compares case-insensitively, as `WindowsPath` does on a Windows host.
+
+    `Path("/workspace/notes.txt") == Path("/workspace/Notes.txt")` is `True` on Windows and
+    `False` everywhere else. Modelling that here rather than reading `sys.platform` keeps the
+    coverage on every host that runs the suite.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, PurePath):
+            return self.as_posix().casefold() == other.as_posix().casefold()
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.as_posix().casefold())
+
+
+class CaseFoldingHostApplyPatchSession(PosixHostApplyPatchSession):
+    """A host that folds case in path comparisons, over a sandbox store that does not.
+
+    This is the SDK running on Windows against a Linux container. The host's own filesystem
+    says nothing about the sandbox's, so a case-only `move_to` is a real rename that the
+    sandbox must perform. The store below keeps every spelling apart; only `normalize_path`
+    hands back paths that fold.
+    """
+
+    def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        normalized = super().normalize_path(path, for_write=for_write)
+        return cast(Path, _CaseFoldingHostPath(normalized.as_posix()))
+
+    def _stored_path(self, path: Path | str) -> Path:
+        return cast(Path, PurePosixPath(self.normalize_path(path).as_posix()))
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        _ = user
+        stored = self._stored_path(path)
+        if stored not in self.files:
+            raise FileNotFoundError(stored)
+        return io.BytesIO(self.files[stored])
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        payload = data.read()
+        stored = self._stored_path(path)
+        if isinstance(payload, str):
+            self.files[stored] = payload.encode("utf-8")
+        else:
+            self.files[stored] = bytes(payload)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        stored = self._stored_path(path)
+        self.rm_calls.append((stored, recursive))
+        self.files.pop(stored, None)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        _ = user
+        stored_source = self._stored_path(source)
+        if stored_source not in self.files:
+            raise FileNotFoundError(stored_source)
+        stored_destination = self._stored_path(destination)
+        self.files[stored_destination] = self.files.pop(stored_source)
+        self.mv_calls.append((stored_source, stored_destination))
+
+
+class CaseFoldingApplyPatchSession(PosixHostApplyPatchSession):
+    """A case-sensitive host over a store that models case-folding APFS.
+
+    Case-folding APFS stores `notes.txt` and `Notes.txt` as one file. Replacing that entry
+    through a case-variant path keeps its stored name, while moving the entry itself changes
+    the spelling. Lookups here fold case so the double follows that measured behavior.
+    """
+
+    def _stored_path(self, path: Path | str) -> Path:
+        normalized = self.normalize_path(path)
+        folded = normalized.as_posix().casefold()
+        for stored in self.files:
+            if stored.as_posix().casefold() == folded:
+                return stored
+        return normalized
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        return await super().read(self._stored_path(path), user=user)
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await super().write(self._stored_path(path), data, user=user)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        await super().rm(self._stored_path(path), recursive=recursive, user=user)
+
+
+class ParentAliasApplyPatchSession(PosixHostApplyPatchSession):
+    """A store where `/workspace/alias` resolves to `/workspace/real`."""
+
+    def _stored_path(self, path: Path | str) -> Path:
+        normalized = cast(PurePosixPath, self.normalize_path(path))
+        alias = PurePosixPath("/workspace/alias")
+        try:
+            relative = normalized.relative_to(alias)
+        except ValueError:
+            return cast(Path, normalized)
+        return cast(Path, PurePosixPath("/workspace/real") / relative)
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        return await ApplyPatchSession.read(self, self._stored_path(path), user=user)
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await ApplyPatchSession.write(self, self._stored_path(path), data, user=user)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        await super().rm(self._stored_path(path), recursive=recursive, user=user)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        normalized_source = self.normalize_path(source)
+        normalized_destination = self.normalize_path(destination)
+        if (
+            normalized_source != normalized_destination
+            and normalized_source.name == normalized_destination.name
+            and self._stored_path(source) == self._stored_path(destination)
+        ):
+            raise RuntimeError("mv: source and destination are the same file")
+        await super().mv(source, destination, user=user)
+
+
+class NormalizationFoldingApplyPatchSession(PosixHostApplyPatchSession):
+    """A case-sensitive host over a filesystem that folds case and Unicode normalization.
+
+    This is APFS. It stores one entry for the decomposed and the composed spelling of the same
+    accented name, as well as for `notes.txt` and `Notes.txt`. `str.casefold` answers the first
+    pair wrong, which is one reason the fix may not ask a string whether two paths are one file.
+    """
+
+    def _stored_path(self, path: Path | str) -> Path:
+        normalized = self.normalize_path(path)
+        folded = unicodedata.normalize("NFC", normalized.as_posix()).casefold()
+        for stored in self.files:
+            if unicodedata.normalize("NFC", stored.as_posix()).casefold() == folded:
+                return stored
+        return normalized
+
+    async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
+        return await ApplyPatchSession.read(self, self._stored_path(path), user=user)
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await ApplyPatchSession.write(self, self._stored_path(path), data, user=user)
+
+    async def rm(
+        self,
+        path: Path | str,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        await ApplyPatchSession.rm(self, self._stored_path(path), recursive=recursive, user=user)
+
+
+class WriteFailureApplyPatchSession(CaseFoldingApplyPatchSession):
+    """A case-folding session whose first write fails, as a dropped sandbox connection would."""
+
+    def __init__(self, manifest: Manifest | None = None) -> None:
+        super().__init__(manifest)
+        self.fail_next_write = True
+
+    async def write(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        if self.fail_next_write:
+            self.fail_next_write = False
+            raise ConnectionError("sandbox write failed")
+        await super().write(path, data, user=user)
+
+
+class ConcurrentWriterApplyPatchSession(PosixHostApplyPatchSession):
+    """A case-sensitive session where another writer takes the source path and the move fails.
+
+    The rename is committed by a move. This session lets the staging write land, then has a
+    second writer put its own file at the source path, then fails the move. The operation
+    cannot succeed from here. What it must not do is put the original text back over the file
+    that other writer just created.
+    """
+
+    def __init__(self, manifest: Manifest | None = None) -> None:
+        super().__init__(manifest)
+        self.concurrent_source: Path | None = None
+        self.concurrent_text = "written by someone else\n"
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        if self.concurrent_source is not None:
+            self.files[self.normalize_path(self.concurrent_source)] = self.concurrent_text.encode(
+                "utf-8"
+            )
+        raise ConnectionError("sandbox move failed")
+
 
 class ProviderNotFoundApplyPatchSession(ApplyPatchSession):
     async def read(self, path: Path, *, user: str | User | None = None) -> io.BytesIO:
@@ -112,6 +448,8 @@ class UserRecordingApplyPatchSession(ApplyPatchSession):
         self.write_users: list[str | None] = []
         self.mkdir_users: list[str | None] = []
         self.rm_users: list[str | None] = []
+        self.mv_users: list[str | None] = []
+        self.same_file_users: list[str | None] = []
 
     @staticmethod
     def _user_name(user: str | User | None) -> str | None:
@@ -150,3 +488,24 @@ class UserRecordingApplyPatchSession(ApplyPatchSession):
     ) -> None:
         self.rm_users.append(self._user_name(user))
         await super().rm(path, recursive=recursive)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        self.mv_users.append(self._user_name(user))
+        await super().mv(source, destination)
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        follow_symlinks: bool = True,
+        user: str | User | None = None,
+    ) -> bool:
+        self.same_file_users.append(self._user_name(user))
+        return await super().same_file(left, right, follow_symlinks=follow_symlinks)
