@@ -104,6 +104,51 @@ class TestSelectCompactionCandidateItems:
 
 
 class TestOpenAIResponsesCompactionSession:
+    @pytest.mark.asyncio
+    async def test_clear_session_forgets_response_chain_state(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-old", "store": True})
+        await session.clear_session()
+
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True, "compaction_mode": "previous_response_id"})
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_clear_forgets_response_chain_state(self) -> None:
+        class CancelAfterCommittedClearSession(SimpleListSession):
+            async def clear_session(self) -> None:
+                await super().clear_session()
+                raise asyncio.CancelledError()
+
+        underlying = CancelAfterCommittedClearSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda _context: False,
+        )
+
+        await session.run_compaction({"response_id": "resp-old", "store": True})
+        with pytest.raises(asyncio.CancelledError):
+            await session.clear_session()
+
+        assert await underlying.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True, "compaction_mode": "previous_response_id"})
+        mock_client.responses.compact.assert_not_called()
+
     def test_client_preserves_falsy_default_client(self) -> None:
         mock_client = MagicMock()
         mock_client.__bool__.return_value = False

@@ -551,7 +551,19 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         async with self._mutation_lock:
             try:
                 await self.underlying_session.clear_session()
-            except (Exception, asyncio.CancelledError):
+            except asyncio.CancelledError:
+                # Some session backends shield mutations so a cancellation can be
+                # observed only after the clear has committed. Treat cancellation as
+                # potentially destructive and forget the response chain as well as
+                # cached history, so cleared history cannot be reconstructed later.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
+                self._mutation_generation += 1
+                raise
+            except Exception:
                 self._compaction_candidate_items = None
                 self._session_items = None
                 self._deferred_response_id = None
@@ -559,7 +571,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 raise
             self._compaction_candidate_items = []
             self._session_items = []
+            self._response_id = None
             self._deferred_response_id = None
+            self._last_unstored_response_id = None
             self._mutation_generation += 1
 
     async def _ensure_compaction_candidates(
