@@ -1892,7 +1892,18 @@ async def start_streaming(
                     # handoff transition, so a tripwire or guardrail exception is surfaced instead
                     # of the state (current_agent, run_state, published events) racing ahead of an
                     # input guardrail that was still validating the original input.
-                    await input_guardrail_tripwire_triggered_for_stream(streamed_result)
+                    triggered = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
+                    if triggered:
+                        first_trigger = next(
+                            (
+                                result
+                                for result in streamed_result.input_guardrail_results
+                                if result.output.tripwire_triggered
+                            ),
+                            None,
+                        )
+                        if first_trigger is not None:
+                            raise InputGuardrailTripwireTriggered(first_trigger)
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent

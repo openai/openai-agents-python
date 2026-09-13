@@ -13,7 +13,7 @@ from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handof
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
-from agents.exceptions import UserError
+from agents.exceptions import InputGuardrailTripwireTriggered, UserError
 from agents.guardrail import GuardrailFunctionOutput, input_guardrail
 from agents.items import (
     MessageOutputItem,
@@ -1433,6 +1433,53 @@ async def test_fresh_streamed_handoff_awaits_parallel_input_guardrail_before_tra
     # The handoff transition must not have been committed: the guardrail task was still
     # in flight (sleeping) when the model returned the handoff, and it raised a real error
     # rather than a tripwire, so no part of the observable state should have moved past triage.
+    assert streamed_result.current_agent.name == "triage"
+    state = streamed_result.to_state()
+    assert state._current_agent is not None
+    assert state._current_agent.name == "triage"
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_stops_transition_on_real_tripwire() -> None:
+    """Sibling to test_fresh_streamed_handoff_awaits_parallel_input_guardrail_before_transition:
+    that test covers a parallel guardrail raising a genuine exception. This one covers a
+    guardrail that settles normally with tripwire_triggered=True (no exception). The generic-loop
+    handoff branch awaits the in-flight guardrail before committing the transition, but must also
+    inspect its boolean result: a normal tripwire result must raise
+    InputGuardrailTripwireTriggered and stop the transition, not silently publish the delegate
+    and a resumable NextStepRunAgain.
+    """
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_tripping_guardrail(
+        ctx: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.3)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        input_guardrails=[slow_tripping_guardrail],
+    )
+
+    streamed_result = Runner.run_streamed(
+        triage, "hello", run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        async for _ in streamed_result.stream_events():
+            await asyncio.sleep(0.05)
+    # The handoff transition must not have been committed: a real tripwire result must stop
+    # the transition the same way a raised guardrail exception does.
     assert streamed_result.current_agent.name == "triage"
     state = streamed_result.to_state()
     assert state._current_agent is not None
