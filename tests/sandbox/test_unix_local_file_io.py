@@ -26,6 +26,7 @@ from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.snapshot import NoopSnapshot
 
 if TYPE_CHECKING or sys.platform != "win32":
+    from agents.sandbox.sandboxes._unix_local_file_ops import _FileOps
     from agents.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxSession,
         UnixLocalSandboxSessionState,
@@ -59,10 +60,16 @@ async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path)
         )
     elif operation in {"rm", "rmtree"}:
         await session.rm(path, recursive=operation == "rmtree")
+    elif operation == "mv":
+        await session.mv(path, path.with_name("moved"))
+    elif operation == "same_file":
+        return await session.same_file(path, path, follow_symlinks=False)
     return None
 
 
-@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "ls", "rm", "rmtree", "patch"])
+@pytest.mark.parametrize(
+    "operation", ["read", "write", "mkdir", "ls", "rm", "rmtree", "patch", "mv", "same_file"]
+)
 async def test_parent_swap_after_validation_cannot_access_outside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
@@ -133,7 +140,9 @@ async def test_leaf_swap_does_not_follow_new_symlink(
         return result
 
     monkeypatch.setattr(session, "normalize_path", swap)
-    if operation in {"rm", "rmtree"}:
+    if operation in {"rm", "rmtree", "mv", "same_file"}:
+        # These act on the entry itself, so a swapped-in symlink is removed, moved or
+        # compared as a link, never followed.
         await _operate(session, operation, Path("target"))
     else:
         with pytest.raises(
@@ -417,3 +426,79 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+async def test_rename_replaces_the_destination_entry(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_bytes(b"from a")
+    (workspace / "b.txt").write_bytes(b"from b")
+    session = _session(workspace)
+
+    await session.mv(Path("a.txt"), Path("b.txt"))
+
+    assert sorted(entry.name for entry in workspace.iterdir()) == ["b.txt"]
+    assert (workspace / "b.txt").read_bytes() == b"from a"
+
+
+async def test_rename_onto_a_directory_fails_and_keeps_the_source(tmp_path: Path) -> None:
+    # `mv` would put the source inside the directory and exit 0; a caller that then removes
+    # the source would delete the file. `os.rename` refuses instead.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_bytes(b"kept")
+    (workspace / "docs").mkdir()
+    session = _session(workspace)
+
+    with pytest.raises(ExecNonZeroError):
+        await session.mv(Path("notes.txt"), Path("docs"))
+
+    assert (workspace / "notes.txt").read_bytes() == b"kept"
+    assert list((workspace / "docs").iterdir()) == []
+
+
+async def test_rename_moves_a_symlink_entry_rather_than_its_target(tmp_path: Path) -> None:
+    # Below the session, the operation is on the entry named, so a link moves as a link.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target.txt"
+    target.write_bytes(b"target")
+    link = workspace / "link.txt"
+    link.symlink_to(target)
+
+    _FileOps().rename(link, workspace / "moved.txt")
+
+    assert target.read_bytes() == b"target"
+    assert (workspace / "moved.txt").is_symlink()
+    assert not link.exists()
+
+
+async def test_same_file_answers_by_entry_identity(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    one = workspace / "one.txt"
+    one.write_bytes(b"one")
+    (workspace / "two.txt").write_bytes(b"two")
+    (workspace / "hard.txt").hardlink_to(one)
+    session = _session(workspace)
+
+    assert await session.same_file(Path("one.txt"), Path("one.txt")) is True
+    assert await session.same_file(Path("one.txt"), Path("hard.txt")) is True
+    assert await session.same_file(Path("one.txt"), Path("two.txt")) is False
+    assert await session.same_file(Path("one.txt"), Path("missing.txt")) is False
+
+
+async def test_same_file_distinguishes_a_link_from_its_target_when_asked(
+    tmp_path: Path,
+) -> None:
+    # The session resolves a leaf symlink before the check, so this is the module's answer.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target.txt"
+    target.write_bytes(b"target")
+    link = workspace / "link.txt"
+    link.symlink_to(target)
+
+    files = _FileOps()
+    assert files.same_file(link, target) is True
+    assert files.same_file(link, target, follow_symlinks=False) is False

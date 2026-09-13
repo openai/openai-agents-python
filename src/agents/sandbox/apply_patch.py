@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from uuid import uuid4
 
 from ..apply_diff import ApplyDiffMode, apply_diff
 from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
@@ -111,9 +113,11 @@ class WorkspaceEditor:
 
             moved_relative_path, moved_display_path = self._resolve_path(operation.move_to)
             moved_destination = self._session.normalize_path(moved_relative_path)
-            await self._write_text(moved_destination, updated_text)
-            if moved_destination != destination:
-                await self._session.rm(destination, user=self._user)
+            await self._move_updated_text(
+                source=destination,
+                moved_destination=moved_destination,
+                text=updated_text,
+            )
             return ApplyPatchResult(
                 output=f"Updated {display_path}\nMoved {display_path} to {moved_display_path}"
             )
@@ -208,6 +212,76 @@ class WorkspaceEditor:
             message=f"apply_patch read() returned non-text content: {type(payload).__name__}",
             path=op_path,
         )
+
+    async def _move_updated_text(
+        self,
+        *,
+        source: Path,
+        moved_destination: Path,
+        text: str,
+    ) -> None:
+        """Apply an update that renames the file, without a window in which it does not exist.
+
+        Writing the destination and then removing the source destroys the file whenever the two
+        paths are one file on disk, which is what a case-only rename is on a filesystem that
+        folds case. Removing the source first destroys it whenever the replacement write fails.
+
+        So neither path is written or removed until the new content is committed somewhere else:
+        the text goes to a staging file, a single `mv` puts it at the destination, and only then
+        is the source removed when the filesystem says it is a different entry. When both names
+        are one entry and the leaf spellings differ, a second move changes the stored spelling.
+        Before the first move the original is untouched; after it the new content exists. There
+        is no moment where the only copy is in memory, and nothing is restored after the fact.
+
+        The identity answer can still go stale. On the different-entry branch, a writer that
+        replaces the source before the removal loses its file. On the same-entry branch, a writer
+        that replaces the source before the second move has its content moved onto the destination
+        and reported as the patched file. Closing either race needs an operation tied to the entry
+        whose identity was checked, which no backend here offers.
+
+        The staging file is a new inode. Committing it replaces the mode, ownership and
+        extended attributes of whatever entry was at the destination: the original, when the
+        filesystem folds the two names onto one entry, and an existing distinct file, when the
+        rename lands on one. An update without `move_to` keeps them, because it writes into the
+        existing inode. Carrying them across would mean reading and reapplying them per backend,
+        or asking the sandbox whether the destination exists and writing in place when it does,
+        which gives up the single-`mv` commit for that case. The committed content is worth more
+        than the mode bits.
+
+        The staging name is a fixed length rather than a decoration of the destination name,
+        because a destination basename near the filesystem's 255-byte limit would make the
+        decorated name exceed it and the write would fail with ENAMETOOLONG.
+        """
+        if source.as_posix() == moved_destination.as_posix():
+            # Not a rename, so nothing needs committing elsewhere. Writing in place is what an
+            # update without `move_to` does, and it keeps the inode, the mode and the xattrs.
+            #
+            # The comparison is on the spelling rather than on `Path` equality, which folds case
+            # on a Windows host. Whether two sandbox paths are one file is the sandbox's answer,
+            # not the host's: a Windows host talking to a case-sensitive sandbox would otherwise
+            # take this branch for a case-only rename and never create the new name. Paths that
+            # differ only in case go down the staging path, where `same_file` asks the sandbox.
+            await self._write_text(source, text)
+            return
+
+        staging = moved_destination.with_name(f".apply_patch-{uuid4().hex}.tmp")
+        try:
+            await self._write_text(staging, text)
+            await self._session.mv(staging, moved_destination, user=self._user)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._session.rm(staging, user=self._user)
+            raise
+        same_entry = await self._session.same_file(
+            source, moved_destination, follow_symlinks=False, user=self._user
+        )
+        if same_entry and source.name != moved_destination.name:
+            # On case-folding APFS, replacing an existing entry through a case-variant path
+            # updates its content but keeps its old spelling. Moving that same entry performs
+            # the requested case-only rename without touching the committed content.
+            await self._session.mv(source, moved_destination, user=self._user)
+        elif not same_entry:
+            await self._session.rm(source, user=self._user)
 
     async def _write_text(self, destination: Path, text: str) -> None:
         await self._session.mkdir(destination.parent, parents=True, user=self._user)

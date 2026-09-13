@@ -113,6 +113,43 @@ class _FileOps:
         finally:
             os.close(fd)
 
+    def rename(self, source: Path, destination: Path) -> None:
+        """Rename an entry, replacing whatever entry is at the destination.
+
+        This is a rename of the directory entry itself: a symlink leaf is moved, not its
+        target, and a destination that is an existing directory is an error rather than a
+        place to put the source. On a filesystem that folds case, renaming an entry to another
+        spelling of its own name changes the stored spelling.
+        """
+        with (
+            self.parent(source, for_write=True) as (source_fd, source_name),
+            self.parent(destination, for_write=True) as (destination_fd, destination_name),
+        ):
+            os.rename(
+                source_name,
+                destination_name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+            )
+
+    def same_file(self, left: Path, right: Path, *, follow_symlinks: bool = True) -> bool:
+        """Return whether two paths name one entry, by device and inode.
+
+        The filesystem answers this, not a string comparison: on a volume that folds case, or
+        Unicode normalization, two spellings can be one entry. A path that does not exist is
+        not the same file as anything.
+        """
+        try:
+            with (
+                self.parent(left) as (left_fd, left_name),
+                self.parent(right) as (right_fd, right_name),
+            ):
+                left_stat = os.stat(left_name, dir_fd=left_fd, follow_symlinks=follow_symlinks)
+                right_stat = os.stat(right_name, dir_fd=right_fd, follow_symlinks=follow_symlinks)
+        except FileNotFoundError:
+            return False
+        return os.path.samestat(left_stat, right_stat)
+
 
 def _entry(path: Path, entry: os.stat_result) -> dict[str, str | int]:
     try:
@@ -162,13 +199,22 @@ def _remove_at(parent_fd: int, name: str, *, recursive: bool) -> None:
 
 def _main() -> None:
     # The application supplies this code and an authorized path directly, never via the workspace.
-    operation, raw_path = sys.argv[1:]
+    operation, *raw_paths = sys.argv[1:]
     files = _FileOps()
-    path = Path(raw_path)
+    paths = [Path(raw_path) for raw_path in raw_paths]
     if operation == "write":
+        (path,) = paths
         files.write(path, cast(io.IOBase, sys.stdin.buffer))
     elif operation == "ls":
+        (path,) = paths
         print(json.dumps(files.listing(path), ensure_ascii=True))
+    elif operation == "rename":
+        source, destination = paths
+        files.rename(source, destination)
+    elif operation == "same_file":
+        left, right = paths
+        follow_symlinks = sys.stdin.buffer.read() != b"0"
+        print(json.dumps(files.same_file(left, right, follow_symlinks=follow_symlinks)))
     else:
         raise ValueError("Unsupported UnixLocal file operation")
 

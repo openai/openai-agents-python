@@ -112,6 +112,89 @@ async def test_user_write_uses_shared_traversal_and_preserves_input(
 
 
 @pytest.mark.asyncio
+async def test_user_rename_runs_in_the_worker_relative_to_both_parents(
+    session: unix_local.UnixLocalSandboxSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened = Mock(side_effect=[10, 11, 12, 13, 14, 15])
+    closed = Mock()
+    renamed = Mock()
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "close", closed)
+    monkeypatch.setattr(os, "rename", renamed)
+    dispatch = Mock(side_effect=_worker)
+    monkeypatch.setattr(subprocess, "run", dispatch)
+    await session.mv(Path("old/file"), Path("new/File"), user=User(name="example-user"))
+    assert dispatch.call_count == 1
+    assert dispatch.call_args.args[0][9:] == [
+        "rename",
+        "/workspace/old/file",
+        "/workspace/new/File",
+    ]
+    assert [call.args[0] for call in opened.call_args_list] == [
+        "/",
+        "workspace",
+        "old",
+        "/",
+        "workspace",
+        "new",
+    ]
+    assert all(call.args[1] & os.O_NOFOLLOW for call in opened.call_args_list)
+    renamed.assert_called_once_with("file", "File", src_dir_fd=12, dst_dir_fd=15)
+    assert sorted(call.args[0] for call in closed.call_args_list) == [10, 11, 12, 13, 14, 15]
+
+
+@pytest.mark.asyncio
+async def test_user_rename_failure_keeps_the_error(
+    session: unix_local.UnixLocalSandboxSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "open", Mock(side_effect=[10, 11, 12, 13]))
+    monkeypatch.setattr(os, "close", Mock())
+    monkeypatch.setattr(os, "rename", Mock(side_effect=IsADirectoryError("Is a directory")))
+    dispatch = Mock(side_effect=_worker)
+    monkeypatch.setattr(subprocess, "run", dispatch)
+    with pytest.raises(ExecNonZeroError) as error:
+        await session.mv(Path("file"), Path("docs"), user="example-user")
+    assert dispatch.call_count == 1
+    assert b"Is a directory" in error.value.result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("follow_symlinks", "inodes", "expected"),
+    [
+        pytest.param(True, (7, 7), True, id="same-entry"),
+        pytest.param(True, (7, 8), False, id="different-entries"),
+        pytest.param(False, (7, 9), False, id="link-not-followed"),
+    ],
+)
+async def test_user_same_file_asks_the_worker(
+    session: unix_local.UnixLocalSandboxSession,
+    monkeypatch: pytest.MonkeyPatch,
+    follow_symlinks: bool,
+    inodes: tuple[int, int],
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(os, "open", Mock(side_effect=[10, 11, 12, 13]))
+    monkeypatch.setattr(os, "close", Mock())
+    stats = [os.stat_result((stat.S_IFREG, ino, 1, 1, 0, 0, 0, 0, 0, 0)) for ino in inodes]
+    stat_mock = Mock(side_effect=stats)
+    monkeypatch.setattr(os, "stat", stat_mock)
+    dispatch = Mock(side_effect=_worker)
+    monkeypatch.setattr(subprocess, "run", dispatch)
+    answer = await session.same_file(
+        Path("left"), Path("right"), follow_symlinks=follow_symlinks, user="example-user"
+    )
+    assert answer is expected
+    assert dispatch.call_count == 1
+    assert dispatch.call_args.args[0][9:] == ["same_file", "/workspace/left", "/workspace/right"]
+    assert dispatch.call_args.kwargs["input"] == (b"1" if follow_symlinks else b"0")
+    assert [call.kwargs["follow_symlinks"] for call in stat_mock.call_args_list] == [
+        follow_symlinks,
+        follow_symlinks,
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [errno.EACCES, errno.ELOOP])
 @pytest.mark.parametrize("operation", ["ls", "write"])
 async def test_user_lookup_failure_stops_before_file_io(
@@ -209,13 +292,17 @@ async def test_user_listing_preserves_metadata_and_names(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["ls", "write"])
+@pytest.mark.parametrize("operation", ["ls", "write", "mv", "same_file"])
 async def test_ungranted_path_never_dispatches(
     session: unix_local.UnixLocalSandboxSession, operation: str
 ) -> None:
     with pytest.raises(InvalidManifestPathError):
         if operation == "ls":
             await session.ls("/ungranted/file", user="example-user")
+        elif operation == "mv":
+            await session.mv(Path("file"), Path("/ungranted/file"), user="example-user")
+        elif operation == "same_file":
+            await session.same_file(Path("file"), Path("/ungranted/file"), user="example-user")
         else:
             await session.write(Path("/ungranted/file"), io.BytesIO(b"value"), user="example-user")
     subprocess.run.assert_not_called()  # type: ignore[attr-defined]
