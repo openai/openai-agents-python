@@ -141,12 +141,21 @@ class BackendSpanExporter(TracingExporter):
                     if sanitize_for_openai:
                         exported = self._sanitize_for_openai_tracing_api(exported)
                     try:
-                        json.dumps(exported, allow_nan=False)
+                        # Encode the way the request body is encoded (UTF-8, no NaN), so
+                        # strings holding unpaired surrogates are caught here as well.
+                        json.dumps(exported, ensure_ascii=False, allow_nan=False).encode("utf-8")
                     except (TypeError, ValueError):
                         logger.warning(
-                            "[non-fatal] Tracing: dropping non-JSON-serializable values."
+                            "[non-fatal] Tracing: sanitizing values that can't be sent as JSON."
                         )
                         exported = self._sanitize_json_compatible_value(exported)
+                        # Strings pass the sanitizer unchanged, so replace any unpaired
+                        # surrogates, which UTF-8 can't encode, with "?".
+                        exported = json.loads(
+                            json.dumps(exported, ensure_ascii=False)
+                            .encode("utf-8", "replace")
+                            .decode("utf-8")
+                        )
                     data.append(exported)
             payload = {"data": data}
 

@@ -953,6 +953,28 @@ def test_backend_span_exporter_keeps_batch_when_trace_metadata_is_not_json(bad_v
     exporter.close()
 
 
+def test_backend_span_exporter_keeps_batch_when_a_string_has_an_unpaired_surrogate():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata={"note": "x\ud800y", "ok": "x"},
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, bad_trace])
+
+    assert received == [
+        clean_trace.export(),
+        {**cast(dict[str, Any], bad_trace.export()), "metadata": {"note": "x?y", "ok": "x"}},
+    ]
+    exporter.close()
+
+
 def test_backend_span_exporter_keeps_batch_when_custom_span_data_is_not_json():
     received: list[dict[str, Any]] = []
     exporter = _exporter_capturing_posts(received, endpoint="https://example.test/traces")
