@@ -963,23 +963,66 @@ def test_backend_span_exporter_keeps_batch_when_trace_metadata_is_not_json(bad_v
     [BackendSpanExporter._OPENAI_TRACING_INGEST_ENDPOINT, "https://example.test/traces"],
     ids=["openai", "custom"],
 )
-def test_backend_span_exporter_drops_only_the_item_that_cannot_be_repaired(endpoint: str):
+@pytest.mark.parametrize(
+    ("metadata", "sent_metadata"),
+    [
+        ({"n": 10**5000, "ok": "x"}, {"ok": "x"}),
+        ({10**5000: "n", 7: "x"}, {"7": "x"}),
+    ],
+    ids=["value", "key"],
+)
+def test_backend_span_exporter_keeps_the_item_when_an_int_is_too_long_to_send(
+    endpoint: str, metadata: dict[Any, Any], sent_metadata: dict[str, Any]
+):
     received: list[dict[str, Any]] = []
     exporter = _exporter_capturing_posts(received, endpoint=endpoint)
     clean_trace = get_trace(mock_processor())
-    # Python refuses to turn an int past 4300 digits into a string, so this can't be sent.
+    # Python refuses to turn an int past 4300 digits into a string, so json can't send it.
     bad_trace = TraceImpl(
         name="bad_trace",
         trace_id="bad_trace_id",
         group_id=None,
-        metadata={"n": 10**5000},
+        metadata=metadata,
         processor=mock_processor(),
         tracing_api_key=None,
     )
 
     exporter.export([clean_trace, bad_trace])
 
-    assert received == [clean_trace.export()]
+    assert received == [
+        clean_trace.export(),
+        {**cast(dict[str, Any], bad_trace.export()), "metadata": sent_metadata},
+    ]
+    exporter.close()
+
+
+def test_backend_span_exporter_repair_sends_dict_keys_the_way_json_does():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    encodable_keys: dict[Any, Any] = {200: "int", 1.5: "float", True: "bool", None: "none"}
+    metadata: dict[Any, Any] = {
+        **encodable_keys,
+        float("nan"): "nan key",
+        "at": datetime.now(timezone.utc),
+    }
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata=metadata,
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([bad_trace])
+
+    assert received == [
+        {
+            **cast(dict[str, Any], bad_trace.export()),
+            "metadata": json.loads(json.dumps(encodable_keys)),
+        },
+    ]
+    assert received[0]["metadata"] == {"200": "int", "1.5": "float", "true": "bool", "null": "none"}
     exporter.close()
 
 
@@ -1044,22 +1087,77 @@ def test_backend_span_exporter_keeps_openai_batch_when_span_io_has_an_unpaired_s
     exporter.close()
 
 
-def test_backend_span_exporter_keeps_batch_when_custom_span_data_is_not_json():
+@pytest.mark.parametrize(
+    "endpoint",
+    [BackendSpanExporter._OPENAI_TRACING_INGEST_ENDPOINT, "https://example.test/traces"],
+    ids=["openai", "custom"],
+)
+def test_backend_span_exporter_keeps_valid_custom_span_data_when_repairing(endpoint: str):
     received: list[dict[str, Any]] = []
-    exporter = _exporter_capturing_posts(received, endpoint="https://example.test/traces")
+    exporter = _exporter_capturing_posts(received, endpoint=endpoint)
+    clean_trace = get_trace(mock_processor())
     custom_span = SpanImpl(
         trace_id="test_trace_id",
         span_id="custom_span_id",
-        parent_id=None,
+        parent_id="parent_span_id",
         processor=mock_processor(),
-        span_data=CustomSpanData(name="lookup", data={"at": datetime.now(timezone.utc), "rows": 3}),
+        span_data=CustomSpanData(
+            name="lookup",
+            data={"status_counts": {200: 3}, "at": datetime.now(timezone.utc)},
+        ),
         tracing_api_key=None,
     )
 
-    exporter.export([get_trace(mock_processor()), custom_span])
+    exporter.export([clean_trace, custom_span])
 
-    assert len(received) == 2
-    assert received[1]["span_data"] == {"type": "custom", "name": "lookup", "data": {"rows": 3}}
+    exported_span = cast(dict[str, Any], custom_span.export())
+    assert received == [
+        clean_trace.export(),
+        {
+            **exported_span,
+            "span_data": {
+                "type": "custom",
+                "name": "lookup",
+                "data": {"status_counts": {"200": 3}},
+            },
+        },
+    ]
+    assert received[1]["id"] == "custom_span_id"
+    assert received[1]["trace_id"] == "test_trace_id"
+    assert received[1]["parent_id"] == "parent_span_id"
+    exporter.close()
+
+
+def test_backend_span_exporter_keeps_int_keys_in_openai_sanitized_span_fields():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    oversized_input: list[dict[Any, Any]] = [
+        {200: 3, "blob": "x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000)}
+    ]
+    span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="generation_span_id",
+        parent_id=None,
+        processor=mock_processor(),
+        span_data=GenerationSpanData(
+            input=oversized_input,
+            usage={"input_tokens": 1, "output_tokens": 2, "details": {"by_status": {200: 3}}},
+        ),
+        tracing_api_key=None,
+    )
+
+    exporter.export([span])
+
+    [sent] = received
+    assert sent["id"] == "generation_span_id"
+    assert sent["span_data"]["usage"] == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "details": {"by_status": {"200": 3}},
+    }
+    [sent_input] = sent["span_data"]["input"]
+    assert sent_input["200"] == 3
+    assert sent_input["blob"].endswith(BackendSpanExporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     exporter.close()
 
 

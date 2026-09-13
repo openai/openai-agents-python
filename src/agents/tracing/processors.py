@@ -148,21 +148,14 @@ class BackendSpanExporter(TracingExporter):
                         logger.warning(
                             "[non-fatal] Tracing: sanitizing values that can't be sent as JSON."
                         )
-                        try:
-                            exported = self._sanitize_json_compatible_value(exported)
-                            # Strings pass the sanitizer unchanged, so replace any unpaired
-                            # surrogates, which UTF-8 can't encode, with "?".
-                            exported = json.loads(
-                                json.dumps(exported, ensure_ascii=False)
-                                .encode("utf-8", "replace")
-                                .decode("utf-8")
-                            )
-                        except (TypeError, ValueError):
-                            # e.g. an int too long to convert to a string; skip just this item.
-                            logger.warning(
-                                "[non-fatal] Tracing: dropping an item that can't be sent as JSON."
-                            )
-                            continue
+                        exported = self._sanitize_json_compatible_value(exported)
+                        # Strings pass the sanitizer unchanged, so replace any unpaired
+                        # surrogates, which UTF-8 can't encode, with "?".
+                        exported = json.loads(
+                            json.dumps(exported, ensure_ascii=False)
+                            .encode("utf-8", "replace")
+                            .decode("utf-8")
+                        )
                     data.append(exported)
             payload = {"data": data}
 
@@ -515,7 +508,14 @@ class BackendSpanExporter(TracingExporter):
         )
 
     def _sanitize_json_compatible_value(self, value: Any, seen_ids: set[int] | None = None) -> Any:
-        if value is None or isinstance(value, str | bool | int):
+        if value is None or isinstance(value, str | bool):
+            return value
+        if isinstance(value, int):
+            try:
+                # json writes ints with int.__repr__, which raises past Python's digit limit.
+                int.__repr__(value)
+            except ValueError:
+                return self._UNSERIALIZABLE
             return value
         if isinstance(value, float):
             return value if math.isfinite(value) else self._UNSERIALIZABLE
@@ -529,12 +529,13 @@ class BackendSpanExporter(TracingExporter):
             sanitized_dict: dict[str, Any] = {}
             try:
                 for key, nested_value in value.items():
-                    if not isinstance(key, str):
+                    json_key = self._json_object_key(key)
+                    if json_key is None:
                         continue
                     sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
                     if sanitized_nested is self._UNSERIALIZABLE:
                         continue
-                    sanitized_dict[key] = sanitized_nested
+                    sanitized_dict[json_key] = sanitized_nested
             finally:
                 seen_ids.remove(value_id)
             return sanitized_dict
@@ -554,6 +555,19 @@ class BackendSpanExporter(TracingExporter):
                 seen_ids.remove(value_id)
             return sanitized_list
         return self._UNSERIALIZABLE
+
+    def _json_object_key(self, key: Any) -> str | None:
+        """Return the key text json.dumps would send for ``key``, or None if it can't send it."""
+        if isinstance(key, str):
+            return key
+        if key is None or isinstance(key, bool | int | float):
+            try:
+                # Same text json writes for these keys: "true", "null", "200", "1.5".
+                return json.dumps(key, allow_nan=False)
+            except ValueError:
+                # A non-finite float, or an int past Python's digit limit.
+                return None
+        return None
 
     def close(self):
         """Close the underlying HTTP client."""
