@@ -1171,9 +1171,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     @staticmethod
     def _raise_mapped_transport_error(error: UserError, cause: Exception | None) -> NoReturn:
         """Raise a mapped transport error without retaining unsafe URL data."""
-        if cause is None:
-            raise error from None
-        raise error from cause
+        try:
+            raise error from cause
+        finally:
+            # Python 3.10 task runners can retain an active exception while resuming a coroutine.
+            # Clear implicit context after raising; retain only the explicitly approved cause.
+            error.__context__ = None
 
     def _user_error_for_request_operation(
         self,
