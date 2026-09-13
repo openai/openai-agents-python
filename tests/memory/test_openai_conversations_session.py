@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -204,6 +205,36 @@ class TestOpenAIConversationsSessionLifecycle:
         mock_openai_client.conversations.create.assert_called_once_with(items=[])
 
     @pytest.mark.asyncio
+    async def test_get_session_id_preserves_created_id_when_cancelled(self, mock_openai_client):
+        """A cancelled first create must settle and retain the remote conversation ID."""
+        create_started = asyncio.Event()
+        release_create = asyncio.Event()
+
+        async def create_conversation(*, items: list[Any]) -> MagicMock:
+            create_started.set()
+            await release_create.wait()
+            return MagicMock(id="created_id")
+
+        mock_openai_client.conversations.create.side_effect = create_conversation
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+        get_task = asyncio.create_task(session._get_session_id())
+
+        await create_started.wait()
+        get_task.cancel("caller-cancelled")
+        await asyncio.sleep(0)
+        release_create.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await get_task
+
+        assert session.session_id == "created_id"
+        await session.add_items([{"role": "user", "content": "next"}])
+        mock_openai_client.conversations.create.assert_awaited_once_with(items=[])
+        mock_openai_client.conversations.items.create.assert_awaited_once_with(
+            conversation_id="created_id", items=[{"role": "user", "content": "next"}]
+        )
+
+    @pytest.mark.asyncio
     async def test_clear_session_id(self, mock_openai_client):
         """Test _clear_session_id sets session_id to None."""
         session = OpenAIConversationsSession(
@@ -322,6 +353,76 @@ class TestOpenAIConversationsSessionBasicOperations:
 
             assert popped_item is None
             mock_openai_client.conversations.items.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pop_item_calls_return_distinct_items(self, mock_openai_client):
+        """Concurrent pops must not both read the same remote item before deleting it."""
+        rows: list[dict[str, Any]] = [
+            {"id": "old", "role": "user", "content": "old"},
+            {"id": "new", "role": "assistant", "content": "new"},
+        ]
+        deleted: list[str] = []
+
+        async def list_items(*, conversation_id: str, order: str, **kwargs: Any):
+            snapshot = list(reversed(rows))
+            await asyncio.sleep(0)
+            for row in snapshot:
+                yield SimpleNamespace(model_dump=lambda exclude_unset=True, row=row: dict(row))
+
+        async def delete_item(*, conversation_id: str, item_id: str) -> None:
+            deleted.append(item_id)
+            rows[:] = [row for row in rows if row["id"] != item_id]
+
+        mock_openai_client.conversations.items.list = list_items
+        mock_openai_client.conversations.items.delete.side_effect = delete_item
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        first, second = await asyncio.gather(session.pop_item(), session.pop_item())
+
+        assert [first["id"], second["id"]] == ["new", "old"]  # type: ignore[index]
+        assert deleted == ["new", "old"]
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_pop_item_waits_for_remote_delete_before_propagating_cancellation(
+        self, mock_openai_client
+    ):
+        """A cancelled pop must not return until its remote delete has settled."""
+        rows: list[dict[str, Any]] = [
+            {"id": "old", "role": "user", "content": "old"},
+            {"id": "new", "role": "assistant", "content": "new"},
+        ]
+        delete_started = asyncio.Event()
+        release_delete = asyncio.Event()
+
+        async def list_items(*, conversation_id: str, order: str, **kwargs: Any):
+            for row in reversed(rows):
+                yield SimpleNamespace(model_dump=lambda exclude_unset=True, row=row: dict(row))
+
+        async def delete_item(*, conversation_id: str, item_id: str) -> None:
+            delete_started.set()
+            await release_delete.wait()
+            rows[:] = [row for row in rows if row["id"] != item_id]
+
+        mock_openai_client.conversations.items.list = list_items
+        mock_openai_client.conversations.items.delete.side_effect = delete_item
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+        pop_task = asyncio.create_task(session.pop_item())
+
+        await delete_started.wait()
+        pop_task.cancel("caller-cancelled")
+        await asyncio.sleep(0)
+        release_delete.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pop_task
+
+        assert rows == [{"id": "old", "role": "user", "content": "old"}]
+        assert (await session.pop_item())["id"] == "old"  # type: ignore[index]
 
     @pytest.mark.asyncio
     async def test_clear_session(self, mock_openai_client):

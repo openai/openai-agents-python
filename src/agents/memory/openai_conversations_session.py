@@ -25,6 +25,12 @@ async def start_openai_conversations_session(openai_client: AsyncOpenAI | None =
 
 
 class OpenAIConversationsSession(SessionABC):
+    """Session backed by the OpenAI Conversations API.
+
+    Mutations are serialized within one session instance. Callers that share a
+    conversation ID across multiple instances must coordinate those instances themselves.
+    """
+
     session_settings: SessionSettings | None = None
 
     def __init__(
@@ -36,6 +42,7 @@ class OpenAIConversationsSession(SessionABC):
     ):
         self._session_id: str | None = conversation_id
         self._session_id_lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
         self.session_settings = (
             coerce_session_settings(session_settings)
             if session_settings is not None
@@ -76,7 +83,14 @@ class OpenAIConversationsSession(SessionABC):
     async def _get_session_id(self) -> str:
         async with self._session_id_lock:
             if self._session_id is None:
-                self._session_id = await start_openai_conversations_session(self._openai_client)
+
+                async def create_and_set_session_id() -> str:
+                    session_id = await start_openai_conversations_session(self._openai_client)
+                    self._session_id = session_id
+                    return session_id
+
+                await _await_mutation(create_and_set_session_id())
+            assert self._session_id is not None
             return self._session_id
 
     async def _clear_session_id(self) -> None:
@@ -115,35 +129,42 @@ class OpenAIConversationsSession(SessionABC):
         if not items:
             return
 
-        session_id = await self._get_session_id()
-        await self._openai_client.conversations.items.create(
-            conversation_id=session_id,
-            items=items,
-        )
+        async with self._mutation_lock:
+            session_id = await self._get_session_id()
+            await _await_mutation(
+                self._openai_client.conversations.items.create(
+                    conversation_id=session_id,
+                    items=items,
+                )
+            )
 
     async def pop_item(self) -> TResponseInputItem | None:
-        session_id = await self._get_session_id()
-        items = await self.get_items(limit=1)
-        if not items:
-            return None
-        item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
-        await self._openai_client.conversations.items.delete(
-            conversation_id=session_id, item_id=item_id
-        )
-        return items[0]
+        async with self._mutation_lock:
+            session_id = await self._get_session_id()
+            items = await self.get_items(limit=1)
+            if not items:
+                return None
+            item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
+            await _await_mutation(
+                self._openai_client.conversations.items.delete(
+                    conversation_id=session_id, item_id=item_id
+                )
+            )
+            return items[0]
 
     async def clear_session(self) -> None:
-        async with self._session_id_lock:
-            if self._session_id is None:
-                return
+        async with self._mutation_lock:
+            async with self._session_id_lock:
+                if self._session_id is None:
+                    return
 
-            session_id = self._session_id
+                session_id = self._session_id
 
-            async def delete_and_clear_session_id() -> None:
-                await self._openai_client.conversations.delete(
-                    conversation_id=session_id,
-                )
-                if self._session_id == session_id:
-                    self._session_id = None
+                async def delete_and_clear_session_id() -> None:
+                    await self._openai_client.conversations.delete(
+                        conversation_id=session_id,
+                    )
+                    if self._session_id == session_id:
+                        self._session_id = None
 
-            await _await_mutation(delete_and_clear_session_id())
+                await _await_mutation(delete_and_clear_session_id())
