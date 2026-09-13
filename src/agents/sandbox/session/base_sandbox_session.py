@@ -1,6 +1,7 @@
 import abc
 import asyncio
 import io
+import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -197,6 +198,8 @@ _RM_ACCESS_CHECK_SCRIPT = (
     '[ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ]\n'
 )
 
+logger = logging.getLogger(__name__)
+
 
 class BaseSandboxSession(abc.ABC):
     state: SandboxSessionState
@@ -227,6 +230,7 @@ class BaseSandboxSession(abc.ABC):
     _archive_limits: SandboxArchiveLimits | None = None
     _pty_cleanup_tasks: set[asyncio.Future[Any]] | None = None
     _deferred_dependency_close_task: asyncio.Task[Any] | None = None
+    _deferred_shutdown_requested: bool = False
     # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
     # cleanup must retain the backend in that case so it can be resumed instead of deleting the
     # only remaining copy of the workspace.
@@ -413,6 +417,15 @@ class BaseSandboxSession(abc.ABC):
                 # Persist before re-raising cancellation or a cleanup deadline/error so the
                 # backend cannot be deleted with workspace state that exists only remotely.
                 self._backend_preservation_required = True
+                if self._has_pending_pty_cleanup_tasks():
+                    # The detached PTY owner may still mutate the workspace. Do not start a
+                    # snapshot until that owner has finished; the preserved backend remains the
+                    # source of truth for a later resume.
+                    if isinstance(before_stop_error, Exception):
+                        wrapped = self._wrap_stop_error(before_stop_error)
+                        if wrapped is not before_stop_error:
+                            raise wrapped from before_stop_error
+                    raise
                 snapshot_error = await self._persist_snapshot_before_stop_error()
                 if snapshot_error is None:
                     self._backend_preservation_required = False
@@ -590,20 +603,38 @@ class BaseSandboxSession(abc.ABC):
             cleanup_error = exc
         try:
             if cleanup_error is None and not self._pre_stop_hooks_failed:
-                await self.stop()
-            await self.shutdown()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
+                try:
+                    await self.stop()
+                except BaseException as exc:
+                    cleanup_error = exc
+                    self._deferred_shutdown_requested = True
+
+            if not self._should_preserve_backend_on_cleanup():
+                if self._has_pending_pty_cleanup_tasks():
+                    self._deferred_shutdown_requested = True
+                else:
+                    try:
+                        await self.shutdown()
+                        self._deferred_shutdown_requested = False
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                        if self._has_pending_pty_cleanup_tasks():
+                            self._deferred_shutdown_requested = True
         finally:
             pending_cleanup_before_dependencies = self._has_pending_pty_cleanup_tasks()
-            try:
-                await self._aclose_dependencies()
-            except BaseException as exc:
-                if pending_cleanup_before_dependencies or self._has_pending_pty_cleanup_tasks():
-                    self._schedule_deferred_dependency_close()
-                if cleanup_error is None:
-                    cleanup_error = exc
+            if pending_cleanup_before_dependencies:
+                self._schedule_deferred_dependency_close(shutdown=self._deferred_shutdown_requested)
+            else:
+                try:
+                    await self._aclose_dependencies()
+                except BaseException as exc:
+                    if self._has_pending_pty_cleanup_tasks():
+                        self._schedule_deferred_dependency_close(
+                            shutdown=self._deferred_shutdown_requested
+                        )
+                    if cleanup_error is None:
+                        cleanup_error = exc
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -708,7 +739,8 @@ class BaseSandboxSession(abc.ABC):
 
         return caller_cancellation, False
 
-    def _schedule_deferred_dependency_close(self) -> None:
+    def _schedule_deferred_dependency_close(self, *, shutdown: bool = False) -> None:
+        self._deferred_shutdown_requested = self._deferred_shutdown_requested or shutdown
         task = self._deferred_dependency_close_task
         if task is not None and not task.done():
             return
@@ -721,13 +753,51 @@ class BaseSandboxSession(abc.ABC):
 
         def consume_task_exception(done: asyncio.Task[Any]) -> None:
             if not done.cancelled():
-                done.exception()
+                error = done.exception()
+                if error is not None:
+                    logger.error(
+                        "Deferred sandbox cleanup failed: %s",
+                        error,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
 
         task.add_done_callback(consume_task_exception)
 
     async def _finish_deferred_dependency_close(self) -> None:
-        await self._wait_for_tracked_cleanup_tasks()
-        await self._aclose_dependencies()
+        deferred_error: BaseException | None = None
+        try:
+            while True:
+                await self._wait_for_tracked_cleanup_tasks()
+                # Let done callbacks update preservation state before deciding whether the backend
+                # can be torn down. In particular, fallback snapshot completion clears this state.
+                await asyncio.sleep(0)
+                if (
+                    self._deferred_shutdown_requested
+                    and not self._should_preserve_backend_on_cleanup()
+                ):
+                    self._deferred_shutdown_requested = False
+                    try:
+                        await self.shutdown()
+                    except BaseException as exc:
+                        if self._has_pending_pty_cleanup_tasks():
+                            self._deferred_shutdown_requested = True
+                            continue
+                        deferred_error = exc
+                    break
+                if not self._has_pending_pty_cleanup_tasks():
+                    break
+        except BaseException as exc:
+            deferred_error = exc
+
+        if not self._has_pending_pty_cleanup_tasks():
+            try:
+                await self._aclose_dependencies()
+            except BaseException as dependency_error:
+                if deferred_error is None:
+                    raise
+                raise deferred_error from dependency_error
+        if deferred_error is not None:
+            raise deferred_error
 
     @staticmethod
     def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:
@@ -1016,6 +1086,8 @@ class BaseSandboxSession(abc.ABC):
                     cleanup_errors.setdefault(index, error)
         if cleanup_errors:
             raise cleanup_errors[min(cleanup_errors)]
+        if self._has_pending_pty_cleanup_tasks():
+            raise asyncio.TimeoutError()
         if caller_cancellation is not None:
             raise caller_cancellation
         if pending:

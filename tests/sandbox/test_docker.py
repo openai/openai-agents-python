@@ -13,7 +13,6 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 from pathlib import Path
 from typing import cast
 
@@ -4763,7 +4762,7 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
         await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
         cleanup_task.cancel()
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.5)
 
         assert second_socket.closed is True
@@ -4775,8 +4774,8 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
         if cleanup_task is not None:
             if not cleanup_task.done():
                 cleanup_task.cancel()
-            with suppress(BaseException):
-                await cleanup_task
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+        await session._wait_for_tracked_cleanup_tasks(timeout=0.5)
 
     async def wait_for_first_socket_close() -> None:
         while not first_socket.closed:

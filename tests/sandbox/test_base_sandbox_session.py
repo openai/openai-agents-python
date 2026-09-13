@@ -313,6 +313,95 @@ async def test_pty_cleanup_batch_uses_one_deadline_and_starts_every_entry() -> N
 
 
 @pytest.mark.asyncio
+async def test_stop_does_not_snapshot_while_pty_cleanup_is_still_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.state = SimpleNamespace(manifest=Manifest(), type="test")
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    snapshot_started = asyncio.Event()
+
+    async def pending_cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    async def before_stop() -> None:
+        session._track_pty_cleanup_task(asyncio.create_task(pending_cleanup()))
+        await cleanup_started.wait()
+        raise RuntimeError("pty cleanup timed out")
+
+    async def persist_snapshot() -> None:
+        snapshot_started.set()
+
+    session._before_stop = before_stop
+    session._persist_snapshot = persist_snapshot
+
+    try:
+        with pytest.raises(RuntimeError, match="pty cleanup timed out"):
+            await inspect.unwrap(BaseSandboxSession.stop)(session)
+
+        assert not snapshot_started.is_set()
+        assert session._should_preserve_backend_on_cleanup()
+    finally:
+        release_cleanup.set()
+        cleanup_tasks = tuple(session._pty_cleanup_tasks or ())
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_aclose_defers_shutdown_until_fallback_snapshot_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ShutdownProbeSession(_Session):
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(manifest=Manifest(), type="test")
+            self.shutdown_started = asyncio.Event()
+            self.release_snapshot = asyncio.Event()
+            self.shutdown_calls = 0
+
+        def _pty_cleanup_timeout_s(self) -> float:
+            return 0.01
+
+        async def _before_stop(self) -> None:
+            raise RuntimeError("stop cleanup failed")
+
+        async def stop(self) -> None:
+            await inspect.unwrap(BaseSandboxSession.stop)(self)
+
+        async def _persist_snapshot(self) -> None:
+            await self.release_snapshot.wait()
+
+        async def _shutdown_backend(self) -> None:
+            self.shutdown_calls += 1
+            self.shutdown_started.set()
+
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+    session = ShutdownProbeSession()
+
+    with pytest.raises(RuntimeError, match="stop cleanup failed"):
+        await inspect.unwrap(BaseSandboxSession.aclose)(session)
+
+    assert session.shutdown_calls == 0
+    deferred_task = session._deferred_dependency_close_task
+    assert deferred_task is not None
+
+    session.release_snapshot.set()
+    await asyncio.wait_for(deferred_task, timeout=0.5)
+    assert session.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_pty_start_rollback_removes_and_terminates_exact_entry() -> None:
     session = _session()
     entry = object()

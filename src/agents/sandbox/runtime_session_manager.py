@@ -119,6 +119,9 @@ class _SandboxSessionResources:
         try:
             while True:
                 await self._session._wait_for_tracked_cleanup_tasks()
+                # Snapshot completion callbacks may update preservation after the tracked future
+                # wakes its waiters. Give those callbacks a turn before making the shutdown call.
+                await asyncio.sleep(0)
                 if self._session._should_preserve_backend_on_cleanup():
                     return
 

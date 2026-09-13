@@ -558,7 +558,7 @@ async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> N
         await session.aclose()
 
     assert inner.stop_calls == 1
-    assert inner.shutdown_calls == 0
+    assert inner.shutdown_calls == 1
     assert inner.close_dependency_calls == 1
 
 
@@ -818,6 +818,35 @@ async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
         "Deferred sandbox cleanup failed: deferred delete failed" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_owned_deferred_cleanup_rechecks_snapshot_preservation() -> None:
+    inner = _FakeSession(Manifest())
+    inner._backend_preservation_required = True
+    client = _FakeClient(inner)
+    resources = _SandboxSessionResources(
+        session=client.session,
+        client=client,
+        owns_session=True,
+    )
+    pending = asyncio.get_running_loop().create_future()
+    inner._track_pty_cleanup_task(pending)
+    resources._schedule_deferred_cleanup()
+
+    # Let the deferred task register its waiter before arranging a callback that clears the
+    # preservation flag after the tracked future completes.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    pending.add_done_callback(lambda _done: setattr(inner, "_backend_preservation_required", False))
+    pending.set_result(None)
+
+    deferred_task = resources.deferred_cleanup_task
+    assert deferred_task is not None
+    await asyncio.wait_for(deferred_task, timeout=0.5)
+
+    assert inner.shutdown_calls == 1
+    assert client.delete_calls == 1
 
 
 @pytest.mark.asyncio
