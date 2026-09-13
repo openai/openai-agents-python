@@ -864,6 +864,29 @@ async def test_runner_owned_deferred_cleanup_rechecks_snapshot_preservation() ->
 
 
 @pytest.mark.asyncio
+async def test_runner_owned_deferred_cleanup_runs_session_finalization_hook() -> None:
+    class _FinalizingSession(_FakeSession):
+        finalization_calls = 0
+
+        async def _after_deferred_dependency_close(self) -> None:
+            self.finalization_calls += 1
+
+    session = _FinalizingSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+
+    resources._schedule_deferred_cleanup()
+    deferred_task = resources.deferred_cleanup_task
+    assert deferred_task is not None
+    await asyncio.wait_for(deferred_task, timeout=0.5)
+
+    assert session.finalization_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finishes() -> None:
     upload_started = asyncio.Event()
     release_upload = asyncio.Event()

@@ -17,6 +17,7 @@ from ..agent import Agent
 from ..exceptions import _raise_data_redacted_error
 from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from ..run_context import TContext
+from ..run_internal.sync import _track_sync_background_task
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
 from ._mount_security import (
@@ -100,6 +101,7 @@ class _SandboxSessionResources:
             name="agents.deferred_session_cleanup",
         )
         self._deferred_cleanup_task = task
+        _track_sync_background_task(task)
 
         def observe_task_result(done: asyncio.Task[Any]) -> None:
             if done.cancelled():
@@ -144,6 +146,7 @@ class _SandboxSessionResources:
                     await self._session._aclose_dependencies()
                 except BaseException:
                     pass
+                await self._session._after_deferred_dependency_close()
 
     @redact_mount_error_data
     async def cleanup(self) -> None:

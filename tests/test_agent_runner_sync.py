@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Generator
 from typing import Any, Protocol
 
@@ -6,6 +7,7 @@ import pytest
 
 from agents.agent import Agent
 from agents.run import AgentRunner
+from agents.run_internal.sync import _stop_sync_loop_driver, _track_sync_background_task
 
 
 class _EventLoopPolicy(Protocol):
@@ -179,5 +181,72 @@ def test_run_sync_finalizes_async_generators(monkeypatch, fresh_event_loop_polic
             "Async generators must be finalized after run_sync returns."
         )
     finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        test_loop.close()
+
+
+def test_run_sync_drives_tracked_background_task_after_return(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+    completed = threading.Event()
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def deferred_work():
+            await asyncio.sleep(0.01)
+            completed.set()
+
+        task = asyncio.create_task(deferred_work())
+        _track_sync_background_task(task)
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    test_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(test_loop)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert completed.wait(timeout=0.5)
+    finally:
+        _stop_sync_loop_driver(test_loop)
+        fresh_event_loop_policy.set_event_loop(None)
+        test_loop.close()
+
+
+def test_run_sync_does_not_stop_next_run_when_old_task_finishes(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    release = threading.Event()
+    background_finished = threading.Event()
+    run_count = 0
+
+    async def fake_run(self, *_args, **_kwargs):
+        nonlocal run_count
+        run_count += 1
+        if run_count == 1:
+
+            async def deferred_work():
+                await asyncio.to_thread(release.wait)
+                background_finished.set()
+
+            task = asyncio.create_task(deferred_work())
+            _track_sync_background_task(task)
+        else:
+            await asyncio.sleep(0.05)
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    test_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(test_loop)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        _stop_sync_loop_driver(test_loop)
+        release.set()
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert background_finished.is_set()
+    finally:
+        _stop_sync_loop_driver(test_loop)
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()

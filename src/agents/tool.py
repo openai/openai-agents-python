@@ -72,6 +72,7 @@ from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
+from .run_internal.sync import _track_sync_background_task
 from .strict_schema import _copy_json_schema, ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
@@ -398,6 +399,7 @@ async def _dispose_computer(
 
 def _track_background_computer_disposal(task: asyncio.Task[None]) -> None:
     _background_computer_disposal_tasks.add(task)
+    _track_sync_background_task(task)
 
     def forget_task(done: asyncio.Task[None]) -> None:
         _background_computer_disposal_tasks.discard(done)

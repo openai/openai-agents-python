@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 from contextlib import suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -29,6 +30,7 @@ from agents import (
 )
 from agents.computer import Button, Computer, Environment
 from agents.models.openai_responses import Converter
+from agents.run_internal.sync import _stop_sync_loop_driver
 from agents.testing import ScriptedModel
 
 
@@ -224,6 +226,49 @@ async def test_dispose_computer_timeout_keeps_disposer_running(
         await asyncio.wait_for(finished.wait(), timeout=0.5)
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_run_sync_drives_timed_out_computer_disposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = FakeComputer("sync")
+    disposed: list[FakeComputer] = []
+    disposal_finished = threading.Event()
+
+    async def dispose(*, computer: FakeComputer, **_kwargs: Any) -> None:
+        await asyncio.sleep(0.02)
+        disposed.append(computer)
+        disposal_finished.set()
+
+    monkeypatch.setattr(tool_module, "_COMPUTER_DISPOSAL_TIMEOUT_S", 0.001)
+    tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=AsyncMock(return_value=created),
+            dispose=dispose,
+        )
+    )
+    model = ScriptedModel(steps=[[_make_message("done")]])
+    agent = Agent(name="ComputerAgent", model=model, tools=[tool])
+    loop_holder: list[asyncio.AbstractEventLoop] = []
+
+    def run_sync() -> Any:
+        loop = asyncio.new_event_loop()
+        loop_holder.append(loop)
+        asyncio.set_event_loop(loop)
+        try:
+            return Runner.run_sync(agent, "hello")
+        finally:
+            asyncio.set_event_loop(None)
+
+    result = await asyncio.to_thread(run_sync)
+    try:
+        assert result.final_output == "done"
+        assert disposal_finished.wait(timeout=0.5)
+        assert disposed == [created]
+    finally:
+        _stop_sync_loop_driver(loop_holder[0])
+        loop_holder[0].close()
 
 
 def _make_message(text: str) -> ResponseOutputMessage:

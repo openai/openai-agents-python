@@ -150,6 +150,11 @@ from .run_internal.session_persistence import (
     session_items_for_turn,
     update_run_state_after_resume,
 )
+from .run_internal.sync import (
+    _IS_SYNC_RUN,
+    _start_sync_loop_driver,
+    _stop_sync_loop_driver,
+)
 from .run_internal.tool_use_tracker import (
     AgentToolUseTracker,
     hydrate_tool_use_tracker,
@@ -2337,25 +2342,31 @@ class AgentRunner:
             default_loop = policy.new_event_loop()
             policy.set_event_loop(default_loop)
 
+        _stop_sync_loop_driver(default_loop)
+
         # We intentionally leave the default loop open even if we had to create one above. Session
         # instances and other helpers stash loop-bound primitives between calls and expect to find
         # the same default loop every time run_sync is invoked on this thread.
         # Schedule the async run on the default loop so that we can manage cancellation explicitly.
-        task = default_loop.create_task(
-            self.run(
-                starting_agent,
-                input,
-                session=session,
-                context=context,
-                max_turns=max_turns,
-                hooks=hooks,
-                run_config=run_config,
-                error_handlers=error_handlers,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-                conversation_id=conversation_id,
+        sync_run_token = _IS_SYNC_RUN.set(True)
+        try:
+            task = default_loop.create_task(
+                self.run(
+                    starting_agent,
+                    input,
+                    session=session,
+                    context=context,
+                    max_turns=max_turns,
+                    hooks=hooks,
+                    run_config=run_config,
+                    error_handlers=error_handlers,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                    conversation_id=conversation_id,
+                )
             )
-        )
+        finally:
+            _IS_SYNC_RUN.reset(sync_run_token)
 
         try:
             # Drive the coroutine to completion, harvesting the final RunResult.
@@ -2376,6 +2387,7 @@ class AgentRunner:
                 # async generators so their cleanup code executes promptly.
                 with contextlib.suppress(RuntimeError):
                     default_loop.run_until_complete(default_loop.shutdown_asyncgens())
+                _start_sync_loop_driver(default_loop)
 
     def run_streamed(
         self,
