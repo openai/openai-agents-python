@@ -229,6 +229,7 @@ class BaseSandboxSession(abc.ABC):
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
     _pty_cleanup_tasks: set[asyncio.Future[Any]] | None = None
+    _snapshot_persistence_task: asyncio.Task[None] | None = None
     _deferred_dependency_close_task: asyncio.Task[Any] | None = None
     _deferred_shutdown_requested: bool = False
     # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
@@ -443,7 +444,14 @@ class BaseSandboxSession(abc.ABC):
                         raise wrapped from before_stop_error
                 raise
             try:
-                await self._persist_snapshot()
+                snapshot_task = self._snapshot_persistence_task
+                if snapshot_task is not None and not snapshot_task.done():
+                    # Join an in-flight snapshot instead of starting another upload. Shield it
+                    # so a retry cancellation cannot cancel the upload that still owns the
+                    # preserved backend.
+                    await asyncio.shield(snapshot_task)
+                else:
+                    await self._persist_snapshot()
                 self._backend_preservation_required = False
             except Exception as error:
                 wrapped = self._wrap_stop_error(error)
@@ -456,9 +464,12 @@ class BaseSandboxSession(abc.ABC):
     async def _persist_snapshot_before_stop_error(self) -> BaseException | None:
         """Persist a snapshot with a deadline without replacing the original stop failure."""
 
-        snapshot_task = asyncio.create_task(
-            self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
-        )
+        snapshot_task = self._snapshot_persistence_task
+        if snapshot_task is None or snapshot_task.done():
+            snapshot_task = asyncio.create_task(
+                self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
+            )
+            self._snapshot_persistence_task = snapshot_task
 
         def mark_snapshot_durable(task: asyncio.Task[Any]) -> None:
             try:
@@ -467,7 +478,12 @@ class BaseSandboxSession(abc.ABC):
                 return
             self._backend_preservation_required = False
 
+        def forget_snapshot_task(task: asyncio.Task[Any]) -> None:
+            if self._snapshot_persistence_task is task:
+                self._snapshot_persistence_task = None
+
         snapshot_task.add_done_callback(mark_snapshot_durable)
+        snapshot_task.add_done_callback(forget_snapshot_task)
         completion = asyncio.create_task(asyncio.wait((snapshot_task,)))
         caller_cancellation: asyncio.CancelledError | None = None
         timed_out = False
@@ -609,7 +625,14 @@ class BaseSandboxSession(abc.ABC):
                     cleanup_error = exc
                     self._deferred_shutdown_requested = True
 
-            if not self._should_preserve_backend_on_cleanup():
+            deferred_cleanup_task = self._deferred_dependency_close_task
+            if deferred_cleanup_task is not None and not deferred_cleanup_task.done():
+                try:
+                    await asyncio.shield(deferred_cleanup_task)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            elif not self._should_preserve_backend_on_cleanup():
                 if self._has_pending_pty_cleanup_tasks():
                     self._deferred_shutdown_requested = True
                 else:
@@ -623,7 +646,11 @@ class BaseSandboxSession(abc.ABC):
                             self._deferred_shutdown_requested = True
         finally:
             pending_cleanup_before_dependencies = self._has_pending_pty_cleanup_tasks()
-            if pending_cleanup_before_dependencies:
+            deferred_cleanup_pending = (
+                self._deferred_dependency_close_task is not None
+                and not self._deferred_dependency_close_task.done()
+            )
+            if pending_cleanup_before_dependencies or deferred_cleanup_pending:
                 self._schedule_deferred_dependency_close(shutdown=self._deferred_shutdown_requested)
             else:
                 try:

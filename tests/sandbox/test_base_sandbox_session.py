@@ -402,6 +402,79 @@ async def test_aclose_defers_shutdown_until_fallback_snapshot_finishes(
 
 
 @pytest.mark.asyncio
+async def test_aclose_retry_joins_detached_snapshot_before_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetrySnapshotSession(_Session):
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(manifest=Manifest(), type="test")
+            self.snapshot_started = asyncio.Event()
+            self.release_snapshot = asyncio.Event()
+            self.snapshot_calls = 0
+            self.shutdown_calls = 0
+            self.deferred_cleanup_started = asyncio.Event()
+            self.shutdown_started = asyncio.Event()
+            self.release_shutdown = asyncio.Event()
+            self.retry_stop_finished = asyncio.Event()
+
+        def _pty_cleanup_timeout_s(self) -> float:
+            return 0.01
+
+        async def _before_stop(self) -> None:
+            if self.snapshot_calls == 0:
+                raise RuntimeError("stop cleanup failed")
+
+        async def stop(self) -> None:
+            await inspect.unwrap(BaseSandboxSession.stop)(self)
+            self.retry_stop_finished.set()
+
+        async def _persist_snapshot(self) -> None:
+            self.snapshot_calls += 1
+            self.snapshot_started.set()
+            await self.release_snapshot.wait()
+
+        async def _wait_for_tracked_cleanup_tasks(
+            self, *, timeout: float | None = None
+        ) -> tuple[asyncio.CancelledError | None, bool]:
+            self.deferred_cleanup_started.set()
+            return await super()._wait_for_tracked_cleanup_tasks(timeout=timeout)
+
+        async def _shutdown_backend(self) -> None:
+            self.shutdown_calls += 1
+            self.shutdown_started.set()
+            await self.release_shutdown.wait()
+
+    session = RetrySnapshotSession()
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="stop cleanup failed"):
+        await inspect.unwrap(BaseSandboxSession.aclose)(session)
+    await asyncio.wait_for(session.snapshot_started.wait(), timeout=0.5)
+    await asyncio.wait_for(session.deferred_cleanup_started.wait(), timeout=0.5)
+
+    retry = asyncio.create_task(inspect.unwrap(BaseSandboxSession.aclose)(session))
+    await asyncio.sleep(0)
+    assert not retry.done()
+    assert session.snapshot_calls == 1
+
+    session.release_snapshot.set()
+    await asyncio.wait_for(session.shutdown_started.wait(), timeout=0.5)
+    await asyncio.wait_for(session.retry_stop_finished.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    assert session.shutdown_calls == 1
+
+    session.release_shutdown.set()
+    await asyncio.wait_for(retry, timeout=0.5)
+
+    assert session.snapshot_calls == 1
+    assert session.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_pty_start_rollback_removes_and_terminates_exact_entry() -> None:
     session = _session()
     entry = object()

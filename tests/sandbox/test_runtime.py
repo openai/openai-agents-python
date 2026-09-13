@@ -3384,6 +3384,27 @@ async def test_runner_keeps_sandbox_resume_state_when_cleanup_preserves_backend(
 
 
 @pytest.mark.asyncio
+async def test_runner_keeps_sandbox_resume_state_when_non_streamed_cleanup_is_cancelled() -> None:
+    session = _CancelledPreservingStopSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        instructions="Base instructions.",
+    )
+
+    result = await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+    state = result.to_state()
+
+    assert result.final_output == "done"
+    assert result._sandbox_resume_state is not None
+    assert result._sandbox_resume_state["backend_id"] == "fake"
+    assert state._sandbox == result._sandbox_resume_state
+    assert result._sandbox_session is None
+    assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runner_streamed_keeps_sandbox_resume_state_when_cleanup_preserves_backend() -> None:
     session = _PreservingFailingStopSession(Manifest())
     client = _FakeClient(session)

@@ -2222,7 +2222,7 @@ class AgentRunner:
                             logger, "Failed to enqueue sandbox memory after run", error
                         )
                     sandbox_resume_state = await sandbox_runtime.cleanup()
-                except Exception as error:
+                except (Exception, asyncio.CancelledError) as error:
                     log_tool_action_warning(
                         logger, "Failed to clean up sandbox resources after run", error
                     )
