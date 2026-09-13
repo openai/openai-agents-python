@@ -142,6 +142,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # Serialize wrapper mutations against compaction snapshot/replace/restore so a
         # cancellation rollback cannot rewrite past a newer concurrent write.
         self._mutation_lock = asyncio.Lock()
+        # Runner persistence can carry this wrapper-local generation across the
+        # append-to-compaction gap. A later wrapper mutation revokes that one
+        # pending automatic replacement without inferring ownership from history.
+        self._mutation_generation = 0
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -178,6 +182,49 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         When a run context is provided, the billed compaction request contributes to
         that run's usage totals.
         """
+        await self._run_compaction(args, wrapper=wrapper)
+
+    async def _run_compaction(
+        self,
+        args: OpenAIResponsesCompactionArgs | None,
+        *,
+        wrapper: RunContextWrapper[Any] | None,
+        read_items: Callable[[], Awaitable[list[TResponseInputItem]]] | None = None,
+        prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
+    ) -> None:
+        # Keep one wrapper mutation boundary from the snapshot through replacement.
+        # A concurrent add, pop, or clear waits here and then runs against the
+        # compacted state instead of being overwritten by a stale replacement.
+        async with self._mutation_lock:
+            has_expected_generation = wrapper is not None and hasattr(
+                wrapper, "_session_compaction_generation"
+            )
+            expected_generation = (
+                getattr(wrapper, "_session_compaction_generation", None)
+                if has_expected_generation
+                else None
+            )
+            if has_expected_generation and (
+                not isinstance(expected_generation, int)
+                or expected_generation != self._mutation_generation
+            ):
+                logger.warning(
+                    "Skipped compaction because Session history changed after this "
+                    "run appended its items."
+                )
+                return
+            await self._run_compaction_locked(
+                args, wrapper=wrapper, read_items=read_items, prepare_items=prepare_items
+            )
+
+    async def _run_compaction_locked(
+        self,
+        args: OpenAIResponsesCompactionArgs | None,
+        *,
+        wrapper: RunContextWrapper[Any] | None,
+        read_items: Callable[[], Awaitable[list[TResponseInputItem]]] | None = None,
+        prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
+    ) -> None:
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
         requested_mode = args.get("compaction_mode") if args else None
@@ -201,7 +248,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "when using previous_response_id compaction."
             )
 
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
+            read_items
+        )
 
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
@@ -245,14 +294,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             _normalize_compaction_output_items(compacted.output or [])
         )
 
-        async with self._mutation_lock:
-            previous_items = await self._get_all_underlying_session_items()
+        # Prepare output before any destructive operation. Keep the rollback snapshot in
+        # its original storage form so restoring encrypted history does not renew its TTL.
+        stored_output_items = (
+            prepare_items(output_items) if prepare_items is not None else output_items
+        )
+        previous_items = await self._get_all_underlying_session_items()
+        try:
             await self._replace_underlying_session_items(
-                output_items=output_items,
+                output_items=stored_output_items,
                 previous_items=previous_items,
             )
-            self._compaction_candidate_items = select_compaction_candidate_items(output_items)
-            self._session_items = output_items
+        except (Exception, asyncio.CancelledError):
+            self._mutation_generation += 1
+            raise
+        self._mutation_generation += 1
+        self._compaction_candidate_items = (
+            None if read_items is not None else select_compaction_candidate_items(output_items)
+        )
+        self._session_items = None if read_items is not None else output_items
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
@@ -264,6 +324,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
+
+    async def _get_items_with_generation(
+        self, read_items: Callable[[], Awaitable[list[TResponseInputItem]]]
+    ) -> tuple[list[TResponseInputItem], int]:
+        """Read one Runner snapshot with its exact wrapper generation."""
+        async with self._mutation_lock:
+            # Read through the outer Session so its decryption and filtering still apply.
+            items = await read_items()
+            return items, self._mutation_generation
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
@@ -383,25 +452,34 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             replacement_error,
         )
 
-    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
-        if self._deferred_response_id is not None:
-            return
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
-        resolved_mode = self._resolve_compaction_mode_for_response(
-            response_id=response_id,
-            store=store,
-            requested_mode=None,
-        )
-        should_compact = self.should_trigger_compaction(
-            {
-                "response_id": response_id,
-                "compaction_mode": resolved_mode,
-                "compaction_candidate_items": compaction_candidate_items,
-                "session_items": session_items,
-            }
-        )
-        if should_compact:
-            self._deferred_response_id = response_id
+    async def _defer_compaction(
+        self,
+        response_id: str,
+        store: bool | None = None,
+        *,
+        read_items: Callable[[], Awaitable[list[TResponseInputItem]]] | None = None,
+    ) -> None:
+        async with self._mutation_lock:
+            if self._deferred_response_id is not None:
+                return
+            compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
+                read_items
+            )
+            resolved_mode = self._resolve_compaction_mode_for_response(
+                response_id=response_id,
+                store=store,
+                requested_mode=None,
+            )
+            should_compact = self.should_trigger_compaction(
+                {
+                    "response_id": response_id,
+                    "compaction_mode": resolved_mode,
+                    "compaction_candidate_items": compaction_candidate_items,
+                    "session_items": session_items,
+                }
+            )
+            if should_compact:
+                self._deferred_response_id = response_id
 
     def _get_deferred_compaction_response_id(self) -> str | None:
         return self._deferred_response_id
@@ -411,41 +489,90 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         async with self._mutation_lock:
-            try:
-                await self.underlying_session.add_items(items)
-            except (Exception, asyncio.CancelledError):
-                # The backend may have committed before acknowledgement failed. Re-read its
-                # authoritative history before compaction instead of retaining a stale cache.
-                self._compaction_candidate_items = None
-                self._session_items = None
-                raise
-            if self._compaction_candidate_items is not None:
-                new_items = _normalize_compaction_session_items(items)
-                new_candidates = select_compaction_candidate_items(new_items)
-                if new_candidates:
-                    self._compaction_candidate_items.extend(new_candidates)
-            if self._session_items is not None:
-                self._session_items.extend(_normalize_compaction_session_items(items))
+            await self._add_items_locked(items)
+
+    async def _add_items_with_generation(
+        self,
+        write_items: Callable[[], Awaitable[None]],
+        *,
+        expected_generation: int | None,
+    ) -> int | None:
+        """Append one Runner batch and retain ownership only when its read stayed current."""
+        # The outer Session applies its transformations before our public add_items acquires
+        # the mutation lock. Any intervening mutation revokes ownership, including a write
+        # that completes while the outer Session is awaiting acknowledgement after our append.
+        await write_items()
+        if expected_generation is not None and self._mutation_generation == expected_generation + 1:
+            return self._mutation_generation
+        return None
+
+    async def _add_items_locked(self, items: list[TResponseInputItem]) -> None:
+        try:
+            await self.underlying_session.add_items(items)
+        except (Exception, asyncio.CancelledError):
+            # The backend may have committed before acknowledgement failed. Re-read its
+            # authoritative history before compaction instead of retaining a stale cache.
+            self._compaction_candidate_items = None
+            self._session_items = None
+            self._mutation_generation += 1
+            raise
+        self._mutation_generation += 1
+        if self._compaction_candidate_items is not None:
+            new_items = _normalize_compaction_session_items(items)
+            new_candidates = select_compaction_candidate_items(new_items)
+            if new_candidates:
+                self._compaction_candidate_items.extend(new_candidates)
+        if self._session_items is not None:
+            self._session_items.extend(_normalize_compaction_session_items(items))
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
-            popped = await self.underlying_session.pop_item()
+            try:
+                popped = await self.underlying_session.pop_item()
+            except (Exception, asyncio.CancelledError):
+                # The deletion may have committed before acknowledgement failed.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
+                self._mutation_generation += 1
+                raise
             if popped:
                 self._compaction_candidate_items = None
                 self._session_items = None
+                self._response_id = None
+                self._deferred_response_id = None
+                self._last_unstored_response_id = None
+                self._mutation_generation += 1
             return popped
 
     async def clear_session(self) -> None:
         async with self._mutation_lock:
-            await self.underlying_session.clear_session()
+            try:
+                await self.underlying_session.clear_session()
+            except (Exception, asyncio.CancelledError):
+                self._compaction_candidate_items = None
+                self._session_items = None
+                self._deferred_response_id = None
+                self._mutation_generation += 1
+                raise
             self._compaction_candidate_items = []
             self._session_items = []
             self._deferred_response_id = None
+            self._mutation_generation += 1
 
     async def _ensure_compaction_candidates(
         self,
+        read_items: Callable[[], Awaitable[list[TResponseInputItem]]] | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
         """Lazy-load and cache compaction candidates."""
+        if read_items is not None:
+            # The outer view can change through TTL expiration without a mutation. Its
+            # logical items also differ from the raw items maintained by our append cache.
+            history = _normalize_compaction_session_items(await read_items())
+            return select_compaction_candidate_items(history), history
+
         if self._compaction_candidate_items is not None and self._session_items is not None:
             return (self._compaction_candidate_items[:], self._session_items[:])
 

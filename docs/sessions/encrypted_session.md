@@ -14,36 +14,34 @@
 Encrypted sessions require the `encrypt` extra:
 
 ```bash
-pip install openai-agents[encrypt]
+pip install 'openai-agents[encrypt]'
 ```
 
 ## Quick start
 
+This example uses an in-memory `SQLiteSession`. The built-in session does not require a separate database driver.
+
 ```python
 import asyncio
-from agents import Agent, Runner
-from agents.extensions.memory import EncryptedSession, SQLAlchemySession
+from agents import Agent, Runner, SQLiteSession
+from agents.extensions.memory import EncryptedSession
 
 async def main():
     agent = Agent("Assistant")
-    
-    # Create underlying session
-    underlying_session = SQLAlchemySession.from_url(
-        "user-123",
-        url="sqlite+aiosqlite:///:memory:",
-        create_tables=True
-    )
-    
-    # Wrap with encryption
-    session = EncryptedSession(
-        session_id="user-123",
-        underlying_session=underlying_session,
-        encryption_key="your-secret-key-here",
-        ttl=600  # 10 minutes
-    )
-    
-    result = await Runner.run(agent, "Hello", session=session)
-    print(result.final_output)
+
+    underlying_session = SQLiteSession("user-123")
+    try:
+        session = EncryptedSession(
+            session_id="user-123",
+            underlying_session=underlying_session,
+            encryption_key="your-secret-key-here",
+            ttl=600  # 10 minutes
+        )
+
+        result = await Runner.run(agent, "Hello", session=session)
+        print(result.final_output)
+    finally:
+        underlying_session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -117,6 +115,12 @@ session = EncryptedSession(
 
 ### With SQLAlchemy sessions
 
+Install the `encrypt` and `sqlalchemy` extras for the PostgreSQL example below. The `sqlalchemy` extra includes the `asyncpg` driver used by the `postgresql+asyncpg://` URL.
+
+```bash
+pip install 'openai-agents[encrypt,sqlalchemy]'
+```
+
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
 
@@ -133,6 +137,8 @@ session = EncryptedSession(
     encryption_key="secret-key"
 )
 ```
+
+The application is responsible for disposing of the engine created by `SQLAlchemySession.from_url()`. After all `SQLAlchemySession` instances using that engine are no longer needed, call `await underlying.engine.dispose()` in the application's cleanup path, even if a run fails.
 
 !!! warning "Advanced Session Features"
 

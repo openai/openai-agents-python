@@ -39,13 +39,19 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
-from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
+from openai.types.responses.tool_param import (
+    CodeInterpreter,
+    ImageGeneration,
+    ImageGenerationInputImageMask as _ImageGenerationInputImageMask,
+    Mcp,
+)
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import (
     NotRequired,
     ParamSpec,
+    Required,
     Self,
     TypeAliasType,
     TypedDict,
@@ -75,6 +81,8 @@ from .util._tool_errors import get_trace_tool_error
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from typing_extensions import dataclass_transform
+
     from .agent import Agent, AgentBase
     from .items import RunItem, ToolApprovalItem
 
@@ -795,6 +803,16 @@ class FileSearchTool:
         return "file_search"
 
 
+class WebSearchToolImageSettings(TypedDict, total=False):
+    """Image result settings for `WebSearchTool` when `search_content_types` includes `"image"`."""
+
+    max_results: int
+    """The number of image results to return."""
+
+    caption: bool
+    """Whether to include a short caption with each image when one is available."""
+
+
 @dataclass
 class WebSearchTool:
     """A hosted tool that lets the LLM search the web. Currently only supported with OpenAI models,
@@ -817,6 +835,16 @@ class WebSearchTool:
     indexed-only behavior where supported.
     """
 
+    search_content_types: list[Literal["text", "image"]] | None = None
+    """The kinds of results the search may return.
+
+    When omitted, the API default (text only) is used. Include `"image"` to
+    receive image results. Use `image_settings` to customize those results.
+    """
+
+    image_settings: WebSearchToolImageSettings | None = None
+    """Settings for image results when `search_content_types` includes `"image"`."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -825,6 +853,8 @@ class WebSearchTool:
             filters: WebSearchToolFilters | dict[str, Any] | None = None,
             search_context_size: Literal["low", "medium", "high"] = "medium",
             external_web_access: bool | None = None,
+            search_content_types: list[Literal["text", "image"]] | None = None,
+            image_settings: WebSearchToolImageSettings | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
@@ -1136,12 +1166,71 @@ class CodeInterpreterTool:
         return "code_interpreter"
 
 
-@dataclass
+class ImageGenerationToolConfig(TypedDict, total=False):
+    """Responses image generation settings, including current model and quality options."""
+
+    type: Required[Literal["image_generation"]]
+    action: Literal["generate", "edit", "auto"]
+    background: Literal["transparent", "opaque", "auto"]
+    input_fidelity: Literal["high", "low"] | None
+    input_image_mask: _ImageGenerationInputImageMask
+    model: str
+    moderation: Literal["auto", "low"]
+    output_compression: int
+    output_format: Literal["png", "webp", "jpeg"]
+    partial_images: int
+    quality: Literal["low", "medium", "high", "xhigh", "max", "auto"]
+    size: str
+
+
+if not TYPE_CHECKING:
+    _image_generation_dataclass = dataclass
+else:
+    _ImageGenerationToolT = TypeVar("_ImageGenerationToolT")
+
+    @dataclass_transform()
+    def _image_generation_dataclass(
+        cls: type[_ImageGenerationToolT],
+    ) -> type[_ImageGenerationToolT]:
+        # Keep required fields from losing descriptor access typing in mypy.
+        return cls
+
+    class _ImageGenerationToolConfigField(Protocol):
+        """Describe widened reads and upstream-compatible assignments for type checkers."""
+
+        def __get__(
+            self,
+            instance: ImageGenerationTool | None,
+            owner: type[ImageGenerationTool] | None = None,
+        ) -> ImageGenerationToolConfig: ...
+
+        def __set__(
+            self, instance: ImageGenerationTool, value: ImageGenerationToolConfig | ImageGeneration
+        ) -> None: ...
+
+
+@_image_generation_dataclass
 class ImageGenerationTool:
     """A tool that allows the LLM to generate images."""
 
-    tool_config: ImageGeneration
-    """The tool config, which includes image generation settings."""
+    # Keep the public field first for static documentation and runtime schema generators.
+    if not TYPE_CHECKING:
+        tool_config: ImageGenerationToolConfig
+        """Responses API image generation settings, including `type="image_generation"`.
+
+        Accepts `ImageGenerationToolConfig`, the OpenAI SDK's typed config, or an inline
+        dictionary with known image options. Use `ImageGenerationToolConfig` to annotate
+        reusable configurations. Reads and indexed mutations use this widened type.
+        For example, set `model="gpt-image-2.5-sunburst"` or
+        `model="gpt-image-2.5-flare"` with `quality="xhigh"` or `quality="max"`.
+        Settings are forwarded unchanged; the API validates model-specific support.
+        """
+    else:
+        tool_config: _ImageGenerationToolConfigField
+
+    if TYPE_CHECKING:
+
+        def __init__(self, tool_config: ImageGenerationToolConfig | ImageGeneration) -> None: ...
 
     @property
     def name(self):

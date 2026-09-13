@@ -324,7 +324,7 @@ main_agent = RealtimeAgent(
 
 ### Guardrails
 
-Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrail checks are debounced: each check runs on accumulated output-text and audio-transcript deltas rather than on every partial delta, and emits `guardrail_tripped` instead of raising an exception.
+Realtime agents support output guardrails on agent responses and input guardrails on function-tool calls. Output guardrail checks are debounced: each check runs on accumulated output-text and audio-transcript deltas rather than on every partial delta, and emits `guardrail_tripped` instead of raising an exception. A single delta schedules at most one check. If that delta crosses multiple `debounce_text_length` boundaries, the SDK advances the next boundary past all of them instead of scheduling catch-up checks after later small deltas.
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail

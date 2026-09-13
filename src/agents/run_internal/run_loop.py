@@ -102,6 +102,7 @@ from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     get_unsent_tool_call_ids_for_interrupted_state,
+    reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
@@ -628,6 +629,10 @@ async def _finalize_streamed_final_output(
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
     # persisted-item count, make the second one a no-op.
+    # The output, its guardrails, and its terminal hooks are all complete, so from here until
+    # the turn is persisted this run owns a result no resume can reproduce.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = True
     if on_persisted_after_guardrails is None:
         await save_items(final_turn_items, response_id, store_setting)
     else:
@@ -640,6 +645,10 @@ async def _finalize_streamed_final_output(
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
             return
+    # The append and any post-append maintenance both succeeded, so the turn is durable and the
+    # state is open again.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = False
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -923,6 +932,7 @@ async def start_streaming(
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
         if is_resumed_state and run_state is not None:
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             streamed_result._current_turn_persisted_item_count = (
                 run_state._current_turn_persisted_item_count

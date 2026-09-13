@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -96,3 +97,55 @@ def test_serial_command_targets_only_discovered_files(
         "-m",
         "serial",
     ]
+
+
+def test_windows_runner_uses_subprocess_and_propagates_exit_code(
+    serial_test_runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[list[str], bool]] = []
+
+    def capture_run(command: list[str], *, check: bool) -> SimpleNamespace:
+        captured.append((command, check))
+        return SimpleNamespace(returncode=23)
+
+    monkeypatch.setattr(serial_test_runner.sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "run", capture_run)
+    monkeypatch.setattr(serial_test_runner.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        serial_test_runner.os,
+        "execv",
+        lambda *_args: pytest.fail("Windows serial runner must not call os.execv"),
+    )
+    monkeypatch.setattr(sys, "argv", ["run_serial_tests.py"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        serial_test_runner.main()
+
+    assert exc_info.value.code == 23
+    assert len(captured) == 1
+    assert captured[0][1] is False
+
+
+def test_non_windows_runner_still_execs(
+    serial_test_runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(serial_test_runner.sys, "platform", "linux")
+    monkeypatch.setattr(serial_test_runner.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("POSIX serial runner must not call subprocess.run"),
+    )
+    monkeypatch.setattr(
+        serial_test_runner.os, "execv", lambda _executable, command: captured.append(command)
+    )
+    monkeypatch.setattr(sys, "argv", ["run_serial_tests.py"])
+
+    serial_test_runner.main()
+
+    assert len(captured) == 1
+    assert "serial" in captured[0]

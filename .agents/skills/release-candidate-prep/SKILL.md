@@ -1,6 +1,6 @@
 ---
 name: release-candidate-prep
-description: Preflight and prepare an OpenAI Agents Python release candidate in a dedicated worktree from exact origin/main, gate readiness before branch creation, freeze the released API contract, create or replace the local release branch with one release commit, enforce final release review as a checker, and produce release-specific PR text. Use only when explicitly invoked with a version. Never push, open a PR, or mutate GitHub.
+description: Prepare a local Python SDK release candidate in a dedicated worktree. Use only when explicitly invoked with a version.
 ---
 
 # Release Candidate Preparation

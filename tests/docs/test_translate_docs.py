@@ -127,3 +127,26 @@ def test_a_heading_with_its_own_attribute_list_is_not_rewritten(translate_docs: 
     translated = "## アルファ {.lead}\n\n## ベータ\n"
 
     assert translate_docs.preserve_heading_anchors(source, translated) == translated
+
+
+def test_ref_pages_are_skipped_with_windows_separators(
+    translate_docs: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    translated: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(translate_docs.os.path, "relpath", lambda *_args: r"ref\voice\model.md")
+    monkeypatch.setattr(translate_docs.os, "makedirs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        translate_docs,
+        "translate_file",
+        lambda file_path, target_path, lang_code: translated.append(
+            (file_path, target_path, lang_code)
+        ),
+    )
+
+    translate_docs.translate_single_source_file(
+        r"docs\ref\voice\model.md",
+        check_translation_outdated=False,
+    )
+
+    assert translated == []

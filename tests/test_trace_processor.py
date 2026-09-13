@@ -70,117 +70,155 @@ def test_batch_trace_processor_on_trace_start(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=0.1)
     test_trace = get_trace(processor)
 
-    processor.on_trace_start(test_trace)
-    assert processor._queue.qsize() == 1, "Trace should be added to the queue"
-
-    # Shutdown to clean up the worker thread
-    processor.shutdown()
+    try:
+        with processor._export_lock:
+            processor.on_trace_start(test_trace)
+            assert processor._queue.qsize() == 1, "Trace should be added to the queue"
+    finally:
+        processor.shutdown()
 
 
 def test_batch_trace_processor_on_span_end(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=0.1)
     test_span = get_span(processor)
 
-    processor.on_span_end(test_span)
-    assert processor._queue.qsize() == 1, "Span should be added to the queue"
-
-    # Shutdown to clean up the worker thread
-    processor.shutdown()
+    try:
+        with processor._export_lock:
+            processor.on_span_end(test_span)
+            assert processor._queue.qsize() == 1, "Span should be added to the queue"
+    finally:
+        processor.shutdown()
 
 
 def test_batch_trace_processor_queue_full(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, max_queue_size=2, schedule_delay=0.1)
-    # Fill the queue
-    processor.on_trace_start(get_trace(processor))
-    processor.on_trace_start(get_trace(processor))
-    assert processor._queue.full() is True
+    try:
+        with processor._export_lock:
+            # Fill the queue.
+            processor.on_trace_start(get_trace(processor))
+            processor.on_trace_start(get_trace(processor))
+            assert processor._queue.full() is True
 
-    # Next item should not be queued
-    processor.on_trace_start(get_trace(processor))
-    assert processor._queue.qsize() == 2, "Queue should not exceed max_queue_size"
+            # Next item should not be queued.
+            processor.on_trace_start(get_trace(processor))
+            assert processor._queue.qsize() == 2, "Queue should not exceed max_queue_size"
 
-    processor.on_span_end(get_span(processor))
-    assert processor._queue.qsize() == 2, "Queue should not exceed max_queue_size"
-
-    processor.shutdown()
+            processor.on_span_end(get_span(processor))
+            assert processor._queue.qsize() == 2, "Queue should not exceed max_queue_size"
+    finally:
+        processor.shutdown()
 
 
 def test_batch_processor_doesnt_enqueue_on_trace_end_or_span_start(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter)
 
-    processor.on_trace_start(get_trace(processor))
-    assert processor._queue.qsize() == 1, "Trace should be queued"
+    try:
+        with processor._export_lock:
+            processor.on_trace_start(get_trace(processor))
+            assert processor._queue.qsize() == 1, "Trace should be queued"
 
-    processor.on_span_start(get_span(processor))
-    assert processor._queue.qsize() == 1, "Span should not be queued"
+            processor.on_span_start(get_span(processor))
+            assert processor._queue.qsize() == 1, "Span should not be queued"
 
-    processor.on_span_end(get_span(processor))
-    assert processor._queue.qsize() == 2, "Span should be queued"
+            processor.on_span_end(get_span(processor))
+            assert processor._queue.qsize() == 2, "Span should be queued"
 
-    processor.on_trace_end(get_trace(processor))
-    assert processor._queue.qsize() == 2, "Nothing new should be queued"
-
-    processor.shutdown()
+            processor.on_trace_end(get_trace(processor))
+            assert processor._queue.qsize() == 2, "Nothing new should be queued"
+    finally:
+        processor.shutdown()
 
 
 def test_batch_trace_processor_force_flush(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, max_batch_size=2, schedule_delay=5.0)
 
-    processor.on_trace_start(get_trace(processor))
-    processor.on_span_end(get_span(processor))
-    processor.on_span_end(get_span(processor))
+    try:
+        with processor._export_lock:
+            processor.on_trace_start(get_trace(processor))
+            processor.on_span_end(get_span(processor))
+            processor.on_span_end(get_span(processor))
 
-    processor.force_flush()
+        processor.force_flush()
 
-    # Ensure exporter.export was called with all items in batches respecting max_batch_size=2
-    exported_batches = [call_args[0][0] for call_args in mocked_exporter.export.call_args_list]
-    total_exported = sum(len(batch) for batch in exported_batches)
+        # Ensure exporter.export was called with all items in batches respecting max_batch_size=2.
+        exported_batches = [call_args[0][0] for call_args in mocked_exporter.export.call_args_list]
+        total_exported = sum(len(batch) for batch in exported_batches)
 
-    # We pushed 3 items; ensure they all got exported across 2 batches (sizes 2 and 1)
-    assert total_exported == 3
-    assert [len(batch) for batch in exported_batches] == [2, 1]
+        # We pushed 3 items; ensure they all got exported across 2 batches (sizes 2 and 1).
+        assert total_exported == 3
+        assert [len(batch) for batch in exported_batches] == [2, 1]
+    finally:
+        processor.shutdown()
 
-    processor.shutdown()
 
-
-def test_batch_trace_processor_force_flush_waits_for_in_flight_background_export():
+def test_batch_trace_processor_force_flush_waits_for_in_flight_background_export(monkeypatch):
     export_started = threading.Event()
     export_continue = threading.Event()
+    export_completed = threading.Event()
+    flush_blocked = threading.Event()
+    flush_completed = threading.Event()
+
+    class ObservedExportLock:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+
+        def __enter__(self) -> None:
+            if not self.lock.acquire(blocking=False):
+                flush_blocked.set()
+                self.lock.acquire()
+
+        def __exit__(self, *args: object) -> None:
+            self.lock.release()
 
     class BlockingExporter(TracingExporter):
         def export(self, items: list[Trace | Span[Any]]) -> None:
             export_started.set()
-            assert export_continue.wait(timeout=2.0)
+            export_continue.wait()
+            export_completed.set()
 
     processor = BatchTraceProcessor(exporter=BlockingExporter(), schedule_delay=0.01)
-    processor.on_trace_start(get_trace(processor))
+    monkeypatch.setattr(processor, "_export_lock", ObservedExportLock())
 
-    assert export_started.wait(timeout=2.0)
+    def flush() -> None:
+        processor.force_flush()
+        flush_completed.set()
 
-    flush_thread = threading.Thread(target=processor.force_flush)
-    flush_thread.start()
+    flush_thread = threading.Thread(target=flush)
+    try:
+        processor.on_trace_start(get_trace(processor))
+        assert export_started.wait(timeout=2.0)
 
-    time.sleep(0.1)
-    assert flush_thread.is_alive(), "force_flush() should wait for an in-flight export"
+        flush_thread.start()
+        assert flush_blocked.wait(timeout=2.0)
+        assert not export_completed.is_set()
+        assert not flush_completed.is_set(), "force_flush() should wait for an in-flight export"
 
-    export_continue.set()
-    flush_thread.join(timeout=2.0)
+        export_continue.set()
+        assert flush_completed.wait(timeout=2.0)
+        assert export_completed.is_set()
+    finally:
+        export_continue.set()
+        if flush_thread.ident is not None:
+            flush_thread.join(timeout=2.0)
+        processor.shutdown(timeout=2.0)
 
     assert not flush_thread.is_alive()
-
-    processor.shutdown()
+    assert processor._worker_thread is not None
+    assert not processor._worker_thread.is_alive()
 
 
 def test_batch_trace_processor_shutdown_flushes(mocked_exporter):
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=5.0)
-    processor.on_trace_start(get_trace(processor))
-    processor.on_span_end(get_span(processor))
-    qsize_before = processor._queue.qsize()
-    assert qsize_before == 2
+    try:
+        with processor._export_lock:
+            processor.on_trace_start(get_trace(processor))
+            processor.on_span_end(get_span(processor))
+            qsize_before = processor._queue.qsize()
+            assert qsize_before == 2
+    finally:
+        processor.shutdown()
 
-    processor.shutdown()
-
-    # Ensure everything was exported after shutdown
+    # Ensure everything was exported after shutdown.
     total_exported = 0
     for call_args in mocked_exporter.export.call_args_list:
         batch = call_args[0][0]
@@ -206,21 +244,23 @@ def test_batch_trace_processor_shutdown_timeout_returns_when_exporter_blocks(
         schedule_delay=60.0,
         export_trigger_ratio=1.0,
     )
-    processor.on_span_end(get_span(processor))
+    try:
+        processor.on_span_end(get_span(processor))
+        assert export_started.wait(timeout=2.0)
 
-    assert export_started.wait(timeout=2.0)
+        start = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            processor.shutdown(timeout=0.05)
+        elapsed = time.monotonic() - start
 
-    start = time.monotonic()
-    with caplog.at_level(logging.WARNING):
-        processor.shutdown(timeout=0.05)
-    elapsed = time.monotonic() - start
+        assert elapsed < 0.5
+        assert "shutdown timeout reached" in caplog.text
+    finally:
+        release_export.set()
+        processor.shutdown(timeout=2.0)
 
-    assert elapsed < 0.5
-    assert "shutdown timeout reached" in caplog.text
-
-    release_export.set()
-    if processor._worker_thread:
-        processor._worker_thread.join(timeout=2.0)
+    assert processor._worker_thread is not None
+    assert not processor._worker_thread.is_alive()
 
 
 def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
@@ -252,6 +292,9 @@ def test_batch_trace_processor_survives_exporter_exception():
     spans to silently accumulate in the queue until it filled up.
     """
 
+    first_export_started = threading.Event()
+    recovery_completed = threading.Event()
+
     class FlakyExporter(TracingExporter):
         def __init__(self) -> None:
             self.call_count = 0
@@ -260,26 +303,36 @@ def test_batch_trace_processor_survives_exporter_exception():
         def export(self, items: list[Trace | Span[Any]]) -> None:
             self.call_count += 1
             if self.call_count == 1:
+                first_export_started.set()
                 raise RuntimeError("simulated exporter failure")
             self.exported.extend(items)
+            if len(self.exported) == 2:
+                recovery_completed.set()
 
     exporter = FlakyExporter()
     processor = BatchTraceProcessor(exporter, schedule_delay=0.05, max_batch_size=1)
-    processor.on_span_end(get_span(processor))
-    processor.on_span_end(get_span(processor))
-    processor.on_span_end(get_span(processor))
+    try:
+        processor.on_span_end(get_span(processor))
+        assert first_export_started.wait(timeout=2.0)
+        worker = processor._worker_thread
 
-    # Give the worker time to encounter the failure and continue processing.
-    time.sleep(0.3)
+        later_spans = [get_span(processor), get_span(processor)]
+        for span in later_spans:
+            processor.on_span_end(span)
+
+        assert recovery_completed.wait(timeout=2.0)
+        assert worker is not None
+        assert processor._worker_thread is worker
+        assert worker.is_alive(), "Worker thread must survive an exporter exception"
+
+        # Recovery must happen on the worker before shutdown can drain the queue.
+        assert exporter.exported == later_spans
+        assert exporter.call_count == 3
+    finally:
+        processor.shutdown(timeout=2.0)
 
     assert processor._worker_thread is not None
-    assert processor._worker_thread.is_alive(), "Worker thread must survive an exporter exception"
-
-    processor.shutdown(timeout=2.0)
-
-    # First batch raised; the remaining two items must still have been exported.
-    assert len(exporter.exported) == 2
-    assert exporter.call_count >= 3
+    assert not processor._worker_thread.is_alive()
 
 
 @pytest.mark.parametrize(
@@ -424,17 +477,19 @@ def test_get_trace_provider_force_flush_flushes_default_processor(mocked_exporte
     processor = BatchTraceProcessor(exporter=mocked_exporter, schedule_delay=60.0)
     provider.register_processor(processor)
 
-    with patch("agents.tracing.setup.GLOBAL_TRACE_PROVIDER", provider):
-        processor.on_trace_start(get_trace(processor))
-        processor.on_span_end(get_span(processor))
+    try:
+        with patch("agents.tracing.setup.GLOBAL_TRACE_PROVIDER", provider):
+            processor.on_trace_start(get_trace(processor))
+            processor.on_span_end(get_span(processor))
 
-        get_trace_provider().force_flush()
+            get_trace_provider().force_flush()
 
-    total_exported = sum(
-        len(call_args[0][0]) for call_args in mocked_exporter.export.call_args_list
-    )
-    assert total_exported == 2
-    processor.shutdown()
+        total_exported = sum(
+            len(call_args[0][0]) for call_args in mocked_exporter.export.call_args_list
+        )
+        assert total_exported == 2
+    finally:
+        processor.shutdown()
 
 
 def mock_processor():
@@ -573,19 +628,22 @@ def test_batch_trace_processor_shutdown_interrupts_exporter_retry_backoff(mock_c
         export_trigger_ratio=1.0,
     )
 
-    processor.on_span_end(get_span(processor))
-    assert post_called.wait(timeout=2.0)
+    try:
+        processor.on_span_end(get_span(processor))
+        assert post_called.wait(timeout=2.0)
 
-    start = time.monotonic()
-    processor.shutdown(timeout=1.0)
-    elapsed = time.monotonic() - start
+        start = time.monotonic()
+        processor.shutdown(timeout=1.0)
+        elapsed = time.monotonic() - start
 
-    assert elapsed < 0.5
-    assert processor._worker_thread is not None
-    assert not processor._worker_thread.is_alive()
-    assert mock_client.return_value.post.call_count == 1
+        assert elapsed < 0.5
+        assert processor._worker_thread is not None
+        assert not processor._worker_thread.is_alive()
+        assert mock_client.return_value.post.call_count == 1
 
-    exporter.close()
+    finally:
+        processor.shutdown(timeout=2.0)
+        exporter.close()
 
 
 @patch("httpx2.Client")

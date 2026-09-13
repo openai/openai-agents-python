@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,7 +47,14 @@ def main() -> None:
     marker_expression = (
         "serial and not review_optional" if args.exclude_review_optional else "serial"
     )
-    os.execv(sys.executable, _serial_args(marker_expression=marker_expression))
+    command = _serial_args(marker_expression=marker_expression)
+    if sys.platform == "win32":
+        # Windows has no process replacement: os.execv spawns a child and
+        # terminates this process with 0, so the caller sees success no matter
+        # how pytest exits. Mirror run_integration_tests.py and wait instead.
+        completed = subprocess.run(command, check=False)
+        raise SystemExit(completed.returncode)
+    os.execv(sys.executable, command)
 
 
 if __name__ == "__main__":
