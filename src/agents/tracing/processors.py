@@ -140,6 +140,13 @@ class BackendSpanExporter(TracingExporter):
                 if exported:
                     if sanitize_for_openai:
                         exported = self._sanitize_for_openai_tracing_api(exported)
+                    try:
+                        json.dumps(exported, allow_nan=False)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[non-fatal] Tracing: dropping non-JSON-serializable values."
+                        )
+                        exported = self._sanitize_json_compatible_value(exported)
                     data.append(exported)
             payload = {"data": data}
 

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -5,6 +6,8 @@ import sys
 import textwrap
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +19,7 @@ from agents.tracing import flush_traces, get_trace_provider
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
-from agents.tracing.span_data import AgentSpanData
+from agents.tracing.span_data import AgentSpanData, CustomSpanData
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace, TraceImpl
 
@@ -911,6 +914,61 @@ def test_backend_span_exporter_truncates_large_structured_input_without_stringif
     assert isinstance(sent_input["blob"], str)
     assert sent_input["blob"].endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(sent_input) <= exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+    exporter.close()
+
+
+def _exporter_capturing_posts(received: list[dict[str, Any]], **kwargs: Any) -> BackendSpanExporter:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        received.extend(json.loads(request.content)["data"])
+        return httpx2.Response(200)
+
+    exporter = BackendSpanExporter(api_key="test_key", **kwargs)
+    exporter._client.close()
+    exporter._client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    return exporter
+
+
+@pytest.mark.parametrize("bad_value", [uuid.uuid4(), float("nan")], ids=["uuid", "nan"])
+def test_backend_span_exporter_keeps_batch_when_trace_metadata_is_not_json(bad_value: Any):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    clean_span = get_span(mock_processor())
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata={"request_id": bad_value, "ok": "x"},
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, clean_span, bad_trace])
+
+    assert received == [
+        clean_trace.export(),
+        clean_span.export(),
+        {**cast(dict[str, Any], bad_trace.export()), "metadata": {"ok": "x"}},
+    ]
+    exporter.close()
+
+
+def test_backend_span_exporter_keeps_batch_when_custom_span_data_is_not_json():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received, endpoint="https://example.test/traces")
+    custom_span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="custom_span_id",
+        parent_id=None,
+        processor=mock_processor(),
+        span_data=CustomSpanData(name="lookup", data={"at": datetime.now(timezone.utc), "rows": 3}),
+        tracing_api_key=None,
+    )
+
+    exporter.export([get_trace(mock_processor()), custom_span])
+
+    assert len(received) == 2
+    assert received[1]["span_data"] == {"type": "custom", "name": "lookup", "data": {"rows": 3}}
     exporter.close()
 
 
