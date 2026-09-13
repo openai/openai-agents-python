@@ -266,6 +266,20 @@ class _CancelledPreservingStopSession(_FakeSession):
         raise asyncio.CancelledError("stop cancelled while preserving backend")
 
 
+class _BlockingPreservingStopSession(_FakeSession):
+    def __init__(self, manifest: Manifest, stop_gate: asyncio.Event) -> None:
+        super().__init__(manifest)
+        self._stop_gate = stop_gate
+        self.stop_started = asyncio.Event()
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self._running = False
+        self._backend_preservation_required = True
+        self.stop_started.set()
+        await self._stop_gate.wait()
+
+
 def _external_mount_manifest(secret_access_key: str) -> Manifest:
     return Manifest(
         entries={
@@ -3402,6 +3416,37 @@ async def test_runner_keeps_sandbox_resume_state_when_non_streamed_cleanup_is_ca
     assert state._sandbox == result._sandbox_resume_state
     assert result._sandbox_session is None
     assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_propagates_caller_cancellation_during_non_streamed_cleanup() -> None:
+    stop_gate = asyncio.Event()
+    session = _BlockingPreservingStopSession(Manifest(), stop_gate)
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        instructions="Base instructions.",
+    )
+
+    run_task = asyncio.create_task(
+        Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+    )
+    try:
+        await asyncio.wait_for(session.stop_started.wait(), timeout=0.5)
+
+        run_task.cancel("caller stopped run")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await run_task
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.args == ("caller stopped run",)
+        assert client.delete_calls == 0
+    finally:
+        stop_gate.set()
+        if not run_task.done():
+            run_task.cancel()
+        with suppress(BaseException):
+            await run_task
 
 
 @pytest.mark.asyncio

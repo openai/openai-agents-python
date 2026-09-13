@@ -1113,10 +1113,10 @@ class BaseSandboxSession(abc.ABC):
                     cleanup_errors.setdefault(index, error)
         if cleanup_errors:
             raise cleanup_errors[min(cleanup_errors)]
-        if self._has_pending_pty_cleanup_tasks():
-            raise asyncio.TimeoutError()
         if caller_cancellation is not None:
             raise caller_cancellation
+        if self._has_pending_pty_cleanup_tasks():
+            raise asyncio.TimeoutError()
         if pending:
             raise asyncio.TimeoutError()
 

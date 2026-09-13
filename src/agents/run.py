@@ -821,6 +821,7 @@ class AgentRunner:
 
                 completed_result: RunResult | None = None
                 run_exception: BaseException | None = None
+                sandbox_cleanup_cancellation: asyncio.CancelledError | None = None
 
                 def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
                     result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
@@ -2230,6 +2231,11 @@ class AgentRunner:
                         completed_result._sandbox_resume_state = (
                             sandbox_runtime.resume_state_after_cleanup_error
                         )
+                    current_task = asyncio.current_task()
+                    if isinstance(error, asyncio.CancelledError) and (
+                        current_task is not None and current_task.cancelling()
+                    ):
+                        sandbox_cleanup_cancellation = error
                 else:
                     if completed_result is not None:
                         completed_result._sandbox_resume_state = sandbox_resume_state
@@ -2248,6 +2254,8 @@ class AgentRunner:
                         usage_delta(task_usage_start, context_wrapper.usage),
                     )
                     current_task_span.finish(reset_current=True)
+                if sandbox_cleanup_cancellation is not None:
+                    raise sandbox_cleanup_cancellation
 
     def run_sync(
         self,

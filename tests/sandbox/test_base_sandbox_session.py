@@ -313,6 +313,47 @@ async def test_pty_cleanup_batch_uses_one_deadline_and_starts_every_entry() -> N
 
 
 @pytest.mark.asyncio
+async def test_pty_cleanup_batch_preserves_caller_cancellation_after_deadline() -> None:
+    session = _session()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def cleanup(_entry: int) -> None:
+        started.set()
+        await release.wait()
+        completed.set()
+
+    batch = asyncio.create_task(session._cleanup_pty_entries((1,), cleanup, timeout=0.01))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        batch.cancel("caller stopped PTY cleanup")
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await batch
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.args == ("caller stopped PTY cleanup",)
+        assert session._pty_cleanup_tasks
+        assert not completed.is_set()
+
+        release.set()
+        cleanup_tasks = tuple(session._pty_cleanup_tasks or ())
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=0.5)
+        await asyncio.sleep(0)
+        assert completed.is_set()
+        assert session._pty_cleanup_tasks == set()
+    finally:
+        release.set()
+        if not batch.done():
+            batch.cancel()
+        with suppress(BaseException):
+            await batch
+        cleanup_tasks = tuple(session._pty_cleanup_tasks or ())
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_stop_does_not_snapshot_while_pty_cleanup_is_still_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
