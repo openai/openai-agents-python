@@ -958,6 +958,31 @@ def test_backend_span_exporter_keeps_batch_when_trace_metadata_is_not_json(bad_v
     exporter.close()
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [BackendSpanExporter._OPENAI_TRACING_INGEST_ENDPOINT, "https://example.test/traces"],
+    ids=["openai", "custom"],
+)
+def test_backend_span_exporter_drops_only_the_item_that_cannot_be_repaired(endpoint: str):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received, endpoint=endpoint)
+    clean_trace = get_trace(mock_processor())
+    # Python refuses to turn an int past 4300 digits into a string, so this can't be sent.
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata={"n": 10**5000},
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, bad_trace])
+
+    assert received == [clean_trace.export()]
+    exporter.close()
+
+
 def test_backend_span_exporter_keeps_batch_when_a_string_has_an_unpaired_surrogate():
     received: list[dict[str, Any]] = []
     exporter = _exporter_capturing_posts(received)

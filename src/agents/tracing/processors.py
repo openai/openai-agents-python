@@ -148,14 +148,21 @@ class BackendSpanExporter(TracingExporter):
                         logger.warning(
                             "[non-fatal] Tracing: sanitizing values that can't be sent as JSON."
                         )
-                        exported = self._sanitize_json_compatible_value(exported)
-                        # Strings pass the sanitizer unchanged, so replace any unpaired
-                        # surrogates, which UTF-8 can't encode, with "?".
-                        exported = json.loads(
-                            json.dumps(exported, ensure_ascii=False)
-                            .encode("utf-8", "replace")
-                            .decode("utf-8")
-                        )
+                        try:
+                            exported = self._sanitize_json_compatible_value(exported)
+                            # Strings pass the sanitizer unchanged, so replace any unpaired
+                            # surrogates, which UTF-8 can't encode, with "?".
+                            exported = json.loads(
+                                json.dumps(exported, ensure_ascii=False)
+                                .encode("utf-8", "replace")
+                                .decode("utf-8")
+                            )
+                        except (TypeError, ValueError):
+                            # e.g. an int too long to convert to a string; skip just this item.
+                            logger.warning(
+                                "[non-fatal] Tracing: dropping an item that can't be sent as JSON."
+                            )
+                            continue
                     data.append(exported)
             payload = {"data": data}
 
