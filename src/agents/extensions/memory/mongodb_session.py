@@ -302,12 +302,11 @@ class MongoDBSession(SessionABC):
         Returns:
             List of input items representing the conversation history.
         """
-        await self._ensure_indexes()
-
         session_limit = resolve_session_limit(limit, self.session_settings)
-
         if session_limit is not None and session_limit <= 0:
             return []
+
+        await self._ensure_indexes()
 
         generation = await self._get_generation()
         query = {

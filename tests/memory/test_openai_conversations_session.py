@@ -233,6 +233,19 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_negative_limit_rejects_without_backend_init(self, mock_openai_client):
+        """Negative limit must raise ValueError without creating a remote session."""
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        with pytest.raises(
+            ValueError, match=r"limit must be a non-negative integer or None, got -1"
+        ):
+            await session.get_items(limit=-1)
+
+        mock_openai_client.conversations.create.assert_not_called()
+        assert session._session_id is None
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(

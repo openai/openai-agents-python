@@ -590,6 +590,29 @@ async def test_get_items_limit_zero(session: MongoDBSession) -> None:
     assert await session.get_items(limit=0) == []
 
 
+async def test_get_items_negative_limit_rejects_without_backend_init() -> None:
+    """Negative limit must raise ValueError without triggering index creation."""
+    MongoDBSession._init_state.clear()
+    client = FakeAsyncMongoClient()
+    s = MongoDBSession("neg-limit-init-test", client=client)
+
+    call_count = 0
+
+    async def fail_if_called(*args: Any, **kwargs: Any) -> str:
+        nonlocal call_count
+        call_count += 1
+        return "fake_index"
+
+    s._messages.create_index = fail_if_called  # type: ignore[method-assign]
+    s._sessions.create_index = fail_if_called  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
+        await s.get_items(limit=-1)
+
+    assert call_count == 0
+    assert not s._is_init_done()
+
+
 async def test_get_items_limit_exceeds_count(session: MongoDBSession) -> None:
     """Requesting more items than exist returns all items without error."""
     await session.add_items([{"role": "user", "content": "only"}])

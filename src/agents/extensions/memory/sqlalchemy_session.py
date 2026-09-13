@@ -308,9 +308,11 @@ class SQLAlchemySession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        await self._ensure_tables()
-
         session_limit = resolve_session_limit(limit, self.session_settings)
+        if session_limit == 0:
+            return []
+
+        await self._ensure_tables()
 
         async def _decode_rows(rows: list[str]) -> list[TResponseInputItem]:
             items: list[TResponseInputItem] = []
@@ -347,9 +349,6 @@ class SQLAlchemySession(SessionABC):
                 )
                 result = await sess.execute(stmt)
                 return await _decode_rows([row[0] for row in result.all()])
-
-            if session_limit == 0:
-                return []
 
             # Expand the fetch window when corrupt rows sit among the newest entries so
             # limit counts valid conversation items, matching pop_item and the SQLite

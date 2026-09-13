@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -237,6 +238,24 @@ async def test_get_items_with_limit(agent: Agent):
     # Negative limit raises ValueError
     with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
         await session.get_items(limit=-1)
+
+
+async def test_get_items_negative_limit_rejects_without_backend_init():
+    """Negative limit must raise ValueError without ensuring tables."""
+    engine = create_async_engine(DB_URL)
+    session = SQLAlchemySession(
+        "uninit_session",
+        engine=engine,
+        create_tables=True,
+    )
+    with patch.object(
+        session, "_ensure_tables", side_effect=AssertionError("_ensure_tables must not be called")
+    ):
+        with pytest.raises(
+            ValueError, match=r"limit must be a non-negative integer or None, got -1"
+        ):
+            await session.get_items(limit=-1)
+    await engine.dispose()
 
 
 async def test_pop_from_empty_session():
