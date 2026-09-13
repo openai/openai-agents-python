@@ -1392,6 +1392,55 @@ def test_keyword_only_docstring_description_takes_precedence_over_annotated():
     assert properties["limit"]["description"] == "Documented limit."
 
 
+def keyword_args_only_google_function(*, limit: int = 10) -> str:
+    """Search the catalog.
+
+    Keyword Args:
+        limit: Max number of results to return.
+    """
+    return f"{limit}"
+
+
+def other_parameters_only_numpy_function(*, limit: int = 10) -> str:
+    """Search the catalog.
+
+    Other Parameters
+    ----------------
+    limit : int
+        Max number of results to return.
+    """
+    return f"{limit}"
+
+
+def keyword_only_sphinx_function(*, limit: int = 10) -> str:
+    """Search the catalog.
+
+    :keyword limit: Max number of results to return.
+    """
+    return f"{limit}"
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        keyword_args_only_google_function,
+        other_parameters_only_numpy_function,
+        keyword_only_sphinx_function,
+    ],
+)
+def test_keyword_only_sections_detected_without_style_override(func):
+    """A tool whose parameters are all keyword-only documents them with nothing but a
+    keyword-only section, so style detection has to recognize that section on its own. NumPy
+    "Other Parameters" does not match the "^Parameters" anchor and sphinx ":keyword" is not
+    ":param", so both used to score zero and fall back to the google parser, which dropped the
+    description for a default function_tool() call that passes no docstring_style."""
+    fs = function_schema(func, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["limit"]["description"] == "Max number of results to return."
+    assert fs.description == "Search the catalog."
+
+
 class _ElementwiseEqual:
     """Mimics numpy-array equality: ``==`` returns a container whose truthiness raises."""
 

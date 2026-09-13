@@ -140,16 +140,27 @@ DocstringStyle = Literal["google", "numpy", "sphinx"]
 def _detect_docstring_style(doc: str) -> DocstringStyle:
     scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
 
-    # Sphinx style detection: look for :param, :type, :return:, and :rtype:
-    sphinx_patterns = [r"^:param\s", r"^:type\s", r"^:return:", r"^:rtype:"]
+    # Sphinx style detection: look for :param, :keyword, :type, :return:, and :rtype:. A tool
+    # whose parameters are all keyword-only can document them with :keyword alone, so that
+    # marker has to count on its own.
+    sphinx_patterns = [
+        r"^:param\s",
+        r"^:(?:key|keyword)\s",
+        r"^:type\s",
+        r"^:return:",
+        r"^:rtype:",
+    ]
     for pattern in sphinx_patterns:
         if re.search(pattern, doc, re.MULTILINE):
             scores["sphinx"] += 1
 
-    # Numpy style detection: look for headers like 'Parameters', 'Returns', or 'Yields' followed by
-    # a dashed underline
+    # Numpy style detection: look for headers like 'Parameters', 'Other Parameters',
+    # 'Returns', or 'Yields' followed by a dashed underline. 'Other Parameters' does not match
+    # the '^Parameters' anchor, so a docstring that only documents keyword-only parameters
+    # needs its own pattern.
     numpy_patterns = [
         r"^Parameters\s*\n\s*-{3,}",
+        r"^Other Parameters\s*\n\s*-{3,}",
         r"^Returns\s*\n\s*-{3,}",
         r"^Yields\s*\n\s*-{3,}",
     ]
