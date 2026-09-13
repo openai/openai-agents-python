@@ -258,6 +258,14 @@ class _PreservingFailingStopSession(_FakeSession):
         raise RuntimeError("stop failed while preserving backend")
 
 
+class _CancelledPreservingStopSession(_FakeSession):
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self._running = False
+        self._backend_preservation_required = True
+        raise asyncio.CancelledError("stop cancelled while preserving backend")
+
+
 def _external_mount_manifest(secret_access_key: str) -> Manifest:
     return Manifest(
         entries={
@@ -902,6 +910,50 @@ async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finis
         if deferred_task is not None and not deferred_task.done():
             with suppress(BaseException):
                 await asyncio.wait_for(deferred_task, timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_session_manager_serializes_preserved_backend_from_non_current_agent() -> None:
+    client = _FakeClient(_FakeSession(Manifest()))
+    preserved_agent = SandboxAgent(
+        name="preserved",
+        model=ScriptedModel(),
+        instructions="Preserved instructions.",
+    )
+    current_agent = SandboxAgent(
+        name="current",
+        model=ScriptedModel(),
+        instructions="Current instructions.",
+    )
+    preserved_session = _PreservingFailingStopSession(Manifest())
+    current_session = _FakeSession(Manifest())
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=preserved_agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=None,
+    )
+    manager.acquire_agent(preserved_agent)
+    manager.acquire_agent(current_agent)
+    manager._resources_by_agent[id(preserved_agent)] = _SandboxSessionResources(
+        session=preserved_session,
+        client=None,
+        owns_session=True,
+    )
+    manager._resources_by_agent[id(current_agent)] = _SandboxSessionResources(
+        session=current_session,
+        client=None,
+        owns_session=True,
+    )
+    manager._current_agent_id = id(current_agent)
+
+    with pytest.raises(RuntimeError, match="stop failed while preserving backend"):
+        await manager.cleanup()
+
+    resume_state = manager.resume_state_after_cleanup_error
+    assert resume_state is not None
+    sessions_by_agent = cast(dict[str, dict[str, object]], resume_state["sessions_by_agent"])
+    assert set(sessions_by_agent) == {preserved_agent.name, current_agent.name}
+    assert manager._acquired_agents == {}
 
 
 @pytest.mark.asyncio
@@ -3317,6 +3369,26 @@ async def test_runner_streamed_keeps_sandbox_resume_state_when_cleanup_preserves
 
     assert events
     assert result.final_output == "done"
+    assert result._sandbox_resume_state is not None
+    assert result._sandbox_resume_state["backend_id"] == "fake"
+    assert result._sandbox_session is None
+    assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_streamed_keeps_resume_state_when_cleanup_is_cancelled() -> None:
+    session = _CancelledPreservingStopSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        instructions="Base instructions.",
+    )
+
+    result = Runner.run_streamed(agent, "hello", run_config=_sandbox_run_config(client))
+    with pytest.raises(asyncio.CancelledError):
+        [event async for event in result.stream_events()]
+
     assert result._sandbox_resume_state is not None
     assert result._sandbox_resume_state["backend_id"] == "fake"
     assert result._sandbox_session is None

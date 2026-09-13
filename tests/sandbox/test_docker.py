@@ -4820,6 +4820,10 @@ async def test_docker_pty_kill_remains_queued_after_cleanup_timeout(
         await asyncio.wait_for(asyncio.to_thread(blocker_started.wait), timeout=0.5)
         await session._kill_pty_pid_path(Path("/tmp/queued.pid"))
         assert container.exec_calls == []
+        await asyncio.sleep(0.05)
+        assert any(not task.done() for task in (session._pty_cleanup_tasks or ())), (
+            "the raw queued executor future must remain tracked"
+        )
 
         release_blocker.set()
 
@@ -4829,6 +4833,7 @@ async def test_docker_pty_kill_remains_queued_after_cleanup_timeout(
 
         await asyncio.wait_for(wait_for_kill(), timeout=0.5)
         _assert_pty_kill_call(container.exec_calls[0])
+        await session._wait_for_tracked_cleanup_tasks(timeout=0.5)
     finally:
         release_blocker.set()
         await asyncio.to_thread(executor.shutdown, True)

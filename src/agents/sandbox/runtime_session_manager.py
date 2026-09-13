@@ -382,7 +382,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         self._track_deferred_cleanup_task(deferred_cleanup_task)
                 if cleanup_error is None:
                     resume_state = self.serialize_resume_state()
-                elif self._current_session_preserves_backend():
+                elif self._any_session_preserves_backend():
                     try:
                         self._resume_state_after_cleanup_error = self.serialize_resume_state()
                     except BaseException:
@@ -399,11 +399,11 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 raise cleanup_error
             return resume_state
 
-    def _current_session_preserves_backend(self) -> bool:
-        if self._current_agent_id is None:
-            return False
-        resources = self._resources_by_agent.get(self._current_agent_id)
-        return resources is not None and resources.backend_preserved_after_cleanup
+    def _any_session_preserves_backend(self) -> bool:
+        return any(
+            resources.backend_preserved_after_cleanup
+            for resources in self._resources_by_agent.values()
+        )
 
     def _track_deferred_cleanup_task(self, task: asyncio.Task[Any]) -> None:
         if task.done():

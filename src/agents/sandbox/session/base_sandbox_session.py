@@ -225,7 +225,7 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
-    _pty_cleanup_tasks: set[asyncio.Task[Any]] | None = None
+    _pty_cleanup_tasks: set[asyncio.Future[Any]] | None = None
     _deferred_dependency_close_task: asyncio.Task[Any] | None = None
     # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
     # cleanup must retain the backend in that case so it can be resumed instead of deleting the
@@ -870,14 +870,14 @@ class BaseSandboxSession(abc.ABC):
             return float(timeout)
         return _DEFAULT_PTY_CLEANUP_TIMEOUT_S
 
-    def _track_pty_cleanup_task(self, task: asyncio.Task[Any]) -> None:
+    def _track_pty_cleanup_task(self, task: asyncio.Future[Any]) -> None:
         tasks = self._pty_cleanup_tasks
         if tasks is None:
             tasks = set()
             self._pty_cleanup_tasks = tasks
         tasks.add(task)
 
-        def forget_task(done: asyncio.Task[Any]) -> None:
+        def forget_task(done: asyncio.Future[Any]) -> None:
             tasks.discard(done)
             if not done.cancelled():
                 done.exception()

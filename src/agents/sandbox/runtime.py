@@ -129,7 +129,7 @@ class SandboxRuntime(Generic[TContext]):
                         )
                     try:
                         payload = await self.cleanup()
-                    except Exception:
+                    except BaseException:
                         result._sandbox_resume_state = self.resume_state_after_cleanup_error
                         raise
                     else:

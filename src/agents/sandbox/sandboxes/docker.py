@@ -100,11 +100,6 @@ _DEFERRED_CLEANUP_TIMEOUT_S = 30.0
 _PTY_CLEANUP_TIMEOUT_S = 5.0
 
 
-def _consume_future_exception(future: asyncio.Future[Any]) -> None:
-    if not future.cancelled():
-        future.exception()
-
-
 def _measure_stream(stream: io.IOBase) -> tuple[int, io.IOBase, io.IOBase | None]:
     """Return ``(length, readable_stream, spool_to_close)`` for a length-framed write.
 
@@ -587,7 +582,7 @@ class DockerSandboxSession(BaseSandboxSession):
             exec_result = await asyncio.wait_for(wait_target, timeout=timeout)
         except asyncio.TimeoutError as e:
             if keep_running_on_timeout and not future.done():
-                future.add_done_callback(_consume_future_exception)
+                self._track_pty_cleanup_task(future)
             if kill_on_timeout:
                 # Best-effort: kill processes matching the command line.
                 # If this fails, the caller still gets a timeout error.
