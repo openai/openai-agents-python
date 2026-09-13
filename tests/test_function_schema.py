@@ -1271,6 +1271,127 @@ def test_variadic_param_descriptions_preserved(func, style):
     assert properties["kwargs"]["description"] == "Extra options."
 
 
+def keyword_args_google_function(query: str, *, limit: int = 10) -> str:
+    """Search the catalog.
+
+    Args:
+        query: What to search for.
+
+    Keyword Args:
+        limit: Max number of results to return.
+    """
+    return f"{query} {limit}"
+
+
+def keyword_arguments_google_function(query: str, *, limit: int = 10) -> str:
+    """Search the catalog.
+
+    Args:
+        query: What to search for.
+
+    Keyword Arguments:
+        limit: Max number of results to return.
+    """
+    return f"{query} {limit}"
+
+
+def other_parameters_numpy_function(query: str, *, limit: int = 10) -> str:
+    """Search the catalog.
+
+    Parameters
+    ----------
+    query : str
+        What to search for.
+
+    Other Parameters
+    ----------------
+    limit : int
+        Max number of results to return.
+    """
+    return f"{query} {limit}"
+
+
+def keyword_args_sphinx_function(query: str, *, limit: int = 10) -> str:
+    """Search the catalog.
+
+    :param query: What to search for.
+    :keyword limit: Max number of results to return.
+    """
+    return f"{query} {limit}"
+
+
+@pytest.mark.parametrize(
+    "func,style",
+    [
+        (keyword_args_google_function, "google"),
+        (keyword_arguments_google_function, "google"),
+        (other_parameters_numpy_function, "numpy"),
+        (keyword_args_sphinx_function, "sphinx"),
+    ],
+)
+def test_keyword_only_param_descriptions_preserved(func, style):
+    """Google ("Keyword Args:"/"Keyword Arguments:") and NumPy ("Other Parameters") document
+    keyword-only parameters in a section that griffe reports as other parameters rather than
+    parameters. Those descriptions must reach the JSON schema, matching the sphinx ``:keyword:``
+    form that griffe folds into the parameters section."""
+    fs = function_schema(func, docstring_style=style, strict_json_schema=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["query"]["description"] == "What to search for."
+    assert properties["limit"]["description"] == "Max number of results to return."
+
+
+def starred_keyword_args_google_function(x: int, **options: str) -> str:
+    """Add numbers to a base.
+
+    Args:
+        x: The base value.
+
+    Keyword Args:
+        **options: Extra options.
+    """
+    return f"{x} {options}"
+
+
+def test_starred_keyword_only_param_descriptions_preserved():
+    """griffe returns variadic names verbatim ("**options") from a keyword-only section too, so
+    the stars must still be stripped for the lookup by signature parameter name to succeed."""
+    fs = function_schema(
+        starred_keyword_args_google_function, docstring_style="google", strict_json_schema=False
+    )
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["x"]["description"] == "The base value."
+    assert properties["options"]["description"] == "Extra options."
+
+
+def annotated_keyword_args_google_function(
+    x: Annotated[int, "Annotated base."], *, limit: Annotated[int, "Annotated limit."] = 10
+) -> str:
+    """Add numbers to a base.
+
+    Args:
+        x: Documented base.
+
+    Keyword Args:
+        limit: Documented limit.
+    """
+    return f"{x} {limit}"
+
+
+def test_keyword_only_docstring_description_takes_precedence_over_annotated():
+    """A docstring description already wins over an ``Annotated`` one for a regular parameter.
+    A keyword-only parameter documented in a keyword-only section must resolve the same way,
+    rather than falling back to its ``Annotated`` metadata."""
+    fs = function_schema(
+        annotated_keyword_args_google_function, docstring_style="google", strict_json_schema=False
+    )
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["x"]["description"] == "Documented base."
+    assert properties["limit"]["description"] == "Documented limit."
+
+
 class _ElementwiseEqual:
     """Mimics numpy-array equality: ``==`` returns a container whose truthiness raises."""
 
