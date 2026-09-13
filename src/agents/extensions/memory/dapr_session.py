@@ -48,7 +48,7 @@ from ...logger import (
     log_model_and_tool_action_warning,
     logger,
 )
-from ...memory.session import SessionABC
+from ...memory.session import SessionABC, _await_mutation
 from ...memory.session_settings import (
     SessionSettings,
     coerce_session_settings,
@@ -495,18 +495,21 @@ class DaprSession(SessionABC):
         """Clear all items for this session."""
         async with self._lock:
             self._check_not_closed()
-            # Delete messages and metadata keys
-            await self._dapr_client.delete_state(
-                store_name=self._state_store_name,
-                key=self._messages_key,
-                options=self._get_state_options(),
-            )
 
-            await self._dapr_client.delete_state(
-                store_name=self._state_store_name,
-                key=self._metadata_key,
-                options=self._get_state_options(),
-            )
+            async def delete_session_state() -> None:
+                # Delete messages and metadata keys as one cancellation-settled mutation.
+                await self._dapr_client.delete_state(
+                    store_name=self._state_store_name,
+                    key=self._messages_key,
+                    options=self._get_state_options(),
+                )
+                await self._dapr_client.delete_state(
+                    store_name=self._state_store_name,
+                    key=self._metadata_key,
+                    options=self._get_state_options(),
+                )
+
+            await _await_mutation(delete_session_state())
 
     async def close(self) -> None:
         """Close the Dapr client connection.

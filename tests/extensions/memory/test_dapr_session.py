@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import Mock
@@ -225,6 +226,45 @@ async def test_dapr_session_direct_ops(fake_dapr_client: FakeDaprClient):
 
     finally:
         await session.close()
+
+
+async def test_clear_session_waits_for_metadata_delete_after_cancellation(
+    fake_dapr_client: FakeDaprClient,
+):
+    """A cancelled clear must settle both state-key deletes before propagating."""
+    session = DaprSession(
+        session_id="clear_cancelled",
+        state_store_name="statestore",
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
+    )
+    fake_dapr_client._state[session._messages_key] = b"[]"
+    fake_dapr_client._state[session._metadata_key] = b'{"created_at":"old"}'
+
+    delete_started = asyncio.Event()
+    release_messages_delete = asyncio.Event()
+    original_delete_state = fake_dapr_client.delete_state
+
+    async def controlled_delete_state(*, store_name: str, key: str, options: Any = None) -> None:
+        if key == session._messages_key:
+            fake_dapr_client._state.pop(key, None)
+            delete_started.set()
+            await release_messages_delete.wait()
+            return
+        await original_delete_state(store_name=store_name, key=key, options=options)
+
+    fake_dapr_client.delete_state = controlled_delete_state  # type: ignore[method-assign]
+    clear_task = asyncio.create_task(session.clear_session())
+
+    await delete_started.wait()
+    clear_task.cancel("caller-cancelled")
+    await asyncio.sleep(0)
+    release_messages_delete.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await clear_task
+
+    assert session._messages_key not in fake_dapr_client._state
+    assert session._metadata_key not in fake_dapr_client._state
 
 
 async def test_runner_integration(agent: Agent, fake_dapr_client: FakeDaprClient):
