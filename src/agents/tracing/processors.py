@@ -339,7 +339,9 @@ class BackendSpanExporter(TracingExporter):
             serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             return self._OPENAI_TRACING_MAX_FIELD_BYTES + 1
-        return len(serialized.encode("utf-8"))
+        # Unpaired surrogates can't be UTF-8 encoded; export replaces each with "?" later,
+        # so count them as that one byte instead of raising.
+        return len(serialized.encode("utf-8", "replace"))
 
     def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
         value_size = self._value_json_size_bytes(value)

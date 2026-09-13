@@ -19,7 +19,12 @@ from agents.tracing import flush_traces, get_trace_provider
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
-from agents.tracing.span_data import AgentSpanData, CustomSpanData
+from agents.tracing.span_data import (
+    AgentSpanData,
+    CustomSpanData,
+    FunctionSpanData,
+    GenerationSpanData,
+)
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace, TraceImpl
 
@@ -971,6 +976,45 @@ def test_backend_span_exporter_keeps_batch_when_a_string_has_an_unpaired_surroga
     assert received == [
         clean_trace.export(),
         {**cast(dict[str, Any], bad_trace.export()), "metadata": {"note": "x?y", "ok": "x"}},
+    ]
+    exporter.close()
+
+
+@pytest.mark.parametrize(
+    ("span_data", "repaired"),
+    [
+        (
+            FunctionSpanData(name="lookup", input="x\ud800y", output="x\ud800y"),
+            {"input": "x?y", "output": "x?y"},
+        ),
+        (
+            GenerationSpanData(input=[{"content": "x\ud800y"}], output=[{"content": "x\ud800y"}]),
+            {"input": [{"content": "x?y"}], "output": [{"content": "x?y"}]},
+        ),
+    ],
+    ids=["function", "generation"],
+)
+def test_backend_span_exporter_keeps_openai_batch_when_span_io_has_an_unpaired_surrogate(
+    span_data: Any, repaired: dict[str, Any]
+):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="io_span_id",
+        parent_id=None,
+        processor=mock_processor(),
+        span_data=span_data,
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, span])
+
+    exported_span = cast(dict[str, Any], span.export())
+    assert received == [
+        clean_trace.export(),
+        {**exported_span, "span_data": {**exported_span["span_data"], **repaired}},
     ]
     exporter.close()
 
