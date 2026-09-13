@@ -295,6 +295,38 @@ class TestOpenAIResponsesCompactionSession:
             underlying.close()
 
     @pytest.mark.asyncio
+    async def test_clear_session_invalidates_response_chain(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "remove me"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        # Seed deferred work through the runner's compaction hook.
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        await session.clear_session()
+        assert await session.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+        assert session._get_deferred_compaction_response_id() is None
+        assert session._last_unstored_response_id is None
+
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:
         mock_session = self.create_mock_session()
         mock_session.get_items.return_value = [{"type": "message", "content": "test"}]
