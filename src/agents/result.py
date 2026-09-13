@@ -150,6 +150,9 @@ def _populate_state_from_result(
         state._pending_input = copy.deepcopy(source_state._pending_input)
         state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
+        # A streamed result exists before its terminal append does, so a checkpoint taken from a
+        # failed stream has to keep the fail-closed marker or it would look resumable.
+        state._terminal_unrecoverable = source_state._terminal_unrecoverable
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
         state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))
@@ -693,6 +696,21 @@ class RunResultStreaming(RunResultBase):
     )
     _sandbox_cleanup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _sandbox_cleanup_callback_registered: bool = field(default=False, init=False, repr=False)
+    _sandbox_wrapped_run_loop_task: asyncio.Task[Any] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _model_provider_cleanup: Callable[[], Awaitable[None]] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _model_provider_cleanup_task: asyncio.Task[None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
         self._current_agent_ref = weakref.ref(self.current_agent)
@@ -757,6 +775,7 @@ class RunResultStreaming(RunResultBase):
             return
 
         original_task = self.run_loop_task
+        self._sandbox_wrapped_run_loop_task = original_task
         self._sandbox_cleanup_callback_registered = True
         original_task.add_done_callback(
             lambda _task: asyncio.create_task(self._run_sandbox_cleanup())
@@ -784,9 +803,49 @@ class RunResultStreaming(RunResultBase):
             await self._run_sandbox_cleanup()
             return result
 
-        self.run_loop_task = asyncio.create_task(
+        cleanup_wrapper_task = asyncio.create_task(
             _await_data_redacted_error_boundary(_await_run_and_cleanup)
         )
+
+        def cancel_original_if_wrapper_cancelled(task: asyncio.Task[Any]) -> None:
+            # A task cancelled before its first event-loop step cannot enter its coroutine body.
+            if task.cancelled() and not original_task.done():
+                original_task.cancel()
+
+        cleanup_wrapper_task.add_done_callback(cancel_original_if_wrapper_cancelled)
+        self.run_loop_task = cleanup_wrapper_task
+
+    def _ensure_model_provider_cleanup_on_completion(
+        self,
+        cleanup: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Register one cleanup task that also starts if the run task never enters its body."""
+        self._model_provider_cleanup = cleanup
+        if self.run_loop_task is not None:
+            self.run_loop_task.add_done_callback(lambda _task: self._start_model_provider_cleanup())
+
+    def _start_model_provider_cleanup(self) -> asyncio.Task[None] | None:
+        task = self._model_provider_cleanup_task
+        if task is not None:
+            return task
+
+        cleanup = self._model_provider_cleanup
+        if cleanup is None:
+            return None
+
+        self._model_provider_cleanup = None
+
+        async def run_cleanup() -> None:
+            await cleanup()
+
+        task = asyncio.create_task(run_cleanup())
+        self._model_provider_cleanup_task = task
+        return task
+
+    async def _await_model_provider_cleanup(self) -> None:
+        task = self._start_model_provider_cleanup()
+        if task is not None:
+            await asyncio.shield(task)
 
     @property
     def run_loop_exception(self) -> BaseException | None:
@@ -1003,6 +1062,7 @@ class RunResultStreaming(RunResultBase):
                     self._cleanup_tasks()
 
                 if not cancelled:
+                    await self._await_model_provider_cleanup()
                     await self._run_sandbox_cleanup()
             finally:
                 # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
@@ -1092,6 +1152,9 @@ class RunResultStreaming(RunResultBase):
     def _cleanup_tasks(self):
         if self.run_loop_task and not self.run_loop_task.done():
             self.run_loop_task.cancel()
+
+        if self._sandbox_wrapped_run_loop_task and not self._sandbox_wrapped_run_loop_task.done():
+            self._sandbox_wrapped_run_loop_task.cancel()
 
         if self._input_guardrails_task and not self._input_guardrails_task.done():
             self._input_guardrails_task.cancel()

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import threading
 import warnings as warnings_module
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +20,7 @@ from openai.types.responses.response_usage import (
 
 import agents._debug as _debug
 from agents import Agent, Runner
-from agents.items import TResponseInputItem
+from agents.items import MessageOutputItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionSession,
     Session,
@@ -30,11 +34,17 @@ from agents.memory.openai_responses_compaction_session import (
     is_openai_model_name,
     select_compaction_candidate_items,
 )
+from agents.run_context import RunContextWrapper
 from agents.run_internal.items import (
     TOOL_CALL_SESSION_DESCRIPTION_KEY,
     TOOL_CALL_SESSION_TITLE_KEY,
 )
-from agents.testing import ScriptedModel
+from agents.run_internal.session_persistence import (
+    prepare_input_with_session,
+    save_result_to_session,
+)
+from agents.run_state import RunState
+from agents.testing import ModelStep, ScriptedModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
 
@@ -150,6 +160,139 @@ class TestOpenAIResponsesCompactionSession:
         await session.add_items(items)
 
         mock_session.add_items.assert_called_once_with(items)
+
+    @pytest.mark.asyncio
+    async def test_pop_item_invalidates_response_chain(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "remove me"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        # Seed deferred work through the runner's compaction hook.
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        assert await session.pop_item() == item
+        assert await session.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+        assert session._get_deferred_compaction_response_id() is None
+        assert session._last_unstored_response_id is None
+
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
+    async def test_empty_pop_preserves_response_chain(self) -> None:
+        underlying = self.create_mock_session()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        assert await session.pop_item() is None
+
+        assert session._get_deferred_compaction_response_id() == "resp-old"
+        assert session._last_unstored_response_id == "resp-old"
+        await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-old"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["cancelled", "error"])
+    async def test_settled_pop_failure_invalidates_response_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        # Gate the real SQLite commit acknowledgement so cancellation cannot undo the pop.
+        committed = threading.Event()
+        allow_return = threading.Event()
+
+        class PausingCommitConnection(sqlite3.Connection):
+            pause_commit = True
+
+            def commit(self) -> None:
+                super().commit()
+                if self.pause_commit:
+                    self.pause_commit = False
+                    committed.set()
+                    assert allow_return.wait(timeout=10)
+                    if outcome == "error":
+                        raise RuntimeError("commit acknowledgement failed")
+
+        underlying = SQLiteSession("settled-pop", tmp_path / "settled-pop.db")
+        history: list[TResponseInputItem] = [
+            {"role": "user", "content": "keep me"},
+            {"role": "assistant", "content": "remove me"},
+        ]
+        await underlying.add_items(history)
+        connection = sqlite3.connect(
+            str(tmp_path / "settled-pop.db"),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with underlying._connections_lock:
+            underlying._connections.add(connection)
+        monkeypatch.setattr(underlying, "_get_connection", lambda: connection)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            session_id="settled-pop",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+        mutation = asyncio.create_task(session.pop_item())
+        try:
+            assert await asyncio.to_thread(committed.wait, 10)
+            if outcome == "cancelled":
+                mutation.cancel()
+            allow_return.set()
+            if outcome == "cancelled":
+                with pytest.raises(asyncio.CancelledError):
+                    await mutation
+            else:
+                with pytest.raises(RuntimeError, match="commit acknowledgement failed"):
+                    await mutation
+
+            assert await session.get_items() == history[:1]
+            assert not session._mutation_lock.locked()
+            with pytest.raises(ValueError, match="requires a response_id"):
+                await session.run_compaction({"force": True})
+            mock_client.responses.compact.assert_not_awaited()
+            assert session._get_deferred_compaction_response_id() is None
+            assert session._last_unstored_response_id is None
+            assert await underlying.get_items() == history[:1]
+        finally:
+            allow_return.set()
+            if not mutation.done():
+                mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+            underlying.close()
 
     @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:
@@ -1700,6 +1843,313 @@ class TestStripOrphanedAssistantIds:
         result = _strip_orphaned_assistant_ids(items)
         for item in result:
             assert "id" not in item
+
+
+class TestCompactionMutationSerialization:
+    @pytest.mark.asyncio
+    async def test_resumed_save_carries_generation_into_compaction(self) -> None:
+        """A resumed append uses the same ownership handoff as a fresh save."""
+        underlying = SimpleListSession()
+        client = MagicMock()
+        client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+        resumed_persisted = asyncio.Event()
+        release_resumed = asyncio.Event()
+        add_calls = 0
+
+        class PausingCompactionSession(OpenAIResponsesCompactionSession):
+            async def _add_items_with_generation(
+                self,
+                write_items: Callable[[], Awaitable[None]],
+                *,
+                expected_generation: int | None,
+            ) -> int | None:
+                nonlocal add_calls
+                generation = await super()._add_items_with_generation(
+                    write_items,
+                    expected_generation=expected_generation,
+                )
+                add_calls += 1
+                if add_calls == 1:
+                    resumed_persisted.set()
+                    await release_resumed.wait()
+                return generation
+
+        session = PausingCompactionSession(
+            session_id="resumed-interleaved-persist",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp-a",
+        )
+        agent = Agent(name="worker-a")
+        wrapper = RunContextWrapper(context=None)
+        state: RunState[Any] = RunState(
+            context=wrapper,
+            original_input=[],
+            starting_agent=agent,
+        )
+        resumed_item = MessageOutputItem(agent=agent, raw_item=get_text_message("run-A"))
+        await prepare_input_with_session([], session, None, wrapper=wrapper)
+
+        resumed_save = asyncio.create_task(
+            save_result_to_session(
+                session,
+                [],
+                [resumed_item],
+                state,
+                response_id="resp-a",
+                wrapper=wrapper,
+                resumed_write_state=state,
+            )
+        )
+        await asyncio.wait_for(resumed_persisted.wait(), timeout=1)
+        await asyncio.wait_for(
+            Runner.run(
+                Agent(
+                    name="worker-b",
+                    model=ScriptedModel(
+                        steps=[
+                            ModelStep(
+                                output=[get_text_message("run-B")],
+                                response_id="resp-b",
+                            )
+                        ]
+                    ),
+                ),
+                "input-B",
+                session=session,
+            ),
+            timeout=1,
+        )
+        release_resumed.set()
+        await resumed_save
+
+        client.responses.compact.assert_not_awaited()
+        stored = str(await underlying.get_items())
+        assert "run-A" in stored
+        assert "run-B" in stored
+
+    @pytest.mark.asyncio
+    async def test_runner_skips_compaction_after_interleaved_model_wait(self) -> None:
+        """A later run that completes during A's model wait revokes A's replacement."""
+        underlying = SimpleListSession()
+        client = MagicMock()
+        client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+        model_entered = asyncio.Event()
+        release_model = asyncio.Event()
+
+        async def respond_after_b(_: Any) -> ModelStep:
+            model_entered.set()
+            await release_model.wait()
+            return ModelStep(output=[get_text_message("run-A")], response_id="resp-a")
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="interleaved-model-wait",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp-a",
+        )
+        run_a = asyncio.create_task(
+            Runner.run(
+                Agent(
+                    name="worker-a",
+                    model=ScriptedModel(steps=[ModelStep.respond(respond_after_b)]),
+                ),
+                "input-A",
+                session=session,
+            )
+        )
+        await asyncio.wait_for(model_entered.wait(), timeout=1)
+        await asyncio.wait_for(
+            Runner.run(
+                Agent(
+                    name="worker-b",
+                    model=ScriptedModel(
+                        steps=[
+                            ModelStep(
+                                output=[get_text_message("run-B")],
+                                response_id="resp-b",
+                            )
+                        ]
+                    ),
+                ),
+                "input-B",
+                session=session,
+            ),
+            timeout=1,
+        )
+        release_model.set()
+        await run_a
+
+        client.responses.compact.assert_not_awaited()
+        stored = str(await underlying.get_items())
+        assert "run-A" in stored
+        assert "run-B" in stored
+
+    @pytest.mark.asyncio
+    async def test_runner_skips_compaction_after_interleaved_persist(self) -> None:
+        """A later Runner append between save and compact revokes replacement."""
+        underlying = SimpleListSession()
+        client = MagicMock()
+        client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+        run_a_persisted = asyncio.Event()
+        release_run_a = asyncio.Event()
+        add_calls = 0
+
+        class PausingCompactionSession(OpenAIResponsesCompactionSession):
+            async def _add_items_with_generation(
+                self,
+                write_items: Callable[[], Awaitable[None]],
+                *,
+                expected_generation: int | None,
+            ) -> int | None:
+                nonlocal add_calls
+                generation = await super()._add_items_with_generation(
+                    write_items,
+                    expected_generation=expected_generation,
+                )
+                add_calls += 1
+                if add_calls == 2:
+                    run_a_persisted.set()
+                    await release_run_a.wait()
+                return generation
+
+        session = PausingCompactionSession(
+            session_id="interleaved-persist",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp-a",
+        )
+
+        run_a = asyncio.create_task(
+            Runner.run(
+                Agent(
+                    name="worker-a",
+                    model=ScriptedModel(
+                        steps=[
+                            ModelStep(
+                                output=[get_text_message("run-A")],
+                                response_id="resp-a",
+                            )
+                        ]
+                    ),
+                ),
+                "input-A",
+                session=session,
+            )
+        )
+        await asyncio.wait_for(run_a_persisted.wait(), timeout=1)
+        await asyncio.wait_for(
+            Runner.run(
+                Agent(
+                    name="worker-b",
+                    model=ScriptedModel(
+                        steps=[
+                            ModelStep(
+                                output=[get_text_message("run-B")],
+                                response_id="resp-b",
+                            )
+                        ]
+                    ),
+                ),
+                "input-B",
+                session=session,
+            ),
+            timeout=1,
+        )
+        release_run_a.set()
+        await run_a
+
+        client.responses.compact.assert_not_awaited()
+        stored = str(await underlying.get_items())
+        assert "run-A" in stored
+        assert "run-B" in stored
+
+    @pytest.mark.asyncio
+    async def test_add_waits_for_in_flight_compaction_and_survives(self) -> None:
+        old_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+        concurrent_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "user", "content": "concurrent"},
+        )
+        compacted_item = cast(
+            TResponseInputItem,
+            {"type": "compaction", "summary": "compacted"},
+        )
+        underlying = SimpleListSession(history=[old_item])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+
+        async def compact(**_: Any) -> SimpleNamespace:
+            compact_entered.set()
+            await release_compact.wait()
+            return SimpleNamespace(output=[compacted_item])
+
+        client = MagicMock()
+        client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="serialized-add",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="input",
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await compact_entered.wait()
+        add_task = asyncio.create_task(session.add_items([concurrent_item]))
+        await asyncio.sleep(0)
+        assert not add_task.done()
+
+        release_compact.set()
+        await compaction_task
+        await add_task
+
+        assert await underlying.get_items() == [compacted_item, concurrent_item]
+
+    @pytest.mark.asyncio
+    async def test_clear_waits_for_in_flight_compaction_and_stays_empty(self) -> None:
+        old_item = cast(
+            TResponseInputItem,
+            {"type": "message", "role": "assistant", "content": "old"},
+        )
+        compacted_item = cast(
+            TResponseInputItem,
+            {"type": "compaction", "summary": "compacted"},
+        )
+        underlying = SimpleListSession(history=[old_item])
+        compact_entered = asyncio.Event()
+        release_compact = asyncio.Event()
+
+        async def compact(**_: Any) -> SimpleNamespace:
+            compact_entered.set()
+            await release_compact.wait()
+            return SimpleNamespace(output=[compacted_item])
+
+        client = MagicMock()
+        client.responses.compact = AsyncMock(side_effect=compact)
+        session = OpenAIResponsesCompactionSession(
+            session_id="serialized-clear",
+            underlying_session=underlying,
+            client=client,
+            compaction_mode="input",
+        )
+
+        compaction_task = asyncio.create_task(session.run_compaction({"force": True}))
+        await compact_entered.wait()
+        clear_task = asyncio.create_task(session.clear_session())
+        await asyncio.sleep(0)
+        assert not clear_task.done()
+
+        release_compact.set()
+        await compaction_task
+        await clear_task
+
+        assert await underlying.get_items() == []
 
 
 class TestCompactionStripsOrphanedIds:

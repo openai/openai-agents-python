@@ -1895,15 +1895,23 @@ class AdvancedSQLiteSession(SQLiteSession):
             branch_id: The branch the turn was read from. Defaults to the current
                 branch when not provided.
             turn_anchor: The id of the turn's first ``message_structure`` row,
-                captured when the turn was read. When provided, the write is
-                skipped unless that exact row still exists for the given
-                branch/turn, so usage is never recorded against a turn that was
-                removed — even if a new turn reused the same numeric id. Because
-                the check is scoped to this branch/turn, unrelated removals (e.g.
-                delete_branch on another branch) do not drop this write.
+                captured when the turn was read. The write is skipped unless that
+                exact row still exists for the given branch/turn, so usage is
+                never recorded against a turn that was removed — even if a new
+                turn reused the same numeric id. Because the check is scoped to
+                this branch/turn, unrelated removals (e.g. delete_branch on
+                another branch) do not drop this write. ``None`` means the branch
+                had no turn when it was read, so there is nothing to attribute
+                the usage to and the write is skipped.
         """
 
         target_branch = branch_id if branch_id is not None else self._current_branch_id
+
+        if turn_anchor is None:
+            # ``_capture_current_turn`` returns no anchor only when the branch has no
+            # turn rows; recording usage would invent a phantom turn 0.
+            self._logger.debug("Skipping usage store: no current turn on branch %r", target_branch)
+            return
 
         def _update_sync():
             """Synchronous helper to update turn usage data."""

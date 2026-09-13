@@ -1,6 +1,6 @@
 ---
 name: runtime-behavior-probe
-description: Plan and, after explicit approval, execute runtime-behavior probes for local or live integrations. Use only when explicitly invoked to verify behavior that code review and normal tests cannot settle; define a controlled validation matrix and report observed evidence.
+description: Plan controlled runtime probes when explicitly invoked; execute only after the required probe approval.
 ---
 
 # Runtime Behavior Probe

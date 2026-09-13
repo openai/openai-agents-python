@@ -131,7 +131,8 @@ def _create_owner_bearing_structure_tables(
 
 
 def _multiprocessing_context() -> Any:
-    method = "spawn" if sys.platform == "win32" else "forkserver"
+    # Spawn avoids the forkserver's Unix listener, which macOS sandboxes can deny.
+    method = "spawn" if sys.platform in {"win32", "darwin"} else "forkserver"
     return multiprocessing.get_context(method)
 
 
@@ -3438,6 +3439,46 @@ async def test_store_run_usage_survives_unrelated_branch_deletion(usage_data: Us
         turn_2_usage = await session.get_turn_usage(2)
         assert isinstance(turn_2_usage, dict)
         assert turn_2_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        session.close()
+
+
+async def test_store_run_usage_skips_when_current_branch_has_no_turn(usage_data: Usage):
+    """A branch without any turn rows has no turn to attribute a run's usage to, so
+    store_run_usage skips the write instead of recording a phantom turn 0.
+    """
+    session = AdvancedSQLiteSession(session_id="usage_no_turn_test", create_tables=True)
+
+    try:
+        # A fresh session has no turn on the current branch.
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert await session.get_turn_usage() == []
+
+        # A branch whose only turn was popped away has no turn either.
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        await session.pop_item()
+        await session.pop_item()
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert _count_rows(session, "turn_usage") == 0
+
+        # Once a real turn exists, usage is recorded against it.
+        await session.add_items([{"role": "user", "content": "u2"}])
+        second_usage = Usage(requests=2, input_tokens=20, output_tokens=5, total_tokens=25)
+        await session.store_run_usage(create_mock_run_result(second_usage))
+        session_usage = await session.get_session_usage()
+        assert session_usage is not None
+        assert session_usage["requests"] == 2
+        assert session_usage["total_turns"] == 1
+        turn_usage = await session.get_turn_usage()
+        assert isinstance(turn_usage, list)
+        assert [row["user_turn_number"] for row in turn_usage] == [1]
     finally:
         session.close()
 

@@ -18,8 +18,8 @@ POLICY = ROOT / "tests" / "fixtures" / "released_api_contract_policy.json"
 
 sys.path.insert(0, str(ROOT))
 
-from integration_tests._contract_support import (  # noqa: E402
-    build_released_api_contract,
+from integration_tests._contract_support import build_released_api_contract  # noqa: E402
+from integration_tests._contract_surface import (  # noqa: E402
     load_api_contract,
     load_submodule_export_policy,
 )

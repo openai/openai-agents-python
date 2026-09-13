@@ -332,7 +332,8 @@ class ReviewStateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HEAD does not match.*vendor/dependency"):
             review_state(self.repo, self.base, ("vendor/dependency",))
 
-        self._git("add", "vendor/dependency")
+        # Stage the new gitlink even though the fixture intentionally ignores this submodule.
+        self._git("add", "--force", "vendor/dependency")
         clean_state = review_state(self.repo, self.base, ("vendor/dependency",))
 
         self.assertEqual(

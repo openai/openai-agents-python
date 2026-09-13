@@ -9,12 +9,15 @@ if sys.platform == "win32":  # pragma: no cover
 import asyncio
 import errno
 import fcntl
+import inspect
 import io
+import json
 import logging
 import os
 import shlex
 import shutil
 import signal
+import subprocess
 import tarfile
 import tempfile
 import termios
@@ -69,7 +72,11 @@ from ..util.tar_utils import (
     should_skip_tar_member,
 )
 from ..workspace_paths import _raise_if_filesystem_root
+from . import _unix_local_file_ops
+from ._unix_local_files import _UnixLocalFiles
 
+# Capture installed SDK code at import, before a session can run workspace processes.
+_USER_FILE_WORKER_SOURCE = inspect.getsource(_unix_local_file_ops)
 _DEFAULT_WORKSPACE_PREFIX = "sandbox-local-"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 _PTY_READ_CHUNK_BYTES = 16_384
@@ -156,6 +163,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     """
     Unix-only session implementation that runs commands on the host and uses the host filesystem
     as the workspace (rooted at `self.state.manifest.root`).
+
+    User-scoped listing and writing require sudo access to a system python3 and its standard
+    library. These operations run a trusted file worker in Python isolated mode, independently
+    of the application's interpreter or virtual environment.
     """
 
     state: UnixLocalSandboxSessionState
@@ -174,6 +185,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self._reserved_pty_process_ids = set()
         self._fd_close_tasks = set()
         self._host_environment_allowlist = None
+        self._files = _UnixLocalFiles(state.manifest)
 
     @classmethod
     def from_state(cls, state: UnixLocalSandboxSessionState) -> "UnixLocalSandboxSession":
@@ -354,7 +366,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     env=env,
                     preexec_fn=_preexec,
                 )
-            except Exception:
+            except BaseException:
                 with suppress(OSError):
                     os.close(primary_fd)
                 with suppress(OSError):
@@ -400,7 +412,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -410,6 +422,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -442,7 +455,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms, input_empty=chars == ""
@@ -455,6 +468,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -533,7 +547,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
+    ) -> tuple[bytes, int | None, bool]:
         return await collect_pty_output(
             output_chunks=entry.output_chunks,
             output_lock=entry.output_lock,
@@ -550,8 +564,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         entry: _UnixPtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code: int | None = entry.process.returncode
+        exit_code: int | None = entry.process.returncode if output_closed else None
         live_process_id: int | None = process_id
 
         if exit_code is not None:
@@ -574,7 +589,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             return None
 
         meta = [
-            (process_id, entry.last_used, entry.process.returncode is not None)
+            (process_id, entry.last_used, entry.output_closed.is_set())
             for process_id, entry in self._pty_processes.items()
         ]
         process_id = process_id_to_prune_from_meta(meta)
@@ -888,6 +903,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         return "/", rewritten
 
     def normalize_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        self._files.configure(self.state.manifest)
         policy = self._workspace_path_policy()
         return policy.normalize_path(path, for_write=for_write, resolve_symlinks=True)
 
@@ -897,13 +913,44 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> list[FileEntry]:
-        if user is not None:
-            return await super().ls(path, user=user)
-
         normalized = self.normalize_path(path)
+        if user is not None:
+            command = ("ls", "-la", "--", str(normalized))
+            try:
+                result = await self._run_file_operation_as_user("ls", normalized, user=user)
+            except OSError as e:
+                raise ExecNonZeroError(
+                    ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                    command=command,
+                    cause=e,
+                ) from e
+            if result.returncode:
+                raise ExecNonZeroError(
+                    ExecResult(
+                        stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+                    ),
+                    command=command,
+                )
+            return [
+                FileEntry(
+                    path=entry["path"],
+                    permissions=Permissions.from_mode(entry["mode"]).model_copy(
+                        update={"directory": entry["kind"] == "directory"}
+                    ),
+                    owner=entry["owner"],
+                    group=entry["group"],
+                    size=entry["size"],
+                    kind=EntryKind(entry["kind"]),
+                )
+                for entry in json.loads(result.stdout)
+            ]
+
         command = ("ls", "-la", "--", str(normalized))
         try:
-            with os.scandir(normalized) as entries:
+            with (
+                self._files.directory(normalized) as directory_fd,
+                os.scandir(directory_fd) as entries,
+            ):
                 listed: list[FileEntry] = []
                 for entry in entries:
                     stat_result = entry.stat(follow_symlinks=False)
@@ -917,7 +964,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                         kind = EntryKind.OTHER
                     listed.append(
                         FileEntry(
-                            path=entry.path,
+                            path=str(normalized / entry.name),
                             permissions=Permissions.from_mode(stat_result.st_mode),
                             owner=str(stat_result.st_uid),
                             group=str(stat_result.st_gid),
@@ -945,7 +992,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         else:
             normalized = self.normalize_path(path, for_write=True)
         try:
-            normalized.mkdir(parents=parents, exist_ok=True)
+            self._files.mkdir(normalized, parents=parents)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
@@ -961,13 +1008,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         else:
             normalized = self.normalize_path(path, for_write=True)
         try:
-            if normalized.is_dir() and not normalized.is_symlink():
-                if recursive:
-                    await run_blocking_workspace_io(shutil.rmtree, normalized)
-                else:
-                    normalized.rmdir()
+            if recursive:
+                await run_blocking_workspace_io(partial(self._files.rm, normalized, recursive=True))
             else:
-                normalized.unlink()
+                self._files.rm(normalized, recursive=False)
         except FileNotFoundError as e:
             if recursive:
                 return
@@ -985,7 +1029,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         workspace_path = self.normalize_path(path)
         try:
-            return workspace_path.open("rb")
+            return self._files.read(workspace_path)
         except FileNotFoundError as e:
             raise WorkspaceReadNotFoundError(path=path, cause=e) from e
         except OSError as e:
@@ -1006,9 +1050,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             return
 
         try:
-            workspace_path.parent.mkdir(parents=True, exist_ok=True)
-            with workspace_path.open("wb") as f:
-                shutil.copyfileobj(payload.stream, f)
+            self._files.write(workspace_path, payload.stream)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
@@ -1019,58 +1061,67 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         *,
         user: str | User,
     ) -> None:
-        env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
-        command_parts = self._prepare_exec_command(
-            "sh",
-            "-c",
-            'mkdir -p "$(dirname "$1")" && cat > "$1"',
-            "sh",
-            str(path),
-            shell=False,
-            user=user,
-        )
-        command_parts = self._workspace_relative_command_parts(command_parts, workspace_root)
-        process_cwd, command_parts = self._shell_workspace_process_context(
-            command_parts=command_parts,
-            workspace_root=workspace_root,
-            cwd=cwd,
-        )
-        exec_command = self._confined_exec_command(
-            command_parts=command_parts,
-            workspace_root=workspace_root,
-            env=env,
-        )
-
         payload = stream.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         elif not isinstance(payload, bytes):
             payload = bytes(payload)
-
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *exec_command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=process_cwd,
-                env=env,
-                start_new_session=True,
+            result = await self._run_file_operation_as_user(
+                "write", path, user=user, payload=payload
             )
-            stdout, stderr = await proc.communicate(payload)
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=path, cause=e) from e
-
-        if proc.returncode:
+        if result.returncode:
             raise WorkspaceArchiveWriteError(
                 path=path,
                 context={
-                    "command": command_parts,
-                    "stdout": stdout.decode("utf-8", errors="replace"),
-                    "stderr": stderr.decode("utf-8", errors="replace"),
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    "operation": "write",
                 },
             )
+
+    async def _run_file_operation_as_user(
+        self,
+        operation: Literal["ls", "write"],
+        path: Path,
+        *,
+        user: str | User,
+        payload: bytes = b"",
+    ) -> subprocess.CompletedProcess[bytes]:
+        # Authorization is synchronous and captured for this operation before dispatch.
+        path = self._files.authorize(path, for_write=operation == "write")
+        command = self._prepare_exec_command(
+            "python3",
+            "-I",
+            "-S",
+            "-c",
+            _USER_FILE_WORKER_SOURCE,
+            operation,
+            str(path),
+            shell=False,
+            user=user,
+        )
+        # Resolve sudo from trusted host configuration, never the workspace's command environment.
+        executable = shutil.which(command[0])
+        if executable is None:
+            raise FileNotFoundError(f"UnixLocal user dispatcher is unavailable: {command[0]}")
+        command[0] = executable
+
+        # This trusted worker enforces the file boundary itself, like direct host file I/O.
+        # It does not execute workspace commands or load workspace Python modules.
+        def run_worker() -> subprocess.CompletedProcess[bytes]:
+            return subprocess.run(
+                command,
+                input=payload,
+                capture_output=True,
+                cwd="/",
+                env={"PATH": os.defpath},
+                start_new_session=True,
+                check=False,
+            )
+
+        return await run_blocking_workspace_io(run_worker)
 
     async def running(self) -> bool:
         return self._running

@@ -4,50 +4,48 @@ search:
 ---
 # 加密会话
 
-`EncryptedSession` 为任何会话实现提供透明加密，通过自动过期旧条目来保护对话数据。
+`EncryptedSession` 可为任何会话实现提供透明加密，并通过自动使旧条目过期来保护对话数据。
 
 ## 功能 {#features}
 
-- **透明加密**：使用 Fernet 加密包装任何会话
-- **每会话密钥**：使用 HKDF 密钥派生，为每个会话生成唯一加密
-- **自动过期**：TTL 过期时会静默跳过旧条目
-- **即插即用替代方案**：适用于任何现有会话实现
+- **透明加密**：使用 Fernet 加密封装任何会话
+- **每会话密钥**：使用 HKDF 密钥派生，为每个会话生成唯一的加密密钥
+- **自动过期**：TTL 到期后，会静默跳过旧条目
+- **即插即用的替代方案**：适用于任何现有会话实现
 
 ## 安装 {#installation}
 
 加密会话需要 `encrypt` extra：
 
 ```bash
-pip install openai-agents[encrypt]
+pip install 'openai-agents[encrypt]'
 ```
 
 ## 快速入门 {#quick-start}
 
+此示例使用内存中的 `SQLiteSession`。内置会话不需要单独的数据库驱动程序。
+
 ```python
 import asyncio
-from agents import Agent, Runner
-from agents.extensions.memory import EncryptedSession, SQLAlchemySession
+from agents import Agent, Runner, SQLiteSession
+from agents.extensions.memory import EncryptedSession
 
 async def main():
     agent = Agent("Assistant")
-    
-    # Create underlying session
-    underlying_session = SQLAlchemySession.from_url(
-        "user-123",
-        url="sqlite+aiosqlite:///:memory:",
-        create_tables=True
-    )
-    
-    # Wrap with encryption
-    session = EncryptedSession(
-        session_id="user-123",
-        underlying_session=underlying_session,
-        encryption_key="your-secret-key-here",
-        ttl=600  # 10 minutes
-    )
-    
-    result = await Runner.run(agent, "Hello", session=session)
-    print(result.final_output)
+
+    underlying_session = SQLiteSession("user-123")
+    try:
+        session = EncryptedSession(
+            session_id="user-123",
+            underlying_session=underlying_session,
+            encryption_key="your-secret-key-here",
+            ttl=600  # 10 minutes
+        )
+
+        result = await Runner.run(agent, "Hello", session=session)
+        print(result.final_output)
+    finally:
+        underlying_session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -101,9 +99,9 @@ session = EncryptedSession(
 )
 ```
 
-## 与不同会话类型的搭配使用 {#usage-with-different-session-types}
+## 不同会话类型的用法 {#usage-with-different-session-types}
 
-### 与 SQLite 会话搭配使用 {#with-sqlite-sessions}
+### SQLite 会话 {#with-sqlite-sessions}
 
 ```python
 from agents import SQLiteSession
@@ -119,7 +117,13 @@ session = EncryptedSession(
 )
 ```
 
-### 与 SQLAlchemy 会话搭配使用 {#with-sqlalchemy-sessions}
+### SQLAlchemy 会话 {#with-sqlalchemy-sessions}
+
+对于下面的 PostgreSQL 示例，请安装 `encrypt` 和 `sqlalchemy` extras。`sqlalchemy` extra 包含 `postgresql+asyncpg://` URL 使用的 `asyncpg` 驱动程序。
+
+```bash
+pip install 'openai-agents[encrypt,sqlalchemy]'
+```
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -138,12 +142,14 @@ session = EncryptedSession(
 )
 ```
 
+应用程序负责释放由 `SQLAlchemySession.from_url()` 创建的引擎。在不再需要使用该引擎的所有 `SQLAlchemySession` 实例后，请在应用程序的清理流程中调用 `await underlying.engine.dispose()`，即使运行失败也应如此。
+
 !!! warning "高级会话功能"
 
-    将 `EncryptedSession` 与 `AdvancedSQLiteSession` 等高级会话实现一起使用时，请注意：
+    将 `EncryptedSession` 与 `AdvancedSQLiteSession` 等高级会话实现配合使用时，请注意：
 
-    - 像 `find_turns_by_content()` 这样的方法无法有效工作，因为消息内容已加密
-    - 基于内容的搜索会在加密数据上运行，因此效果受限
+    - 由于消息内容已加密，`find_turns_by_content()` 等方法无法有效工作
+    - 基于内容的搜索会对加密数据执行操作，因此效果有限
 
 
 
@@ -151,19 +157,19 @@ session = EncryptedSession(
 
 EncryptedSession 使用 HKDF（基于 HMAC 的密钥派生函数）为每个会话派生唯一的加密密钥：
 
-- **主密钥**：你提供的加密密钥
+- **主密钥**：您提供的加密密钥
 - **会话盐值**：会话 ID
 - **信息字符串**：`"agents.session-store.hkdf.v1"`
-- **输出**：32 字节 Fernet 密钥
+- **输出**：32 字节的 Fernet 密钥
 
 这可以确保：
 - 每个会话都有唯一的加密密钥
-- 没有主密钥就无法派生密钥
-- 不同会话之间的会话数据无法相互解密
+- 没有主密钥便无法派生密钥
+- 无法跨不同会话解密会话数据
 
 ## 自动过期 {#automatic-expiration}
 
-当条目超过 TTL 时，检索过程中会自动跳过它们：
+当条目超过 TTL 时，检索期间会自动跳过这些条目：
 
 ```python
 # Items older than TTL are silently ignored

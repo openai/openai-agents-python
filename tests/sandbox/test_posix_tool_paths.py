@@ -27,7 +27,7 @@ def test_shell_workdir_normalizes_backslashes_as_sandbox_separators() -> None:
         workdir=r"src\project",
     )
 
-    assert command == "cd /workspace/src/project && pwd"
+    assert command == "cd /workspace/src/project || exit\npwd"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="UnixLocalSandbox is Unix-only")
@@ -55,7 +55,7 @@ def test_shell_workdir_normalizes_backslashes_before_unix_local_resolution(
         workdir=r"src\project",
     )
 
-    assert command == f"cd {workspace.as_posix()}/src/project && pwd"
+    assert command == f"cd {workspace.as_posix()}/src/project || exit\npwd"
 
 
 @pytest.mark.asyncio
