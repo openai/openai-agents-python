@@ -31,7 +31,7 @@ try:
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
     )
-    from agents.voice.testing import ScriptedTTSModel
+    from agents.voice.testing import ScriptedSTTModel, ScriptedTTSModel, ScriptedVoiceWorkflow
 
     from .helpers import extract_events
     from .pipeline_test_models import (
@@ -1645,6 +1645,130 @@ async def test_voicepipeline_run_multi_turn_split_words() -> None:
     assert len(audio_chunks) == 6
     await fake_tts.verify_audio_chunks("foo bar baz", audio_chunks[:3])
     await fake_tts.verify_audio_chunks("foo2 bar2 baz2", audio_chunks[3:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracing_disabled", [False, True])
+async def test_voicepipeline_releases_completed_tts_tasks_between_turns(
+    tracing_disabled: bool,
+) -> None:
+    synthesis_tasks: list[asyncio.Task[Any]] = []
+    retained_counts: list[int] = []
+    sentences = [f"This is synthesized segment number {index}. " for index in range(6)]
+
+    class RecordingTTS(ScriptedTTSModel):
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            task = asyncio.current_task()
+            assert task is not None
+            synthesis_tasks.append(task)
+            async for chunk in super().run(text, settings):
+                yield chunk
+
+    class ObservingWorkflow(ScriptedVoiceWorkflow):
+        async def run(self, transcription: str) -> AsyncIterator[str]:
+            # The producer awaits the preceding turn before requesting another transcript.
+            retained_counts.append(len(result._tasks))
+            assert all(task.done() for task in synthesis_tasks)
+            async for text in super().run(transcription):
+                yield text
+
+    stt = ScriptedSTTModel(sessions=[["first", "second", "third"]])
+    tts = RecordingTTS([[np.array([index], dtype=np.int16).tobytes()] for index in range(6)])
+    workflow = ObservingWorkflow([sentences[:2], sentences[2:4], sentences[4:]])
+    pipeline = VoicePipeline(
+        stt_model=stt,
+        tts_model=tts,
+        workflow=workflow,
+        config=VoicePipelineConfig(tracing_disabled=tracing_disabled),
+    )
+    result = await pipeline.run(StreamedAudioInput())
+    events, audio_chunks = await extract_events(result)
+
+    assert retained_counts == [0, 0, 0]
+    assert len(synthesis_tasks) == 6
+    assert all(task.done() and not task.cancelled() for task in synthesis_tasks)
+    assert not any(task in result._tasks for task in synthesis_tasks)
+    assert events == ["turn_started", "audio", "audio", "turn_ended"] * 3 + ["session_ended"]
+    assert b"".join(audio_chunks) == np.arange(6, dtype=np.int16).tobytes()
+    assert result.total_output_text == "".join(sentences)
+    assert stt.created_sessions[0].closed
+    stt.assert_complete()
+    tts.assert_complete()
+    workflow.assert_complete()
+    if not tracing_disabled:
+        trace_events = fetch_events()
+        assert trace_events[-1] == "trace_end"
+        assert trace_events.count("span_start") == trace_events.count("span_end")
+        assert all(span.ended_at is not None for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["error", "cancel"])
+async def test_voicepipeline_settles_later_tts_after_a_successful_turn(outcome: str) -> None:
+    second_started = asyncio.Event()
+    second_release = asyncio.Event()
+    second_stopped = asyncio.Event()
+    synthesis_tasks: list[asyncio.Task[Any]] = []
+    error = RuntimeError("second turn synthesis failed")
+
+    class ControlledTTS(ScriptedTTSModel):
+        # Scripted results cannot suspend a later call at the cancellation boundary.
+        async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+            task = asyncio.current_task()
+            assert task is not None
+            synthesis_tasks.append(task)
+            if text.startswith("Second"):
+                second_started.set()
+                try:
+                    await second_release.wait()
+                    raise error
+                finally:
+                    second_stopped.set()
+            async for chunk in super().run(text, settings):
+                yield chunk
+
+    stt = ScriptedSTTModel(sessions=[["first", "second"]])
+    tts = ControlledTTS([[b"\x01\x00"]])
+    pipeline = VoicePipeline(
+        stt_model=stt,
+        tts_model=tts,
+        workflow=ScriptedVoiceWorkflow(["First spoken response.", "Second spoken response."]),
+    )
+    result = await pipeline.run(StreamedAudioInput())
+    audio_chunks: list[bytes] = []
+
+    async def consume() -> None:
+        async for event in result.stream():
+            if event.type == "voice_stream_event_audio":
+                assert event.data is not None
+                audio_chunks.append(event.data.tobytes())
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=5)
+        if outcome == "cancel":
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await consumer
+        else:
+            second_release.set()
+            with pytest.raises(RuntimeError) as exc_info:
+                await asyncio.wait_for(consumer, timeout=5)
+            assert exc_info.value is error
+
+        assert audio_chunks == [b"\x01\x00"]
+        assert len(synthesis_tasks) == 2
+        assert all(task.done() for task in synthesis_tasks)
+        assert second_stopped.is_set()
+        assert stt.created_sessions[0].closed
+        assert result.text_generation_task is not None and result.text_generation_task.done()
+        assert "trace_end" in fetch_events()
+        assert all(span.ended_at is not None for span in fetch_ordered_spans())
+    finally:
+        second_release.set()
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
 
 
 @pytest.mark.asyncio

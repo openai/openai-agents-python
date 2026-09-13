@@ -271,6 +271,7 @@ class StreamedAudioResult:
         if self._dispatcher_task is None:
             self._dispatcher_task = asyncio.create_task(self._dispatch_audio())
         await asyncio.gather(*self._tasks)
+        self._tasks.clear()
 
     def _finish_turn(self):
         if self._tracing_span is not None:
