@@ -2014,6 +2014,13 @@ async def test_get_items_with_parameters():
     assert limited_items[0].get("content") == "Second question"  # Most recent first
     assert limited_items[1].get("content") == "Second answer"
 
+    # Test get_items with limit=0
+    assert await session.get_items(limit=0) == []
+
+    # Test get_items with negative limit
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
+        await session.get_items(limit=-1)
+
     # Test get_items with branch_id
     main_items = await session.get_items(branch_id="main")
     assert len(main_items) == 4

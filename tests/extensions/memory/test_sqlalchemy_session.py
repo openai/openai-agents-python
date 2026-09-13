@@ -230,6 +230,14 @@ async def test_get_items_with_limit(agent: Agent):
     more_than_all = await session.get_items(limit=10)
     assert len(more_than_all) == 4
 
+    # Limit=0 returns empty list
+    zero_items = await session.get_items(limit=0)
+    assert zero_items == []
+
+    # Negative limit raises ValueError
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
+        await session.get_items(limit=-1)
+
 
 async def test_pop_from_empty_session():
     """Test that pop_item returns None on an empty session."""

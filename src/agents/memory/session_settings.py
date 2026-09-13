@@ -17,14 +17,24 @@ from .._config_coercion import (
 
 def resolve_session_limit(
     explicit_limit: int | None,
-    settings: SessionSettings | dict[str, Any] | None,
+    settings: SessionSettings | dict[str, Any] | None = None,
 ) -> int | None:
-    """Safely resolve the effective limit for session operations."""
+    """Safely resolve the effective limit for session operations.
+
+    Raises:
+        ValueError: If the resolved limit is negative.
+    """
+    limit: int | None
     if explicit_limit is not None:
-        return explicit_limit
-    if settings is not None:
-        return coerce_session_settings(settings).limit
-    return None
+        limit = explicit_limit
+    elif settings is not None:
+        limit = coerce_session_settings(settings).limit
+    else:
+        limit = None
+
+    if limit is not None and limit < 0:
+        raise ValueError(f"limit must be a non-negative integer or None, got {limit}")
+    return limit
 
 
 @dataclass
@@ -36,7 +46,11 @@ class SessionSettings:
     """
 
     limit: int | None = None
-    """Maximum number of items to retrieve. If None, retrieves all items."""
+    """Maximum number of items to retrieve. If None, retrieves all items. Must be non-negative."""
+
+    def __post_init__(self) -> None:
+        if self.limit is not None and self.limit < 0:
+            raise ValueError(f"limit must be a non-negative integer or None, got {self.limit}")
 
     def resolve(self, override: SessionSettings | dict[str, Any] | None) -> SessionSettings:
         """Produce a new SessionSettings by overlaying any non-None values from the

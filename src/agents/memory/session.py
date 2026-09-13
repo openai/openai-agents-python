@@ -56,6 +56,7 @@ class Session(Protocol):
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+                   Must be a non-negative integer or None.
 
         Returns:
             List of input items representing the conversation history
@@ -103,6 +104,7 @@ class SessionABC(ABC):
         Args:
             limit: Maximum number of items to retrieve. If None, retrieves all items.
                    When specified, returns the latest N items in chronological order.
+                   Must be a non-negative integer or None.
 
         Returns:
             List of input items representing the conversation history

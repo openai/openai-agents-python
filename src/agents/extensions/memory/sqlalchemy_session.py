@@ -348,24 +348,22 @@ class SQLAlchemySession(SessionABC):
                 result = await sess.execute(stmt)
                 return await _decode_rows([row[0] for row in result.all()])
 
-            if session_limit > 0:
-                # Expand the fetch window when corrupt rows sit among the newest entries so
-                # limit counts valid conversation items, matching pop_item and the SQLite
-                # backends.
-                window = session_limit
-                while True:
-                    result = await sess.execute(_latest_first_stmt(window))
-                    rows: list[str] = [row[0] for row in result.all()]
-                    items = await _decode_rows(rows[::-1])
-                    if len(items) >= session_limit:
-                        return items[-session_limit:]
-                    if len(rows) < window:
-                        return items
-                    window *= 2
+            if session_limit == 0:
+                return []
 
-            # Preserve existing non-positive LIMIT semantics, which are dialect-defined.
-            result = await sess.execute(_latest_first_stmt(session_limit))
-            return await _decode_rows([row[0] for row in result.all()][::-1])
+            # Expand the fetch window when corrupt rows sit among the newest entries so
+            # limit counts valid conversation items, matching pop_item and the SQLite
+            # backends.
+            window = session_limit
+            while True:
+                result = await sess.execute(_latest_first_stmt(window))
+                rows: list[str] = [row[0] for row in result.all()]
+                items = await _decode_rows(rows[::-1])
+                if len(items) >= session_limit:
+                    return items[-session_limit:]
+                if len(rows) < window:
+                    return items
+                window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.

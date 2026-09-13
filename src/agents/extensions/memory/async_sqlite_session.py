@@ -262,43 +262,30 @@ class AsyncSQLiteSession(SessionABC):
                 await cursor.close()
                 return _decode_rows(rows)
 
-            if session_limit > 0:
-                # Expand the fetch window when corrupt rows sit among the newest entries so
-                # limit counts valid conversation items, matching EncryptedSession and pop_item.
-                window = session_limit
-                while True:
-                    cursor = await conn.execute(
-                        f"""
-                        SELECT message_data FROM {self.messages_table}
-                        WHERE session_id = ?
-                        ORDER BY id DESC
-                        LIMIT ?
-                        """,
-                        (self.session_id, window),
-                    )
-                    rows = list(await cursor.fetchall())
-                    await cursor.close()
-                    items = _decode_rows(rows[::-1])
-                    if len(items) >= session_limit:
-                        return items[-session_limit:]
-                    if len(rows) < window:
-                        return items
-                    window *= 2
+            if session_limit == 0:
+                return []
 
-            # Preserve historical non-positive LIMIT semantics (including SQLite's
-            # unlimited behavior for negative values).
-            cursor = await conn.execute(
-                f"""
-                SELECT message_data FROM {self.messages_table}
-                WHERE session_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (self.session_id, session_limit),
-            )
-            rows = list(await cursor.fetchall())
-            await cursor.close()
-            return _decode_rows(rows[::-1])
+            # Expand the fetch window when corrupt rows sit among the newest entries so
+            # limit counts valid conversation items, matching EncryptedSession and pop_item.
+            window = session_limit
+            while True:
+                cursor = await conn.execute(
+                    f"""
+                    SELECT message_data FROM {self.messages_table}
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (self.session_id, window),
+                )
+                rows = list(await cursor.fetchall())
+                await cursor.close()
+                items = _decode_rows(rows[::-1])
+                if len(items) >= session_limit:
+                    return items[-session_limit:]
+                if len(rows) < window:
+                    return items
+                window *= 2
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.

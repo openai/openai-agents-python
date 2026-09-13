@@ -415,45 +415,32 @@ class AdvancedSQLiteSession(SQLiteSession):
                         )
                         return _decode_rows(cursor.fetchall())
 
-                    if session_limit > 0:
-                        # Expand the fetch window when corrupt rows sit among the newest
-                        # entries so limit counts valid conversation items, matching
-                        # SQLiteSession.get_items and the inherited pop_item.
-                        window = session_limit
-                        while True:
-                            cursor.execute(
-                                f"""
-                                SELECT m.message_data
-                                FROM {self.messages_table} m
-                                JOIN message_structure s ON m.id = s.message_id
-                                WHERE m.session_id = ? AND s.branch_id = ?
-                                ORDER BY s.sequence_number DESC
-                                LIMIT ?
-                            """,
-                                (self.session_id, resolved_branch_id, window),
-                            )
-                            rows = cursor.fetchall()
-                            items = _decode_rows(list(reversed(rows)))
-                            if len(items) >= session_limit:
-                                return items[-session_limit:]
-                            if len(rows) < window:
-                                return items
-                            window *= 2
+                    if session_limit == 0:
+                        return []
 
-                    # Preserve historical non-positive LIMIT semantics (including SQLite's
-                    # unlimited behavior for negative values).
-                    cursor.execute(
-                        f"""
-                        SELECT m.message_data
-                        FROM {self.messages_table} m
-                        JOIN message_structure s ON m.id = s.message_id
-                        WHERE m.session_id = ? AND s.branch_id = ?
-                        ORDER BY s.sequence_number DESC
-                        LIMIT ?
-                    """,
-                        (self.session_id, resolved_branch_id, session_limit),
-                    )
-                    return _decode_rows(list(reversed(cursor.fetchall())))
+                    # Expand the fetch window when corrupt rows sit among the newest
+                    # entries so limit counts valid conversation items, matching
+                    # SQLiteSession.get_items and the inherited pop_item.
+                    window = session_limit
+                    while True:
+                        cursor.execute(
+                            f"""
+                            SELECT m.message_data
+                            FROM {self.messages_table} m
+                            JOIN message_structure s ON m.id = s.message_id
+                            WHERE m.session_id = ? AND s.branch_id = ?
+                            ORDER BY s.sequence_number DESC
+                            LIMIT ?
+                        """,
+                            (self.session_id, resolved_branch_id, window),
+                        )
+                        rows = cursor.fetchall()
+                        items = _decode_rows(list(reversed(rows)))
+                        if len(items) >= session_limit:
+                            return items[-session_limit:]
+                        if len(rows) < window:
+                            return items
+                        window *= 2
 
         return await asyncio.to_thread(_get_items_sync)
 

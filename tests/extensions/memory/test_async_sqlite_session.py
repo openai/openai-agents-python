@@ -147,6 +147,11 @@ async def test_async_sqlite_session_get_items_limit():
         none = await session.get_items(limit=0)
         assert none == []
 
+        with pytest.raises(
+            ValueError, match=r"limit must be a non-negative integer or None, got -1"
+        ):
+            await session.get_items(limit=-1)
+
         await session.close()
 
 

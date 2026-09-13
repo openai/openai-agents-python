@@ -9,6 +9,7 @@ import pytest
 from agents import Agent, RunConfig, SQLiteSession
 from agents.items import TResponseInputItem
 from agents.memory import SessionSettings
+from agents.memory.session_settings import resolve_session_limit
 from agents.testing import ScriptedModel
 from tests.memory.test_session import run_agent_async
 from tests.test_responses import get_text_message
@@ -232,4 +233,55 @@ async def test_session_limit_larger_than_history(runner_method):
         assert last_input[1].get("content")[0]["text"] == "Reply 1"
         assert last_input[2].get("content") == "Message 2"
 
+        session.close()
+
+
+def test_session_settings_negative_limit():
+    """Test that SessionSettings rejects negative limit values with ValueError."""
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
+        SessionSettings(limit=-1)
+
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -5"):
+        SessionSettings(limit=-5)
+
+
+def test_resolve_session_limit_negative():
+    """Test that resolve_session_limit rejects negative limit values with ValueError."""
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -1"):
+        resolve_session_limit(-1)
+
+    with pytest.raises(ValueError, match=r"limit must be a non-negative integer or None, got -10"):
+        resolve_session_limit(-10, SessionSettings(limit=5))
+
+
+@pytest.mark.asyncio
+async def test_session_get_items_negative_limit_raises_value_error():
+    """Test that Session.get_items(limit=-1) raises ValueError."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("limit_neg_test", Path(temp_dir) / "test_limit_neg.db")
+        with pytest.raises(
+            ValueError, match=r"limit must be a non-negative integer or None, got -1"
+        ):
+            await session.get_items(limit=-1)
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_get_items_zero_returns_empty_list():
+    """Test that get_items(limit=0) returns an empty list."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = SQLiteSession("limit_zero_direct", Path(temp_dir) / "test_limit_zero_direct.db")
+        history = cast(
+            list[TResponseInputItem],
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi there"}],
+                },
+            ],
+        )
+        await session.add_items(history)
+        assert await session.get_items(limit=0) == []
         session.close()
