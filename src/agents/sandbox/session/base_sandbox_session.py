@@ -740,6 +740,11 @@ class BaseSandboxSession(abc.ABC):
         if caller_cancellation is not None:
             raise caller_cancellation
 
+    async def _after_deferred_dependency_close(self) -> None:
+        """Run provider-specific finalization after deferred cleanup is complete."""
+
+        return
+
     def _has_pending_pty_cleanup_tasks(self) -> bool:
         return any(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
 
@@ -792,6 +797,7 @@ class BaseSandboxSession(abc.ABC):
 
     async def _finish_deferred_dependency_close(self) -> None:
         deferred_error: BaseException | None = None
+        dependency_error: BaseException | None = None
         try:
             while True:
                 await self._wait_for_tracked_cleanup_tasks()
@@ -819,10 +825,30 @@ class BaseSandboxSession(abc.ABC):
         if not self._has_pending_pty_cleanup_tasks():
             try:
                 await self._aclose_dependencies()
-            except BaseException as dependency_error:
+            except BaseException as error:
                 if deferred_error is None:
-                    raise
-                raise deferred_error from dependency_error
+                    deferred_error = error
+                else:
+                    dependency_error = error
+
+        try:
+            await self._after_deferred_dependency_close()
+        except BaseException as finalization_error:
+            if deferred_error is None:
+                raise
+            logger.error(
+                "Deferred sandbox finalization failed after cleanup error: %s",
+                finalization_error,
+                exc_info=(
+                    type(finalization_error),
+                    finalization_error,
+                    finalization_error.__traceback__,
+                ),
+            )
+
+        if dependency_error is not None:
+            assert deferred_error is not None
+            raise deferred_error from dependency_error
         if deferred_error is not None:
             raise deferred_error
 

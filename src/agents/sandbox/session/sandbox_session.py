@@ -286,6 +286,9 @@ class SandboxSession(BaseSandboxSession):
     async def _aclose_dependencies(self) -> None:
         await self._inner._aclose_dependencies()
 
+    async def _after_deferred_dependency_close(self) -> None:
+        await self._instrumentation.flush()
+
     def _set_concurrency_limits(self, limits: SandboxConcurrencyLimits) -> None:
         super()._set_concurrency_limits(limits)
         self._inner._set_concurrency_limits(limits)

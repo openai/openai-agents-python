@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from contextlib import suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -13,6 +15,7 @@ from openai.types.responses.response_computer_tool_call import (
 )
 
 import agents._debug as _debug
+import agents.tool as tool_module
 from agents import (
     Agent,
     ComputerProvider,
@@ -94,6 +97,133 @@ async def test_dispose_computer_failure_respects_tool_data_policy(
 
     assert "Failed to dispose computer for run context" in caplog.text
     assert ("SECRET_COMPUTER_DISPOSE_FAILURE" not in caplog.text) is redacted
+
+
+@pytest.mark.asyncio
+async def test_dispose_computer_cancellation_keeps_disposer_owned_and_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def dispose(**_kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(tool_module, "_COMPUTER_DISPOSAL_TIMEOUT_S", 5.0)
+    tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=AsyncMock(return_value=FakeComputer()),
+            dispose=dispose,
+        )
+    )
+    ctx = RunContextWrapper(context=None)
+    await resolve_computer(tool=tool, run_context=ctx)
+
+    task = asyncio.create_task(dispose_resolved_computers(run_context=ctx))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        task.cancel("caller cancellation")
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.args == ("caller cancellation",)
+        assert not finished.is_set()
+
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=0.5)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with suppress(BaseException):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_dispose_computer_after_caught_cancellation_detaches_immediately() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def dispose(**_kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+        finished.set()
+
+    tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=AsyncMock(return_value=FakeComputer()),
+            dispose=dispose,
+        )
+    )
+    ctx = RunContextWrapper(context=None)
+    await resolve_computer(tool=tool, run_context=ctx)
+
+    async def caller() -> None:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await dispose_resolved_computers(run_context=ctx)
+            raise
+
+    task = asyncio.create_task(caller())
+    try:
+        await asyncio.sleep(0)
+        task.cancel("caller cancellation")
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(task, timeout=0.5)
+        if sys.version_info >= (3, 11):
+            assert exc_info.value.args == ("caller cancellation",)
+
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        assert not finished.is_set()
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=0.5)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with suppress(BaseException):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_dispose_computer_timeout_keeps_disposer_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def dispose(**_kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(tool_module, "_COMPUTER_DISPOSAL_TIMEOUT_S", 0.01)
+    tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=AsyncMock(return_value=FakeComputer()),
+            dispose=dispose,
+        )
+    )
+    ctx = RunContextWrapper(context=None)
+    await resolve_computer(tool=tool, run_context=ctx)
+
+    try:
+        await asyncio.wait_for(dispose_resolved_computers(run_context=ctx), timeout=0.5)
+        assert started.is_set()
+        assert not finished.is_set()
+
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=0.5)
+    finally:
+        release.set()
 
 
 def _make_message(text: str) -> ResponseOutputMessage:
