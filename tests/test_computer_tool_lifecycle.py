@@ -237,8 +237,14 @@ async def test_run_sync_drives_timed_out_computer_disposal(
     disposal_finished = threading.Event()
 
     async def dispose(*, computer: FakeComputer, **_kwargs: Any) -> None:
-        await asyncio.sleep(0.02)
-        disposed.append(computer)
+        async def dispose_remaining_resources() -> Any:
+            yield None
+            disposed.append(computer)
+
+        async for _ in dispose_remaining_resources():
+            # Keep the disposer suspended after the generator yields so loop-wide async-generator
+            # shutdown cannot silently skip the generator's remaining cleanup.
+            await asyncio.sleep(0.02)
         disposal_finished.set()
 
     monkeypatch.setattr(tool_module, "_COMPUTER_DISPOSAL_TIMEOUT_S", 0.001)

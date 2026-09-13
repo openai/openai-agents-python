@@ -11,6 +11,7 @@ from typing import Any, Literal, NoReturn, TypeVar
 from typing_extensions import Self
 
 from ...editor import ApplyPatchOperation
+from ...logger import log_tool_action_error
 from ...run_config import (
     DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY,
     DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY,
@@ -787,10 +788,10 @@ class BaseSandboxSession(abc.ABC):
             if not done.cancelled():
                 error = done.exception()
                 if error is not None:
-                    logger.error(
-                        "Deferred sandbox cleanup failed: %s",
+                    log_tool_action_error(
+                        logger,
+                        "Deferred sandbox cleanup failed",
                         error,
-                        exc_info=(type(error), error, error.__traceback__),
                     )
 
         task.add_done_callback(consume_task_exception)
@@ -836,14 +837,10 @@ class BaseSandboxSession(abc.ABC):
         except BaseException as finalization_error:
             if deferred_error is None:
                 raise
-            logger.error(
-                "Deferred sandbox finalization failed after cleanup error: %s",
+            log_tool_action_error(
+                logger,
+                "Deferred sandbox finalization failed after cleanup error",
                 finalization_error,
-                exc_info=(
-                    type(finalization_error),
-                    finalization_error,
-                    finalization_error.__traceback__,
-                ),
             )
 
         if dependency_error is not None:

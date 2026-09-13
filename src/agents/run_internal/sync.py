@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import sys
 import threading
 from contextvars import ContextVar
 from typing import Any
@@ -13,6 +15,7 @@ _SYNC_BACKGROUND_TASKS: WeakKeyDictionary[asyncio.AbstractEventLoop, set[asyncio
 _SYNC_LOOP_DRIVERS: WeakKeyDictionary[asyncio.AbstractEventLoop, _SyncLoopDriver] = (
     WeakKeyDictionary()
 )
+_SYNC_LOOP_LOCAL = threading.local()
 _SYNC_DRIVER_LOCK = threading.Lock()
 
 
@@ -26,6 +29,9 @@ class _SyncLoopDriver:
             name="agents.sync-deferred-cleanup",
             daemon=True,
         )
+        self._settlement_task: asyncio.Task[None] | None = None
+        self._settlement_future: concurrent.futures.Future[None] | None = None
+        self._handoff_requested = False
 
     def start(self) -> None:
         self.thread.start()
@@ -33,8 +39,9 @@ class _SyncLoopDriver:
 
     def _run(self) -> None:
         asyncio.set_event_loop(self.loop)
-        self.started.set()
         try:
+            # Signal readiness from the loop so submitters cannot race run_forever.
+            self.loop.call_soon(self.started.set)
             self.loop.run_forever()
         finally:
             with _SYNC_DRIVER_LOCK:
@@ -42,21 +49,101 @@ class _SyncLoopDriver:
                     _SYNC_LOOP_DRIVERS.pop(self.loop, None)
             self.stopped.set()
 
+    def schedule_settlement(self) -> concurrent.futures.Future[None]:
+        if self._settlement_future is not None:
+            return self._settlement_future
+
+        result: concurrent.futures.Future[None] = concurrent.futures.Future()
+        self._settlement_future = result
+
+        def create_settlement_task() -> None:
+            if self._settlement_task is not None and not self._settlement_task.done():
+                return
+            task = self.loop.create_task(
+                self._settle_background_work(),
+                name="agents.sync_deferred_cleanup_settlement",
+            )
+            self._settlement_task = task
+
+            def complete(done: asyncio.Task[None]) -> None:
+                try:
+                    result.set_result(done.result())
+                except BaseException as exc:
+                    result.set_exception(exc)
+                finally:
+                    # The result callback must run before stopping the loop. Stopping from the
+                    # settlement coroutine can leave this callback queued forever.
+                    if not self._handoff_requested:
+                        self.loop.stop()
+
+            task.add_done_callback(complete)
+
+        try:
+            self.loop.call_soon_threadsafe(create_settlement_task)
+        except BaseException as exc:
+            result.set_exception(exc)
+        return result
+
+    async def _settle_background_work(self) -> None:
+        while True:
+            tasks = _get_pending_sync_background_tasks(self.loop)
+            if not tasks:
+                break
+            # asyncio.wait observes completion without cancelling provider cleanup when this
+            # settlement task is interrupted to hand the loop back to a synchronous run.
+            done, _ = await asyncio.wait(tasks)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+            # Let each task's done callbacks update the registry before checking it again.
+            await asyncio.sleep(0)
+        await self.loop.shutdown_asyncgens()
+
     def stop(self) -> None:
         if not self.thread.is_alive():
             return
+
+        self._handoff_requested = True
+
+        def stop_loop() -> None:
+            settlement_task = self._settlement_task
+            if settlement_task is not None and not settlement_task.done():
+                settlement_task.cancel()
+            self.loop.stop()
+
         try:
-            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.loop.call_soon_threadsafe(stop_loop)
         except RuntimeError:
-            # The loop may have been closed by its owner while the driver was
-            # exiting. The driver thread will observe the closed loop and stop.
             pass
         if threading.current_thread() is not self.thread:
             self.thread.join()
 
 
+def _get_sync_loop() -> asyncio.AbstractEventLoop:
+    loop = getattr(_SYNC_LOOP_LOCAL, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _SYNC_LOOP_LOCAL.loop = loop
+    return loop
+
+
+def _get_pending_sync_background_tasks(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[asyncio.Task[Any], ...]:
+    with _SYNC_DRIVER_LOCK:
+        tasks = _SYNC_BACKGROUND_TASKS.get(loop)
+        if not tasks:
+            return ()
+        completed_tasks = {task for task in tasks if task.done()}
+        tasks.difference_update(completed_tasks)
+        if not tasks:
+            _SYNC_BACKGROUND_TASKS.pop(loop, None)
+            return ()
+        return tuple(tasks)
+
+
 def _track_sync_background_task(task: asyncio.Task[Any]) -> None:
-    if not _IS_SYNC_RUN.get():
+    if not _IS_SYNC_RUN.get() or task.done():
         return
     loop = task.get_loop()
     with _SYNC_DRIVER_LOCK:
@@ -64,11 +151,14 @@ def _track_sync_background_task(task: asyncio.Task[Any]) -> None:
         tasks.add(task)
 
     def forget(done: asyncio.Task[Any]) -> None:
+        loop = done.get_loop()
         with _SYNC_DRIVER_LOCK:
+            tasks = _SYNC_BACKGROUND_TASKS.get(loop)
+            if tasks is None:
+                return
             tasks.discard(done)
-            should_stop = not tasks and _SYNC_LOOP_DRIVERS.get(loop) is not None
-        if should_stop:
-            loop.stop()
+            if not tasks:
+                _SYNC_BACKGROUND_TASKS.pop(loop, None)
 
     task.add_done_callback(forget)
 
@@ -78,19 +168,26 @@ def _stop_sync_loop_driver(loop: asyncio.AbstractEventLoop) -> None:
         driver = _SYNC_LOOP_DRIVERS.get(loop)
     if driver is not None:
         driver.stop()
-        with _SYNC_DRIVER_LOCK:
-            if not driver.thread.is_alive():
-                _SYNC_LOOP_DRIVERS.pop(loop, None)
 
 
-def _start_sync_loop_driver(loop: asyncio.AbstractEventLoop) -> None:
+def _start_sync_loop_driver(loop: asyncio.AbstractEventLoop) -> _SyncLoopDriver:
+    _get_pending_sync_background_tasks(loop)
     with _SYNC_DRIVER_LOCK:
-        tasks = _SYNC_BACKGROUND_TASKS.get(loop)
-        if not tasks or not any(not task.done() for task in tasks):
-            return
         driver = _SYNC_LOOP_DRIVERS.get(loop)
         if driver is not None and driver.thread.is_alive():
-            return
+            return driver
         driver = _SyncLoopDriver(loop)
         _SYNC_LOOP_DRIVERS[loop] = driver
     driver.start()
+    return driver
+
+
+def _create_sync_task(
+    loop: asyncio.AbstractEventLoop,
+    coroutine: Any,
+) -> asyncio.Task[Any]:
+    """Create a sync-run task on Python 3.10 and newer."""
+
+    if sys.version_info >= (3, 11):
+        return loop.create_task(coroutine, context=None)
+    return loop.create_task(coroutine)

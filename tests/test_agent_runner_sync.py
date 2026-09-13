@@ -1,13 +1,19 @@
 import asyncio
 import threading
 from collections.abc import Generator
-from typing import Any, Protocol
+from typing import Protocol
 
 import pytest
 
 from agents.agent import Agent
 from agents.run import AgentRunner
-from agents.run_internal.sync import _stop_sync_loop_driver, _track_sync_background_task
+from agents.run_internal.sync import (
+    _SYNC_BACKGROUND_TASKS,
+    _get_pending_sync_background_tasks,
+    _get_sync_loop,
+    _stop_sync_loop_driver,
+    _track_sync_background_task,
+)
 
 
 class _EventLoopPolicy(Protocol):
@@ -27,7 +33,7 @@ def fresh_event_loop_policy() -> Generator[_EventLoopPolicy, None, None]:
         asyncio.set_event_loop_policy(policy_before)
 
 
-def test_run_sync_reuses_existing_default_loop(monkeypatch, fresh_event_loop_policy):
+def test_run_sync_does_not_drive_existing_default_loop(monkeypatch, fresh_event_loop_policy):
     runner = AgentRunner()
     observed_loops: list[asyncio.AbstractEventLoop] = []
 
@@ -42,13 +48,49 @@ def test_run_sync_reuses_existing_default_loop(monkeypatch, fresh_event_loop_pol
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input")
-        assert observed_loops and observed_loops[0] is test_loop
+        assert observed_loops and observed_loops[0] is not test_loop
+        assert not test_loop.is_running()
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()
 
 
-def test_run_sync_creates_default_loop_when_missing(monkeypatch, fresh_event_loop_policy):
+def test_run_sync_leaves_caller_loop_closable_with_deferred_cleanup(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    deferred_finished = threading.Event()
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def deferred_work():
+            await asyncio.sleep(0.02)
+            deferred_finished.set()
+
+        task = asyncio.create_task(deferred_work())
+        _track_sync_background_task(task)
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    caller_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(caller_loop)
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        fresh_event_loop_policy.set_event_loop(None)
+        caller_loop.close()
+
+        assert not caller_loop.is_running()
+        assert deferred_finished.wait(timeout=0.5)
+    finally:
+        _stop_sync_loop_driver(_get_sync_loop())
+        fresh_event_loop_policy.set_event_loop(None)
+        if not caller_loop.is_closed():
+            caller_loop.close()
+
+
+def test_run_sync_does_not_create_or_replace_default_loop_when_missing(
+    monkeypatch, fresh_event_loop_policy
+):
     runner = AgentRunner()
     observed_loops: list[asyncio.AbstractEventLoop] = []
 
@@ -61,14 +103,16 @@ def test_run_sync_creates_default_loop_when_missing(monkeypatch, fresh_event_loo
     fresh_event_loop_policy.set_event_loop(None)
 
     runner.run_sync(Agent(name="test-agent"), "input")
-    created_loop = observed_loops[0]
-    assert created_loop is fresh_event_loop_policy.get_event_loop()
+    assert observed_loops
+    with pytest.raises(RuntimeError):
+        fresh_event_loop_policy.get_event_loop()
 
-    fresh_event_loop_policy.set_event_loop(None)
-    created_loop.close()
+    sync_loop = _get_sync_loop()
+    _stop_sync_loop_driver(sync_loop)
+    sync_loop.close()
 
 
-def test_run_sync_replaces_closed_default_loop(monkeypatch, fresh_event_loop_policy):
+def test_run_sync_does_not_replace_closed_default_loop(monkeypatch, fresh_event_loop_policy):
     runner = AgentRunner()
     observed_loops: list[asyncio.AbstractEventLoop] = []
 
@@ -84,15 +128,15 @@ def test_run_sync_replaces_closed_default_loop(monkeypatch, fresh_event_loop_pol
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input")
-        replacement_loop = observed_loops[0]
-        assert replacement_loop is fresh_event_loop_policy.get_event_loop()
-        assert replacement_loop is not closed_loop
-        assert not replacement_loop.is_closed()
+        assert observed_loops
+        assert fresh_event_loop_policy.get_event_loop() is closed_loop
+        assert closed_loop.is_closed()
     finally:
-        current_loop = fresh_event_loop_policy.get_event_loop()
         fresh_event_loop_policy.set_event_loop(None)
-        if not current_loop.is_closed():
-            current_loop.close()
+        sync_loop = _get_sync_loop()
+        _stop_sync_loop_driver(sync_loop)
+        if not sync_loop.is_closed():
+            sync_loop.close()
 
 
 def test_run_sync_errors_when_loop_already_running(monkeypatch, fresh_event_loop_policy):
@@ -112,47 +156,58 @@ def test_run_sync_errors_when_loop_already_running(monkeypatch, fresh_event_loop
 
 def test_run_sync_cancels_task_when_interrupted(monkeypatch, fresh_event_loop_policy):
     runner = AgentRunner()
+    started = threading.Event()
+    cancelled = threading.Event()
 
     async def fake_run(self, *_args, **_kwargs):
-        await asyncio.sleep(3600)
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
     monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
 
-    test_loop = asyncio.new_event_loop()
-    fresh_event_loop_policy.set_event_loop(test_loop)
-
-    created_tasks: list[asyncio.Task[Any]] = []
-    original_create_task = test_loop.create_task
-
-    def capturing_create_task(coro):
-        task = original_create_task(coro)
-        created_tasks.append(task)
-        return task
-
-    original_run_until_complete = test_loop.run_until_complete
-    call_count = {"value": 0}
+    sync_loop = asyncio.new_event_loop()
+    original_run_until_complete = sync_loop.run_until_complete
+    call_count = 0
 
     def interrupt_once(future):
-        call_count["value"] += 1
-        if call_count["value"] == 1:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            original_run_until_complete(asyncio.sleep(0))
             raise KeyboardInterrupt()
         return original_run_until_complete(future)
 
-    monkeypatch.setattr(test_loop, "create_task", capturing_create_task)
-    monkeypatch.setattr(test_loop, "run_until_complete", interrupt_once)
+    monkeypatch.setattr("agents.run._get_sync_loop", lambda: sync_loop)
+    monkeypatch.setattr(sync_loop, "run_until_complete", interrupt_once)
 
     try:
         with pytest.raises(KeyboardInterrupt):
             runner.run_sync(Agent(name="test-agent"), "input")
 
-        assert created_tasks, "Expected run_sync to schedule a task."
-        assert created_tasks[0].done()
-        assert created_tasks[0].cancelled()
-        assert call_count["value"] >= 2
+        assert started.is_set(), "Expected run_sync to schedule a task."
+        assert cancelled.is_set(), "Expected run_sync to cancel the task after interruption."
+        assert call_count >= 2
     finally:
         monkeypatch.undo()
-        fresh_event_loop_policy.set_event_loop(None)
-        test_loop.close()
+        _stop_sync_loop_driver(sync_loop)
+        sync_loop.close()
+
+
+def test_sync_background_registry_prunes_completed_tasks():
+    sync_loop = asyncio.new_event_loop()
+    try:
+        task = sync_loop.create_task(asyncio.sleep(0))
+        sync_loop.run_until_complete(task)
+        _SYNC_BACKGROUND_TASKS[sync_loop] = {task}
+
+        assert _get_pending_sync_background_tasks(sync_loop) == ()
+        assert sync_loop not in _SYNC_BACKGROUND_TASKS
+    finally:
+        sync_loop.close()
 
 
 def test_run_sync_finalizes_async_generators(monkeypatch, fresh_event_loop_policy):
@@ -185,6 +240,49 @@ def test_run_sync_finalizes_async_generators(monkeypatch, fresh_event_loop_polic
         test_loop.close()
 
 
+def test_run_sync_shutdowns_asyncgens_after_tracked_cleanup(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+    cleanup_finished = threading.Event()
+    generator_finished = threading.Event()
+    order: list[str] = []
+    held_generators: list[object] = []
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def agen():
+            try:
+                yield None
+            finally:
+                order.append("generator")
+                generator_finished.set()
+
+        gen = agen()
+        await gen.__anext__()
+        held_generators.append(gen)
+
+        async def deferred_work():
+            order.append("cleanup-start")
+            await asyncio.sleep(0.02)
+            order.append("cleanup-finished")
+            cleanup_finished.set()
+
+        task = asyncio.create_task(deferred_work())
+        _track_sync_background_task(task)
+        return "ok"
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert cleanup_finished.wait(timeout=0.5)
+        assert generator_finished.wait(timeout=0.5)
+        assert order == ["cleanup-start", "cleanup-finished", "generator"]
+    finally:
+        sync_loop = _get_sync_loop()
+        _stop_sync_loop_driver(sync_loop)
+        if not sync_loop.is_closed():
+            sync_loop.close()
+
+
 def test_run_sync_drives_tracked_background_task_after_return(monkeypatch, fresh_event_loop_policy):
     runner = AgentRunner()
     completed = threading.Event()
@@ -207,7 +305,7 @@ def test_run_sync_drives_tracked_background_task_after_return(monkeypatch, fresh
         runner.run_sync(Agent(name="test-agent"), "input")
         assert completed.wait(timeout=0.5)
     finally:
-        _stop_sync_loop_driver(test_loop)
+        _stop_sync_loop_driver(_get_sync_loop())
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()
 
@@ -242,11 +340,11 @@ def test_run_sync_does_not_stop_next_run_when_old_task_finishes(
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input")
-        _stop_sync_loop_driver(test_loop)
+        _stop_sync_loop_driver(_get_sync_loop())
         release.set()
         runner.run_sync(Agent(name="test-agent"), "input")
         assert background_finished.is_set()
     finally:
-        _stop_sync_loop_driver(test_loop)
+        _stop_sync_loop_driver(_get_sync_loop())
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()

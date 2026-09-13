@@ -15,6 +15,7 @@ from .._run_state_agent_identity import (
 )
 from ..agent import Agent
 from ..exceptions import _raise_data_redacted_error
+from ..logger import log_tool_action_error
 from ..run_config import SandboxArchiveLimits, SandboxConcurrencyLimits, SandboxRunConfig
 from ..run_context import TContext
 from ..run_internal.sync import _track_sync_background_task
@@ -108,10 +109,10 @@ class _SandboxSessionResources:
                 return
             error = done.exception()
             if error is not None:
-                logger.error(
-                    "Deferred sandbox cleanup failed: %s",
+                log_tool_action_error(
+                    logger,
+                    "Deferred sandbox cleanup failed",
                     error,
-                    exc_info=(type(error), error, error.__traceback__),
                 )
 
         task.add_done_callback(observe_task_result)
@@ -374,6 +375,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         )
         with span_cm:
             cleanup_error: BaseException | None = None
+            caller_cancellation: asyncio.CancelledError | None = None
             resume_state: dict[str, object] | None = None
             self._resume_state_after_cleanup_error = None
             try:
@@ -381,14 +383,35 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                     try:
                         await resources.cleanup()
                     except BaseException as exc:  # pragma: no cover
-                        if cleanup_error is None:
+                        current_task = asyncio.current_task()
+                        is_caller_cancellation = (
+                            current_task is not None and current_task.cancelling()
+                        )
+                        if isinstance(exc, asyncio.CancelledError) and is_caller_cancellation:
+                            caller_cancellation = caller_cancellation or exc
+                        elif is_caller_cancellation:
+                            # A resource can catch cancellation while preserving an earlier
+                            # provider error. Keep the cancellation reason independently so it
+                            # cannot be lost when this manager continues with other sessions.
+                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
+                        elif cleanup_error is None:
                             cleanup_error = exc
+                    else:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            # A resource may consume the cancellation while still completing its
+                            # owned cleanup. Preserve the caller's cancellation independently of
+                            # the cleanup result so a later provider error cannot hide it.
+                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
                     deferred_cleanup_task = resources.deferred_cleanup_task
                     if deferred_cleanup_task is not None:
                         self._track_deferred_cleanup_task(deferred_cleanup_task)
+                preserves_backend = self._any_session_preserves_backend()
                 if cleanup_error is None:
                     resume_state = self.serialize_resume_state()
-                elif self._any_session_preserves_backend():
+                    if caller_cancellation is not None and preserves_backend:
+                        self._resume_state_after_cleanup_error = resume_state
+                elif preserves_backend:
                     try:
                         self._resume_state_after_cleanup_error = self.serialize_resume_state()
                     except BaseException:
@@ -401,6 +424,8 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 self._cleanup_finished = True
                 if not self._deferred_cleanup_tasks:
                     self._release_agents()
+            if caller_cancellation is not None:
+                raise caller_cancellation
             if cleanup_error is not None:
                 raise cleanup_error
             return resume_state

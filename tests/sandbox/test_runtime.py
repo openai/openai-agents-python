@@ -280,6 +280,25 @@ class _BlockingPreservingStopSession(_FakeSession):
         await self._stop_gate.wait()
 
 
+class _FailingDeferredShutdownSession(_FakeSession):
+    def __init__(self, manifest: Manifest, error_message: str) -> None:
+        super().__init__(manifest)
+        self._error_message = error_message
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        raise RuntimeError(self._error_message)
+
+
+class _FailingDeferredFinalizationSession(_FakeSession):
+    def __init__(self, manifest: Manifest, error_message: str) -> None:
+        super().__init__(manifest)
+        self._error_message = error_message
+
+    async def _after_deferred_dependency_close(self) -> None:
+        raise RuntimeError(self._error_message)
+
+
 def _external_mount_manifest(secret_access_key: str) -> Manifest:
     return Manifest(
         entries={
@@ -747,8 +766,11 @@ async def test_runner_owned_cleanup_waits_for_detached_snapshot_before_closing_d
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
     upload_started = asyncio.Event()
     release_upload = asyncio.Event()
@@ -804,6 +826,7 @@ async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
         client=client,
         owns_session=True,
     )
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
     caplog.set_level(logging.ERROR, logger="agents.sandbox.runtime_session_manager")
 
     cleanup = asyncio.create_task(resources.cleanup())
@@ -828,10 +851,28 @@ async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
         await deferred_task
 
     assert client.delete_calls == 1
-    assert any(
-        "Deferred sandbox cleanup failed: deferred delete failed" in record.getMessage()
+    records = [
+        record
         for record in caplog.records
-    )
+        if record.name == "agents.sandbox.runtime_session_manager"
+        and record.getMessage().startswith("Deferred sandbox cleanup failed")
+    ]
+    assert records
+    record = records[-1]
+    if redacted:
+        assert record.msg == "%s"
+        assert record.args == ("Deferred sandbox cleanup failed",)
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert all(value is not source_error for value in record.__dict__.values())
+        assert "deferred delete failed" not in logging.Formatter("%(message)s").format(record)
+    else:
+        assert record.msg == "%s: %s"
+        assert record.args is not None
+        assert record.args[1] is source_error
+        assert record.exc_info is not None
+        assert record.exc_info[1] is source_error
+        assert "deferred delete failed" in logging.Formatter("%(message)s").format(record)
 
 
 @pytest.mark.asyncio
@@ -884,6 +925,50 @@ async def test_runner_owned_deferred_cleanup_runs_session_finalization_hook() ->
     await asyncio.wait_for(deferred_task, timeout=0.5)
 
     assert session.finalization_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callback", ["resources", "session"])
+@pytest.mark.parametrize("redacted", [True, False])
+async def test_deferred_cleanup_callbacks_respect_tool_data_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    callback: str,
+    redacted: bool,
+) -> None:
+    sentinel = "DEFERRED_CLEANUP_SECRET"
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redacted)
+
+    if callback == "resources":
+        session = _FailingDeferredFinalizationSession(Manifest(), sentinel)
+        resources = _SandboxSessionResources(
+            session=session,
+            client=None,
+            owns_session=True,
+        )
+        resources._schedule_deferred_cleanup()
+        task = resources.deferred_cleanup_task
+    else:
+        session = _FailingDeferredShutdownSession(Manifest(), sentinel)
+        session._schedule_deferred_dependency_close(shutdown=True)
+        task = session._deferred_dependency_close_task
+
+    assert task is not None
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match=sentinel):
+            await task
+
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Deferred sandbox cleanup failed")
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert (sentinel not in caplog.text) is redacted
+    assert (record.exc_info is None) is redacted
+    if not redacted:
+        assert record.exc_info is not None
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1105,71 @@ async def test_session_manager_serializes_preserved_backend_from_non_current_age
     sessions_by_agent = cast(dict[str, dict[str, object]], resume_state["sessions_by_agent"])
     assert set(sessions_by_agent) == {preserved_agent.name, current_agent.name}
     assert manager._acquired_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_error() -> None:
+    first_agent = SandboxAgent(name="first", model=ScriptedModel(), instructions="First.")
+    second_agent = SandboxAgent(name="second", model=ScriptedModel(), instructions="Second.")
+    first_session = _FakeSession(Manifest())
+    second_session = _FakeSession(Manifest())
+    first_resources = _SandboxSessionResources(
+        session=first_session,
+        client=None,
+        owns_session=True,
+    )
+    second_resources = _SandboxSessionResources(
+        session=second_session,
+        client=None,
+        owns_session=True,
+    )
+    second_cleanup_started = asyncio.Event()
+    release_second_cleanup = asyncio.Event()
+
+    async def fail_first_cleanup() -> None:
+        raise RuntimeError("first cleanup failed")
+
+    async def wait_for_second_cleanup() -> None:
+        second_cleanup_started.set()
+        try:
+            await release_second_cleanup.wait()
+        except asyncio.CancelledError:
+            # A resource is allowed to finish its owned cleanup after consuming caller
+            # cancellation. The manager must still re-propagate that cancellation.
+            return
+
+    cast(Any, first_resources).cleanup = fail_first_cleanup
+    cast(Any, second_resources).cleanup = wait_for_second_cleanup
+
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=first_agent,
+        sandbox_config=SandboxRunConfig(session=first_session),
+        run_state=None,
+    )
+    manager.acquire_agent(first_agent)
+    manager.acquire_agent(second_agent)
+    manager._resources_by_agent[id(first_agent)] = first_resources
+    manager._resources_by_agent[id(second_agent)] = second_resources
+    manager._current_agent_id = id(second_agent)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    try:
+        await asyncio.wait_for(second_cleanup_started.wait(), timeout=0.5)
+        cleanup.cancel("caller cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await cleanup
+        if sys.version_info >= (3, 11):
+            # Once a resource consumes the injected CancelledError, asyncio preserves only the
+            # task's cancellation count; the original message is not available to the manager.
+            assert exc_info.value.args in (("caller cancellation",), ())
+        assert manager._cleanup_finished
+        assert manager._acquired_agents == {}
+    finally:
+        release_second_cleanup.set()
+        if not cleanup.done():
+            cleanup.cancel()
+        with suppress(BaseException):
+            await cleanup
 
 
 @pytest.mark.asyncio

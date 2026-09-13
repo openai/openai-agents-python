@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import warnings
 from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import Unpack
@@ -152,6 +151,9 @@ from .run_internal.session_persistence import (
 )
 from .run_internal.sync import (
     _IS_SYNC_RUN,
+    _create_sync_task,
+    _get_pending_sync_background_tasks,
+    _get_sync_loop,
     _start_sync_loop_driver,
     _stop_sync_loop_driver,
 )
@@ -2309,13 +2311,6 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        # Python 3.14 stopped implicitly wiring up a default event loop
-        # when synchronous code touches asyncio APIs for the first time.
-        # Several of our synchronous entry points (for example the Redis/SQLAlchemy session helpers)
-        # construct asyncio primitives like asyncio.Lock during __init__,
-        # which binds them to whatever loop happens to be the thread's default at that moment.
-        # To keep those locks usable we must ensure that run_sync reuses that same default loop
-        # instead of hopping over to a brand-new asyncio.run() loop.
         try:
             already_running_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -2329,28 +2324,15 @@ class AgentRunner:
                 "AgentRunner.run_sync() cannot be called when an event loop is already running."
             )
 
-        policy = asyncio.get_event_loop_policy()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            try:
-                default_loop = policy.get_event_loop()
-            except RuntimeError:
-                default_loop = policy.new_event_loop()
-                policy.set_event_loop(default_loop)
+        # Keep the caller's default loop untouched. The SDK-owned loop is stable for this calling
+        # thread so loop-bound session primitives remain usable across synchronous runs.
+        sync_loop = _get_sync_loop()
+        _stop_sync_loop_driver(sync_loop)
 
-        if default_loop.is_closed():
-            default_loop = policy.new_event_loop()
-            policy.set_event_loop(default_loop)
-
-        _stop_sync_loop_driver(default_loop)
-
-        # We intentionally leave the default loop open even if we had to create one above. Session
-        # instances and other helpers stash loop-bound primitives between calls and expect to find
-        # the same default loop every time run_sync is invoked on this thread.
-        # Schedule the async run on the default loop so that we can manage cancellation explicitly.
         sync_run_token = _IS_SYNC_RUN.set(True)
         try:
-            task = default_loop.create_task(
+            task = _create_sync_task(
+                sync_loop,
                 self.run(
                     starting_agent,
                     input,
@@ -2363,31 +2345,33 @@ class AgentRunner:
                     previous_response_id=previous_response_id,
                     auto_previous_response_id=auto_previous_response_id,
                     conversation_id=conversation_id,
-                )
+                ),
             )
         finally:
             _IS_SYNC_RUN.reset(sync_run_token)
 
         try:
             # Drive the coroutine to completion, harvesting the final RunResult.
-            return default_loop.run_until_complete(task)
+            return cast(RunResult, sync_loop.run_until_complete(task))
         except BaseException as error:
             # If the sync caller aborts (KeyboardInterrupt, etc.), make sure the scheduled task
             # does not linger on the shared loop by cancelling it and waiting for completion.
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    default_loop.run_until_complete(task)
+                    sync_loop.run_until_complete(task)
             if _is_error_data_redacted(error) or isinstance(error, ModelBehaviorError):
                 _detach_data_redacted_error_traceback(error)
             raise
         finally:
-            if not default_loop.is_closed():
-                # The loop stays open for subsequent runs, but we still need to flush any pending
-                # async generators so their cleanup code executes promptly.
-                with contextlib.suppress(RuntimeError):
-                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
-                _start_sync_loop_driver(default_loop)
+            if _get_pending_sync_background_tasks(sync_loop):
+                driver = _start_sync_loop_driver(sync_loop)
+                driver.schedule_settlement()
+            elif not sync_loop.is_closed():
+                # Normal async generators still close before run_sync returns. Deferred cleanup
+                # keeps the SDK-owned loop alive and settles them after its tracked tasks finish.
+                with contextlib.suppress(BaseException):
+                    sync_loop.run_until_complete(sync_loop.shutdown_asyncgens())
 
     def run_streamed(
         self,
