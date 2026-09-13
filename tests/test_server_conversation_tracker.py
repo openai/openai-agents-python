@@ -149,6 +149,7 @@ def test_hydrate_from_state_preserves_unsent_outputs_from_interrupted_turn() -> 
     ]
     interrupted_state = SimpleNamespace(
         _current_step=NextStepInterruption(interruptions=[]),
+        _model_responses=[model_response],
         _last_processed_response=SimpleNamespace(
             handoffs=[],
             functions=[
@@ -209,6 +210,101 @@ def test_hydrate_from_state_preserves_unsent_outputs_from_interrupted_turn() -> 
         for item in prepared
         if isinstance(item, dict) and item.get("type") == "function_call_output"
     ] == ["call_DIAG", "call_CLEANUP1", "call_CLEANUP2"]
+
+
+def test_hydrate_from_state_preserves_unsent_output_without_a_pending_tool_run() -> None:
+    """An interrupted turn's local output is unsent even with no pending tool run to enumerate.
+
+    A call to a tool that does not exist is answered locally and leaves no pending tool run in
+    the resumed `ProcessedResponse`, so the latest model response is what identifies its output
+    as still unsent.
+    """
+    agent = Agent(name="test")
+    approval_call = ResponseFunctionToolCall(
+        id="fc_101",
+        type="function_call",
+        call_id="call_APPROVAL",
+        name="run_cleanup",
+        arguments='{"target": "temp_files"}',
+        status="completed",
+    )
+    missing_tool_call = ResponseFunctionToolCall(
+        id="fc_102",
+        type="function_call",
+        call_id="call_MISSING",
+        name="not_a_registered_tool",
+        arguments="{}",
+        status="completed",
+    )
+    model_response = ModelResponse(
+        output=[approval_call, missing_tool_call],
+        usage=Usage(),
+        response_id="resp_101",
+    )
+    missing_tool_output = ToolCallOutputItem(
+        agent=agent,
+        raw_item={
+            "type": "function_call_output",
+            "call_id": "call_MISSING",
+            "output": "Tool not_a_registered_tool not found.",
+        },
+        output="Tool not_a_registered_tool not found.",
+    )
+    generated_items: list[RunItem] = [
+        ToolCallItem(agent=agent, raw_item=approval_call),
+        ToolCallItem(agent=agent, raw_item=missing_tool_call),
+        ToolApprovalItem(agent=agent, raw_item=approval_call, tool_name="run_cleanup"),
+        missing_tool_output,
+    ]
+    interrupted_state = SimpleNamespace(
+        _current_step=NextStepInterruption(interruptions=[]),
+        _model_responses=[model_response],
+        _last_processed_response=SimpleNamespace(
+            handoffs=[],
+            functions=[SimpleNamespace(tool_call=approval_call)],
+            computer_actions=[],
+            custom_tool_calls=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+        ),
+    )
+
+    tracker = OpenAIServerConversationTracker(previous_response_id="resp_101")
+    tracker.hydrate_from_state(
+        original_input="Clean up and call the missing tool.",
+        generated_items=generated_items,
+        model_responses=[model_response],
+        unsent_tool_call_ids=get_unsent_tool_call_ids_for_interrupted_state(
+            cast(Any, interrupted_state)
+        ),
+    )
+
+    assert "call_MISSING" not in tracker.server_tool_call_ids
+
+    prepared = tracker.prepare_input(
+        "Clean up and call the missing tool.",
+        [
+            ToolCallItem(agent=agent, raw_item=approval_call),
+            ToolCallItem(agent=agent, raw_item=missing_tool_call),
+            missing_tool_output,
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item={
+                    "type": "function_call_output",
+                    "call_id": "call_APPROVAL",
+                    "output": "Cleanup finished.",
+                },
+                output="Cleanup finished.",
+            ),
+        ],
+    )
+
+    assert [
+        item.get("call_id")
+        for item in prepared
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ] == ["call_MISSING", "call_APPROVAL"]
 
 
 def test_hydrate_from_state_does_not_track_string_initial_input_by_object_identity() -> None:

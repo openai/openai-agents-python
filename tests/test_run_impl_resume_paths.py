@@ -918,6 +918,149 @@ async def test_resumed_interruption_passes_server_managed_conversation_flag(
     assert server_managed_values == [True]
 
 
+def _sent_tool_outputs(model: ScriptedModel, *, first_call_index: int) -> list[tuple[str, str]]:
+    """Collect the tool outputs the model received, from `first_call_index` onward."""
+    outputs: list[tuple[str, str]] = []
+    for call in model.calls[first_call_index:]:
+        for item in cast(list[dict[str, Any]], call.input):
+            if item.get("type") == "function_call_output":
+                outputs.append((str(item.get("call_id")), str(item.get("output"))))
+    return outputs
+
+
+async def _run_server_managed(
+    agent: Agent[Any],
+    agent_input: Any,
+    *,
+    run_config: RunConfig,
+    use_conversation_id: bool,
+    streaming: bool,
+) -> Any:
+    """Run the agent under one of the server-managed continuation modes."""
+    kwargs: dict[str, Any] = (
+        {"conversation_id": "conv-resume"}
+        if use_conversation_id
+        else {"auto_previous_response_id": True}
+    )
+    if streaming:
+        streamed = Runner.run_streamed(agent, agent_input, run_config=run_config, **kwargs)
+        async for _ in streamed.stream_events():
+            pass
+        return streamed
+    return await Runner.run(agent, agent_input, run_config=run_config, **kwargs)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("serialize_state", [False, True], ids=["live_state", "serialized_state"])
+@pytest.mark.parametrize(
+    "use_conversation_id", [False, True], ids=["auto_previous_response_id", "conversation_id"]
+)
+@pytest.mark.asyncio
+async def test_resumed_server_managed_run_sends_tool_not_found_output(
+    streaming: bool,
+    serialize_state: bool,
+    use_conversation_id: bool,
+) -> None:
+    """A resumed server-managed run must send the output built for a missing tool.
+
+    The interrupted turn answers the unknown tool locally while another call waits for
+    approval. The server already owns both calls, so resuming has to deliver both outputs.
+    """
+
+    @function_tool(name_override="needs_ok", needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        return text
+
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model, tools=[needs_ok])
+    model.extend(
+        [
+            [
+                get_function_tool_call(
+                    "needs_ok", json.dumps({"text": "one"}), call_id="call-approval"
+                ),
+                get_function_tool_call("missing_tool", json.dumps({}), call_id="call-missing"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(tool_not_found_behavior="return_error_to_model")
+
+    async def run_once(agent_input: Any) -> Any:
+        return await _run_server_managed(
+            agent,
+            agent_input,
+            run_config=run_config,
+            use_conversation_id=use_conversation_id,
+            streaming=streaming,
+        )
+
+    first = await run_once("Use needs_ok and missing_tool")
+    state = first.to_state()
+    if serialize_state:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    interruptions = state.get_interruptions()
+    assert [item.raw_item.call_id for item in interruptions] == ["call-approval"]
+    state.approve(interruptions[0])
+
+    resumed = await run_once(state)
+
+    assert resumed.final_output == "done"
+    delivered = _sent_tool_outputs(model, first_call_index=1)
+    assert sorted(call_id for call_id, _ in delivered) == ["call-approval", "call-missing"]
+    assert "missing_tool" in dict(delivered)["call-missing"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_server_managed_run_sends_each_tool_output_once() -> None:
+    """Staged approvals must deliver every output exactly once to a server-managed conversation.
+
+    Approving one of two gated calls resumes and interrupts again without a model request, so
+    the same model response stays current across both resumes.
+    """
+
+    @function_tool(name_override="needs_ok", needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        return f"ok:{text}"
+
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model, tools=[needs_ok])
+    model.extend(
+        [
+            [
+                get_function_tool_call("needs_ok", json.dumps({"text": "a"}), call_id="call-a"),
+                get_function_tool_call("needs_ok", json.dumps({"text": "b"}), call_id="call-b"),
+                get_function_tool_call("missing_tool", json.dumps({}), call_id="call-missing"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(tool_not_found_behavior="return_error_to_model")
+
+    async def run_once(agent_input: Any) -> Any:
+        return await _run_server_managed(
+            agent,
+            agent_input,
+            run_config=run_config,
+            use_conversation_id=False,
+            streaming=False,
+        )
+
+    result = await run_once("Use needs_ok twice and missing_tool")
+    for expected_model_calls in (1, 2):
+        state = await RunState.from_json(agent, json.loads(json.dumps(result.to_state().to_json())))
+        interruptions = state.get_interruptions()
+        assert interruptions
+        state.approve(interruptions[0])
+        result = await run_once(state)
+        # Approving only the first gated call resumes without asking the model again.
+        assert len(model.calls) == expected_model_calls
+
+    assert result.final_output == "done"
+    delivered = _sent_tool_outputs(model, first_call_index=1)
+    assert sorted(call_id for call_id, _ in delivered) == ["call-a", "call-b", "call-missing"]
+
+
 @pytest.mark.asyncio
 async def test_resumed_approval_does_not_duplicate_session_items() -> None:
     async def test_tool() -> str:
