@@ -63,10 +63,10 @@ if ! git diff --name-only --no-renames -z "$base_sha" "$head_sha" -- > "$changed
 fi
 
 docs_pattern='^(docs/|mkdocs\.yml$)'
-# Dependency updates must refresh deployed assets even in a mixed push.
+# Dependency and deployment workflow updates refresh assets even in a mixed push.
 if [ "$mode" = "docs-deploy" ]; then
   while IFS= read -r -d '' path; do
-    if [ "$path" = "uv.lock" ]; then
+    if [[ "$path" = uv.lock || "$path" = .github/workflows/docs.yml ]]; then
       echo "run=true" >> "$GITHUB_OUTPUT"
       exit 0
     fi
@@ -79,7 +79,7 @@ case "$mode" in
     pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills)\.yml$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs)
-    pattern='^(docs/|mkdocs\.yml$|uv\.lock$)'
+    pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/docs\.yml$)'
     ;;
   docs-only)
     pattern="$docs_pattern"

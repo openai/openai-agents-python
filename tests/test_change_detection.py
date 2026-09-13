@@ -109,7 +109,7 @@ def _detect(
         (".github/scripts/update_released_api_contract.py", True, False, False),
         (".github/scripts/run_repo_skill_tests.py", True, False, False),
         (".github/workflows/tests.yml", True, False, False),
-        (".github/workflows/docs.yml", True, False, False),
+        (".github/workflows/docs.yml", True, True, False),
         (".github/workflows/publish.yml", True, False, False),
         (".github/workflows/repo-skills.yml", True, False, False),
         ("pyproject.toml", True, False, False),
@@ -307,9 +307,12 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
         (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
     )
     assert workflow["on"] == {
-        "push": {"branches": ["main"], "paths": ["docs/**", "mkdocs.yml", "uv.lock"]}
+        "push": {
+            "branches": ["main"],
+            "paths": ["docs/**", "mkdocs.yml", "uv.lock", ".github/workflows/docs.yml"],
+        }
     }
-    steps = workflow["jobs"]["deploy_docs"]["steps"]
+    steps = workflow["jobs"]["build_docs"]["steps"]
     detection = next(step for step in steps if step.get("id") == "docs-deploy")
     assert detection["env"] == {
         "BASE_SHA": "${{ github.event.before }}",
@@ -338,6 +341,7 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
     )
 
 
+@pytest.mark.parametrize("deployment_input", ["uv.lock", ".github/workflows/docs.yml"])
 @pytest.mark.parametrize(
     "mixed_paths",
     [
@@ -346,13 +350,97 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
         ("docs/index.md", "src/agents/run.py"),
     ],
 )
-def test_lockfile_changes_build_and_deploy_docs(
-    change_repo: tuple[Path, str], mixed_paths: tuple[str, ...]
+def test_deployment_input_changes_build_and_deploy_docs(
+    change_repo: tuple[Path, str], deployment_input: str, mixed_paths: tuple[str, ...]
 ) -> None:
     repo, base = change_repo
-    head = _commit(repo, "uv.lock", *mixed_paths)
+    head = _commit(repo, deployment_input, *mixed_paths)
 
     assert _detect(repo, "code", base, head)
     assert _detect(repo, "docs", base, head)
     assert _detect(repo, "docs-deploy", base, head)
     assert not _detect(repo, "docs-only", base, head)
+
+
+def test_docs_build_and_publish_have_separate_permissions() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert workflow["permissions"] == {}
+    assert workflow["concurrency"] == {
+        "group": "docs-deploy",
+        "cancel-in-progress": "false",
+        "queue": "max",
+    }
+    build = workflow["jobs"]["build_docs"]
+    deploy = workflow["jobs"]["deploy_docs"]
+    assert build["permissions"] == {"contents": "read"}
+    checkout = build["steps"][0]
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert deploy["permissions"] == {"contents": "write"}
+    assert deploy["needs"] == "build_docs"
+    assert deploy["if"] == "needs.build_docs.outputs.deploy == 'true'"
+    assert build["outputs"]["deploy"] == "${{ steps.docs-deploy.outputs.run }}"
+    upload = next(step for step in build["steps"] if step["name"] == "Upload site")
+    download = next(step for step in deploy["steps"] if step["name"] == "Download site")
+    assert upload["with"]["name"] == download["with"]["name"]
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert "run-id" not in download["with"]
+    assert "github-token" not in download["with"]
+    assert [step["name"] for step in deploy["steps"]] == [
+        "Checkout published branch",
+        "Download site",
+        "Publish static files",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="Publishing uses rsync on Ubuntu")
+def test_docs_publish_static_artifact_to_existing_branch(tmp_path: Path) -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    publish = next(
+        step
+        for step in workflow["jobs"]["deploy_docs"]["steps"]
+        if step["name"] == "Publish static files"
+    )
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(remote, "init", "--bare", "--initial-branch=gh-pages")
+    published = tmp_path / "published"
+    _git(tmp_path, "clone", remote.as_posix(), published.as_posix())
+    _git(published, "config", "user.name", "Docs test")
+    _git(published, "config", "user.email", "docs@example.invalid")
+    initial = _commit(published, "old.html")
+    _git(published, "push", "origin", "HEAD:gh-pages")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<h1>Updated documentation</h1>", encoding="utf-8")
+    (site / ".well-known").mkdir()
+    (site / ".well-known" / "example.txt").write_text("static metadata", encoding="utf-8")
+    # Build output is data and must never replace the publisher's Git configuration.
+    (site / ".git").mkdir()
+    (site / ".git" / "config").write_text("artifact metadata", encoding="utf-8")
+    config = (published / ".git" / "config").read_bytes()
+    env = _environment()
+    env["GITHUB_SHA"] = "2" * 40
+    for _ in range(2):
+        subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", publish["run"]],
+            cwd=tmp_path,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    assert _git(remote, "rev-list", "--count", f"{initial}..gh-pages") == "1"
+    assert _git(remote, "show", "gh-pages:index.html") == "<h1>Updated documentation</h1>"
+    assert _git(remote, "show", "gh-pages:.well-known/example.txt") == "static metadata"
+    assert (
+        _git(remote, "ls-tree", "--name-only", "gh-pages") == ".nojekyll\n.well-known\nindex.html"
+    )
+    # The publisher updates only its author fields; the remote remains the local fixture.
+    assert b"artifact metadata" not in (published / ".git" / "config").read_bytes()
+    assert remote.as_posix().encode() in config
+    assert _git(published, "remote", "get-url", "origin") == remote.as_posix()
