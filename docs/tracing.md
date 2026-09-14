@@ -164,6 +164,29 @@ To customize this default setup, to send traces to alternative or additional bac
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
 
+## Custom tracing endpoints
+
+Model requests and trace exports use separate clients and destinations. Setting `OPENAI_BASE_URL` or a model client's `base_url` changes model requests; the default tracing exporter still posts to `https://api.openai.com/v1/traces/ingest`. Configure tracing separately when using a model gateway or a self-hosted model.
+
+To send traces to a different service that accepts the OpenAI traces ingest payload, configure [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter] with the full ingest URL and a credential for that service. Replace the default processor during application startup, before creating traces or running agents:
+
+```python
+import os
+
+from agents import set_trace_processors
+from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
+
+exporter = BackendSpanExporter(
+    endpoint=os.environ["MY_TRACING_ENDPOINT"],
+    api_key=os.environ["MY_TRACING_API_KEY"],
+)
+set_trace_processors([BatchTraceProcessor(exporter)])
+```
+
+`MY_TRACING_ENDPOINT` and `MY_TRACING_API_KEY` are application-defined environment variables read by this example, not variables that the SDK reads automatically. For example, the endpoint could be `https://tracing.example.com/v1/traces/ingest`. A service that implements model endpoints does not necessarily implement traces ingestion; use a compatible receiver or an [ecosystem integration](#ecosystem-integrations).
+
+The exporter sends its API key as a Bearer token to the configured endpoint. If `api_key` is omitted, the exporter falls back to `OPENAI_API_KEY`; per-run keys configured through `RunConfig.tracing` take precedence over the exporter's key. The exporter also falls back to `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` for its organization and project headers. Configure these credentials and headers for the intended tracing destination. Using `add_trace_processor()` instead of `set_trace_processors()` keeps the default OpenAI exporter active as an additional destination.
+
 ## Tracing with non-OpenAI models
 
 When using non-OpenAI models, you can provide an OpenAI API key to the tracing exporter to enable free tracing in the OpenAI Traces dashboard without disabling tracing. See the [Third-party adapters](models/index.md#third-party-adapters) section in the Models guide for adapter selection and setup caveats.
