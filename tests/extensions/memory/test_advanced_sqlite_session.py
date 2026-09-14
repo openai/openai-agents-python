@@ -2095,6 +2095,22 @@ async def test_branch_error_handling():
     with pytest.raises(ValueError, match="Branch ID cannot be empty"):
         await session.delete_branch("   ")
 
+    # Test switching to empty branch ID
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.switch_to_branch("")
+
+    # Test switching to empty branch ID (whitespace only)
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.switch_to_branch("   ")
+
+    # Test creating branch with empty branch name
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.create_branch_from_turn(1, "")
+
+    # Test creating branch with whitespace branch name
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.create_branch_from_turn(1, "   ")
+
     session.close()
 
 
