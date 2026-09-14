@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agents.sandbox import Manifest
 from agents.sandbox.errors import WorkspaceReadNotFoundError
+from agents.sandbox.files import EntryKind, FileEntry, Permissions
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
 from agents.sandbox.types import ExecResult, User
@@ -92,6 +93,27 @@ class ApplyPatchSession(BaseSandboxSession):
         normalized = self.normalize_path(path)
         self.rm_calls.append((normalized, recursive))
         self.files.pop(normalized, None)
+
+    async def ls(
+        self,
+        path: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> list[FileEntry]:
+        _ = user
+        normalized = self.normalize_path(path)
+        return [
+            FileEntry(
+                path=str(file_path),
+                permissions=Permissions.from_mode(0o644),
+                owner="0",
+                group="0",
+                size=len(payload),
+                kind=EntryKind.FILE,
+            )
+            for file_path, payload in self.files.items()
+            if file_path.parent == normalized
+        ]
 
 
 class ProviderNotFoundApplyPatchSession(ApplyPatchSession):

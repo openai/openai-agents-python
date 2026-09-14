@@ -192,7 +192,15 @@ _RM_ACCESS_CHECK_SCRIPT = (
     "    exit $?\n"
     "fi\n"
     'parent=$(dirname "$target")\n'
-    '[ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ]\n'
+    '[ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ] || exit 1\n'
+    # A sticky directory (e.g. /tmp) lets only the entry's owner or the directory's owner
+    # unlink an entry, even with write access to the directory. `stat` without -L reports
+    # the entry itself (GNU `-c`, BSD/macOS `-f`), so a symlink is judged by the link's
+    # owner, not its target's. root (CAP_FOWNER) may unlink anything it can reach.
+    'if [ "$(id -u)" != 0 ] && [ -k "$parent" ] && [ ! -O "$parent" ]; then\n'
+    '    owner=$(stat -c %u "$target" 2>/dev/null || stat -f %u "$target" 2>/dev/null)\n'
+    '    [ -n "$owner" ] && [ "$owner" = "$(id -u)" ]\n'
+    "fi\n"
 )
 
 
@@ -1056,6 +1064,17 @@ class BaseSandboxSession(abc.ABC):
         user: str | User | None = None,
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
+        await self._check_rm_access_with_exec(workspace_path, recursive=recursive, user=user)
+        return workspace_path
+
+    async def _check_rm_access_with_exec(
+        self,
+        workspace_path: Path,
+        *,
+        recursive: bool = False,
+        user: str | User | None = None,
+    ) -> None:
+        """Run the sandbox-side ``rm`` access check for an already validated workspace path."""
         recursive_flag = "1" if recursive else "0"
         path_arg = sandbox_path_str(workspace_path)
         cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
@@ -1075,7 +1094,6 @@ class BaseSandboxSession(abc.ABC):
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
             )
-        return workspace_path
 
     @abc.abstractmethod
     async def running(self) -> bool:
