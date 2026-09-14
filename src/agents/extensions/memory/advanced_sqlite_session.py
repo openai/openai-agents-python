@@ -4,10 +4,13 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 import time
+from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from contextlib import closing
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypeVar, cast
 
 from agents.result import RunResult
 from agents.usage import Usage
@@ -23,6 +26,8 @@ from ...logger import (
 from ...memory import SQLiteSession
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 from ...memory.sqlite_session import _await_mutation
+
+_T = TypeVar("_T")
 
 
 def _allow_all_sqlite_actions(
@@ -77,6 +82,10 @@ class AdvancedSQLiteSession(SQLiteSession):
         # branch pointer is established or a write begins. A mismatch means
         # another instance cleared the session, so the local pointer resets to main.
         self._generation = 0
+        # Order history mutations and usage capture before dispatching workers.
+        # The bookkeeping lock never protects SQLite work or an await.
+        self._turn_operation_lock = threading.Lock()
+        self._turn_operation_tail: Future[None] | None = None
         self._create_structure_tables_on_init = create_tables
         try:
             super().__init__(
@@ -344,6 +353,33 @@ class AdvancedSQLiteSession(SQLiteSession):
             ON turn_usage(session_id, branch_id, user_turn_number)
         """)
 
+    def _run_ordered_turn_operation(
+        self, worker: Callable[..., _T], *args: Any
+    ) -> Coroutine[Any, Any, _T]:
+        """Reserve history/capture order before the caller first yields.
+
+        Completion futures are independent of any event loop, like the session's
+        thread-local database connections. A failed operation still releases its
+        successor; each caller owns cancellation settlement via _await_mutation.
+        """
+        completion: Future[None] = Future()
+        with self._turn_operation_lock:
+            predecessor = self._turn_operation_tail
+            self._turn_operation_tail = completion
+
+        async def _run() -> _T:
+            try:
+                if predecessor is not None:
+                    await asyncio.wrap_future(predecessor)
+                return await asyncio.to_thread(worker, *args)
+            finally:
+                completion.set_result(None)
+                with self._turn_operation_lock:
+                    if self._turn_operation_tail is completion:
+                        self._turn_operation_tail = None
+
+        return _run()
+
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add items to the session.
 
@@ -366,7 +402,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 conn.commit()
 
         try:
-            await _await_mutation(asyncio.to_thread(_add_items_sync))
+            await _await_mutation(self._run_ordered_turn_operation(_add_items_sync))
         except Exception as exc:
             log_model_and_tool_action_error(self._logger, "Failed to add session items", exc)
             raise
@@ -551,7 +587,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             # Drop corrupted JSON entries and keep looking for a valid item.
                             continue
 
-        return await _await_mutation(asyncio.to_thread(_pop_item_sync))
+        return await _await_mutation(self._run_ordered_turn_operation(_pop_item_sync))
 
     async def clear_session(self) -> None:
         """Clear all items for this session.
@@ -621,6 +657,8 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         This is designed to be called after `Runner.run()` completes.
         Session-level usage can be aggregated from turn data when needed.
+        Appends and pops started later on this session instance cannot change
+        which turn this call captures.
 
         Args:
             result: The result from the run
@@ -638,11 +676,12 @@ class AdvancedSQLiteSession(SQLiteSession):
                 branch_id = self._current_branch_id
                 generation = self._generation
                 usage = result.context_wrapper.usage
+                capture = self._run_ordered_turn_operation(
+                    self._capture_current_turn, branch_id, generation
+                )
 
                 async def _store_usage() -> None:
-                    current_turn, captured_branch, turn_anchor = await asyncio.to_thread(
-                        self._capture_current_turn, branch_id, generation
-                    )
+                    current_turn, captured_branch, turn_anchor = await capture
                     # Only update turn-level usage; session usage is aggregated on demand.
                     await self._update_turn_usage_internal(
                         current_turn,

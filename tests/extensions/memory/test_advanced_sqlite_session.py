@@ -3454,6 +3454,7 @@ async def test_store_run_usage_keeps_target_while_capture_is_waiting(
     """Usage must not move to another branch or replacement session history."""
     session = AdvancedSQLiteSession(session_id=f"usage_capture_{operation}", create_tables=True)
     task: asyncio.Task[None] | None = None
+    replacement: asyncio.Task[None] | None = None
     try:
         await session.add_items([{"role": "user", "content": "main turn"}])
         if operation == "switch":
@@ -3470,13 +3471,19 @@ async def test_store_run_usage_keeps_target_while_capture_is_waiting(
                     await session.switch_to_branch("main")
                 else:
                     await session.clear_session()
-                    await session.add_items([{"role": "user", "content": "replacement turn"}])
+                    replacement = asyncio.create_task(
+                        session.add_items([{"role": "user", "content": "replacement turn"}])
+                    )
                 release.set()
                 await task
+                if replacement is not None:
+                    await replacement
             finally:
                 release.set()
                 if task is not None:
                     await asyncio.gather(task, return_exceptions=True)
+                if replacement is not None:
+                    await asyncio.gather(replacement, return_exceptions=True)
 
         assert await session.get_turn_usage(branch_id="main") == []
         if operation == "switch":
@@ -3487,6 +3494,194 @@ async def test_store_run_usage_keeps_target_while_capture_is_waiting(
             assert await session.get_items() == [{"role": "user", "content": "main turn"}]
         else:
             assert await session.get_items() == [{"role": "user", "content": "replacement turn"}]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("operation", ["append", "replace"])
+async def test_store_run_usage_keeps_turn_when_history_changes_during_capture(
+    usage_data: Usage, operation: str
+):
+    """Later history must not receive usage from a capture that is still waiting."""
+    session = AdvancedSQLiteSession(session_id=f"capture_turn_{operation}", create_tables=True)
+    newer_usage = Usage(requests=1, input_tokens=7, output_tokens=4, total_tokens=11)
+    mutation_entered = asyncio.Event()
+    mutation_dispatched = asyncio.Event()
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        await session.add_items([{"role": "user", "content": "original turn"}])
+        with _gate_worker("_capture_current_turn") as (started, real_to_thread, release):
+            gated_to_thread = asyncio.to_thread
+
+            async def observe_dispatch(func, /, *args, **kwargs):
+                if getattr(func, "__name__", "") in ("_add_items_sync", "_pop_item_sync"):
+                    mutation_dispatched.set()
+                return await gated_to_thread(func, *args, **kwargs)
+
+            async def change_history() -> None:
+                mutation_entered.set()
+                if operation == "replace":
+                    await session.pop_item()
+                await session.add_items([{"role": "user", "content": "newer turn"}])
+                await session.store_run_usage(create_mock_run_result(newer_usage))
+
+            with patch(
+                "agents.extensions.memory.advanced_sqlite_session.asyncio.to_thread",
+                observe_dispatch,
+            ):
+                try:
+                    tasks.append(
+                        asyncio.create_task(
+                            session.store_run_usage(create_mock_run_result(usage_data))
+                        )
+                    )
+                    assert await real_to_thread(started.wait, 5)
+                    tasks.append(asyncio.create_task(change_history()))
+                    await mutation_entered.wait()
+                    # Let the completion-owned mutation task reach its first await.
+                    await asyncio.sleep(0)
+                    if mutation_dispatched.is_set():
+                        # Expose the original race if history can overtake capture.
+                        await tasks[1]
+                    release.set()
+                    await asyncio.gather(*tasks)
+                finally:
+                    release.set()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+        newer_turn = 2 if operation == "append" else 1
+        recorded_newer = await session.get_turn_usage(newer_turn)
+        assert isinstance(recorded_newer, dict)
+        assert recorded_newer["total_tokens"] == newer_usage.total_tokens
+        if operation == "append":
+            recorded_original = await session.get_turn_usage(1)
+            assert isinstance(recorded_original, dict)
+            assert recorded_original["total_tokens"] == usage_data.total_tokens
+        else:
+            assert await session.get_items() == [{"role": "user", "content": "newer turn"}]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("outcome", ["failure", "cancel"])
+async def test_queued_turn_mutation_releases_later_usage_capture(usage_data: Usage, outcome: str):
+    """A failed or caller-cancelled queued mutation cannot strand later usage."""
+    session = FailingOnceStructureMetadataSession(
+        session_id=f"queued_turn_{outcome}", create_tables=True
+    )
+    session.fail_structure_metadata_once = False
+    user: TResponseInputItem = {"role": "user", "content": "original turn"}
+    assistant: TResponseInputItem = {"role": "assistant", "content": "original response"}
+    replacement: TResponseInputItem = {"role": "user", "content": "next turn"}
+    tasks: list[asyncio.Task[Any]] = []
+    try:
+        await session.add_items([user, assistant])
+        session.fail_structure_metadata_once = outcome == "failure"
+        with _gate_worker("_pop_item_sync") as (started, real_to_thread, release):
+            try:
+                predecessor = asyncio.create_task(session.pop_item())
+                tasks.append(predecessor)
+                assert await real_to_thread(started.wait, 5)
+                mutation_entered = asyncio.Event()
+                capture_entered = asyncio.Event()
+
+                async def add_next_turn() -> None:
+                    mutation_entered.set()
+                    await session.add_items([replacement])
+
+                async def capture_usage() -> None:
+                    capture_entered.set()
+                    await session.store_run_usage(create_mock_run_result(usage_data))
+
+                mutation = asyncio.create_task(add_next_turn())
+                tasks.append(mutation)
+                # The public add call has run to its first await before this resumes.
+                await mutation_entered.wait()
+                if outcome == "cancel":
+                    mutation.cancel("queued-add-cancel")
+                capture = asyncio.create_task(capture_usage())
+                tasks.append(capture)
+                await capture_entered.wait()
+                assert not mutation.done()
+                assert not capture.done()
+                release.set()
+                _, pending = await asyncio.wait(tasks, timeout=5)
+                assert not pending, "A settled predecessor stranded the operation queue"
+                assert await predecessor == assistant
+                if outcome == "failure":
+                    with pytest.raises(RuntimeError, match="structure metadata failed"):
+                        await mutation
+                else:
+                    with pytest.raises(asyncio.CancelledError) as exc_info:
+                        await mutation
+                    _assert_cancel_message(exc_info.value, "queued-add-cancel")
+                await capture
+            finally:
+                release.set()
+                if tasks:
+                    await asyncio.wait(tasks, timeout=5)
+
+        expected_turn = 1 if outcome == "failure" else 2
+        assert await session.get_items() == (
+            [user] if outcome == "failure" else [user, replacement]
+        )
+        recorded = await session.get_turn_usage()
+        assert isinstance(recorded, list)
+        assert [(row["user_turn_number"], row["total_tokens"]) for row in recorded] == [
+            (expected_turn, usage_data.total_tokens)
+        ]
+    finally:
+        session.close()
+
+
+async def test_turn_ordering_survives_reuse_on_another_event_loop(usage_data: Usage):
+    """Both loops must contend: uncontended reuse would miss asyncio.Lock binding."""
+    session = AdvancedSQLiteSession(session_id="usage_two_loops", create_tables=True)
+
+    async def exercise_loop(original_turn: int) -> None:
+        await session.add_items([{"role": "user", "content": f"usage owner {original_turn}"}])
+        tasks: list[asyncio.Task[Any]] = []
+        with _gate_worker("_capture_current_turn") as (started, real_to_thread, release):
+            try:
+                capture = asyncio.create_task(
+                    session.store_run_usage(create_mock_run_result(usage_data))
+                )
+                tasks.append(capture)
+                assert await real_to_thread(started.wait, 5)
+                append_entered = asyncio.Event()
+
+                async def append_turn() -> None:
+                    append_entered.set()
+                    await session.add_items(
+                        [{"role": "user", "content": f"following {original_turn}"}]
+                    )
+
+                append = asyncio.create_task(append_turn())
+                tasks.append(append)
+                await append_entered.wait()
+                assert not append.done()
+                release.set()
+                _, pending = await asyncio.wait(tasks, timeout=5)
+                assert not pending, "Contended operations did not settle on the new loop"
+                await asyncio.gather(*tasks)
+            finally:
+                release.set()
+                if tasks:
+                    await asyncio.wait(tasks, timeout=5)
+
+    def use_two_loops() -> None:
+        asyncio.run(exercise_loop(1))
+        asyncio.run(exercise_loop(3))
+
+    try:
+        # Run outside pytest's active loop; both asyncio.run calls share the session.
+        await asyncio.to_thread(use_two_loops)
+        recorded = await session.get_turn_usage()
+        assert isinstance(recorded, list)
+        assert [(row["user_turn_number"], row["total_tokens"]) for row in recorded] == [
+            (1, usage_data.total_tokens),
+            (3, usage_data.total_tokens),
+        ]
     finally:
         session.close()
 
