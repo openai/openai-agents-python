@@ -28,6 +28,7 @@ from docker.utils import parse_repository_tag
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
+from .._cleanup_owner import create_cleanup_owner
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
     redact_mount_error_data,
@@ -1378,7 +1379,7 @@ class DockerSandboxSession(BaseSandboxSession):
         # Keep the whole executor operation independently owned. In particular, a kill queued
         # behind all Docker workers must still start after this caller's deadline expires; a
         # cancelled queued future would otherwise leave both the process and PID file orphaned.
-        kill_task = asyncio.create_task(
+        kill_task = create_cleanup_owner(
             self._exec_run(
                 cmd=command,
                 workdir=None,
@@ -1391,12 +1392,11 @@ class DockerSandboxSession(BaseSandboxSession):
             name="agents.docker_pty_kill",
         )
         try:
-            await asyncio.wait_for(asyncio.shield(kill_task), timeout=_PTY_CLEANUP_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            self._track_pty_cleanup_task(kill_task)
-        except asyncio.CancelledError:
-            if not kill_task.done():
+            done, _ = await asyncio.wait((kill_task,), timeout=_PTY_CLEANUP_TIMEOUT_S)
+            if not done:
                 self._track_pty_cleanup_task(kill_task)
+        except asyncio.CancelledError:
+            self._track_pty_cleanup_task(kill_task)
             raise
         except Exception:
             pass

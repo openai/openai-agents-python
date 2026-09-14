@@ -18,6 +18,7 @@ from ...run_config import (
     SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
+from .._cleanup_owner import create_cleanup_owner
 from .._mount_security import redact_mount_error_data, validate_manifest_mount_credential_boundaries
 from ..apply_patch import PatchFormat, WorkspaceEditor
 from ..entries import BaseEntry
@@ -467,7 +468,7 @@ class BaseSandboxSession(abc.ABC):
 
         snapshot_task = self._snapshot_persistence_task
         if snapshot_task is None or snapshot_task.done():
-            snapshot_task = asyncio.create_task(
+            snapshot_task = create_cleanup_owner(
                 self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
             )
             self._snapshot_persistence_task = snapshot_task
@@ -485,46 +486,36 @@ class BaseSandboxSession(abc.ABC):
 
         snapshot_task.add_done_callback(mark_snapshot_durable)
         snapshot_task.add_done_callback(forget_snapshot_task)
-        completion = asyncio.create_task(asyncio.wait((snapshot_task,)))
         caller_cancellation: asyncio.CancelledError | None = None
         timed_out = False
         deadline = asyncio.get_running_loop().time() + self._pty_cleanup_timeout_s()
-        try:
-            while not completion.done():
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                try:
-                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
-                except asyncio.CancelledError as error:
-                    caller_cancellation = caller_cancellation or error
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    break
+        while not snapshot_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                await asyncio.wait((snapshot_task,), timeout=remaining)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
 
-            if completion.done():
-                completion.result()
-                try:
-                    snapshot_task.result()
-                except BaseException as error:
-                    return error
-                return None
+        if snapshot_task.done():
+            try:
+                snapshot_task.result()
+            except BaseException as error:
+                return error
+            return None
 
-            if timed_out:
-                # Keep the operation owned after the caller gives up waiting. The backend is
-                # retained because a snapshot that is still running cannot be treated as durable.
-                self._track_pty_cleanup_task(snapshot_task)
-                return asyncio.TimeoutError()
-            if caller_cancellation is not None:
-                # This branch is only reachable if the completion task became done between the
-                # loop condition and the cancellation; keep the original stop failure primary.
-                return caller_cancellation
+        if timed_out:
+            # Keep the operation owned after the caller gives up waiting. The backend is
+            # retained because a snapshot that is still running cannot be treated as durable.
+            self._track_pty_cleanup_task(snapshot_task)
             return asyncio.TimeoutError()
-        finally:
-            if not completion.done():
-                completion.cancel()
-            await asyncio.gather(completion, return_exceptions=True)
+        if caller_cancellation is not None:
+            # Keep the original stop failure primary when cancellation was observed while
+            # the snapshot was still settling.
+            return caller_cancellation
+        return asyncio.TimeoutError()
 
     async def _before_stop(self) -> None:
         """Run transient process cleanup before snapshot persistence."""
@@ -778,7 +769,7 @@ class BaseSandboxSession(abc.ABC):
         if task is not None and not task.done():
             return
 
-        task = asyncio.create_task(
+        task = create_cleanup_owner(
             self._finish_deferred_dependency_close(),
             name="agents.deferred_dependency_close",
         )
@@ -1021,41 +1012,38 @@ class BaseSandboxSession(abc.ABC):
         async def run_operation() -> None:
             await operation
 
-        task = asyncio.create_task(run_operation(), name="agents.pty_cleanup")
+        task = create_cleanup_owner(
+            run_operation(),
+            name="agents.pty_cleanup",
+            cancel_grace_s=max(
+                self._pty_cleanup_timeout_s() if timeout is None else timeout,
+                0.1,
+            ),
+        )
         self._track_pty_cleanup_task(task)
-        completion = asyncio.create_task(asyncio.wait((task,)))
         caller_cancellation: asyncio.CancelledError | None = None
         deadline = asyncio.get_running_loop().time() + (
             self._pty_cleanup_timeout_s() if timeout is None else timeout
         )
         timed_out = False
-        try:
-            while not completion.done():
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                try:
-                    await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
-                except asyncio.CancelledError as error:
-                    caller_cancellation = caller_cancellation or error
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    break
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                await asyncio.wait((task,), timeout=remaining)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
 
-            if completion.done():
-                completion.result()
-                task.result()
-                if caller_cancellation is not None:
-                    raise caller_cancellation
-            elif caller_cancellation is not None:
+        if task.done():
+            task.result()
+            if caller_cancellation is not None:
                 raise caller_cancellation
-            elif timed_out and propagate_timeout:
-                raise asyncio.TimeoutError()
-        finally:
-            if not completion.done():
-                completion.cancel()
-            await asyncio.gather(completion, return_exceptions=True)
+        elif caller_cancellation is not None:
+            raise caller_cancellation
+        elif timed_out and propagate_timeout:
+            raise asyncio.TimeoutError()
 
     async def _rollback_pty_start(
         self,
@@ -1094,7 +1082,7 @@ class BaseSandboxSession(abc.ABC):
         batch_timeout = self._pty_cleanup_timeout_s() if timeout is None else timeout
         deadline = loop.time() + batch_timeout
         cleanup_tasks = [
-            asyncio.create_task(
+            create_cleanup_owner(
                 self._settle_pty_cleanup(
                     cleanup_entry(entry),
                     timeout=batch_timeout,

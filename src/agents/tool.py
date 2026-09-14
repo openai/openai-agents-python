@@ -73,6 +73,7 @@ from .function_schema import DocstringStyle, function_schema, generate_func_docu
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .run_internal.sync import _track_sync_background_task
+from .sandbox._cleanup_owner import create_cleanup_owner
 from .strict_schema import _copy_json_schema, ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
@@ -383,16 +384,6 @@ _COMPUTER_DISPOSAL_TIMEOUT_S = 5.0
 _background_computer_disposal_tasks: set[asyncio.Task[None]] = set()
 
 
-class _OwnedComputerDisposalTask(asyncio.Task[None]):
-    """Keep provider disposal alive while the owning event loop is shutting down."""
-
-    def cancel(self, msg: object = None) -> bool:
-        # asyncio.run() cancels every pending task before closing its loop. Disposal owns the
-        # provider resource, so cancellation must not abandon that cleanup operation.
-        _ = msg
-        return False
-
-
 async def _dispose_computer(
     *,
     dispose: ComputerDispose[ComputerLike],
@@ -425,10 +416,10 @@ def _start_computer_disposal(
     run_context: RunContextWrapper[Any],
     computer: ComputerLike,
 ) -> asyncio.Task[None]:
-    task = _OwnedComputerDisposalTask(
+    task = create_cleanup_owner(
         _dispose_computer(dispose=dispose, run_context=run_context, computer=computer),
-        loop=asyncio.get_running_loop(),
         name="agents.dispose_computer",
+        cancel_grace_s=_COMPUTER_DISPOSAL_TIMEOUT_S,
     )
     _track_background_computer_disposal(task)
     return task

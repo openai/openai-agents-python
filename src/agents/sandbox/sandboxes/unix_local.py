@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ...logger import log_tool_action_warning
+from .._cleanup_owner import create_cleanup_owner
 from .._mount_security import redact_mount_error_data
 from ..errors import (
     ExecNonZeroError,
@@ -641,7 +642,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             await asyncio.gather(entry.wait_task, return_exceptions=True)
 
     def _schedule_fd_close(self, fd: int) -> None:
-        task = asyncio.create_task(asyncio.to_thread(_close_fd_quietly, fd))
+        task = create_cleanup_owner(
+            asyncio.to_thread(_close_fd_quietly, fd), name="agents.fd_close"
+        )
         self._fd_close_tasks.add(task)
         task.add_done_callback(self._fd_close_tasks.discard)
 

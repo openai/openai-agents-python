@@ -8,6 +8,8 @@ from typing import cast
 
 from typing_extensions import Self
 
+from .._cleanup_owner import create_cleanup_owner
+
 DependencyKey = str
 
 
@@ -256,7 +258,7 @@ class Dependencies:
         task = self._close_task
         if task is None:
             self._closed = True
-            task = asyncio.create_task(self._close())
+            task = create_cleanup_owner(self._close(), name="agents.dependencies_close")
             self._close_task = task
         await asyncio.shield(task)
 

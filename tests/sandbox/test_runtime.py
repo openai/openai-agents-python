@@ -10,6 +10,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import threading
 import uuid
 from collections.abc import Sequence
 from contextlib import suppress
@@ -690,6 +691,97 @@ async def test_runner_owned_cleanup_redacts_pre_stop_hook_failure() -> None:
     assert session.stop_calls == 0
     assert session.shutdown_calls == 1
     assert session.close_dependency_calls == 1
+
+
+def test_asyncio_run_waits_for_detached_pty_and_runner_finalization() -> None:
+    """An asyncio.run shutdown must keep a late provider close and its owners alive."""
+    outer_done = threading.Event()
+    loop_ready = threading.Event()
+    release_after_return = threading.Event()
+    finished = threading.Event()
+    release: dict[str, Any] = {}
+    failures: list[BaseException] = []
+    registry: dict[int, str] = {1: "owned"}
+
+    class DelayedPtySession(_FakeSession):
+        gate: asyncio.Event | None = None
+
+        def _pty_cleanup_timeout_s(self) -> float:
+            return 0.02
+
+        async def _before_stop(self) -> None:
+            async def close_pty() -> None:
+                try:
+                    assert self.gate is not None
+                    await self.gate.wait()
+                finally:
+                    registry.pop(1)
+
+            await self._settle_pty_cleanup(close_pty())
+
+        async def _aclose_dependencies(self) -> None:
+            await super()._aclose_dependencies()
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self._running = False
+            await BaseSandboxSession.stop(self)
+
+    inner = DelayedPtySession(Manifest())
+    client = _FakeClient(inner)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        instructions="Base instructions.",
+    )
+
+    def release_after_main_return() -> None:
+        returned = outer_done.wait(2)
+        if returned:
+            release_after_return.set()
+        if loop_ready.wait(5):
+            with suppress(RuntimeError):
+                release["loop"].call_soon_threadsafe(release["gate"].set)
+
+    def run_on_own_loop() -> None:
+        async def run() -> None:
+            gate = asyncio.Event()
+            inner.gate = gate
+            release["loop"] = asyncio.get_running_loop()
+            release["gate"] = gate
+            loop_ready.set()
+            try:
+                result = await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+                assert result.final_output == "done"
+            finally:
+                outer_done.set()
+
+        try:
+            asyncio.run(run())
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run_on_own_loop, daemon=True)
+    release_thread = threading.Thread(target=release_after_main_return, daemon=True)
+    release_thread.start()
+    thread.start()
+    try:
+        assert finished.wait(5), "asyncio.run did not finish deferred cleanup"
+        assert release_after_return.is_set()
+        assert not failures
+        assert registry == {}
+        assert inner.shutdown_calls == 0
+        assert client.delete_calls == 0
+        assert inner.close_dependency_calls >= 2
+        assert agent._sandbox_concurrency_guard is not None
+        assert agent._sandbox_concurrency_guard.active_runs == 0
+    finally:
+        if release and not release["loop"].is_closed():
+            release["loop"].call_soon_threadsafe(release["gate"].set)
+        thread.join(timeout=5)
+        release_thread.join(timeout=5)
 
 
 @pytest.mark.asyncio

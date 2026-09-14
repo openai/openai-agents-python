@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import threading
 from contextlib import suppress
 from types import SimpleNamespace
 
@@ -163,6 +164,53 @@ async def test_pty_cleanup_can_detach_after_timeout() -> None:
             task.cancel()
         with suppress(BaseException):
             await task
+
+
+def test_asyncio_run_shutdown_has_bounded_cleanup_owner() -> None:
+    session = _session()
+    started = threading.Event()
+    finalized = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+    loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+    gate_holder: dict[str, asyncio.Event] = {}
+
+    async def run() -> None:
+        gate = asyncio.Event()
+        loop_holder["loop"] = asyncio.get_running_loop()
+        gate_holder["gate"] = gate
+
+        async def cleanup() -> None:
+            started.set()
+            try:
+                await gate.wait()
+            finally:
+                finalized.set()
+
+        with suppress(asyncio.TimeoutError):
+            await session._settle_pty_cleanup(cleanup(), timeout=0.01)
+
+    def run_on_own_loop() -> None:
+        try:
+            asyncio.run(run())
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run_on_own_loop, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(1), "cleanup did not start"
+        assert finished.wait(1), "asyncio.run did not bound stalled cleanup shutdown"
+        assert finalized.is_set()
+        assert not failures
+    finally:
+        loop = loop_holder.get("loop")
+        gate = gate_holder.get("gate")
+        if loop is not None and gate is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(gate.set)
+        thread.join(timeout=2)
 
 
 @pytest.mark.asyncio

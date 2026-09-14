@@ -22,6 +22,7 @@ from ..run_context import TContext
 from ..run_internal.sync import _track_sync_background_task
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
+from ._cleanup_owner import create_cleanup_owner
 from ._mount_security import (
     _manifest_has_configured_mount_authority,
     _replace_protected_mount_error,
@@ -98,7 +99,7 @@ class _SandboxSessionResources:
         if task is not None and not task.done():
             return
 
-        task = asyncio.create_task(
+        task = create_cleanup_owner(
             self._finish_deferred_cleanup(),
             name="agents.deferred_session_cleanup",
         )
@@ -397,7 +398,9 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             self._resume_state_after_cleanup_error = None
             try:
                 for resources in list(self._resources_by_agent.values()):
-                    resource_cleanup_task = asyncio.create_task(resources.cleanup())
+                    resource_cleanup_task = create_cleanup_owner(
+                        resources.cleanup(), name="agents.resource_cleanup"
+                    )
                     try:
                         await asyncio.shield(resource_cleanup_task)
                     except BaseException as exc:  # pragma: no cover
@@ -510,7 +513,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 if deferred_cleanup_task is not None:
                     await asyncio.shield(deferred_cleanup_task)
 
-        follow_up = asyncio.create_task(
+        follow_up = create_cleanup_owner(
             settle_resource_cleanup(),
             name="agents.cancelled_resource_cleanup",
         )

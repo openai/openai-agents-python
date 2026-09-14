@@ -4762,7 +4762,7 @@ async def test_docker_pty_cleanup_bounds_stalled_backend_and_continues_batch(
         await asyncio.wait_for(asyncio.to_thread(first_kill_started.wait), timeout=0.5)
         cleanup_task.cancel()
 
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.5)
 
         assert second_socket.closed is True
