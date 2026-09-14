@@ -32,6 +32,7 @@ class _ServerCommand:
     action: str
     timeout_seconds: float | None
     future: asyncio.Future[None]
+    cancelled_by_caller: bool = False
 
 
 class _ServerWorker:
@@ -40,6 +41,7 @@ class _ServerWorker:
         self._queue: asyncio.Queue[_ServerCommand] = asyncio.Queue()
         self._task = asyncio.create_task(self._run())
         self._cleanup_future: asyncio.Future[None] | None = None
+        self._active_command: _ServerCommand | None = None
 
     @property
     def is_done(self) -> bool:
@@ -85,15 +87,23 @@ class _ServerWorker:
     async def _submit(self, action: str, timeout_seconds: float | None) -> None:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
-        self._queue.put_nowait(
-            _ServerCommand(action=action, timeout_seconds=timeout_seconds, future=future)
-        )
-        await future
+        command = _ServerCommand(action=action, timeout_seconds=timeout_seconds, future=future)
+        self._queue.put_nowait(command)
+        try:
+            await future
+        except asyncio.CancelledError:
+            # Interrupt only this startup, never another command or a cleanup owner.
+            if self._active_command is command and action == "connect":
+                command.cancelled_by_caller = self._task.cancel()
+            raise
 
     async def _run(self) -> None:
         while True:
             command = await self._queue.get()
+            if command.action == "connect" and command.future.cancelled():
+                continue
             should_exit = command.action == "cleanup"
+            self._active_command = command
             try:
                 if command.action == "connect":
                     await _run_with_timeout_in_task(self._server.connect, command.timeout_seconds)
@@ -106,6 +116,13 @@ class _ServerWorker:
             except BaseException as exc:
                 if not command.future.cancelled():
                     command.future.set_exception(exc)
+            finally:
+                self._active_command = None
+                if command.cancelled_by_caller:
+                    # Balance only the cancellation requested for this command.
+                    uncancel = getattr(self._task, "uncancel", None)
+                    if uncancel is not None:
+                        uncancel()
             if should_exit:
                 return
 
