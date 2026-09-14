@@ -4,7 +4,6 @@ import asyncio
 import concurrent.futures
 import sys
 import threading
-import warnings
 from contextvars import ContextVar
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -140,21 +139,6 @@ def _get_sync_loop() -> asyncio.AbstractEventLoop:
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
         _SYNC_LOOP_LOCAL.loop = loop
-    return loop
-
-
-def _get_default_loop() -> asyncio.AbstractEventLoop | None:
-    """Return an existing open policy loop without creating or replacing one."""
-
-    policy = asyncio.get_event_loop_policy()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        try:
-            loop = policy.get_event_loop()
-        except RuntimeError:
-            return None
-    if loop.is_closed():
-        return None
     return loop
 
 

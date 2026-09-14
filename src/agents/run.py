@@ -152,7 +152,6 @@ from .run_internal.session_persistence import (
 from .run_internal.sync import (
     _IS_SYNC_RUN,
     _create_sync_task,
-    _get_default_loop,
     _get_pending_sync_background_tasks,
     _get_sync_loop,
     _start_sync_loop_driver,
@@ -2332,42 +2331,9 @@ class AgentRunner:
                 "AgentRunner.run_sync() cannot be called when an event loop is already running."
             )
 
-        # Keep unbound synchronous runs on an SDK-owned loop so a caller's default loop remains
-        # stopped and closable. Explicit session/model objects may already own primitives on that
-        # default loop, so run the foreground coroutine there when one is available.
+        # Keep synchronous runs on an SDK-owned loop so a caller's default loop remains stopped
+        # and closable. Callers that pass loop-bound async objects must use the async API.
         sync_loop = _get_sync_loop()
-        if isinstance(run_config, dict):
-            configured_model = run_config.get("model")
-            configured_model_provider = run_config.get("model_provider")
-            has_explicit_model_provider = "model_provider" in run_config
-        else:
-            configured_model = getattr(run_config, "model", None)
-            configured_model_provider = getattr(run_config, "model_provider", None)
-            has_explicit_model_provider = configured_model_provider is not None and not getattr(
-                configured_model_provider, "_agents_default_model_provider", False
-            )
-        configured_sandbox = (
-            run_config.get("sandbox")
-            if isinstance(run_config, dict)
-            else getattr(run_config, "sandbox", None)
-        )
-        configured_session = (
-            configured_sandbox.get("session")
-            if isinstance(configured_sandbox, dict)
-            else getattr(configured_sandbox, "session", None)
-        )
-        agent_model = getattr(starting_agent, "model", None)
-        has_loop_bound_dependency = (
-            session is not None
-            or configured_session is not None
-            or (configured_model is not None and not isinstance(configured_model, str))
-            or (agent_model is not None and not isinstance(agent_model, str))
-            or (has_explicit_model_provider and configured_model_provider is not None)
-        )
-        if has_loop_bound_dependency:
-            dependency_loop = _get_default_loop()
-            if dependency_loop is not None:
-                sync_loop = dependency_loop
         _stop_sync_loop_driver(sync_loop)
 
         sync_run_token = _IS_SYNC_RUN.set(True)

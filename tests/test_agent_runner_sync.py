@@ -59,7 +59,7 @@ def test_run_sync_does_not_drive_existing_default_loop(monkeypatch, fresh_event_
         test_loop.close()
 
 
-def test_run_sync_uses_default_loop_for_explicit_async_dependency(
+def test_run_sync_does_not_drive_default_loop_for_explicit_session(
     monkeypatch, fresh_event_loop_policy
 ):
     runner = AgentRunner()
@@ -68,7 +68,6 @@ def test_run_sync_uses_default_loop_for_explicit_async_dependency(
     async def fake_run(self, *_args, session=None, **_kwargs):
         observed_loops.append(asyncio.get_running_loop())
         assert session is not None
-        assert session.loop is observed_loops[-1]
         return object()
 
     monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
@@ -81,13 +80,14 @@ def test_run_sync_uses_default_loop_for_explicit_async_dependency(
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input", session=_LoopBoundDependency())
-        assert observed_loops == [dependency_loop]
+        assert observed_loops and observed_loops[0] is not dependency_loop
+        assert not dependency_loop.is_running()
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         dependency_loop.close()
 
 
-def test_run_sync_uses_default_loop_for_explicit_model_provider(
+def test_run_sync_does_not_drive_default_loop_for_explicit_model_provider(
     monkeypatch, fresh_event_loop_policy
 ):
     runner = AgentRunner()
@@ -112,13 +112,14 @@ def test_run_sync_uses_default_loop_for_explicit_model_provider(
             "input",
             run_config=RunConfig(model_provider=_Provider()),
         )
-        assert observed_loops == [dependency_loop]
+        assert observed_loops and observed_loops[0] is not dependency_loop
+        assert not dependency_loop.is_running()
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         dependency_loop.close()
 
 
-def test_run_sync_uses_default_loop_for_explicit_multi_provider(
+def test_run_sync_does_not_drive_default_loop_for_explicit_multi_provider(
     monkeypatch, fresh_event_loop_policy
 ):
     runner = AgentRunner()
@@ -149,14 +150,15 @@ def test_run_sync_uses_default_loop_for_explicit_multi_provider(
             "input",
             run_config=RunConfig(model_provider=provider),
         )
-        assert observed_loops == [dependency_loop]
+        assert observed_loops and observed_loops[0] is not dependency_loop
+        assert not dependency_loop.is_running()
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         dependency_loop.close()
 
 
 @pytest.mark.parametrize("run_config", [{"model": object()}, {"sandbox": {"session": object()}}])
-def test_run_sync_uses_default_loop_for_dict_async_dependency(
+def test_run_sync_does_not_drive_default_loop_for_dict_async_dependency(
     monkeypatch, fresh_event_loop_policy, run_config
 ):
     runner = AgentRunner()
@@ -173,7 +175,8 @@ def test_run_sync_uses_default_loop_for_dict_async_dependency(
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input", run_config=run_config)
-        assert observed_loops == [dependency_loop]
+        assert observed_loops and observed_loops[0] is not dependency_loop
+        assert not dependency_loop.is_running()
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         dependency_loop.close()
