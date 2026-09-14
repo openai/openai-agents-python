@@ -103,6 +103,152 @@ class BlockingCleanupServer(TaskBoundServer):
             self.cleanup_finished.set()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suppress_cancelled_error", [False, True])
+@pytest.mark.parametrize("connect_timeout_seconds", [None, 10.0])
+async def test_manager_cancels_parallel_startup_with_its_caller(
+    suppress_cancelled_error: bool,
+    connect_timeout_seconds: float | None,
+) -> None:
+    # Events preserve the active startup boundary without a model or network service.
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class StartingServer(TaskBoundServer):
+        async def connect(self) -> None:
+            await super().connect()
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    healthy = TaskBoundServer()
+    server = StartingServer()
+    manager = MCPServerManager(
+        [healthy, server],
+        connect_in_parallel=True,
+        connect_timeout_seconds=connect_timeout_seconds,
+        cleanup_timeout_seconds=TEST_TIMEOUT_SECONDS,
+        suppress_cancelled_error=suppress_cancelled_error,
+    )
+    connecting = asyncio.create_task(manager.connect_all())
+    try:
+        await asyncio.wait_for(started.wait(), TEST_TIMEOUT_SECONDS)
+        connecting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(connecting, 3 * TEST_TIMEOUT_SECONDS)
+        assert cancelled.is_set()
+        assert server.cleaned
+        assert healthy.cleaned
+        assert manager.active_servers == []
+        assert manager._workers == {}
+        assert server._connect_task is not None
+        cancelling = getattr(server._connect_task, "cancelling", None)
+        if cancelling is not None:
+            assert cancelling() == 0
+    finally:
+        release.set()
+        await asyncio.gather(connecting, return_exceptions=True)
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_skips_parallel_startup_cancelled_before_worker_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_started = asyncio.Event()
+    allow_worker = asyncio.Event()
+    cleanup_queued = asyncio.Event()
+    original_run = manager_module._ServerWorker._run
+    original_cleanup = manager_module._ServerWorker.cleanup
+
+    async def delayed_run(worker: manager_module._ServerWorker) -> None:
+        worker_started.set()
+        await allow_worker.wait()
+        await original_run(worker)
+
+    async def observed_cleanup(
+        worker: manager_module._ServerWorker, timeout_seconds: float | None
+    ) -> None:
+        cleanup_queued.set()
+        await original_cleanup(worker, timeout_seconds)
+
+    monkeypatch.setattr(manager_module._ServerWorker, "_run", delayed_run)
+    monkeypatch.setattr(manager_module._ServerWorker, "cleanup", observed_cleanup)
+
+    class UnstartedServer(TaskBoundServer):
+        async def cleanup(self) -> None:
+            self.cleaned = True
+
+    server = UnstartedServer()
+    manager = MCPServerManager([server], connect_in_parallel=True, suppress_cancelled_error=False)
+    connecting = asyncio.create_task(manager.connect_all())
+    try:
+        await asyncio.wait_for(worker_started.wait(), TEST_TIMEOUT_SECONDS)
+        connecting.cancel()
+        await asyncio.wait_for(cleanup_queued.wait(), TEST_TIMEOUT_SECONDS)
+        allow_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(connecting, TEST_TIMEOUT_SECONDS)
+        assert server._connect_task is None
+        assert server.cleaned
+        assert manager._workers == {}
+    finally:
+        allow_worker.set()
+        await asyncio.gather(connecting, return_exceptions=True)
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_keeps_startup_teardown_alive_after_repeated_caller_cancellation() -> None:
+    started = asyncio.Event()
+    teardown_started = asyncio.Event()
+    release_teardown = asyncio.Event()
+    teardown_finished = asyncio.Event()
+
+    class TeardownServer(TaskBoundServer):
+        async def connect(self) -> None:
+            await super().connect()
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                teardown_started.set()
+                await release_teardown.wait()
+                teardown_finished.set()
+                raise
+
+    server = TeardownServer()
+    manager = MCPServerManager(
+        [server],
+        connect_in_parallel=True,
+        connect_timeout_seconds=None,
+        suppress_cancelled_error=False,
+    )
+    connecting = asyncio.create_task(manager.connect_all())
+    try:
+        await asyncio.wait_for(started.wait(), TEST_TIMEOUT_SECONDS)
+        connecting.cancel()
+        await asyncio.wait_for(teardown_started.wait(), TEST_TIMEOUT_SECONDS)
+        connecting.cancel()
+        release_teardown.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(connecting, TEST_TIMEOUT_SECONDS)
+        await manager.cleanup_all()
+        assert teardown_finished.is_set()
+        assert server.cleaned
+        assert manager._workers == {}
+        if server._connect_task is not None and hasattr(server._connect_task, "cancelling"):
+            assert server._connect_task.cancelling() == 0
+    finally:
+        release_teardown.set()
+        await asyncio.gather(connecting, return_exceptions=True)
+        await manager.cleanup_all()
+
+
 class BlockingCleanupFailureServer(TaskBoundServer):
     def __init__(self) -> None:
         super().__init__()
