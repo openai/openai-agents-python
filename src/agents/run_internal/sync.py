@@ -18,6 +18,7 @@ _SYNC_LOOP_DRIVERS: WeakKeyDictionary[asyncio.AbstractEventLoop, _SyncLoopDriver
 )
 _SYNC_LOOP_LOCAL = threading.local()
 _SYNC_DRIVER_LOCK = threading.Lock()
+_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S = 5.0
 
 
 class _SyncLoopDriver:

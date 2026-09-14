@@ -47,6 +47,7 @@ from agents.sandbox import (
     SandboxRunConfig,
     User,
 )
+from agents.sandbox._cleanup_owner import create_cleanup_owner
 from agents.sandbox._mount_security import (
     REDACTED_MOUNT_AUTHORITY_KEY,
     validate_manifest_mount_credential_boundaries,
@@ -312,6 +313,25 @@ class _BlockingPreservingStopSession(_FakeSession):
         self._backend_preservation_required = True
         self.stop_started.set()
         await self._stop_gate.wait()
+
+
+class _ForcedShutdownCleanupSession(_FakeSession):
+    def __init__(self, manifest: Manifest) -> None:
+        super().__init__(manifest)
+        self.stop_started = asyncio.Event()
+        self.shutdown_started = asyncio.Event()
+        self.stop_gate = asyncio.Event()
+        self.shutdown_gate = asyncio.Event()
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self.stop_started.set()
+        await self.stop_gate.wait()
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        self.shutdown_started.set()
+        await self.shutdown_gate.wait()
 
 
 class _FailingDeferredShutdownSession(_FakeSession):
@@ -1021,6 +1041,37 @@ async def test_runner_owned_deferred_cleanup_preserves_shutdown_failure_after_de
     assert inner.shutdown_calls == 1
     assert client.delete_calls == 1
     assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_owner_forced_cancellation_skips_blocking_shutdown() -> None:
+    inner = _ForcedShutdownCleanupSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=inner,
+        client=None,
+        owns_session=True,
+    )
+    cleanup_owner = create_cleanup_owner(
+        resources.cleanup(),
+        name="test.forced_cleanup",
+        cancel_grace_s=0.01,
+    )
+
+    try:
+        await asyncio.wait_for(inner.stop_started.wait(), timeout=0.5)
+        assert cleanup_owner.cancel() is False
+        done, _ = await asyncio.wait({cleanup_owner}, timeout=0.5)
+
+        assert cleanup_owner in done
+        assert cleanup_owner.cancelled()
+        assert not inner.shutdown_started.is_set()
+    finally:
+        inner.stop_gate.set()
+        inner.shutdown_gate.set()
+        if not cleanup_owner.done():
+            cleanup_owner.cancel()
+        with suppress(BaseException):
+            await cleanup_owner
 
 
 @pytest.mark.asyncio

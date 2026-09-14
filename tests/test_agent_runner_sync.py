@@ -1,6 +1,8 @@
 import asyncio
 import threading
+import time
 from collections.abc import Generator
+from contextlib import suppress
 from typing import Protocol
 
 import pytest
@@ -263,6 +265,45 @@ def test_run_sync_settles_deferred_cleanup_before_return_on_dependency_loop(
         fresh_event_loop_policy.set_event_loop(None)
         if not dependency_loop.is_closed():
             dependency_loop.close()
+
+
+def test_run_sync_bounds_deferred_cleanup_on_dependency_loop(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+    cleanup_started = threading.Event()
+    deferred_tasks: list[asyncio.Task[None]] = []
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def deferred_work() -> None:
+            cleanup_started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(deferred_work())
+        deferred_tasks.append(task)
+        _track_sync_background_task(task)
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    monkeypatch.setattr("agents.run._SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S", 0.01)
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+    try:
+        started_at = time.monotonic()
+        runner.run_sync(Agent(name="test-agent", tools=[object()]), "input")
+        elapsed = time.monotonic() - started_at
+
+        assert cleanup_started.is_set()
+        assert elapsed < 0.5
+        assert deferred_tasks and not deferred_tasks[0].done()
+        assert not dependency_loop.is_running()
+    finally:
+        for task in deferred_tasks:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                dependency_loop.run_until_complete(task)
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
 
 
 def test_run_sync_leaves_caller_loop_closable_with_deferred_cleanup(

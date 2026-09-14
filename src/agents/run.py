@@ -151,6 +151,7 @@ from .run_internal.session_persistence import (
 )
 from .run_internal.sync import (
     _IS_SYNC_RUN,
+    _SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
     _create_sync_task,
     _get_default_loop,
     _get_pending_sync_background_tasks,
@@ -2496,7 +2497,12 @@ class AgentRunner:
             if _get_pending_sync_background_tasks(sync_loop):
                 if caller_owned_loop:
                     with contextlib.suppress(BaseException):
-                        sync_loop.run_until_complete(_settle_sync_background_work(sync_loop))
+                        sync_loop.run_until_complete(
+                            asyncio.wait_for(
+                                _settle_sync_background_work(sync_loop),
+                                timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
+                            )
+                        )
                 else:
                     driver = _start_sync_loop_driver(sync_loop)
                     driver.schedule_settlement()

@@ -202,13 +202,16 @@ class _SandboxSessionResources:
             try:
                 await self._session.run_pre_stop_hooks()
             except BaseException as exc:  # pragma: no cover
+                raise_if_cleanup_owner_force_cancelling(exc)
                 cleanup_error = exc
             if cleanup_error is None and not self._session._pre_stop_hooks_failed:
                 try:
                     await self._session.stop()
                 except BaseException as exc:  # pragma: no cover
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     if cleanup_error is None:
                         cleanup_error = exc
+            raise_if_cleanup_owner_force_cancelling(cleanup_error)
             preserve_backend = (
                 isinstance(self._session, SandboxSession)
                 and self._session._should_preserve_backend_on_cleanup()
@@ -217,8 +220,10 @@ class _SandboxSessionResources:
                 try:
                     await self._session.shutdown()
                 except BaseException as exc:  # pragma: no cover
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     if cleanup_error is None:
                         cleanup_error = exc
+            raise_if_cleanup_owner_force_cancelling(cleanup_error)
             pending_cleanup_after_shutdown = self._session._has_pending_pty_cleanup_tasks()
             preserve_backend = (
                 preserve_backend
