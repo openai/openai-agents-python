@@ -28,23 +28,45 @@ from .traces import Trace
 _warned_default_trace_endpoint_with_custom_model_base = False
 
 
-def _redact_url_for_log(url: str) -> str:
-    """Drop userinfo, query, and fragment so gateway credentials never reach logs."""
+def _split_url(url: str) -> tuple[str, str, int | None, str] | None:
     try:
         parts = urlsplit(url)
+        hostname = parts.hostname or ""
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        return parts.scheme, hostname, port, parts.path
     except ValueError:
-        return "<invalid-url>"
+        return None
 
-    hostname = parts.hostname or ""
+
+def _url_origin(url: str) -> str | None:
+    parsed = _split_url(url)
+    if parsed is None:
+        return None
+    scheme, hostname, port, _path = parsed
+    if not hostname:
+        return None
+    scheme = scheme.lower() or "https"
+    hostname = hostname.lower()
+    if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        return f"{scheme}://{hostname}"
+    return f"{scheme}://{hostname}:{port}"
+
+
+def _redact_url_for_log(url: str) -> str:
+    """Drop userinfo, query, and fragment so gateway credentials never reach logs."""
+    parsed = _split_url(url)
+    if parsed is None:
+        return "<invalid-url>"
+    scheme, hostname, port, path = parsed
     if ":" in hostname:
         host = f"[{hostname}]"
     else:
         host = hostname
-    if parts.port is not None:
-        netloc = f"{host}:{parts.port}"
-    else:
-        netloc = host
-    redacted = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    netloc = f"{host}:{port}" if port is not None else host
+    redacted = urlunsplit((scheme, netloc, path, "", ""))
     return redacted or "<redacted-url>"
 
 
@@ -157,6 +179,11 @@ class BackendSpanExporter(TracingExporter):
         if not model_base:
             return
         if not self._should_sanitize_for_openai_tracing_api():
+            return
+        model_origin = _url_origin(model_base)
+        if model_origin is not None and model_origin == _url_origin(
+            self._OPENAI_TRACING_INGEST_ENDPOINT
+        ):
             return
         _warned_default_trace_endpoint_with_custom_model_base = True
         logger.warning(
