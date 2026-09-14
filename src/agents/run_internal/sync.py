@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import sys
 import threading
+import warnings
 from contextvars import ContextVar
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -32,6 +33,9 @@ class _SyncLoopDriver:
         self._settlement_task: asyncio.Task[None] | None = None
         self._settlement_future: concurrent.futures.Future[None] | None = None
         self._handoff_requested = False
+        self._stop_after_settlement = False
+        self._shutdown_asyncgens_started = False
+        self._running = False
 
     def start(self) -> None:
         self.thread.start()
@@ -39,11 +43,13 @@ class _SyncLoopDriver:
 
     def _run(self) -> None:
         asyncio.set_event_loop(self.loop)
+        self._running = True
         try:
             # Signal readiness from the loop so submitters cannot race run_forever.
             self.loop.call_soon(self.started.set)
             self.loop.run_forever()
         finally:
+            self._running = False
             with _SYNC_DRIVER_LOCK:
                 if _SYNC_LOOP_DRIVERS.get(self.loop) is self:
                     _SYNC_LOOP_DRIVERS.pop(self.loop, None)
@@ -71,9 +77,11 @@ class _SyncLoopDriver:
                 except BaseException as exc:
                     result.set_exception(exc)
                 finally:
-                    # The result callback must run before stopping the loop. Stopping from the
-                    # settlement coroutine can leave this callback queued forever.
-                    if not self._handoff_requested:
+                    # Complete the handoff only after this callback has observed the task result.
+                    # In particular, do not cancel an in-progress async-generator finalizer.
+                    if self._running and (
+                        self._stop_after_settlement or not self._handoff_requested
+                    ):
                         self.loop.stop()
 
             task.add_done_callback(complete)
@@ -97,6 +105,7 @@ class _SyncLoopDriver:
                     task.exception()
             # Let each task's done callbacks update the registry before checking it again.
             await asyncio.sleep(0)
+        self._shutdown_asyncgens_started = True
         await self.loop.shutdown_asyncgens()
 
     def stop(self) -> None:
@@ -108,7 +117,14 @@ class _SyncLoopDriver:
         def stop_loop() -> None:
             settlement_task = self._settlement_task
             if settlement_task is not None and not settlement_task.done():
+                if self._shutdown_asyncgens_started:
+                    # Async-generator ``finally`` blocks can release provider resources. Let the
+                    # settlement task finish before handing the loop back to the caller.
+                    self._stop_after_settlement = True
+                    return
                 settlement_task.cancel()
+                self._stop_after_settlement = True
+                return
             self.loop.stop()
 
         try:
@@ -124,6 +140,21 @@ def _get_sync_loop() -> asyncio.AbstractEventLoop:
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
         _SYNC_LOOP_LOCAL.loop = loop
+    return loop
+
+
+def _get_default_loop() -> asyncio.AbstractEventLoop | None:
+    """Return an existing open policy loop without creating or replacing one."""
+
+    policy = asyncio.get_event_loop_policy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            loop = policy.get_event_loop()
+        except RuntimeError:
+            return None
+    if loop.is_closed():
+        return None
     return loop
 
 

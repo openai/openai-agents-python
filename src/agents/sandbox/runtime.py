@@ -109,6 +109,10 @@ class SandboxRuntime(Generic[TContext]):
     def resume_state_after_cleanup_error(self) -> dict[str, object] | None:
         return self._session_manager.resume_state_after_cleanup_error
 
+    @property
+    def caller_cancelled_during_cleanup(self) -> bool:
+        return self._session_manager.caller_cancelled_during_cleanup
+
     def apply_result_metadata(self, result: RunResult | RunResultStreaming) -> None:
         session = self.current_session
         result._sandbox_session = session

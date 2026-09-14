@@ -169,7 +169,7 @@ async def test_dispose_computer_after_caught_cancellation_detaches_immediately()
         try:
             await asyncio.sleep(1)
         except asyncio.CancelledError:
-            await dispose_resolved_computers(run_context=ctx)
+            await dispose_resolved_computers(run_context=ctx, caller_cancelled=True)
             raise
 
     task = asyncio.create_task(caller())

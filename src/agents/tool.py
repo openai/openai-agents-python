@@ -1014,7 +1014,9 @@ async def resolve_computer(
     return computer
 
 
-async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> None:
+async def dispose_resolved_computers(
+    *, run_context: RunContextWrapper[Any], caller_cancelled: bool = False
+) -> None:
     """Dispose any computer instances created for the provided run context."""
     resolved_by_tool = _computers_by_run_context.pop(run_context, None)
     if not resolved_by_tool:
@@ -1035,7 +1037,8 @@ async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> 
             disposers.append((_resolved.dispose, _resolved.computer))
 
     current_task = asyncio.current_task()
-    if current_task is not None and current_task.cancelling():
+    cancelling = getattr(current_task, "cancelling", None)
+    if caller_cancelled or (cancelling is not None and cancelling()):
         for dispose, computer in disposers:
             _start_computer_disposal(
                 dispose=dispose,
@@ -1056,9 +1059,6 @@ async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> 
                 asyncio.shield(disposal_task), timeout=_COMPUTER_DISPOSAL_TIMEOUT_S
             )
         except asyncio.CancelledError as error:
-            current_task = asyncio.current_task()
-            if current_task is None or not current_task.cancelling():
-                raise
             caller_cancellation = caller_cancellation or error
             for remaining_dispose, remaining_computer in disposers[index + 1 :]:
                 _start_computer_disposal(

@@ -6,7 +6,9 @@ from typing import Protocol
 import pytest
 
 from agents.agent import Agent
+from agents.models.interface import ModelProvider
 from agents.run import AgentRunner
+from agents.run_config import RunConfig
 from agents.run_internal.sync import (
     _SYNC_BACKGROUND_TASKS,
     _get_pending_sync_background_tasks,
@@ -14,6 +16,7 @@ from agents.run_internal.sync import (
     _stop_sync_loop_driver,
     _track_sync_background_task,
 )
+from agents.testing.model import ScriptedModel
 
 
 class _EventLoopPolicy(Protocol):
@@ -53,6 +56,89 @@ def test_run_sync_does_not_drive_existing_default_loop(monkeypatch, fresh_event_
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()
+
+
+def test_run_sync_uses_default_loop_for_explicit_async_dependency(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def fake_run(self, *_args, session=None, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        assert session is not None
+        assert session.loop is observed_loops[-1]
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+
+    class _LoopBoundDependency:
+        loop = dependency_loop
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input", session=_LoopBoundDependency())
+        assert observed_loops == [dependency_loop]
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
+
+
+def test_run_sync_uses_default_loop_for_explicit_model_provider(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    class _Provider(ModelProvider):
+        def get_model(self, _model_name):
+            return ScriptedModel()
+
+    async def fake_run(self, *_args, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+
+    try:
+        runner.run_sync(
+            Agent(name="test-agent"),
+            "input",
+            run_config=RunConfig(model_provider=_Provider()),
+        )
+        assert observed_loops == [dependency_loop]
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
+
+
+@pytest.mark.parametrize("run_config", [{"model": object()}, {"sandbox": {"session": object()}}])
+def test_run_sync_uses_default_loop_for_dict_async_dependency(
+    monkeypatch, fresh_event_loop_policy, run_config
+):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def fake_run(self, *_args, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input", run_config=run_config)
+        assert observed_loops == [dependency_loop]
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
 
 
 def test_run_sync_leaves_caller_loop_closable_with_deferred_cleanup(
@@ -281,6 +367,66 @@ def test_run_sync_shutdowns_asyncgens_after_tracked_cleanup(monkeypatch, fresh_e
         _stop_sync_loop_driver(sync_loop)
         if not sync_loop.is_closed():
             sync_loop.close()
+
+
+def test_run_sync_does_not_cancel_async_generator_finalization_on_handoff(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    shutdown_started = threading.Event()
+    release_shutdown = threading.Event()
+    generator_finished = threading.Event()
+    held_generators: list[object] = []
+    run_count = 0
+
+    class _ControlledLoop(asyncio.SelectorEventLoop):
+        async def shutdown_asyncgens(self):
+            shutdown_started.set()
+            await asyncio.to_thread(release_shutdown.wait)
+            await super().shutdown_asyncgens()
+
+    async def fake_run(self, *_args, **_kwargs):
+        nonlocal run_count
+        run_count += 1
+        if run_count == 1:
+
+            async def agen():
+                try:
+                    yield None
+                finally:
+                    generator_finished.set()
+
+            gen = agen()
+            await gen.__anext__()
+            held_generators.append(gen)
+
+            async def deferred_work():
+                await asyncio.sleep(0)
+
+            _track_sync_background_task(asyncio.create_task(deferred_work()))
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    sync_loop = _ControlledLoop()
+    monkeypatch.setattr("agents.run._get_sync_loop", lambda: sync_loop)
+    fresh_event_loop_policy.set_event_loop(None)
+
+    release_thread = threading.Thread(
+        target=lambda: (shutdown_started.wait(), release_shutdown.set()), daemon=True
+    )
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert shutdown_started.wait(timeout=0.5)
+        release_thread.start()
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert generator_finished.is_set()
+    finally:
+        release_shutdown.set()
+        if release_thread.is_alive():
+            release_thread.join(timeout=0.5)
+        monkeypatch.undo()
+        _stop_sync_loop_driver(sync_loop)
+        sync_loop.close()
 
 
 def test_run_sync_drives_tracked_background_task_after_return(monkeypatch, fresh_event_loop_policy):

@@ -258,6 +258,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         self._claimed_resumed_keys: set[str] = set()
         self._deferred_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._cleanup_finished = False
+        self._caller_cancelled_during_cleanup = False
         self._resume_state_after_cleanup_error: dict[str, object] | None = None
 
     @staticmethod
@@ -291,6 +292,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
     @property
     def resume_state_after_cleanup_error(self) -> dict[str, object] | None:
         return self._resume_state_after_cleanup_error
+
+    @property
+    def caller_cancelled_during_cleanup(self) -> bool:
+        return self._caller_cancelled_during_cleanup
 
     def acquire_agent(self, agent: SandboxAgent[TContext]) -> None:
         agent_id = id(agent)
@@ -377,40 +382,53 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             cleanup_error: BaseException | None = None
             caller_cancellation: asyncio.CancelledError | None = None
             resume_state: dict[str, object] | None = None
+            self._caller_cancelled_during_cleanup = False
             self._resume_state_after_cleanup_error = None
             try:
                 for resources in list(self._resources_by_agent.values()):
+                    resource_cleanup_task = asyncio.create_task(resources.cleanup())
                     try:
-                        await resources.cleanup()
+                        await asyncio.shield(resource_cleanup_task)
                     except BaseException as exc:  # pragma: no cover
                         current_task = asyncio.current_task()
-                        is_caller_cancellation = (
-                            current_task is not None and current_task.cancelling()
+                        cancelling = getattr(current_task, "cancelling", None)
+                        is_caller_cancellation = isinstance(exc, asyncio.CancelledError) and (
+                            not resource_cleanup_task.cancelled()
+                            or (cancelling is not None and cancelling())
                         )
-                        if isinstance(exc, asyncio.CancelledError) and is_caller_cancellation:
-                            caller_cancellation = caller_cancellation or exc
-                        elif is_caller_cancellation:
-                            # A resource can catch cancellation while preserving an earlier
-                            # provider error. Keep the cancellation reason independently so it
-                            # cannot be lost when this manager continues with other sessions.
-                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
+                        if is_caller_cancellation:
+                            if caller_cancellation is None:
+                                caller_cancellation = cast(asyncio.CancelledError, exc)
+                            if resource_cleanup_task.done():
+                                if not resource_cleanup_task.cancelled():
+                                    cleanup_exc = resource_cleanup_task.exception()
+                                    if cleanup_error is None and cleanup_exc is not None:
+                                        cleanup_error = cleanup_exc
+                            else:
+                                self._track_resource_cleanup_task(
+                                    resource_cleanup_task,
+                                    resources,
+                                )
                         elif cleanup_error is None:
                             cleanup_error = exc
-                    else:
-                        current_task = asyncio.current_task()
-                        if current_task is not None and current_task.cancelling():
-                            # A resource may consume the cancellation while still completing its
-                            # owned cleanup. Preserve the caller's cancellation independently of
-                            # the cleanup result so a later provider error cannot hide it.
-                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
                     deferred_cleanup_task = resources.deferred_cleanup_task
                     if deferred_cleanup_task is not None:
                         self._track_deferred_cleanup_task(deferred_cleanup_task)
                 preserves_backend = self._any_session_preserves_backend()
                 if cleanup_error is None:
-                    resume_state = self.serialize_resume_state()
-                    if caller_cancellation is not None and preserves_backend:
-                        self._resume_state_after_cleanup_error = resume_state
+                    try:
+                        resume_state = self.serialize_resume_state()
+                    except BaseException as exc:  # pragma: no cover
+                        if caller_cancellation is None:
+                            raise
+                        cleanup_error = exc
+                    else:
+                        current_task = asyncio.current_task()
+                        cancelling = getattr(current_task, "cancelling", None)
+                        if cancelling is not None and cancelling():
+                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
+                        if caller_cancellation is not None and preserves_backend:
+                            self._resume_state_after_cleanup_error = resume_state
                 elif preserves_backend:
                     try:
                         self._resume_state_after_cleanup_error = self.serialize_resume_state()
@@ -422,6 +440,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 self._resources_by_agent.clear()
                 self._current_agent_id = None
                 self._cleanup_finished = True
+                self._caller_cancelled_during_cleanup = caller_cancellation is not None
                 if not self._deferred_cleanup_tasks:
                     self._release_agents()
             if caller_cancellation is not None:
@@ -438,15 +457,39 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
 
     def _track_deferred_cleanup_task(self, task: asyncio.Task[Any]) -> None:
         if task.done():
+            if not task.cancelled():
+                task.exception()
             return
         self._deferred_cleanup_tasks.add(task)
 
         def release_agents_after_cleanup(done: asyncio.Task[Any]) -> None:
+            if not done.cancelled():
+                done.exception()
             self._deferred_cleanup_tasks.discard(done)
             if self._cleanup_finished and not self._deferred_cleanup_tasks:
                 self._release_agents()
 
         task.add_done_callback(release_agents_after_cleanup)
+
+    def _track_resource_cleanup_task(
+        self,
+        task: asyncio.Task[Any],
+        resources: _SandboxSessionResources,
+    ) -> None:
+        async def settle_resource_cleanup() -> None:
+            try:
+                await asyncio.shield(task)
+            finally:
+                deferred_cleanup_task = resources.deferred_cleanup_task
+                if deferred_cleanup_task is not None:
+                    await asyncio.shield(deferred_cleanup_task)
+
+        follow_up = asyncio.create_task(
+            settle_resource_cleanup(),
+            name="agents.cancelled_resource_cleanup",
+        )
+        _track_sync_background_task(follow_up)
+        self._track_deferred_cleanup_task(follow_up)
 
     async def _create_resources(
         self,

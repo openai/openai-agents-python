@@ -849,6 +849,7 @@ async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
     assert deferred_task is not None
     with pytest.raises(RuntimeError, match="deferred delete failed"):
         await deferred_task
+    await asyncio.sleep(0)
 
     assert client.delete_calls == 1
     records = [
@@ -1131,12 +1132,7 @@ async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_erro
 
     async def wait_for_second_cleanup() -> None:
         second_cleanup_started.set()
-        try:
-            await release_second_cleanup.wait()
-        except asyncio.CancelledError:
-            # A resource is allowed to finish its owned cleanup after consuming caller
-            # cancellation. The manager must still re-propagate that cancellation.
-            return
+        await release_second_cleanup.wait()
 
     cast(Any, first_resources).cleanup = fail_first_cleanup
     cast(Any, second_resources).cleanup = wait_for_second_cleanup
@@ -1156,6 +1152,7 @@ async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_erro
     try:
         await asyncio.wait_for(second_cleanup_started.wait(), timeout=0.5)
         cleanup.cancel("caller cancellation")
+        release_second_cleanup.set()
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await cleanup
         if sys.version_info >= (3, 11):
@@ -1163,6 +1160,12 @@ async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_erro
             # task's cancellation count; the original message is not available to the manager.
             assert exc_info.value.args in (("caller cancellation",), ())
         assert manager._cleanup_finished
+
+        async def wait_for_agents_release() -> None:
+            while manager._acquired_agents:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_agents_release(), timeout=0.5)
         assert manager._acquired_agents == {}
     finally:
         release_second_cleanup.set()
@@ -1170,6 +1173,227 @@ async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_erro
             cleanup.cancel()
         with suppress(BaseException):
             await cleanup
+
+
+@pytest.mark.asyncio
+async def test_session_manager_prioritizes_caller_cancellation_over_resume_state_error() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    session._backend_preservation_required = True
+    client = _FailingSerializeClient(session, "resume state serialization failed")
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def complete_cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    cast(Any, resources).cleanup = complete_cleanup
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = resources
+    manager._current_agent_id = id(agent)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    cleanup.cancel("caller cancellation")
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+
+    assert client.serialize_calls == 1
+    assert manager.resume_state_after_cleanup_error is None
+    assert manager._cleanup_finished
+
+    async def wait_for_agent_release() -> None:
+        while manager._acquired_agents:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_agent_release(), timeout=0.5)
+    assert manager._acquired_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_waits_for_resource_cleanup_after_caller_cancellation() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    await resources._cleanup_lock.acquire()
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=session),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = resources
+    manager._current_agent_id = id(agent)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    try:
+        await asyncio.sleep(0)
+        cleanup.cancel("caller cancellation")
+        await asyncio.sleep(0)
+
+        assert cleanup.done()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        guard = cast(Any, agent)._sandbox_concurrency_guard
+        assert guard is not None
+        assert guard.active_runs == 1
+
+        resources._cleanup_lock.release()
+
+        async def wait_for_agent_release() -> None:
+            while guard.active_runs:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_agent_release(), timeout=0.5)
+    finally:
+        if resources._cleanup_lock.locked():
+            resources._cleanup_lock.release()
+        if not cleanup.done():
+            cleanup.cancel()
+        with suppress(BaseException):
+            await cleanup
+
+    assert session.stop_calls == 1
+    assert manager._cleanup_finished
+    assert manager._acquired_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_waits_for_resource_cleanup_after_repeated_cancellation() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def complete_cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    cast(Any, resources).cleanup = complete_cleanup
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=session),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = resources
+    manager._current_agent_id = id(agent)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    cleanup.cancel("first cancellation")
+    cleanup.cancel("second cancellation")
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        guard = cast(Any, agent)._sandbox_concurrency_guard
+        assert guard is not None
+        assert guard.active_runs == 1
+
+        release_cleanup.set()
+
+        async def wait_for_agent_release() -> None:
+            while guard.active_runs:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_agent_release(), timeout=0.5)
+    finally:
+        release_cleanup.set()
+        if not cleanup.done():
+            cleanup.cancel()
+        with suppress(BaseException):
+            await cleanup
+
+    assert manager._cleanup_finished
+    assert manager._acquired_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_retains_cancellation_when_resource_finishes_same_turn() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def complete_cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    cast(Any, resources).cleanup = complete_cleanup
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=session),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = resources
+    manager._current_agent_id = id(agent)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    loop = asyncio.get_running_loop()
+    loop.call_soon(release_cleanup.set)
+    loop.call_soon(cleanup.cancel, "caller cancellation")
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+
+    assert manager.caller_cancelled_during_cleanup
+    assert manager._cleanup_finished
+    assert manager._acquired_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_manager_propagates_resume_state_error_without_cancellation() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    client = _FailingSerializeClient(session, "resume state serialization failed")
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(client=client, options={"image": "sandbox"}),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    manager._current_agent_id = id(agent)
+
+    with pytest.raises(RuntimeError, match="resume state serialization failed"):
+        await manager.cleanup()
+
+    assert client.serialize_calls == 1
+    assert manager._cleanup_finished
+    assert manager._acquired_agents == {}
 
 
 @pytest.mark.asyncio
@@ -1531,6 +1755,18 @@ class _FakeClient(BaseSandboxClient[dict[str, str]]):
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return SandboxSessionState.model_validate(payload)
+
+
+class _FailingSerializeClient(_FakeClient):
+    def __init__(self, session: _FakeSession, error_message: str) -> None:
+        super().__init__(session)
+        self._error_message = error_message
+        self.serialize_calls = 0
+
+    def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:
+        _ = state
+        self.serialize_calls += 1
+        raise RuntimeError(self._error_message)
 
 
 class _ManifestSessionClient(BaseSandboxClient[None]):
