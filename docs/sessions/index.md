@@ -2,7 +2,7 @@
 
 The Agents SDK provides built-in session memory to automatically maintain conversation history across multiple agent runs, eliminating the need to manually handle `.to_input_list()` between turns.
 
-Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
+Sessions store conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
 Use sessions when you want the SDK to manage client-side memory for you. In the same run, a session cannot be combined with the run-level continuation options `conversation_id`, `previous_response_id`, or `auto_previous_response_id`. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
@@ -136,7 +136,7 @@ If your session implementation exposes default session settings, each non-`None`
 
 ### Basic operations
 
-Sessions supports several operations for managing conversation history:
+Sessions support several operations for managing conversation history:
 
 ```python
 from agents import SQLiteSession
