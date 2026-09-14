@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import os
+import sys
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
@@ -604,6 +605,142 @@ async def test_codex_exec_run_raises_on_non_zero_exit(
     with pytest.raises(RuntimeError, match="exited with code 2"):
         async for _ in exec_client.run(args):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["write", "drain"])
+async def test_codex_exec_run_reaps_process_after_prompt_error(
+    monkeypatch: pytest.MonkeyPatch, failure_point: str
+) -> None:
+    error = BrokenPipeError("prompt delivery failed")
+    process = FakeProcess(stdout_lines=[], returncode=None)
+    assert process.stdin is not None
+
+    def fail_write(_data: bytes) -> None:
+        raise error
+
+    async def fail_drain() -> None:
+        raise error
+
+    monkeypatch.setattr(
+        process.stdin, failure_point, fail_write if failure_point == "write" else fail_drain
+    )
+
+    async def create_process(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", create_process)
+    with pytest.raises(BrokenPipeError) as caught:
+        _ = [
+            line
+            async for line in CodexExec(executable_path="/bin/codex").run(
+                exec_module.CodexExecArgs(input="short prompt")
+            )
+        ]
+    assert caught.value is error
+    assert process.killed
+    assert process.returncode is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_startup", [True, False], ids=["cancel-pending-stdin", "normal"])
+async def test_codex_exec_run_real_prompt_delivery(
+    monkeypatch: pytest.MonkeyPatch, cancel_startup: bool
+) -> None:
+    # Keep real pipe transports: a fake drain cannot establish OS backpressure.
+    real_factory = asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    ready = asyncio.Event()
+    drain_started = asyncio.Event()
+    drain_finished = asyncio.Event()
+    stderr_tasks: set[asyncio.Task[Any]] = set()
+    wait_completed = False
+    helper = "import os, sys, threading\nsys.stderr.write('ready\\n'); sys.stderr.flush()\n" + (
+        "threading.Event().wait(20)\n"
+        if cancel_startup
+        else "assert sys.stdin.buffer.read() == b'short prompt'\nos.write(1, b'done\\n')\n"
+    )
+
+    async def create_process(*command: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        nonlocal process
+        assert command == (sys.executable, "exec", "--experimental-json", "-")
+        assert process is None
+        # Only replace Codex-specific argv; delegate all SDK pipe setup unchanged.
+        process = await real_factory(sys.executable, "-I", "-c", helper, **kwargs)
+        assert process.stdin is not None and process.stderr is not None
+        real_drain, real_read, real_wait = process.stdin.drain, process.stderr.read, process.wait
+
+        async def drain() -> None:
+            drain_started.set()
+            try:
+                await real_drain()
+            finally:
+                drain_finished.set()
+
+        async def read(size: int = -1) -> bytes:
+            task = asyncio.current_task()
+            assert task is not None
+            stderr_tasks.add(task)
+            chunk = await real_read(size)
+            if chunk:
+                ready.set()
+            return chunk
+
+        async def wait() -> int:
+            nonlocal wait_completed
+            result = await real_wait()
+            wait_completed = True
+            return result
+
+        monkeypatch.setattr(process.stdin, "drain", drain)
+        monkeypatch.setattr(process.stderr, "read", read)
+        monkeypatch.setattr(process, "wait", wait)
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", create_process)
+
+    async def consume() -> list[str]:
+        client = CodexExec(executable_path=sys.executable, env={})
+        prompt = "x" * (4 * 1024 * 1024) if cancel_startup else "short prompt"
+        return [line async for line in client.run(exec_module.CodexExecArgs(input=prompt))]
+
+    consumer = asyncio.create_task(consume())
+    try:
+        if cancel_startup:
+            await asyncio.wait_for(ready.wait(), 5)
+            await asyncio.wait_for(drain_started.wait(), 5)
+            assert process is not None and process.stdin is not None
+            assert process.returncode is None and not consumer.done()
+            assert not drain_finished.is_set()
+            transport = process.stdin.transport
+            assert transport.get_write_buffer_size() > transport.get_write_buffer_limits()[1]
+            consumer.cancel()
+            done, _ = await asyncio.wait({consumer}, timeout=5)
+            assert consumer in done
+            with pytest.raises(asyncio.CancelledError):
+                await consumer
+        else:
+            assert await asyncio.wait_for(asyncio.shield(consumer), 5) == ["done"]
+        # Check SDK cleanup before the fixture releases any owned resources.
+        assert process is not None and process.returncode is not None
+        assert wait_completed
+        assert stderr_tasks and all(task.done() for task in stderr_tasks)
+        assert process.stdout is not None and process.stdout.at_eof()
+        assert process.stderr is not None and process.stderr.at_eof()
+        assert process.stdin is not None and process.stdin.is_closing()
+        if not cancel_startup:
+            assert process.returncode == 0
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.wait_for(asyncio.gather(consumer, return_exceptions=True), 5)
+        if process is not None:
+            if process.stdin is not None:
+                process.stdin.close()
+            await asyncio.wait_for(asyncio.gather(*stderr_tasks, return_exceptions=True), 5)
+            await asyncio.wait_for(process.communicate(), 5)
 
 
 @pytest.mark.asyncio
