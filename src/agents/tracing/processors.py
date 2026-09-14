@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from functools import cached_property
 from typing import Any, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx2
 
@@ -41,33 +41,33 @@ def _split_url(url: str) -> tuple[str, str, int | None, str] | None:
         return None
 
 
-def _url_origin(url: str) -> str | None:
+def _url_origin_and_path(url: str) -> tuple[str, str] | None:
     parsed = _split_url(url)
     if parsed is None:
         return None
-    scheme, hostname, port, _path = parsed
+    scheme, hostname, port, path = parsed
     if not hostname:
         return None
     scheme = scheme.lower() or "https"
     hostname = hostname.lower()
     if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
-        return f"{scheme}://{hostname}"
-    return f"{scheme}://{hostname}:{port}"
+        origin = f"{scheme}://{hostname}"
+    else:
+        origin = f"{scheme}://{hostname}:{port}"
+    return origin, path.rstrip("/")
+
+
+def _url_origin(url: str) -> str | None:
+    parsed = _url_origin_and_path(url)
+    return None if parsed is None else parsed[0]
 
 
 def _redact_url_for_log(url: str) -> str:
-    """Drop userinfo, query, and fragment so gateway credentials never reach logs."""
-    parsed = _split_url(url)
-    if parsed is None:
+    """Drop userinfo, path, query, and fragment so gateway credentials never reach logs."""
+    origin = _url_origin(url)
+    if origin is None:
         return "<invalid-url>"
-    scheme, hostname, port, path = parsed
-    if ":" in hostname:
-        host = f"[{hostname}]"
-    else:
-        host = hostname
-    netloc = f"{host}:{port}" if port is not None else host
-    redacted = urlunsplit((scheme, netloc, path, "", ""))
-    return redacted or "<redacted-url>"
+    return origin
 
 
 class ConsoleSpanExporter(TracingExporter):
@@ -186,12 +186,19 @@ class BackendSpanExporter(TracingExporter):
         ):
             return
         _warned_default_trace_endpoint_with_custom_model_base = True
+        if self._endpoint is not None:
+            redirect_hint = (
+                "Pass a different endpoint= to BackendSpanExporter, or omit that argument so "
+                "OPENAI_TRACING_INGEST_ENDPOINT can redirect traces"
+            )
+        else:
+            redirect_hint = "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces"
         logger.warning(
             "[non-fatal] Tracing still exports to %s while model traffic uses %s. "
-            "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces, or disable tracing with "
-            "OPENAI_AGENTS_DISABLE_TRACING=1.",
+            "%s, or disable tracing with OPENAI_AGENTS_DISABLE_TRACING=1.",
             _redact_url_for_log(self.endpoint),
             _redact_url_for_log(model_base),
+            redirect_hint,
         )
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
@@ -337,7 +344,9 @@ class BackendSpanExporter(TracingExporter):
         return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
-        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
+        endpoint = _url_origin_and_path(self.endpoint)
+        default = _url_origin_and_path(self._OPENAI_TRACING_INGEST_ENDPOINT)
+        return endpoint is not None and endpoint == default
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
         """Drop or truncate span fields known to be rejected by traces ingest."""
