@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -74,11 +74,11 @@ from ....sandbox.util.retry import (
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
 from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
 
-AsyncSandbox = vercel_sandbox.AsyncSandbox
-NetworkPolicy = vercel_sandbox.NetworkPolicy
-Resources = vercel_sandbox.Resources
-SandboxStatus = vercel_sandbox.SandboxStatus
-SnapshotSource = vercel_sandbox.SnapshotSource
+AsyncSandbox: TypeAlias = vercel_sandbox.AsyncSandbox
+NetworkPolicy: TypeAlias = vercel_sandbox.NetworkPolicy
+Resources: TypeAlias = vercel_sandbox.Resources
+SandboxStatus: TypeAlias = vercel_sandbox.SandboxStatus
+SnapshotSource: TypeAlias = vercel_sandbox.SnapshotSource
 
 WorkspacePersistenceMode = Literal["tar", "snapshot"]
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from .imports import np
 from .input import AudioInput, StreamedAudioInput
@@ -402,7 +402,7 @@ def _normalize_fragments(fragments: str | Sequence[str]) -> tuple[str, ...]:
 
 def pcm16_samples(samples: Iterable[int]) -> bytes:
     """Encode integer samples as native little-endian PCM16 bytes."""
-    return np.asarray(list(samples), dtype="<i2").tobytes()
+    return cast(bytes, np.asarray(list(samples), dtype="<i2").tobytes())
 
 
 __all__ = [
