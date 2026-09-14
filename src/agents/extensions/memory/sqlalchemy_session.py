@@ -309,9 +309,6 @@ class SQLAlchemySession(SessionABC):
         """Reject trailing-space IDs only when the actual MySQL collation pads spaces."""
         if self._engine.dialect.name not in {"mysql", "mariadb"}:
             return
-        if not self.session_id.endswith(" "):
-            return
-
         try:
             collation_result = await conn.execute(
                 sql_text(
@@ -323,7 +320,7 @@ class SQLAlchemySession(SessionABC):
             )
             collation = collation_result.scalar_one_or_none()
             if not collation:
-                return
+                raise RuntimeError("could not inspect session_id collation")
 
             pad_attribute: str | None
             if getattr(self._engine.dialect, "is_mariadb", False):
@@ -338,7 +335,15 @@ class SQLAlchemySession(SessionABC):
                         {"collation": collation},
                     )
                     pad_attribute = pad_result.scalar_one_or_none()
-                except SQLAlchemyError:
+                except SQLAlchemyError as exc:
+                    extract_error_code = getattr(self._engine.dialect, "_extract_error_code", None)
+                    error_code = (
+                        extract_error_code(getattr(exc, "orig", exc))
+                        if callable(extract_error_code)
+                        else None
+                    )
+                    if error_code != 1054:
+                        raise
                     version_result = await conn.execute(sql_text("SELECT VERSION()"))
                     version = version_result.scalar_one_or_none()
                     pad_attribute = (
@@ -348,8 +353,10 @@ class SQLAlchemySession(SessionABC):
                         and int(version.partition(".")[0]) < 8
                         else None
                     )
+            if pad_attribute not in {"PAD SPACE", "NO PAD"}:
+                raise RuntimeError("could not inspect collation padding")
         except SQLAlchemyError:
-            return
+            raise
 
         if pad_attribute == "PAD SPACE":
             raise ValueError(
@@ -382,8 +389,10 @@ class SQLAlchemySession(SessionABC):
 
             async with self._engine.begin() as conn:
                 await conn.run_sync(self._metadata.create_all)
-                await self._validate_session_id_collation(conn)
-                self._session_id_collation_validated = True
+                needs_collation_validation = self.session_id.endswith(" ")
+                if needs_collation_validation:
+                    await self._validate_session_id_collation(conn)
+                self._session_id_collation_validated = needs_collation_validation
             self._create_tables = False  # Only create once
         finally:
             self._init_lock.release()

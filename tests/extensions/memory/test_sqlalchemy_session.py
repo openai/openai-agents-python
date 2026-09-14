@@ -21,7 +21,7 @@ from openai.types.responses.response_reasoning_item_param import (
 )
 from sqlalchemy import create_mock_engine, event, insert, select, text, update
 from sqlalchemy.dialects import postgresql, sqlite
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -334,13 +334,21 @@ async def test_validate_session_id_collation_rejects_pad_space(
 
 async def test_validate_session_id_collation_rejects_pad_space_on_mysql_57() -> None:
     engine = MagicMock(spec=AsyncEngine)
-    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    engine.dialect = SimpleNamespace(
+        name="mysql",
+        is_mariadb=False,
+        _extract_error_code=lambda exc: exc.args[0].args[0],
+    )
     session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
     conn = MagicMock()
     conn.execute = AsyncMock(
         side_effect=[
             _ScalarResult("utf8mb4_bin"),
-            SQLAlchemyError("Unknown column PAD_ATTRIBUTE"),
+            OperationalError(
+                "SELECT PAD_ATTRIBUTE",
+                {},
+                Exception(Exception(1054, "Unknown column PAD_ATTRIBUTE")),
+            ),
             _ScalarResult("5.7.44"),
         ]
     )
@@ -363,22 +371,32 @@ async def test_validate_session_id_collation_allows_mariadb_nopad() -> None:
     assert conn.execute.await_count == 1
 
 
-@pytest.mark.parametrize("pad_attribute", ["NO PAD", None])
-async def test_validate_session_id_collation_allows_non_pad_or_unknown(
+async def test_validate_session_id_collation_allows_no_pad() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql")
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_0900_bin"), _ScalarResult("NO PAD")]
+    )
+
+    await session._validate_session_id_collation(conn)
+
+
+@pytest.mark.parametrize("pad_attribute", [None, "UNKNOWN"])
+async def test_validate_session_id_collation_rejects_unknown_pad_attribute(
     pad_attribute: str | None,
 ) -> None:
     engine = MagicMock(spec=AsyncEngine)
     engine.dialect = SimpleNamespace(name="mysql")
     session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
     conn = MagicMock()
-    if pad_attribute is None:
-        conn.execute = AsyncMock(return_value=_ScalarResult(None))
-    else:
-        conn.execute = AsyncMock(
-            side_effect=[_ScalarResult("utf8mb4_0900_bin"), _ScalarResult(pad_attribute)]
-        )
+    conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_0900_bin"), _ScalarResult(pad_attribute)]
+    )
 
-    await session._validate_session_id_collation(conn)
+    with pytest.raises(RuntimeError, match="could not inspect collation padding"):
+        await session._validate_session_id_collation(conn)
 
 
 @pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
@@ -427,6 +445,126 @@ async def test_existing_mysql_schema_validates_trailing_space_session_id(
     validate = AsyncMock()
     monkeypatch.setattr(session, "_validate_session_id_collation", validate)
 
+    await session._ensure_tables()
+
+    validate.assert_awaited_once_with(conn)
+
+
+async def test_existing_mysql_schema_retries_failed_pad_attribute_inspection() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    failed_conn = MagicMock()
+    failed_conn.execute = AsyncMock(
+        side_effect=[
+            _ScalarResult("utf8mb4_bin"),
+            SQLAlchemyError("PAD_ATTRIBUTE query failed"),
+            _ScalarResult("8.0.36"),
+        ]
+    )
+    retry_conn = MagicMock()
+    retry_conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")]
+    )
+    connection_contexts = []
+    for conn in (failed_conn, retry_conn):
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=conn)
+        connection_context.__aexit__ = AsyncMock(return_value=None)
+        connection_contexts.append(connection_context)
+    engine.connect.side_effect = connection_contexts
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(SQLAlchemyError, match="PAD_ATTRIBUTE query failed"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert engine.connect.call_count == 2
+
+
+async def test_existing_mysql_schema_rejects_unknown_collation() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value=_ScalarResult(None))
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(RuntimeError, match="could not inspect session_id collation"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+
+async def test_existing_mysql_schema_retries_failed_collation_inspection() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    failed_conn = MagicMock()
+    failed_conn.execute = AsyncMock(side_effect=SQLAlchemyError("metadata query failed"))
+    retry_conn = MagicMock()
+    retry_conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")]
+    )
+    connection_contexts = []
+    for conn in (failed_conn, retry_conn):
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=conn)
+        connection_context.__aexit__ = AsyncMock(return_value=None)
+        connection_contexts.append(connection_context)
+    engine.connect.side_effect = connection_contexts
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(SQLAlchemyError, match="metadata query failed"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert engine.connect.call_count == 2
+
+
+async def test_existing_schema_validation_cannot_be_skipped_during_connect() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")])
+    connection_context = MagicMock()
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    async def enter_with_mutated_id() -> MagicMock:
+        session.session_id = "tenant"
+        return conn
+
+    connection_context.__aenter__ = AsyncMock(side_effect=enter_with_mutated_id)
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+
+async def test_collation_validation_cache_does_not_hide_mutated_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.run_sync = AsyncMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.begin.return_value = connection_context
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant", engine=engine, create_tables=True)
+    validate = AsyncMock()
+    monkeypatch.setattr(session, "_validate_session_id_collation", validate)
+
+    await session._ensure_tables()
+    session.session_id = "tenant "
     await session._ensure_tables()
 
     validate.assert_awaited_once_with(conn)
