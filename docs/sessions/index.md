@@ -43,7 +43,13 @@ result = Runner.run_sync(
     session=session
 )
 print(result.final_output)  # "Approximately 39 million"
+
+# Release the SQLite connections when the session is no longer needed.
+session.close()
 ```
+
+`SQLiteSession.close()` is synchronous. It releases open database connections (and the
+process-local file lock for file-backed sessions); do not reuse the session after closing it.
 
 ## Resuming interrupted runs with the same session
 
