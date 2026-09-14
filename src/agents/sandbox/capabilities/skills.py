@@ -380,6 +380,62 @@ def _get_manifest_entry_by_path(manifest: Manifest, path: Path) -> BaseEntry | N
     return None
 
 
+_BLOCK_SCALAR_HEADERS = frozenset({">", ">-", ">+", "|", "|-", "|+"})
+
+
+def _indent_of(line: str) -> int:
+    """Return the width of the leading whitespace on a frontmatter line."""
+
+    return len(line) - len(line.lstrip())
+
+
+def _fold_lines(block: list[str]) -> str:
+    """Join lines the way YAML folds them, turning blank lines into line breaks."""
+
+    folded = ""
+    blank_lines = 0
+    for line in block:
+        text = line.strip()
+        if not text:
+            blank_lines += 1
+            continue
+        if folded:
+            folded += "\n" * blank_lines if blank_lines else " "
+        folded += text
+        blank_lines = 0
+    return folded
+
+
+def _join_block_lines(block: list[str], *, literal: bool) -> str:
+    """Render the body of a block scalar introduced by a `>` or `|` header."""
+
+    if not literal:
+        return _fold_lines(block)
+
+    indent = min((_indent_of(line) for line in block if line.strip()), default=0)
+    return "\n".join(line[indent:] if line.strip() else "" for line in block)
+
+
+def _take_continuation_lines(
+    lines: list[str], start: int, end: int, key_indent: int
+) -> tuple[list[str], int]:
+    """Collect the lines that belong to the key opened on the preceding line.
+
+    A value can run past its own line as a block scalar or as a wrapped plain scalar, and a
+    key can open a nested block. All three indent their remaining lines past the key, so those
+    lines belong to that key and must not be read as keys of their own.
+    """
+
+    index = start
+    while index < end and (not lines[index].strip() or _indent_of(lines[index]) > key_indent):
+        index += 1
+
+    block = lines[start:index]
+    while block and not block[-1].strip():
+        block.pop()
+    return block, index
+
+
 def _parse_frontmatter(markdown: str) -> dict[str, str]:
     """Parse the simple YAML frontmatter shape used by skill indexes."""
 
@@ -396,19 +452,29 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
         return {}
 
     metadata: dict[str, str] = {}
-    for line in lines[1:end_index]:
+    index = 1
+    while index < end_index:
+        line = lines[index]
+        index += 1
         stripped = line.strip()
         if stripped == "" or stripped.startswith("#") or ":" not in stripped:
             continue
         key, value = stripped.split(":", 1)
         parsed_key = key.strip()
         parsed_value = value.strip()
-        if (
+        continuation, index = _take_continuation_lines(lines, index, end_index, _indent_of(line))
+
+        if parsed_value in _BLOCK_SCALAR_HEADERS:
+            parsed_value = _join_block_lines(continuation, literal=parsed_value[0] == "|").strip()
+        elif continuation and parsed_value:
+            parsed_value = _fold_lines([parsed_value, *continuation])
+        elif not continuation and (
             len(parsed_value) >= 2
             and parsed_value[0] == parsed_value[-1]
             and parsed_value[0] in {"'", '"'}
         ):
             parsed_value = parsed_value[1:-1]
+
         metadata[parsed_key] = parsed_value
     return metadata
 
