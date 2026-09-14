@@ -8,7 +8,7 @@ import pytest
 
 import agents._debug as _debug
 from agents._tool_identity import get_function_tool_lookup_key_for_tool
-from agents.exceptions import ModelBehaviorError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.events import (
     RealtimeToolApprovalRequired,
@@ -85,6 +85,22 @@ class TestToolCallExecution:
             assert _sent_tool_output_strings(mock_model) == ["approved implementation"]
         finally:
             await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_invalid_function_tool_needs_approval_raises(
+        self, mock_model, mock_agent, mock_function_tool
+    ) -> None:
+        mock_function_tool.needs_approval = "always"  # type: ignore[assignment]
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_invalid_approval", arguments="{}"
+        )
+
+        with pytest.raises(UserError, match="needs_approval"):
+            await session._handle_tool_call(tool_call_event)
+
+        assert mock_function_tool.on_invoke_tool.call_count == 0
 
     @pytest.mark.asyncio
     async def test_function_tool_needs_approval_emits_event(
