@@ -266,6 +266,21 @@ class _CancelledPreservingStopSession(_FakeSession):
         raise asyncio.CancelledError("stop cancelled while preserving backend")
 
 
+class _DelayedPreservingStopSession(_FakeSession):
+    def __init__(self, manifest: Manifest, release: asyncio.Event) -> None:
+        super().__init__(manifest)
+        self._release = release
+        self.stop_started = asyncio.Event()
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self._running = False
+        self.stop_started.set()
+        await self._release.wait()
+        self._backend_preservation_required = True
+        raise RuntimeError("stop failed after delayed preservation")
+
+
 class _BlockingPreservingStopSession(_FakeSession):
     def __init__(self, manifest: Manifest, stop_gate: asyncio.Event) -> None:
         super().__init__(manifest)
@@ -3825,6 +3840,54 @@ async def test_runner_keeps_sandbox_resume_state_when_non_streamed_cleanup_is_ca
     assert state._sandbox == result._sandbox_resume_state
     assert result._sandbox_session is None
     assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_manager_serializes_state_after_cancellation_precedes_preservation() -> None:
+    release = asyncio.Event()
+    session = _DelayedPreservingStopSession(Manifest(), release)
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        instructions="Base instructions.",
+    )
+    config = _sandbox_run_config(client).sandbox
+    assert config is not None
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=config,
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
+
+    cleanup = asyncio.create_task(manager.cleanup())
+    try:
+        await asyncio.wait_for(session.stop_started.wait(), timeout=0.5)
+        cleanup.cancel("caller cancellation")
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+
+        assert manager.resume_state_after_cleanup_error is None
+
+        release.set()
+
+        async def wait_for_resume_state() -> None:
+            while manager.resume_state_after_cleanup_error is None:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_resume_state(), timeout=0.5)
+        resume_state = manager.resume_state_after_cleanup_error
+        assert resume_state is not None
+        assert resume_state["backend_id"] == "fake"
+        assert manager._resources_by_agent == {}
+    finally:
+        release.set()
+        if not cleanup.done():
+            cleanup.cancel()
+        with suppress(BaseException):
+            await cleanup
 
 
 @pytest.mark.asyncio

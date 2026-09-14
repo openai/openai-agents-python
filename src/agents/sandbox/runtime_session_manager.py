@@ -257,6 +257,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         self._available_resumed_keys_by_name: dict[str, list[str]] | None = None
         self._claimed_resumed_keys: set[str] = set()
         self._deferred_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._pending_resource_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._cleanup_finished = False
         self._caller_cancelled_during_cleanup = False
         self._resume_state_after_cleanup_error: dict[str, object] | None = None
@@ -437,8 +438,9 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         # serialization cannot complete.
                         self._resume_state_after_cleanup_error = None
             finally:
-                self._resources_by_agent.clear()
-                self._current_agent_id = None
+                if not self._pending_resource_cleanup_tasks:
+                    self._resources_by_agent.clear()
+                    self._current_agent_id = None
                 self._cleanup_finished = True
                 self._caller_cancelled_during_cleanup = caller_cancellation is not None
                 if not self._deferred_cleanup_tasks:
@@ -488,6 +490,22 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             settle_resource_cleanup(),
             name="agents.cancelled_resource_cleanup",
         )
+        self._pending_resource_cleanup_tasks.add(follow_up)
+
+        def finalize_resource_cleanup(_done: asyncio.Task[Any]) -> None:
+            self._pending_resource_cleanup_tasks.discard(follow_up)
+            if not self._cleanup_finished or self._pending_resource_cleanup_tasks:
+                return
+
+            if self._caller_cancelled_during_cleanup and self._any_session_preserves_backend():
+                try:
+                    self._resume_state_after_cleanup_error = self.serialize_resume_state()
+                except BaseException:
+                    self._resume_state_after_cleanup_error = None
+            self._resources_by_agent.clear()
+            self._current_agent_id = None
+
+        follow_up.add_done_callback(finalize_resource_cleanup)
         _track_sync_background_task(follow_up)
         self._track_deferred_cleanup_task(follow_up)
 

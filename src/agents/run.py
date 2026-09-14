@@ -38,7 +38,6 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
-from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -2344,8 +2343,8 @@ class AgentRunner:
         else:
             configured_model = getattr(run_config, "model", None)
             configured_model_provider = getattr(run_config, "model_provider", None)
-            has_explicit_model_provider = configured_model_provider is not None and not isinstance(
-                configured_model_provider, MultiProvider
+            has_explicit_model_provider = configured_model_provider is not None and not getattr(
+                configured_model_provider, "_agents_default_model_provider", False
             )
         configured_sandbox = (
             run_config.get("sandbox")

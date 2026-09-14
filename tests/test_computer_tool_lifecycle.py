@@ -228,6 +228,35 @@ async def test_dispose_computer_timeout_keeps_disposer_running(
         release.set()
 
 
+def test_asyncio_run_keeps_timed_out_computer_disposal_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    finished = threading.Event()
+
+    async def dispose(**_kwargs: Any) -> None:
+        started.set()
+        await asyncio.sleep(0.02)
+        finished.set()
+
+    async def run() -> None:
+        monkeypatch.setattr(tool_module, "_COMPUTER_DISPOSAL_TIMEOUT_S", 0.001)
+        tool = ComputerTool(
+            computer=ComputerProvider[FakeComputer](
+                create=AsyncMock(return_value=FakeComputer()),
+                dispose=dispose,
+            )
+        )
+        ctx = RunContextWrapper(context=None)
+        await resolve_computer(tool=tool, run_context=ctx)
+        await dispose_resolved_computers(run_context=ctx)
+        assert started.is_set()
+        assert not finished.is_set()
+
+    asyncio.run(run())
+    assert finished.is_set()
+
+
 @pytest.mark.asyncio
 async def test_run_sync_drives_timed_out_computer_disposal(
     monkeypatch: pytest.MonkeyPatch,

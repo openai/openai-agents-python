@@ -7,6 +7,7 @@ import pytest
 
 from agents.agent import Agent
 from agents.models.interface import ModelProvider
+from agents.models.multi_provider import MultiProvider, MultiProviderMap
 from agents.run import AgentRunner
 from agents.run_config import RunConfig
 from agents.run_internal.sync import (
@@ -110,6 +111,43 @@ def test_run_sync_uses_default_loop_for_explicit_model_provider(
             Agent(name="test-agent"),
             "input",
             run_config=RunConfig(model_provider=_Provider()),
+        )
+        assert observed_loops == [dependency_loop]
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
+
+
+def test_run_sync_uses_default_loop_for_explicit_multi_provider(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+
+    class _LoopBoundProvider(ModelProvider):
+        loop = dependency_loop
+
+        def get_model(self, _model_name):
+            return ScriptedModel()
+
+    provider_map = MultiProviderMap()
+    provider_map.add_provider("custom", _LoopBoundProvider())
+    provider = MultiProvider(provider_map=provider_map)
+
+    async def fake_run(self, *_args, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    try:
+        runner.run_sync(
+            Agent(name="test-agent"),
+            "input",
+            run_config=RunConfig(model_provider=provider),
         )
         assert observed_loops == [dependency_loop]
     finally:
