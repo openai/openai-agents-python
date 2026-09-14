@@ -664,7 +664,6 @@ class RealtimeSession(RealtimeModelListener):
             self._context_wrapper,
             parsed_args,
             tool_call.call_id,
-            strict=False,
         )
 
     def _build_tool_approval_item(
