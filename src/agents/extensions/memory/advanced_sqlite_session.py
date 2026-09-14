@@ -1010,9 +1010,11 @@ class AdvancedSQLiteSession(SQLiteSession):
             The branch_id of the newly created branch
 
         Raises:
-            ValueError: If turn doesn't exist, doesn't contain a user message, or
-                `branch_name` has already been used in this session
+            ValueError: If turn doesn't exist, doesn't contain a user message,
+                `branch_name` is empty or whitespace, or has already been used in this session
         """
+        if branch_name is not None and (not branch_name or not branch_name.strip()):
+            raise ValueError("Branch ID cannot be empty")
 
         async def _create_and_switch() -> tuple[str, Any, str]:
             # Copying the branch is the first durable side effect. Keep the
@@ -1083,8 +1085,10 @@ class AdvancedSQLiteSession(SQLiteSession):
             branch_id: The branch to switch to.
 
         Raises:
-            ValueError: If the branch doesn't exist.
+            ValueError: If the branch doesn't exist or branch ID is empty.
         """
+        if not branch_id or not branch_id.strip():
+            raise ValueError("Branch ID cannot be empty")
 
         # Validate branch exists
         def _validate_branch() -> int:
@@ -1360,6 +1364,8 @@ class AdvancedSQLiteSession(SQLiteSession):
     ) -> str:
         """Reserve and return a new branch ID for this session."""
         if new_branch_id is not None:
+            if not new_branch_id or not new_branch_id.strip():
+                raise ValueError("Branch ID cannot be empty")
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
