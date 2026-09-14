@@ -566,6 +566,11 @@ class TestSkillsInstructions:
                 id="literal_block_scalar",
             ),
             pytest.param(
+                "description: >-\n  Use for GitHub issue triage.\n  Triggers: /triage, bug report",
+                "Use for GitHub issue triage. Triggers: /triage, bug report",
+                id="folded_block_scalar_with_chomping_indicator",
+            ),
+            pytest.param(
                 "description: Use for GitHub issue\n  triage, not for PR review.",
                 "Use for GitHub issue triage, not for PR review.",
                 id="wrapped_plain_scalar",
@@ -604,6 +609,50 @@ class TestSkillsInstructions:
             f"- discovered-skill: {expected_description} (file: .agents/dynamic-skill)"
             in instructions
         )
+
+    @pytest.mark.parametrize(
+        ("frontmatter", "expected_line"),
+        [
+            pytest.param(
+                "name: discovered-skill\n  # explanation\ndescription: local dir metadata",
+                "- discovered-skill: local dir metadata",
+                id="indented_comment_after_plain_value",
+            ),
+            pytest.param(
+                'name: discovered-skill\ndescription: "local dir metadata"\n  # note',
+                "- discovered-skill: local dir metadata",
+                id="indented_comment_after_quoted_value",
+            ),
+            pytest.param(
+                "name: discovered-skill\ndescription: >\n  Use for triage.\n  # kept as content",
+                "- discovered-skill: Use for triage. # kept as content",
+                id="comment_line_inside_block_scalar_is_content",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_instructions_treat_comment_lines_the_way_yaml_does(
+        self,
+        tmp_path: Path,
+        frontmatter: str,
+        expected_line: str,
+    ) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\n{frontmatter}\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+
+        instructions = await capability.instructions(_source_granted_manifest(source=src_root))
+
+        assert instructions is not None
+        assert f"{expected_line} (file: .agents/dynamic-skill)" in instructions
 
     @pytest.mark.asyncio
     async def test_instructions_keep_skill_name_when_a_description_line_looks_like_a_key(

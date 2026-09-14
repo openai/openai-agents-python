@@ -466,14 +466,18 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
 
         if parsed_value in _BLOCK_SCALAR_HEADERS:
             parsed_value = _join_block_lines(continuation, literal=parsed_value[0] == "|").strip()
-        elif continuation and parsed_value:
-            parsed_value = _fold_lines([parsed_value, *continuation])
-        elif not continuation and (
-            len(parsed_value) >= 2
-            and parsed_value[0] == parsed_value[-1]
-            and parsed_value[0] in {"'", '"'}
-        ):
-            parsed_value = parsed_value[1:-1]
+        else:
+            # A comment line is content inside a block scalar but a comment anywhere else, so it
+            # must not extend a wrapped value or keep a quoted one from being unwrapped.
+            continuation = [item for item in continuation if not item.strip().startswith("#")]
+            if continuation and parsed_value:
+                parsed_value = _fold_lines([parsed_value, *continuation])
+            elif not continuation and (
+                len(parsed_value) >= 2
+                and parsed_value[0] == parsed_value[-1]
+                and parsed_value[0] in {"'", '"'}
+            ):
+                parsed_value = parsed_value[1:-1]
 
         metadata[parsed_key] = parsed_value
     return metadata
