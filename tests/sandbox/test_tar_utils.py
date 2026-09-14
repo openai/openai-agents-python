@@ -266,9 +266,77 @@ def test_strip_tar_member_prefix_output_passes_strict_hydrate_validation(
         validate_tarfile(tar, allow_external_symlink_targets=False)
         safe_extract_tarfile(tar, root=tmp_path, allow_external_symlink_targets=False)
 
-    assert (tmp_path / "sub" / "abs_up").read_bytes() == b"shared"
-    assert (tmp_path / "abs_alias").read_bytes() == b"right"
-    assert not (tmp_path / "dev.fifo").exists()
+    # Inspect the restored link metadata rather than reading through the links: the
+    # targets are POSIX paths that only a POSIX host resolves the way the sandbox does.
+    assert os.readlink(tmp_path / "sub" / "abs_up") == "../a.txt"
+    assert os.readlink(tmp_path / "abs_alias") == "alias/../data.txt"
+    assert (tmp_path / "sub" / "data.txt").read_bytes() == b"right"
+    assert not os.path.lexists(tmp_path / "dev.fifo")
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_that_escape_via_links() -> None:
+    """`a/link -> ..` resolves to the workspace root, so the rebased `a/link/../tmp` names
+    `/tmp` after extraction even though hydrate's lexical check would accept it."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _dir("workspace/a"),
+        _symlink("workspace/a/link", ".."),
+        _symlink("workspace/victim", "/workspace/a/link/../tmp"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_external_links() -> None:
+    """A hop through a link that stays absolute (`outside -> /usr`) proves nothing about
+    where `outside/../x` ends up, so the rebased target is refused rather than guessed."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _symlink("workspace/outside", "/usr"),
+        _symlink("workspace/victim", "/workspace/outside/../x"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_in_a_link_cycle() -> None:
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _symlink("workspace/loop", "loop"),
+        _symlink("workspace/victim", "/workspace/loop/x"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_keeps_rebased_symlinks_that_resolve_inside() -> None:
+    """`..` after a link is applied to the link's target, so `b/../data.txt` with
+    `b -> a/link2` and `a/link2 -> ../sub` names `data.txt` at the root and is kept."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _dir("workspace/a"),
+        _dir("workspace/sub"),
+        _file("workspace/data.txt", b"root"),
+        _symlink("workspace/a/link2", "../sub"),
+        _symlink("workspace/b", "a/link2"),
+        _symlink("workspace/sub/victim", "/workspace/b/../data.txt"),
+    )
+
+    stripped = strip_tar_member_prefix(
+        io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        assert tar.getmember("sub/victim").linkname == "../b/../data.txt"
 
 
 def test_strip_tar_member_prefix_keeps_absolute_symlinks_without_a_root() -> None:

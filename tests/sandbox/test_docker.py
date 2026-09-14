@@ -788,17 +788,35 @@ async def test_docker_persist_and_hydrate_keep_absolute_workspace_symlinks_resol
     ) -> None:
         _ = (error_path, user)
         assert cmd[:3] == ["tar", "-x", "-C"]
+        # The container runs GNU tar, which restores link targets verbatim. Spell that out
+        # instead of relying on `extractall`, whose default filter rewrites symlink targets
+        # on Python 3.14.
+        root = restored._host_path(cmd[3])
         with tarfile.open(fileobj=stream, mode="r|*") as tar:
-            tar.extractall(restored._host_path(cmd[3]))
+            for member in tar:
+                dest = root / member.name
+                if member.isdir():
+                    dest.mkdir(parents=True, exist_ok=True)
+                elif member.issym():
+                    os.symlink(member.linkname, dest)
+                elif member.isreg():
+                    payload = tar.extractfile(member)
+                    assert payload is not None
+                    with payload:
+                        dest.write_bytes(payload.read())
+                else:
+                    raise AssertionError(f"unexpected member type: {member.name}")
 
     restored._stream_into_exec = _extract_like_tar  # type: ignore[method-assign]
     await restored.hydrate_workspace(archive)
 
+    # Assert on the restored link metadata: the targets are POSIX paths that only the
+    # sandbox's own filesystem resolves the way these assertions describe.
     restored_workspace = restored_host_root / "workspace"
     assert os.readlink(restored_workspace / "abs_alias") == "alias/../data.txt"
     assert os.readlink(restored_workspace / "sub" / "abs_up") == "../sub/data.txt"
-    assert (restored_workspace / "abs_alias").read_text(encoding="utf-8") == "right"
-    assert (restored_workspace / "sub" / "abs_up").read_text(encoding="utf-8") == "right"
+    assert os.readlink(restored_workspace / "alias") == "sub/deep"
+    assert (restored_workspace / "sub" / "data.txt").read_text(encoding="utf-8") == "right"
 
 
 @pytest.mark.asyncio
