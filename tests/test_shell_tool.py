@@ -450,6 +450,58 @@ async def test_shell_tool_output_respects_max_output_length() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_tool_max_output_length_does_not_count_command_decoration() -> None:
+    """``max_output_length`` bounds the output streams, not the rendered ``$ <command>`` decoration.
+
+    Regression: the rendered text was re-clamped to ``max_output_length`` after the ``$ echo hi``
+    prefix was added, so a command whose stdout already fit within the budget had real output
+    chopped (here the whole stdout was lost, leaving only the decoration prefix).
+    """
+    shell_tool = ShellTool(
+        executor=lambda request: ShellResult(
+            output=[
+                ShellCommandOutput(
+                    command="echo hi",
+                    stdout="0123456789",
+                    outcome=ShellCallOutcome(type="exit", exit_code=0),
+                )
+            ],
+        )
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+            "max_output_length": 6,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    # The 6-char budget bounds stdout to "012345"; the "$ echo hi" decoration is framing that
+    # neither consumes the budget nor truncates the real output.
+    assert result.output == "$ echo hi\n012345"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["output"][0]["stdout"] == "012345"
+
+
+@pytest.mark.asyncio
 async def test_shell_tool_uses_smaller_max_output_length() -> None:
     shell_tool = ShellTool(
         executor=lambda request: ShellResult(
