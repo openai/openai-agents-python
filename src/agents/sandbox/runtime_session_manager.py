@@ -123,6 +123,7 @@ class _SandboxSessionResources:
     @redact_mount_error_data
     async def _finish_deferred_cleanup(self) -> None:
         cleanup_error: BaseException | None = None
+        secondary_error: BaseException | None = None
         try:
             while True:
                 await self._session._wait_for_tracked_cleanup_tasks()
@@ -130,7 +131,7 @@ class _SandboxSessionResources:
                 # wakes its waiters. Give those callbacks a turn before making the shutdown call.
                 await asyncio.sleep(0)
                 if self._session._should_preserve_backend_on_cleanup():
-                    return
+                    break
 
                 try:
                     await self._session.shutdown()
@@ -138,17 +139,26 @@ class _SandboxSessionResources:
                     raise_if_cleanup_owner_force_cancelling(exc)
                     if self._session._has_pending_pty_cleanup_tasks():
                         continue
+                    cleanup_error = exc
 
                 if self._session._has_pending_pty_cleanup_tasks():
                     continue
                 if self._session._should_preserve_backend_on_cleanup():
-                    return
-                if self._client is not None and isinstance(self._session, SandboxSession):
-                    await self._client.delete(self._session)
-                return
+                    break
+                try:
+                    if self._client is not None and isinstance(self._session, SandboxSession):
+                        await self._client.delete(self._session)
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    else:
+                        secondary_error = exc
+                break
         except BaseException as exc:
-            cleanup_error = exc
-            raise
+            raise_if_cleanup_owner_force_cancelling(exc)
+            if cleanup_error is None:
+                cleanup_error = exc
         finally:
             raise_if_cleanup_owner_force_cancelling(cleanup_error)
             if not self._session._has_pending_pty_cleanup_tasks():
@@ -156,8 +166,28 @@ class _SandboxSessionResources:
                     await self._session._aclose_dependencies()
                 except BaseException as exc:
                     raise_if_cleanup_owner_force_cancelling(exc)
-                    pass
-                await self._session._after_deferred_dependency_close()
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    else:
+                        secondary_error = exc
+                try:
+                    await self._session._after_deferred_dependency_close()
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    else:
+                        log_tool_action_error(
+                            logger,
+                            "Deferred sandbox finalization failed after cleanup error",
+                            exc,
+                        )
+
+        if secondary_error is not None:
+            assert cleanup_error is not None
+            raise cleanup_error from secondary_error
+        if cleanup_error is not None:
+            raise cleanup_error
 
     @redact_mount_error_data
     async def cleanup(self) -> None:

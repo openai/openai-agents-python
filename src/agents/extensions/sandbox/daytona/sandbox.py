@@ -951,6 +951,8 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 )
                 if done:
                     await asyncio.gather(worker_task, return_exceptions=True)
+                else:
+                    self._track_pty_cleanup_task(worker_task)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))

@@ -704,6 +704,44 @@ async def test_stop_persists_snapshot_after_cleanup_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_stop_prioritizes_caller_cancellation_after_snapshot_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.state = SimpleNamespace(manifest=Manifest(), type="test")
+    monkeypatch.setattr(
+        base_sandbox_session,
+        "validate_manifest_mount_credential_boundaries",
+        lambda *args, **kwargs: None,
+    )
+    cleanup_error = RuntimeError("pty cleanup failed")
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+
+    async def before_stop() -> None:
+        raise cleanup_error
+
+    async def persist_snapshot() -> None:
+        snapshot_started.set()
+        await release_snapshot.wait()
+
+    session._before_stop = before_stop
+    session._persist_snapshot = persist_snapshot
+
+    stop_task = asyncio.create_task(inspect.unwrap(BaseSandboxSession.stop)(session))
+    await asyncio.wait_for(snapshot_started.wait(), timeout=0.5)
+    stop_task.cancel("caller cancellation")
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    release_snapshot.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await stop_task
+
+    assert exc_info.value.__cause__ is cleanup_error
+
+
+@pytest.mark.asyncio
 async def test_stop_preserves_original_cleanup_failure_when_snapshot_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

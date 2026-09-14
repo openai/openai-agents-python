@@ -1675,6 +1675,7 @@ class TestDaytonaSandbox:
         )
         logs_started = asyncio.Event()
         finalizer_started = asyncio.Event()
+        release_finalizer = asyncio.Event()
 
         async def read_logs(*_args: object) -> None:
             logs_started.set()
@@ -1682,7 +1683,7 @@ class TestDaytonaSandbox:
 
         async def get_command(*_args: object) -> object:
             finalizer_started.set()
-            await asyncio.Event().wait()
+            await release_finalizer.wait()
             return types.SimpleNamespace(exit_code=None)
 
         monkeypatch.setattr(sandbox.process, "get_session_command_logs_async", read_logs)
@@ -1702,9 +1703,16 @@ class TestDaytonaSandbox:
         await asyncio.wait_for(session._terminate_pty_entry(entry), timeout=0.5)  # noqa: SLF001
 
         assert finalizer_started.is_set()
-        assert worker_task.done()
+        assert not worker_task.done()
         assert entry.worker_task is None
+        assert session._has_pending_pty_cleanup_tasks()
+        assert worker_task in (session._pty_cleanup_tasks or set())
         assert sandbox.process.delete_session_calls == ["session-123"]
+        release_finalizer.set()
+        await asyncio.gather(*(session._pty_cleanup_tasks or ()), return_exceptions=True)
+        await asyncio.sleep(0)
+        assert worker_task.done()
+        assert not session._has_pending_pty_cleanup_tasks()
 
 
 # ---------------------------------------------------------------------------

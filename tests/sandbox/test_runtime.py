@@ -1002,6 +1002,28 @@ async def test_runner_owned_deferred_cleanup_reports_client_delete_failure(
 
 
 @pytest.mark.asyncio
+async def test_runner_owned_deferred_cleanup_preserves_shutdown_failure_after_delete() -> None:
+    inner = _FailingDeferredShutdownSession(Manifest(), "deferred shutdown failed")
+    client = _FakeClient(inner)
+    resources = _SandboxSessionResources(
+        session=client.session,
+        client=client,
+        owns_session=True,
+    )
+
+    resources._schedule_deferred_cleanup()
+    deferred_task = resources.deferred_cleanup_task
+    assert deferred_task is not None
+
+    with pytest.raises(RuntimeError, match="deferred shutdown failed"):
+        await deferred_task
+
+    assert inner.shutdown_calls == 1
+    assert client.delete_calls == 1
+    assert inner.close_dependency_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_runner_owned_deferred_cleanup_rechecks_snapshot_preservation() -> None:
     inner = _FakeSession(Manifest())
     inner._backend_preservation_required = True

@@ -429,7 +429,9 @@ class BaseSandboxSession(abc.ABC):
                         if wrapped is not before_stop_error:
                             raise wrapped from before_stop_error
                     raise
-                snapshot_error = await self._persist_snapshot_before_stop_error()
+                snapshot_error = await self._persist_snapshot_before_stop_error(
+                    before_stop_error=before_stop_error
+                )
                 if snapshot_error is None:
                     self._backend_preservation_required = False
                 else:
@@ -463,7 +465,9 @@ class BaseSandboxSession(abc.ABC):
         finally:
             await self._after_stop()
 
-    async def _persist_snapshot_before_stop_error(self) -> BaseException | None:
+    async def _persist_snapshot_before_stop_error(
+        self, *, before_stop_error: BaseException
+    ) -> BaseException | None:
         """Persist a snapshot with a deadline without replacing the original stop failure."""
 
         snapshot_task = self._snapshot_persistence_task
@@ -503,18 +507,22 @@ class BaseSandboxSession(abc.ABC):
             try:
                 snapshot_task.result()
             except BaseException as error:
+                if caller_cancellation is not None:
+                    raise caller_cancellation from before_stop_error
                 return error
+            if caller_cancellation is not None:
+                raise caller_cancellation from before_stop_error
             return None
 
         if timed_out:
             # Keep the operation owned after the caller gives up waiting. The backend is
             # retained because a snapshot that is still running cannot be treated as durable.
             self._track_pty_cleanup_task(snapshot_task)
+            if caller_cancellation is not None:
+                raise caller_cancellation from before_stop_error
             return asyncio.TimeoutError()
         if caller_cancellation is not None:
-            # Keep the original stop failure primary when cancellation was observed while
-            # the snapshot was still settling.
-            return caller_cancellation
+            raise caller_cancellation from before_stop_error
         return asyncio.TimeoutError()
 
     async def _before_stop(self) -> None:
