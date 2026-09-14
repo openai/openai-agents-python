@@ -215,6 +215,31 @@ class EncryptedSession(SessionABC):
         except (InvalidToken, KeyError):
             return None
 
+    def _unwrap_for_pop(
+        self, item: TResponseInputItem | EncryptedEnvelope
+    ) -> tuple[TResponseInputItem | None, bool]:
+        """Unwrap a popped item and report whether authentication failed.
+
+        Fernet raises ``InvalidToken`` for both an expired token and a token that
+        cannot be authenticated with the configured key. ``pop_item`` needs to
+        distinguish those cases so a wrong key cannot drain recoverable history.
+        """
+        if not _is_encrypted_envelope(item):
+            return cast(TResponseInputItem, item), False
+
+        try:
+            token = item["payload"].encode("utf-8")
+            plaintext = self.cipher.decrypt(token, ttl=self.ttl)
+            return cast(TResponseInputItem, _from_json_bytes(plaintext)), False
+        except KeyError:
+            return None, False
+        except InvalidToken:
+            try:
+                self.cipher.decrypt(token)
+            except InvalidToken:
+                return None, True
+            return None, False
+
     def _unwrap_valid_items(
         self, encrypted_items: list[TResponseInputItem]
     ) -> list[TResponseInputItem]:
@@ -290,9 +315,18 @@ class EncryptedSession(SessionABC):
             )
             if not enc:
                 return None
-            item = self._unwrap(enc)
+            item, authentication_failed = self._unwrap_for_pop(enc)
             if item is not None:
                 return item
+            if authentication_failed:
+                # Put back the exact item returned by the atomic backend pop.
+                # This avoids a get-then-pop race while refusing to drain history.
+                await _call_session_method(
+                    self.underlying_session.add_items,
+                    [cast(TResponseInputItem, enc)],
+                    wrapper=wrapper,
+                )
+                return None
 
     async def clear_session(
         self,
