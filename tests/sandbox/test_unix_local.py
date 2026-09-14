@@ -637,6 +637,41 @@ class TestUnixLocalPersistWorkspaceRestorable:
         assert (restored_root / "releases" / "v1" / "abs_up").read_text(encoding="utf-8") == "right"
 
     @pytest.mark.asyncio
+    async def test_rebased_symlink_that_escapes_through_a_link_stays_absolute(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`a/link -> ..` resolves to the workspace root, so `<root>/a/link/../tmp` names
+        `/tmp`; the relative `a/link/../tmp` would pass hydrate's lexical check and escape,
+        so the target is left absolute for hydrate to refuse as before. A hop through an
+        absolute link (`outside`) or a loop proves nothing either, even when the live tree
+        happens to lead back inside."""
+        workspace = tmp_path / "workspace"
+        (workspace / "a").mkdir(parents=True)
+        (workspace / "a" / "link").symlink_to("..")
+        (workspace / "victim").symlink_to(workspace / "a" / "link" / ".." / "tmp")
+        (workspace / "outside").symlink_to(tmp_path)
+        (workspace / "via_outside").symlink_to(workspace / "outside" / "workspace" / "a")
+        (workspace / "loop").symlink_to("loop")
+        (workspace / "via_loop").symlink_to(workspace / "loop" / ".." / ".." / "etc")
+        (workspace / "b").symlink_to("a/link")
+        (workspace / "a" / "fine").symlink_to(workspace / "b" / "a")
+
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert members["victim"].linkname == str(workspace / "a" / "link" / ".." / "tmp")
+            assert members["via_outside"].linkname == str(
+                workspace / "outside" / "workspace" / "a"
+            )
+            assert members["via_loop"].linkname == str(
+                workspace / "loop" / ".." / ".." / "etc"
+            )
+            # `..` after `b -> a/link -> ..` lands on the root, so `b/a` is provably inside.
+            assert members["a/fine"].linkname == "../b/a"
+
+    @pytest.mark.asyncio
     async def test_persisted_workspace_hydrates_into_a_new_root(self, tmp_path: Path) -> None:
         workspace = self._workspace(tmp_path)
         (workspace / "outside").unlink()  # hydrate rejects external targets by design

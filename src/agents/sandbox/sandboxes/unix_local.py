@@ -141,10 +141,59 @@ def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInf
         ti.size = os.stat(root / ti.name).st_size
         return ti
     if ti.issym() and ti.linkname.startswith("/"):
-        ti.linkname = _rebase_symlink_target(
+        rebased = _rebase_symlink_target(
             ti.linkname, link_name=ti.name, roots=(root, root.resolve(strict=False))
         )
+        if rebased != ti.linkname and _symlink_target_stays_under(
+            root, link_name=ti.name, target=rebased
+        ):
+            ti.linkname = rebased
     return ti
+
+
+# Symlink hops followed while proving that a rebased target stays under the root. Linux
+# gives up after 40 (ELOOP); a workspace that needs more is not worth restoring.
+_MAX_SYMLINK_HOPS = 40
+
+
+def _symlink_target_stays_under(root: Path, *, link_name: str, target: str) -> bool:
+    """Whether a rebased, link-relative target provably resolves under the workspace root.
+
+    The rebase keeps the components after the root verbatim, so ``a/link/../tmp`` is only
+    inside the workspace if ``a/link`` resolves inside it: with ``a/link -> ..`` it names
+    ``/tmp`` once restored, while the strict extractor's lexical check accepts the relative
+    form. The walk applies ``..`` to a link's target the way the kernel does and only
+    follows the workspace's own relative links, which restore verbatim; a hop through a
+    link whose target is absolute proves nothing about the restored tree (on the live tree
+    it may happen to lead back inside), so it fails the proof, as do leaving the root and
+    exceeding the hop budget. A target that cannot be proven contained keeps its absolute
+    form, which hydrate refuses as it always has.
+    """
+
+    pending = list(
+        reversed((*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts))
+    )
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                return False
+            resolved.pop()
+            continue
+        candidate = root.joinpath(*resolved, part)
+        if not candidate.is_symlink():
+            resolved.append(part)
+            continue
+        hops += 1
+        link_target = os.readlink(candidate)
+        if hops > _MAX_SYMLINK_HOPS or link_target.startswith("/"):
+            return False
+        pending.extend(reversed(PurePosixPath(link_target).parts))
+    return True
 
 
 def _rebase_symlink_target(linkname: str, *, link_name: str, roots: tuple[Path, ...]) -> str:
