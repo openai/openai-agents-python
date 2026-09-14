@@ -2512,7 +2512,7 @@ def _ensure_json_compatible(value: Any) -> Any:
 
 
 def _serialize_output_value(value: Any) -> Any:
-    """Convert a tool output value, including containers of models, to plain data.
+    """Convert an output value, including containers of models, to plain data.
 
     ``_ensure_json_compatible`` stringifies anything ``json.dumps`` cannot handle, so
     Pydantic models and dataclasses nested in containers would otherwise degrade to
@@ -2851,6 +2851,16 @@ class _DeserializedFunctionAction:
     nested_agent_run_state_data: Mapping[str, Any] | None
 
 
+def _serialize_guardrail_payload(value: Any) -> Any:
+    """Preserve structured payloads without losing best-effort serialization."""
+    try:
+        value = _serialize_output_value(value)
+    except Exception:
+        # Retain the original payload for the existing JSON/string fallback.
+        pass
+    return _ensure_json_compatible(value)
+
+
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
     *,
@@ -2866,11 +2876,11 @@ def _serialize_guardrail_results(
             },
             "output": {
                 "tripwireTriggered": result.output.tripwire_triggered,
-                "outputInfo": _ensure_json_compatible(result.output.output_info),
+                "outputInfo": _serialize_guardrail_payload(result.output.output_info),
             },
         }
         if isinstance(result, OutputGuardrailResult):
-            entry["agentOutput"] = _ensure_json_compatible(result.agent_output)
+            entry["agentOutput"] = _serialize_guardrail_payload(result.agent_output)
             entry["agent"] = _serialize_agent_reference(
                 result.agent,
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -2896,7 +2906,7 @@ def _serialize_tool_guardrail_results(
             {
                 "guardrail": {"type": type_label, "name": guardrail_name},
                 "output": {
-                    "outputInfo": _ensure_json_compatible(result.output.output_info),
+                    "outputInfo": _serialize_guardrail_payload(result.output.output_info),
                     "behavior": result.output.behavior,
                 },
             }

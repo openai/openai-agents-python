@@ -11582,3 +11582,117 @@ async def test_schema_1_13_hosted_mcp_orphaned_call_decisions_require_reapproval
         )
         == "legacy exact denial"
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_guardrail_models_survive_state_serialization() -> None:
+    from agents.testing import assistant_message
+
+    class Verdict(BaseModel):
+        allowed: bool
+        reason: str
+
+    class Answer(BaseModel):
+        text: str
+
+    async def check(*args: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=Verdict(allowed=True, reason="approved"),
+            tripwire_triggered=False,
+        )
+
+    agent = Agent(
+        name="Audit",
+        model=ScriptedModel([[assistant_message('{"text":"hello"}')]]),
+        output_type=Answer,
+        input_guardrails=[InputGuardrail(check)],
+        output_guardrails=[OutputGuardrail(check)],
+    )
+    result = await Runner.run(agent, "hello", run_config=RunConfig(tracing_disabled=True))
+    restored = await RunState.from_json(agent, json.loads(result.to_state().to_string()))
+
+    assert restored._input_guardrail_results[0].output.output_info == {
+        "allowed": True,
+        "reason": "approved",
+    }
+    assert restored._output_guardrail_results[0].output.output_info == {
+        "allowed": True,
+        "reason": "approved",
+    }
+    assert restored._output_guardrail_results[0].agent_output == {"text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_tool_guardrail_dataclasses_survive_state_serialization() -> None:
+    @dataclass
+    class Verdict:
+        allowed: bool
+        reason: str
+
+    verdict = Verdict(allowed=True, reason="approved")
+    output = ToolGuardrailFunctionOutput(
+        output_info={"checks": [verdict]}, behavior=AllowBehavior(type="allow")
+    )
+    agent = Agent(name="Audit")
+    state = make_state(agent, context=RunContextWrapper(context=None))
+    state._tool_input_guardrail_results = [
+        ToolInputGuardrailResult(
+            guardrail=ToolInputGuardrail(lambda data: output, name="input"),
+            output=output,
+        )
+    ]
+    state._tool_output_guardrail_results = [
+        ToolOutputGuardrailResult(
+            guardrail=ToolOutputGuardrail(lambda data: output, name="output"),
+            output=output,
+        )
+    ]
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    expected = {"checks": [{"allowed": True, "reason": "approved"}]}
+    assert restored._tool_input_guardrail_results[0].output.output_info == expected
+    assert restored._tool_output_guardrail_results[0].output.output_info == expected
+
+
+@pytest.mark.asyncio
+async def test_guardrail_state_keeps_fallback_when_model_serializer_raises() -> None:
+    class Diagnostic(BaseModel):
+        reason: str
+
+        @model_serializer
+        def serialize(self) -> dict[str, Any]:
+            raise ValueError("Serializer unavailable.")
+
+    diagnostic = Diagnostic(reason="approved")
+    output = GuardrailFunctionOutput(output_info=diagnostic, tripwire_triggered=False)
+    agent = Agent(name="Audit")
+    state = make_state(agent, context=RunContextWrapper(context=None))
+    state._input_guardrail_results = [
+        InputGuardrailResult(guardrail=InputGuardrail(lambda *args: output), output=output)
+    ]
+    state._output_guardrail_results = [
+        OutputGuardrailResult(
+            guardrail=OutputGuardrail(lambda *args: output),
+            agent=agent,
+            agent_output=diagnostic,
+            output=output,
+        )
+    ]
+    tool_output = ToolGuardrailFunctionOutput(
+        output_info=diagnostic, behavior=AllowBehavior(type="allow")
+    )
+    state._tool_input_guardrail_results = [
+        ToolInputGuardrailResult(
+            guardrail=ToolInputGuardrail(lambda data: tool_output), output=tool_output
+        )
+    ]
+    state._tool_output_guardrail_results = [
+        ToolOutputGuardrailResult(
+            guardrail=ToolOutputGuardrail(lambda data: tool_output), output=tool_output
+        )
+    ]
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    assert restored._input_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._output_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._output_guardrail_results[0].agent_output == "reason='approved'"
+    assert restored._tool_input_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._tool_output_guardrail_results[0].output.output_info == "reason='approved'"
