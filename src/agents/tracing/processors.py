@@ -163,13 +163,23 @@ class BackendSpanExporter(TracingExporter):
     def project(self):
         return self._project or os.environ.get("OPENAI_PROJECT_ID")
 
-    @cached_property
+    def _invalidate_endpoint(self) -> None:
+        self.__dict__.pop("_resolved_endpoint", None)
+
+    @property
     def endpoint(self) -> str:
-        return (
-            self._endpoint
-            or os.environ.get("OPENAI_TRACING_INGEST_ENDPOINT")
-            or self._OPENAI_TRACING_INGEST_ENDPOINT
-        )
+        if "_resolved_endpoint" not in self.__dict__:
+            self.__dict__["_resolved_endpoint"] = (
+                self._endpoint
+                or os.environ.get("OPENAI_TRACING_INGEST_ENDPOINT")
+                or self._OPENAI_TRACING_INGEST_ENDPOINT
+            )
+        return self.__dict__["_resolved_endpoint"]
+
+    @endpoint.setter
+    def endpoint(self, value: str) -> None:
+        self._endpoint = value
+        self._invalidate_endpoint()
 
     def _warn_if_trace_endpoint_ignores_model_base_url(self) -> None:
         global _warned_default_trace_endpoint_with_custom_model_base

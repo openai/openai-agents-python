@@ -67,6 +67,36 @@ def test_constructor_endpoint_wins_over_env(monkeypatch):
     assert exporter.endpoint == "https://explicit.example.test/ingest"
 
 
+def test_post_construction_endpoint_assignment_before_first_read(monkeypatch):
+    monkeypatch.setenv("OPENAI_TRACING_INGEST_ENDPOINT", CUSTOM_ENDPOINT)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    _reset_warning(monkeypatch)
+
+    assigned = "https://assigned.example.test/ingest"
+    exporter = BackendSpanExporter()
+    exporter.endpoint = assigned
+
+    assert exporter.endpoint == assigned
+    assert exporter._endpoint == assigned
+    assert exporter._should_sanitize_for_openai_tracing_api() is False
+
+
+def test_post_construction_endpoint_assignment_invalidates_cache(monkeypatch):
+    monkeypatch.setenv("OPENAI_TRACING_INGEST_ENDPOINT", CUSTOM_ENDPOINT)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    _reset_warning(monkeypatch)
+
+    assigned = "https://assigned.example.test/ingest"
+    exporter = BackendSpanExporter()
+    assert exporter.endpoint == CUSTOM_ENDPOINT
+
+    exporter.endpoint = assigned
+
+    assert exporter.endpoint == assigned
+    assert exporter._endpoint == assigned
+    assert exporter._should_sanitize_for_openai_tracing_api() is False
+
+
 def test_export_posts_to_env_endpoint(monkeypatch):
     monkeypatch.setenv("OPENAI_TRACING_INGEST_ENDPOINT", CUSTOM_ENDPOINT)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -91,6 +121,36 @@ def test_export_posts_to_env_endpoint(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["url"] == CUSTOM_ENDPOINT
+
+
+def test_export_posts_to_assigned_endpoint(monkeypatch):
+    monkeypatch.setenv("OPENAI_TRACING_INGEST_ENDPOINT", CUSTOM_ENDPOINT)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    _reset_warning(monkeypatch)
+
+    assigned = "https://assigned.example.test/ingest"
+
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self) -> dict[str, str]:
+            return {"id": "span-1"}
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(*, url, headers, json):
+        calls.append({"url": url, "headers": headers, "json": json})
+        return SimpleNamespace(status_code=200, text="ok")
+
+    exporter = BackendSpanExporter()
+    assert exporter.endpoint == CUSTOM_ENDPOINT
+    exporter.endpoint = assigned
+    exporter.set_api_key("test-key")
+    monkeypatch.setattr(exporter, "_client", SimpleNamespace(post=fake_post))
+    exporter.export(cast(list[Trace | Span[Any]], [DummyItem()]))
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == assigned
 
 
 def test_constructor_does_not_warn(monkeypatch, caplog):
