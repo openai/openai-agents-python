@@ -174,8 +174,6 @@ class BackendSpanExporter(TracingExporter):
         if not items:
             return
 
-        self._warn_if_trace_endpoint_ignores_model_base_url()
-
         grouped_items: dict[str | None, list[Trace | Span[Any]]] = {}
         for item in items:
             key = item.tracing_api_key
@@ -186,6 +184,8 @@ class BackendSpanExporter(TracingExporter):
             if not api_key:
                 logger.warning("OPENAI_API_KEY is not set, skipping trace export")
                 continue
+
+            self._warn_if_trace_endpoint_ignores_model_base_url()
 
             sanitize_for_openai = self._should_sanitize_for_openai_tracing_api()
             data: list[dict[str, Any]] = []

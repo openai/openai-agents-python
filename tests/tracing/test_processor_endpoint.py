@@ -121,6 +121,40 @@ def test_warns_once_when_model_base_url_diverges(monkeypatch, caplog):
     assert "OPENAI_TRACING_INGEST_ENDPOINT" in warnings[0]
 
 
+def test_no_warning_until_a_trace_can_be_sent(monkeypatch, caplog):
+    monkeypatch.setenv("OPENAI_BASE_URL", MODEL_BASE)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_TRACING_INGEST_ENDPOINT", raising=False)
+    _reset_warning(monkeypatch)
+
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self) -> dict[str, str]:
+            return {"id": "span-1"}
+
+    def fake_post(*, url, headers, json):
+        return SimpleNamespace(status_code=200, text="ok")
+
+    exporter = BackendSpanExporter()
+    monkeypatch.setattr(exporter, "_client", SimpleNamespace(post=fake_post))
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        exporter.export(cast(list[Trace | Span[Any]], [DummyItem()]))
+
+    assert not [record for record in caplog.records if "Tracing still exports" in record.message]
+
+    exporter.set_api_key("test-key")
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        exporter.export(cast(list[Trace | Span[Any]], [DummyItem()]))
+
+    warnings = [
+        record.message for record in caplog.records if "Tracing still exports" in record.message
+    ]
+    assert len(warnings) == 1
+    assert MODEL_BASE in warnings[0]
+
+
 def test_no_warning_when_only_openai_api_base_is_set(monkeypatch, caplog):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_BASE", MODEL_BASE)
