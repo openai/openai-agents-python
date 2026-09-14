@@ -28,6 +28,7 @@ from docker.utils import parse_repository_tag
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
+from ...logger import log_tool_action_warning
 from .._cleanup_owner import create_cleanup_owner
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
@@ -1393,13 +1394,17 @@ class DockerSandboxSession(BaseSandboxSession):
         )
         try:
             done, _ = await asyncio.wait((kill_task,), timeout=_PTY_CLEANUP_TIMEOUT_S)
-            if not done:
+            if done:
+                # asyncio.wait() does not propagate a completed task's exception. Consume the
+                # result so failed kill attempts follow the normal redacted logging policy.
+                kill_task.result()
+            else:
                 self._track_pty_cleanup_task(kill_task)
         except asyncio.CancelledError:
             self._track_pty_cleanup_task(kill_task)
             raise
-        except Exception:
-            pass
+        except Exception as error:
+            log_tool_action_warning(logger, "Failed to kill Docker PTY process", error)
 
     async def exists(self) -> bool:
         try:

@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import errno
 import io
+import logging
 import queue
 import shutil
 import socket
@@ -4836,6 +4837,44 @@ async def test_docker_pty_kill_remains_queued_after_cleanup_timeout(
     finally:
         release_blocker.set()
         await asyncio.to_thread(executor.shutdown, True)
+
+
+@pytest.mark.asyncio
+async def test_docker_completed_pty_kill_failure_is_observed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = _FakePtyApi()
+    container = _FakePtyContainer(api)
+    session = DockerSandboxSession(
+        docker_client=object(),
+        container=container,
+        state=DockerSandboxSessionState(
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            container_id="container",
+            workspace_root_ready=True,
+        ),
+    )
+
+    def fail_kill(
+        cmd: list[str],
+        demux: bool = True,
+        workdir: str | None = None,
+        user: str = "",
+    ) -> object:
+        _ = (cmd, demux, workdir, user)
+        raise RuntimeError("kill failed")
+
+    monkeypatch.setattr(container, "exec_run", fail_kill)
+    caplog.set_level(logging.WARNING, logger="openai.agents")
+
+    await session._kill_pty_pid_path(Path("/tmp/failed.pid"))
+    await asyncio.sleep(0)
+
+    assert "Failed to kill Docker PTY process" in caplog.text
+    assert not session._pty_cleanup_tasks
 
 
 @pytest.mark.asyncio

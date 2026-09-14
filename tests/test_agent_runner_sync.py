@@ -9,7 +9,7 @@ from agents.agent import Agent
 from agents.models.interface import ModelProvider
 from agents.models.multi_provider import MultiProvider, MultiProviderMap
 from agents.run import AgentRunner
-from agents.run_config import RunConfig
+from agents.run_config import RunConfig, SandboxRunConfig
 from agents.run_internal.sync import (
     _SYNC_BACKGROUND_TASKS,
     _get_pending_sync_background_tasks,
@@ -176,6 +176,46 @@ def test_run_sync_uses_default_loop_for_dict_async_dependency(
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input", run_config=run_config)
+        assert observed_loops == [dependency_loop]
+        assert not dependency_loop.is_running()
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
+
+
+@pytest.mark.parametrize(
+    ("agent", "kwargs"),
+    [
+        (Agent(name="test-agent", tools=[object()]), {}),
+        (Agent(name="test-agent"), {"context": object()}),
+        (Agent(name="test-agent"), {"hooks": object()}),
+        (Agent(name="test-agent"), {"error_handlers": {"max_turns": lambda _data: None}}),
+        (
+            Agent(name="test-agent"),
+            {"run_config": RunConfig(sandbox=SandboxRunConfig(client=object()))},
+        ),
+        (
+            Agent(name="test-agent"),
+            {"run_config": {"sandbox": {"client": object()}}},
+        ),
+    ],
+)
+def test_run_sync_uses_default_loop_for_caller_owned_run_surfaces(
+    monkeypatch, fresh_event_loop_policy, agent, kwargs
+):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def fake_run(self, *_args, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+    try:
+        runner.run_sync(agent, "input", **kwargs)
         assert observed_loops == [dependency_loop]
         assert not dependency_loop.is_running()
     finally:

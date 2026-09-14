@@ -18,7 +18,7 @@ from ...run_config import (
     SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
-from .._cleanup_owner import create_cleanup_owner
+from .._cleanup_owner import create_cleanup_owner, raise_if_cleanup_owner_force_cancelling
 from .._mount_security import redact_mount_error_data, validate_manifest_mount_credential_boundaries
 from ..apply_patch import PatchFormat, WorkspaceEditor
 from ..entries import BaseEntry
@@ -758,12 +758,16 @@ class BaseSandboxSession(abc.ABC):
                 return caller_cancellation, True
             try:
                 await asyncio.wait(tasks, timeout=remaining)
+                raise_if_cleanup_owner_force_cancelling(nested_tasks=tasks)
             except asyncio.CancelledError as error:
+                raise_if_cleanup_owner_force_cancelling(error, nested_tasks=tasks)
                 caller_cancellation = caller_cancellation or error
 
+        raise_if_cleanup_owner_force_cancelling()
         return caller_cancellation, False
 
     def _schedule_deferred_dependency_close(self, *, shutdown: bool = False) -> None:
+        raise_if_cleanup_owner_force_cancelling()
         self._deferred_shutdown_requested = self._deferred_shutdown_requested or shutdown
         task = self._deferred_dependency_close_task
         if task is not None and not task.done():
@@ -804,6 +808,7 @@ class BaseSandboxSession(abc.ABC):
                     try:
                         await self.shutdown()
                     except BaseException as exc:
+                        raise_if_cleanup_owner_force_cancelling(exc)
                         if self._has_pending_pty_cleanup_tasks():
                             self._deferred_shutdown_requested = True
                             continue
@@ -812,12 +817,15 @@ class BaseSandboxSession(abc.ABC):
                 if not self._has_pending_pty_cleanup_tasks():
                     break
         except BaseException as exc:
+            raise_if_cleanup_owner_force_cancelling(exc)
             deferred_error = exc
 
+        raise_if_cleanup_owner_force_cancelling()
         if not self._has_pending_pty_cleanup_tasks():
             try:
                 await self._aclose_dependencies()
             except BaseException as error:
+                raise_if_cleanup_owner_force_cancelling(error)
                 if deferred_error is None:
                     deferred_error = error
                 else:
@@ -826,6 +834,7 @@ class BaseSandboxSession(abc.ABC):
         try:
             await self._after_deferred_dependency_close()
         except BaseException as finalization_error:
+            raise_if_cleanup_owner_force_cancelling(finalization_error)
             if deferred_error is None:
                 raise
             log_tool_action_error(

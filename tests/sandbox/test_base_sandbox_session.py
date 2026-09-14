@@ -213,6 +213,41 @@ def test_asyncio_run_shutdown_has_bounded_cleanup_owner() -> None:
         thread.join(timeout=2)
 
 
+def test_asyncio_run_propagates_forced_shutdown_from_deferred_cleanup_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_cleanup_owner = base_sandbox_session.create_cleanup_owner
+
+    def create_fast_cleanup_owner(awaitable, *, name, cancel_grace_s=0.1):
+        return create_cleanup_owner(awaitable, name=name, cancel_grace_s=0.1)
+
+    monkeypatch.setattr(base_sandbox_session, "create_cleanup_owner", create_fast_cleanup_owner)
+    session = _session()
+    started = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    async def run() -> None:
+        session._pty_cleanup_tasks = {asyncio.get_running_loop().create_future()}
+        session._schedule_deferred_dependency_close()
+        started.set()
+
+    def run_on_own_loop() -> None:
+        try:
+            asyncio.run(run())
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run_on_own_loop, daemon=True)
+    thread.start()
+    assert started.wait(1), "deferred cleanup did not start"
+    assert finished.wait(1), "asyncio.run did not propagate forced shutdown"
+    assert not failures
+    thread.join(timeout=1)
+
+
 @pytest.mark.asyncio
 async def test_pty_cleanup_preserves_cleanup_exception() -> None:
     started = asyncio.Event()

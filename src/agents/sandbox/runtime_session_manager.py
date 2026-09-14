@@ -22,7 +22,7 @@ from ..run_context import TContext
 from ..run_internal.sync import _track_sync_background_task
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
-from ._cleanup_owner import create_cleanup_owner
+from ._cleanup_owner import create_cleanup_owner, raise_if_cleanup_owner_force_cancelling
 from ._mount_security import (
     _manifest_has_configured_mount_authority,
     _replace_protected_mount_error,
@@ -95,6 +95,7 @@ class _SandboxSessionResources:
         self._started = True
 
     def _schedule_deferred_cleanup(self) -> None:
+        raise_if_cleanup_owner_force_cancelling()
         task = self._deferred_cleanup_task
         if task is not None and not task.done():
             return
@@ -121,6 +122,7 @@ class _SandboxSessionResources:
 
     @redact_mount_error_data
     async def _finish_deferred_cleanup(self) -> None:
+        cleanup_error: BaseException | None = None
         try:
             while True:
                 await self._session._wait_for_tracked_cleanup_tasks()
@@ -132,7 +134,8 @@ class _SandboxSessionResources:
 
                 try:
                     await self._session.shutdown()
-                except BaseException:
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     if self._session._has_pending_pty_cleanup_tasks():
                         continue
 
@@ -143,11 +146,16 @@ class _SandboxSessionResources:
                 if self._client is not None and isinstance(self._session, SandboxSession):
                     await self._client.delete(self._session)
                 return
+        except BaseException as exc:
+            cleanup_error = exc
+            raise
         finally:
+            raise_if_cleanup_owner_force_cancelling(cleanup_error)
             if not self._session._has_pending_pty_cleanup_tasks():
                 try:
                     await self._session._aclose_dependencies()
-                except BaseException:
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     pass
                 await self._session._after_deferred_dependency_close()
 

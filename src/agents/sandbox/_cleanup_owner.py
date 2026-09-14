@@ -25,6 +25,7 @@ class _CleanupOwnerTask(asyncio.Task[_T]):
         super().__init__(coroutine, loop=loop, name=name)
         self._cancel_grace_s = max(cancel_grace_s, _MIN_CANCEL_GRACE_S)
         self._forced_cancel_handle: asyncio.TimerHandle | None = None
+        self._force_cancelling = False
 
     def cancel(self, msg: object = None) -> bool:
         if self.done():
@@ -40,6 +41,7 @@ class _CleanupOwnerTask(asyncio.Task[_T]):
     def _force_cancel(self, msg: object) -> None:
         self._forced_cancel_handle = None
         if not self.done():
+            self._force_cancelling = True
             asyncio.Task.cancel(self, msg)
 
     def _clear_forced_cancel(self, _done: asyncio.Future[_T]) -> None:
@@ -47,6 +49,35 @@ class _CleanupOwnerTask(asyncio.Task[_T]):
         self._forced_cancel_handle = None
         if handle is not None:
             handle.cancel()
+
+
+class _CleanupOwnerForcedShutdown(asyncio.CancelledError):
+    """Propagate forced shutdown from a nested cleanup owner."""
+
+
+def cleanup_owner_is_force_cancelling(
+    error: BaseException | None = None,
+) -> bool:
+    """Return whether cleanup orchestration must stop for bounded loop shutdown."""
+
+    if isinstance(error, _CleanupOwnerForcedShutdown):
+        return True
+    task = asyncio.current_task()
+    return isinstance(task, _CleanupOwnerTask) and task._force_cancelling
+
+
+def raise_if_cleanup_owner_force_cancelling(
+    error: BaseException | None = None,
+    *,
+    nested_tasks: tuple[asyncio.Future[Any], ...] = (),
+) -> None:
+    """Stop orchestration when this owner or a nested owner was force-cancelled."""
+
+    nested_force_cancelled = any(
+        isinstance(task, _CleanupOwnerTask) and task._force_cancelling for task in nested_tasks
+    )
+    if cleanup_owner_is_force_cancelling(error) or nested_force_cancelled:
+        raise _CleanupOwnerForcedShutdown() from None
 
 
 def create_cleanup_owner(

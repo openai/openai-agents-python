@@ -265,6 +265,113 @@ def _sandbox_memory_input(
     return copy_input_items(original_input)
 
 
+def _run_sync_has_caller_owned_dependencies(
+    starting_agent: Agent[Any],
+    *,
+    context: object | None,
+    hooks: object | None,
+    run_config: RunConfig | dict[str, Any] | None,
+    error_handlers: object | None,
+    session: object | None,
+) -> bool:
+    """Return whether a sync run must stay on the caller's default event loop.
+
+    ``run_sync`` cannot safely inspect arbitrary objects captured by a tool, hook, or context to
+    discover loop affinity. Treating explicit executable run surfaces as caller-owned keeps those
+    objects together on the loop selected by the caller while leaving a plain, unbound run on the
+    SDK-owned loop.
+    """
+
+    if (
+        context is not None
+        or hooks is not None
+        or error_handlers is not None
+        or session is not None
+    ):
+        return True
+
+    def agent_has_caller_owned_surface(agent: Agent[Any], seen: set[int]) -> bool:
+        agent_id = id(agent)
+        if agent_id in seen:
+            return False
+        seen.add(agent_id)
+
+        agent_model = getattr(agent, "model", None)
+        if agent_model is not None and not isinstance(agent_model, str):
+            return True
+
+        if any(
+            (
+                getattr(agent, "tools", None),
+                getattr(agent, "mcp_servers", None),
+                getattr(agent, "input_guardrails", None),
+                getattr(agent, "output_guardrails", None),
+                getattr(agent, "hooks", None),
+                callable(getattr(agent, "instructions", None)),
+                callable(getattr(agent, "prompt", None)),
+                callable(getattr(agent, "tool_use_behavior", None)),
+                callable(getattr(agent, "base_instructions", None)),
+                getattr(agent, "capabilities", None),
+            )
+        ):
+            return True
+
+        # Handoffs carry an async invocation callback and may lead to another agent with its own
+        # caller-owned resources. The handoff itself is therefore enough to select the caller loop.
+        if getattr(agent, "handoffs", None):
+            return True
+        return False
+
+    if agent_has_caller_owned_surface(starting_agent, set()):
+        return True
+
+    def config_value(name: str) -> object | None:
+        if run_config is None:
+            return None
+        if isinstance(run_config, dict):
+            return run_config.get(name)
+        return getattr(run_config, name, None)
+
+    configured_model = config_value("model")
+    configured_model_provider = config_value("model_provider")
+    if (configured_model is not None and not isinstance(configured_model, str)) or (
+        configured_model_provider is not None
+        and not getattr(configured_model_provider, "_agents_default_model_provider", False)
+    ):
+        return True
+
+    for callback_name in (
+        "handoff_input_filter",
+        "handoff_history_mapper",
+        "session_input_callback",
+        "call_model_input_filter",
+        "tool_error_formatter",
+    ):
+        if callable(config_value(callback_name)):
+            return True
+
+    if config_value("input_guardrails") or config_value("output_guardrails"):
+        return True
+    blocked_output_message = config_value("output_guardrail_blocked_message")
+    if callable(blocked_output_message):
+        return True
+
+    configured_sandbox = config_value("sandbox")
+    if configured_sandbox is not None:
+        if isinstance(configured_sandbox, dict):
+            if configured_sandbox.get("client") is not None:
+                return True
+            if configured_sandbox.get("session") is not None:
+                return True
+        elif (
+            getattr(configured_sandbox, "client", None) is not None
+            or getattr(configured_sandbox, "session", None) is not None
+        ):
+            return True
+
+    return False
+
+
 class Runner:
     @classmethod
     async def run(
@@ -2334,43 +2441,21 @@ class AgentRunner:
             )
 
         # Keep unbound synchronous runs on an SDK-owned loop so a caller's default loop remains
-        # stopped and closable. Explicit session/model objects may already own primitives on that
-        # default loop, so run the foreground coroutine there when one is available.
+        # stopped and closable. Explicit caller-owned run surfaces may already own primitives on
+        # that default loop, so run the foreground coroutine there when one is available.
         sync_loop = _get_sync_loop()
-        caller_owned_loop = False
-        if isinstance(run_config, dict):
-            configured_model = run_config.get("model")
-            configured_model_provider = run_config.get("model_provider")
-            has_explicit_model_provider = "model_provider" in run_config
-        else:
-            configured_model = getattr(run_config, "model", None)
-            configured_model_provider = getattr(run_config, "model_provider", None)
-            has_explicit_model_provider = configured_model_provider is not None and not getattr(
-                configured_model_provider, "_agents_default_model_provider", False
-            )
-        configured_sandbox = (
-            run_config.get("sandbox")
-            if isinstance(run_config, dict)
-            else getattr(run_config, "sandbox", None)
+        caller_owned_loop = _run_sync_has_caller_owned_dependencies(
+            starting_agent,
+            context=context,
+            hooks=hooks,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            session=session,
         )
-        configured_session = (
-            configured_sandbox.get("session")
-            if isinstance(configured_sandbox, dict)
-            else getattr(configured_sandbox, "session", None)
-        )
-        agent_model = getattr(starting_agent, "model", None)
-        has_loop_bound_dependency = (
-            session is not None
-            or configured_session is not None
-            or (configured_model is not None and not isinstance(configured_model, str))
-            or (agent_model is not None and not isinstance(agent_model, str))
-            or (has_explicit_model_provider and configured_model_provider is not None)
-        )
-        if has_loop_bound_dependency:
+        if caller_owned_loop:
             dependency_loop = _get_default_loop()
             if dependency_loop is not None:
                 sync_loop = dependency_loop
-                caller_owned_loop = True
         _stop_sync_loop_driver(sync_loop)
 
         sync_run_token = _IS_SYNC_RUN.set(True)
