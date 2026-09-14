@@ -4089,6 +4089,61 @@ class TestSerializationRoundTrip:
         assert isinstance(restored_item, ToolCallOutputItem)
         assert restored_item.custom_data == {"ui": {"kind": "chart"}, "ids": ["a", "b"]}
 
+    async def test_tool_output_custom_data_preserves_structured_values(self):
+        """Pydantic and dataclass values in tool output custom_data stay structured.
+
+        ``custom_data`` is SDK-only metadata that persists through ``RunState``. Like
+        ``output``, it must route through ``_serialize_output_value`` so model and
+        dataclass payloads survive as plain JSON data instead of repr strings.
+        """
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="ItemAgent")
+        state = make_state(agent, context=context, original_input="test", max_turns=5)
+
+        class Score(BaseModel):
+            value: float
+            label: str
+
+        @dataclass
+        class Meta:
+            cached: bool
+            attempts: int
+
+        raw_tool_output = {
+            "type": "function_call_output",
+            "call_id": "call_custom_data_structured",
+            "output": "result",
+        }
+        state._generated_items.append(
+            ToolCallOutputItem(
+                agent=agent,
+                raw_item=raw_tool_output,
+                output="result",
+                custom_data={
+                    "score": Score(value=0.9, label="high"),
+                    "meta": Meta(cached=True, attempts=2),
+                    "tags": ["a", "b"],
+                },
+            )
+        )
+
+        json_data = state.to_json()
+        assert json_data["generated_items"][0]["custom_data"] == {
+            "score": {"value": 0.9, "label": "high"},
+            "meta": {"cached": True, "attempts": 2},
+            "tags": ["a", "b"],
+        }
+
+        new_state = await RunState.from_json(agent, json_data)
+
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolCallOutputItem)
+        assert restored_item.custom_data == {
+            "score": {"value": 0.9, "label": "high"},
+            "meta": {"cached": True, "attempts": 2},
+            "tags": ["a", "b"],
+        }
+
     async def test_pydantic_tool_output_preserves_default_fields(self):
         """A structured tool output's default-valued fields must survive RunState roundtrips.
 

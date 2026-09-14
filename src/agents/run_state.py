@@ -2078,7 +2078,7 @@ class RunState(Generic[TContext, TAgent]):
             result["tool_origin"] = tool_origin.to_json_dict()
         custom_data = getattr(item, "custom_data", None)
         if isinstance(custom_data, dict) and custom_data:
-            result["custom_data"] = _ensure_json_compatible(custom_data)
+            result["custom_data"] = _ensure_json_compatible(_serialize_output_value(custom_data))
 
         return result
 
