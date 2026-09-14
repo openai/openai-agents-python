@@ -345,7 +345,12 @@ from agents.extensions.memory import AsyncSQLiteSession
 agent = Agent(name="Assistant")
 session = AsyncSQLiteSession("user_123", db_path="conversations.db")
 result = await Runner.run(agent, "Hello", session=session)
+await session.close()
 ```
+
+Call `close()` when the application is finished with the session. This closes
+any opened owned `aiosqlite` connection and makes the session terminal;
+subsequent history operations raise `RuntimeError`.
 
 ### Redis sessions
 
