@@ -121,8 +121,10 @@ async def admit_pending_input(
             None,
             store=store,
             wrapper=wrapper,
+            resumed_write_state=run_state,
+            pending_input_snapshot=pending_input,
         )
-    if server_conversation_tracker is None:
+    elif server_conversation_tracker is None:
         run_state.clear_pending_input()
 
     return admission_items
@@ -598,6 +600,7 @@ async def save_result_to_session(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     resumed_write_state: RunState | None = None,
+    pending_input_snapshot: list[TResponseInputItem] | None = None,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -689,6 +692,22 @@ async def save_result_to_session(
             item for item in items_to_save if not _is_unpersistable_for_openai_conversation(item)
         ]
 
+    if pending_input_snapshot is not None:
+        if resumed_write_state is None:
+            raise UserError("Pending input Session writes require a resumable RunState")
+        if len(new_items) != len(pending_input_snapshot) or not all(
+            isinstance(item, InputItem) for item in new_items
+        ):
+            raise UserError("Pending input Session writes must contain only admission items")
+        if (
+            resumed_write_state.pending_input[: len(pending_input_snapshot)]
+            != pending_input_snapshot
+        ):
+            raise UserError("Pending input changed before its Session write could be checkpointed")
+        if not items_to_save:
+            del resumed_write_state._pending_input[: len(pending_input_snapshot)]
+            return 0
+
     if len(items_to_save) == 0:
         if run_state is not None:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -697,14 +716,30 @@ async def save_result_to_session(
     if resumed_write_state is not None:
         if resumed_write_state._pending_session_write is not None:
             raise UserError("Resolve the pending Session write before saving another batch")
+        if isinstance(session, OpenAIConversationsSession):
+            try:
+                pending_session_id = session.session_id
+            except ValueError:
+                # Conversations sessions create their ID lazily. A zero-item read follows the
+                # public initialization path without appending history, so the ID is checkpointed
+                # before the fallible write begins.
+                await _session_get_items(session, limit=0, wrapper=wrapper)
+                pending_session_id = session.session_id
+        else:
+            pending_session_id = session.session_id
         resumed_write_state._pending_session_write = {
-            "session_id": session.session_id,
+            "session_id": pending_session_id,
             "items": copy.deepcopy(items_to_save),
             "before": None,
-            "persisted_count": (
-                resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
-            ),
+            "persisted_count": resumed_write_state._current_turn_persisted_item_count
+            + (0 if pending_input_snapshot is not None else saved_run_items_count),
         }
+        if pending_input_snapshot is not None:
+            resumed_write_state._pending_session_write["pending_input"] = copy.deepcopy(
+                new_items_as_input
+            )
+            resumed_write_state._generated_items.extend(new_items)
+            resumed_write_state._session_items.extend(new_items)
         await resume_pending_session_write(
             resumed_write_state,
             session,
@@ -814,7 +849,7 @@ async def resume_pending_session_write(
     if session is None or session.session_id != pending["session_id"]:
         raise UserError("Resume the pending Session write with the original Session and session ID")
 
-    def digests(items: Sequence[TResponseInputItem]) -> list[str]:
+    def legacy_digests(items: Sequence[TResponseInputItem]) -> list[str]:
         return [
             hashlib.sha256(
                 _fingerprint_or_repr(
@@ -824,41 +859,94 @@ async def resume_pending_session_write(
             for item in items
         ]
 
+    def appended_digests(items: Sequence[TResponseInputItem]) -> list[str]:
+        if not isinstance(session, OpenAIConversationsSession):
+            return legacy_digests(items)
+        return legacy_digests(
+            [_canonicalize_openai_conversation_item_for_reconciliation(item) for item in items]
+        )
+
+    pending_input = pending.get("pending_input")
+    if pending_input is not None:
+        expected_pending_items = deduplicate_input_items_preferring_latest(pending_input)
+        if isinstance(session, OpenAIConversationsSession):
+            expected_pending_items = [
+                _sanitize_openai_conversation_item(item) for item in expected_pending_items
+            ]
+            expected_pending_items = [
+                item
+                for item in expected_pending_items
+                if not _is_unpersistable_for_openai_conversation(item)
+            ]
+        if [digest_input_item(item) for item in expected_pending_items] != [
+            digest_input_item(item) for item in pending["items"]
+        ]:
+            raise UserError(
+                "Cannot reconcile the pending Session write: its staged input batch changed."
+            )
+        prefix = run_state._pending_input[: len(pending_input)]
+        if len(prefix) != len(pending_input) or [digest_input_item(item) for item in prefix] != [
+            digest_input_item(item) for item in pending_input
+        ]:
+            raise UserError("Cannot reconcile the pending Session write: its staged input changed.")
+
     run_state._session_write_in_progress = True
     try:
         before = pending["before"]
         if before is None:
             # No append has started. Retain the batch even if this first read fails.
             tail = await _session_get_items(
-                session, limit=len(pending["items"]) + 1, wrapper=wrapper
+                session,
+                limit=len(pending["items"]) + 1,
+                wrapper=wrapper,
+                capture_compaction_generation=True,
             )
-            pending["before"] = digests(tail)
+            pending["before"] = legacy_digests(tail)
             append = True
         else:
-            expected = before + digests(pending["items"])
+            expected_length = len(before) + len(pending["items"])
             committed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
                 tail, committed_generation = await _call_session_method(
                     get_with_generation,
-                    lambda: _session_get_items(session, limit=len(expected), wrapper=wrapper),
+                    lambda: _session_get_items(
+                        session,
+                        limit=expected_length,
+                        wrapper=wrapper,
+                    ),
                 )
+                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
             else:
-                tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
-            observed = digests(tail)
-            committed = observed == expected
+                tail = await _session_get_items(session, limit=expected_length, wrapper=wrapper)
+            observed = legacy_digests(tail)
+            committed = (
+                len(tail) == expected_length
+                and observed[: len(before)] == before
+                and appended_digests(tail[len(before) :]) == appended_digests(pending["items"])
+            )
             unchanged = observed[-len(before) :] == before if before else not observed
-            if committed == unchanged:
+            if committed:
+                before_was_complete = len(before) < len(pending["items"]) + 1
+                if unchanged and not before_was_complete:
+                    raise UserError(
+                        "Cannot reconcile the pending Session write: history changed or is "
+                        "ambiguous. Repair the original Session before resuming; do not rerun "
+                        "the completed tool."
+                    )
+                append = False
+            elif unchanged:
+                append = True
+            else:
                 raise UserError(
                     "Cannot reconcile the pending Session write: history changed or is ambiguous. "
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
-            append = unchanged
-            if committed and committed_generation is not None and wrapper is not None:
-                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        if pending_input is not None:
+            del run_state._pending_input[: len(pending_input)]
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
         run_state._pending_session_write = None
     finally:
@@ -1069,6 +1157,52 @@ def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInp
         clean_item.pop("provider_data", None)
         return cast(TResponseInputItem, clean_item)
     return item
+
+
+def _canonicalize_openai_conversation_item_for_reconciliation(
+    item: TResponseInputItem,
+) -> TResponseInputItem:
+    """Normalize Conversations API response defaults for lost-ack matching only."""
+    normalized = ensure_input_item_format(item)
+    if not isinstance(normalized, dict):
+        return normalized
+
+    clean = cast(dict[str, Any], _sanitize_openai_conversation_item(normalized))
+    clean.pop("created_by", None)
+    if clean.get("status") == "completed":
+        clean.pop("status", None)
+
+    item_type = clean.get("type")
+    role = clean.get("role")
+    if item_type not in (None, "message") or role not in {
+        "user",
+        "assistant",
+        "system",
+        "developer",
+    }:
+        return cast(TResponseInputItem, clean)
+
+    clean.pop("type", None)
+    if clean.get("phase") is None:
+        clean.pop("phase", None)
+    content = clean.get("content")
+    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict):
+        return cast(TResponseInputItem, clean)
+
+    expected_text_type = "output_text" if role == "assistant" else "input_text"
+    text_part = dict(content[0])
+    if text_part.get("type") != expected_text_type:
+        return cast(TResponseInputItem, clean)
+    if expected_text_type == "output_text":
+        if text_part.get("annotations") == []:
+            text_part.pop("annotations", None)
+        if text_part.get("logprobs") in (None, []):
+            text_part.pop("logprobs", None)
+    elif text_part.get("prompt_cache_breakpoint") is None:
+        text_part.pop("prompt_cache_breakpoint", None)
+    if set(text_part) == {"type", "text"} and isinstance(text_part.get("text"), str):
+        clean["content"] = text_part["text"]
+    return cast(TResponseInputItem, clean)
 
 
 def _openai_conversation_item_requires_id(item: dict[str, Any]) -> bool:
