@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import tempfile
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Any, cast
 
@@ -124,6 +125,57 @@ async def test_session_memory_basic_functionality_parametrized(runner_method):
         assert len(last_input) > 1  # Should have more than just the current message
 
         session.close()
+
+
+@pytest.mark.parametrize("path_type", [str, Path], ids=["str", "path"])
+@pytest.mark.asyncio
+async def test_sqlite_session_keeps_database_after_chdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_type: type[str] | type[Path]
+) -> None:
+    original_dir = tmp_path / "original"
+    other_dir = tmp_path / "other"
+    original_dir.mkdir()
+    other_dir.mkdir()
+    monkeypatch.chdir(original_dir)
+    with (
+        closing(SQLiteSession(session_id="shared", db_path=path_type("history.db"))) as session,
+        closing(SQLiteSession(session_id="shared", db_path=other_dir / "history.db")) as other,
+    ):
+        other_items: list[TResponseInputItem] = [{"role": "user", "content": "other database"}]
+        await other.add_items(other_items)
+        monkeypatch.chdir(other_dir)
+
+        assert await session.get_items() == []
+        items: list[TResponseInputItem] = [{"role": "user", "content": "original database"}]
+        await session.add_items(items)
+        assert await session.get_items() == items
+        assert await session.pop_item() == items[0]
+        await session.add_items(items)
+        await session.clear_session()
+        assert await session.get_items() == []
+        assert await other.get_items() == other_items
+
+    with closing(
+        SQLiteSession(session_id="shared", db_path=original_dir / "history.db")
+    ) as reopened:
+        assert await reopened.get_items() == []
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_preserves_literal_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "~").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    with closing(SQLiteSession(session_id="literal", db_path=Path("~") / "history.db")) as session:
+        items: list[TResponseInputItem] = [{"role": "user", "content": "literal tilde"}]
+        await session.add_items(items)
+        assert await session.get_items() == items
+    assert (tmp_path / "~" / "history.db").is_file()
+    assert not (home / "history.db").exists()
 
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
