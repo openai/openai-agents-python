@@ -170,9 +170,7 @@ def _symlink_target_stays_under(root: Path, *, link_name: str, target: str) -> b
     form, which hydrate refuses as it always has.
     """
 
-    pending = list(
-        reversed((*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts))
-    )
+    pending = list(reversed((*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)))
     resolved: list[str] = []
     hops = 0
     while pending:

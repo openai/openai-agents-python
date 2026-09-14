@@ -662,12 +662,8 @@ class TestUnixLocalPersistWorkspaceRestorable:
         with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
             members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
             assert members["victim"].linkname == str(workspace / "a" / "link" / ".." / "tmp")
-            assert members["via_outside"].linkname == str(
-                workspace / "outside" / "workspace" / "a"
-            )
-            assert members["via_loop"].linkname == str(
-                workspace / "loop" / ".." / ".." / "etc"
-            )
+            assert members["via_outside"].linkname == str(workspace / "outside" / "workspace" / "a")
+            assert members["via_loop"].linkname == str(workspace / "loop" / ".." / ".." / "etc")
             # `..` after `b -> a/link -> ..` lands on the root, so `b/a` is provably inside.
             assert members["a/fine"].linkname == "../b/a"
 
