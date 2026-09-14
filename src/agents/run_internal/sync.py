@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import sys
 import threading
+import warnings
 from contextvars import ContextVar
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -92,18 +93,7 @@ class _SyncLoopDriver:
         return result
 
     async def _settle_background_work(self) -> None:
-        while True:
-            tasks = _get_pending_sync_background_tasks(self.loop)
-            if not tasks:
-                break
-            # asyncio.wait observes completion without cancelling provider cleanup when this
-            # settlement task is interrupted to hand the loop back to a synchronous run.
-            done, _ = await asyncio.wait(tasks)
-            for task in done:
-                if not task.cancelled():
-                    task.exception()
-            # Let each task's done callbacks update the registry before checking it again.
-            await asyncio.sleep(0)
+        await _settle_pending_sync_background_tasks(self.loop)
         self._shutdown_asyncgens_started = True
         await self.loop.shutdown_asyncgens()
 
@@ -132,6 +122,43 @@ class _SyncLoopDriver:
             pass
         if threading.current_thread() is not self.thread:
             self.thread.join()
+
+
+async def _settle_pending_sync_background_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    while True:
+        tasks = _get_pending_sync_background_tasks(loop)
+        if not tasks:
+            break
+        # asyncio.wait observes completion without cancelling provider cleanup when this
+        # settlement task is interrupted to hand the loop back to a synchronous run.
+        done, _ = await asyncio.wait(tasks)
+        for task in done:
+            if not task.cancelled():
+                task.exception()
+        # Let each task's done callbacks update the registry before checking it again.
+        await asyncio.sleep(0)
+
+
+async def _settle_sync_background_work(loop: asyncio.AbstractEventLoop) -> None:
+    """Settle tracked work synchronously when its owner is a caller-provided loop."""
+
+    await _settle_pending_sync_background_tasks(loop)
+    await loop.shutdown_asyncgens()
+
+
+def _get_default_loop() -> asyncio.AbstractEventLoop | None:
+    """Return an existing open policy loop without creating or replacing one."""
+
+    policy = asyncio.get_event_loop_policy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            loop = policy.get_event_loop()
+        except RuntimeError:
+            return None
+    if loop.is_closed():
+        return None
+    return loop
 
 
 def _get_sync_loop() -> asyncio.AbstractEventLoop:
