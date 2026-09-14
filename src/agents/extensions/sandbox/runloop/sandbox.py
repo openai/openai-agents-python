@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -73,9 +73,9 @@ _RUNLOOP_SANDBOX_SNAPSHOT_MAGIC = b"RUNLOOP_SANDBOX_SNAPSHOT_V1\n"
 
 logger = logging.getLogger(__name__)
 
-RunloopAfterIdle = _RunloopSdkAfterIdle
-RunloopLaunchParameters = _RunloopSdkLaunchParameters
-RunloopUserParameters = _RunloopSdkUserParameters
+RunloopAfterIdle: TypeAlias = _RunloopSdkAfterIdle
+RunloopLaunchParameters: TypeAlias = _RunloopSdkLaunchParameters
+RunloopUserParameters: TypeAlias = _RunloopSdkUserParameters
 
 
 @dataclass(frozen=True)
@@ -435,7 +435,7 @@ class RunloopExistingSecret(BaseModel):
 def _normalize_runloop_user_parameters(
     user_parameters: RunloopUserParameters | dict[str, object] | None,
 ) -> RunloopUserParameters | None:
-    if isinstance(user_parameters, RunloopUserParameters):
+    if isinstance(user_parameters, RunloopUserParameters):  # type: ignore[misc]
         return user_parameters
     if user_parameters is None:
         return None
@@ -447,7 +447,7 @@ def _normalize_runloop_user_parameters(
 def _normalize_runloop_launch_parameters(
     launch_parameters: RunloopLaunchParameters | dict[str, object] | None,
 ) -> RunloopLaunchParameters | None:
-    if isinstance(launch_parameters, RunloopLaunchParameters):
+    if isinstance(launch_parameters, RunloopLaunchParameters):  # type: ignore[misc]
         return launch_parameters
     if launch_parameters is None:
         return None
@@ -1482,7 +1482,7 @@ def _runloop_launch_parameters_payload(
     launch_parameters: RunloopLaunchParameters | None,
     user_parameters: RunloopUserParameters | None,
 ) -> dict[str, object] | None:
-    payload = (
+    payload: dict[str, Any] = (
         launch_parameters.to_dict(mode="json", exclude_none=True, exclude_defaults=True)
         if launch_parameters is not None
         else {}
@@ -1520,7 +1520,7 @@ def _effective_runloop_home(user_parameters: RunloopUserParameters | None) -> Pu
         return _RUNLOOP_DEFAULT_HOME
     if user_parameters.username == "root" and user_parameters.uid == 0:
         return _RUNLOOP_ROOT_HOME
-    return PurePosixPath("/home") / user_parameters.username
+    return PurePosixPath("/home") / str(user_parameters.username)
 
 
 def _default_runloop_manifest_root(user_parameters: RunloopUserParameters | None) -> str:

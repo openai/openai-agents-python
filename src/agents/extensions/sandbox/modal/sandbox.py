@@ -132,10 +132,12 @@ def _modal_provider_error_detail(error: BaseException) -> str | None:
 
 
 def _modal_exception_types(*names: str) -> tuple[type[BaseException], ...]:
-    exception_module = getattr(modal, "exception", None)
+    exception_module: Any = getattr(modal, "exception", None)
     if exception_module is None:
         try:
-            from modal import exception as exception_module
+            import modal.exception as modal_exception
+
+            exception_module = modal_exception
         except Exception:
             return ()
 
