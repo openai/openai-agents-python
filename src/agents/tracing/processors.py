@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from functools import cached_property
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
@@ -25,6 +26,26 @@ from .traces import Trace
 
 # Warn once per process when model traffic is redirected but traces still go to OpenAI.
 _warned_default_trace_endpoint_with_custom_model_base = False
+
+
+def _redact_url_for_log(url: str) -> str:
+    """Drop userinfo, query, and fragment so gateway credentials never reach logs."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
+
+    hostname = parts.hostname or ""
+    if ":" in hostname:
+        host = f"[{hostname}]"
+    else:
+        host = hostname
+    if parts.port is not None:
+        netloc = f"{host}:{parts.port}"
+    else:
+        netloc = host
+    redacted = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return redacted or "<redacted-url>"
 
 
 class ConsoleSpanExporter(TracingExporter):
@@ -93,7 +114,6 @@ class BackendSpanExporter(TracingExporter):
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
-        self._warn_if_trace_endpoint_ignores_model_base_url()
 
     def set_api_key(self, api_key: str):
         """Set the OpenAI API key for the exporter.
@@ -133,11 +153,7 @@ class BackendSpanExporter(TracingExporter):
         global _warned_default_trace_endpoint_with_custom_model_base
         if _warned_default_trace_endpoint_with_custom_model_base:
             return
-        if os.environ.get("OPENAI_AGENTS_DISABLE_TRACING", "false").lower() in ("true", "1"):
-            return
-        model_base = (
-            os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE") or ""
-        ).strip()
+        model_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
         if not model_base:
             return
         if not self._should_sanitize_for_openai_tracing_api():
@@ -147,8 +163,8 @@ class BackendSpanExporter(TracingExporter):
             "[non-fatal] Tracing still exports to %s while model traffic uses %s. "
             "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces, or disable tracing with "
             "OPENAI_AGENTS_DISABLE_TRACING=1.",
-            self.endpoint,
-            model_base,
+            _redact_url_for_log(self.endpoint),
+            _redact_url_for_log(model_base),
         )
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
@@ -157,6 +173,8 @@ class BackendSpanExporter(TracingExporter):
     def _export_with_deadline(self, items: list[Trace | Span[Any]], deadline: float | None) -> None:
         if not items:
             return
+
+        self._warn_if_trace_endpoint_ignores_model_base_url()
 
         grouped_items: dict[str | None, list[Trace | Span[Any]]] = {}
         for item in items:
