@@ -23,6 +23,9 @@ from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace
 
+# Warn once per process when model traffic is redirected but traces still go to OpenAI.
+_warned_default_trace_endpoint_with_custom_model_base = False
+
 
 class ConsoleSpanExporter(TracingExporter):
     """Prints the traces and spans to the console."""
@@ -59,7 +62,7 @@ class BackendSpanExporter(TracingExporter):
         api_key: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        endpoint: str = _OPENAI_TRACING_INGEST_ENDPOINT,
+        endpoint: str | None = None,
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
@@ -72,7 +75,9 @@ class BackendSpanExporter(TracingExporter):
                 `os.environ["OPENAI_ORG_ID"]` if not provided.
             project: The OpenAI project to use. Defaults to
                 `os.environ["OPENAI_PROJECT_ID"]` if not provided.
-            endpoint: The HTTP endpoint to which traces/spans are posted.
+            endpoint: The HTTP endpoint to which traces/spans are posted. Defaults to
+                `os.environ["OPENAI_TRACING_INGEST_ENDPOINT"]` if not provided, otherwise the
+                OpenAI traces ingest endpoint. This is independent of `OPENAI_BASE_URL`.
             max_retries: Maximum number of retries upon failures.
             base_delay: Base delay (in seconds) for the first backoff.
             max_delay: Maximum delay (in seconds) for backoff growth.
@@ -80,7 +85,7 @@ class BackendSpanExporter(TracingExporter):
         self._api_key = api_key
         self._organization = organization
         self._project = project
-        self.endpoint = endpoint
+        self._endpoint = endpoint
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
@@ -88,6 +93,7 @@ class BackendSpanExporter(TracingExporter):
 
         # Keep a client open for connection pooling across multiple export calls
         self._client = httpx2.Client(timeout=httpx2.Timeout(timeout=60, connect=5.0))
+        self._warn_if_trace_endpoint_ignores_model_base_url()
 
     def set_api_key(self, api_key: str):
         """Set the OpenAI API key for the exporter.
@@ -114,6 +120,36 @@ class BackendSpanExporter(TracingExporter):
     @cached_property
     def project(self):
         return self._project or os.environ.get("OPENAI_PROJECT_ID")
+
+    @cached_property
+    def endpoint(self) -> str:
+        return (
+            self._endpoint
+            or os.environ.get("OPENAI_TRACING_INGEST_ENDPOINT")
+            or self._OPENAI_TRACING_INGEST_ENDPOINT
+        )
+
+    def _warn_if_trace_endpoint_ignores_model_base_url(self) -> None:
+        global _warned_default_trace_endpoint_with_custom_model_base
+        if _warned_default_trace_endpoint_with_custom_model_base:
+            return
+        if os.environ.get("OPENAI_AGENTS_DISABLE_TRACING", "false").lower() in ("true", "1"):
+            return
+        model_base = (
+            os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE") or ""
+        ).strip()
+        if not model_base:
+            return
+        if not self._should_sanitize_for_openai_tracing_api():
+            return
+        _warned_default_trace_endpoint_with_custom_model_base = True
+        logger.warning(
+            "[non-fatal] Tracing still exports to %s while model traffic uses %s. "
+            "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces, or disable tracing with "
+            "OPENAI_AGENTS_DISABLE_TRACING=1.",
+            self.endpoint,
+            model_base,
+        )
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
         self._export_with_deadline(items, deadline=None)
