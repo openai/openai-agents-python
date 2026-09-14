@@ -4,6 +4,7 @@ import asyncio
 import copy
 import logging
 import threading
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -261,6 +262,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         self._cleanup_finished = False
         self._caller_cancelled_during_cleanup = False
         self._resume_state_after_cleanup_error: dict[str, object] | None = None
+        self._resume_state_observers: list[Callable[[dict[str, object]], None]] = []
 
     @staticmethod
     def _resume_agent_base_key(agent: Agent[Any]) -> str:
@@ -297,6 +299,14 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
     @property
     def caller_cancelled_during_cleanup(self) -> bool:
         return self._caller_cancelled_during_cleanup
+
+    def register_resume_state_observer(self, observer: Callable[[dict[str, object]], None]) -> None:
+        """Publish a resume state produced after detached cleanup settles."""
+
+        if self._resume_state_after_cleanup_error is not None:
+            observer(self._resume_state_after_cleanup_error)
+        elif not self._cleanup_finished or self._pending_resource_cleanup_tasks:
+            self._resume_state_observers.append(observer)
 
     def acquire_agent(self, agent: SandboxAgent[TContext]) -> None:
         agent_id = id(agent)
@@ -429,10 +439,12 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         if cancelling is not None and cancelling():
                             caller_cancellation = caller_cancellation or asyncio.CancelledError()
                         if caller_cancellation is not None and preserves_backend:
-                            self._resume_state_after_cleanup_error = resume_state
+                            self._publish_resume_state_after_cleanup_error(resume_state)
                 elif preserves_backend:
                     try:
-                        self._resume_state_after_cleanup_error = self.serialize_resume_state()
+                        self._publish_resume_state_after_cleanup_error(
+                            self.serialize_resume_state()
+                        )
                     except BaseException:
                         # Preserve the cleanup failure as the primary error when state
                         # serialization cannot complete.
@@ -441,6 +453,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 if not self._pending_resource_cleanup_tasks:
                     self._resources_by_agent.clear()
                     self._current_agent_id = None
+                    self._resume_state_observers.clear()
                 self._cleanup_finished = True
                 self._caller_cancelled_during_cleanup = caller_cancellation is not None
                 if not self._deferred_cleanup_tasks:
@@ -456,6 +469,17 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             resources.backend_preserved_after_cleanup
             for resources in self._resources_by_agent.values()
         )
+
+    def _publish_resume_state_after_cleanup_error(
+        self, resume_state: dict[str, object] | None
+    ) -> None:
+        self._resume_state_after_cleanup_error = resume_state
+        observers = self._resume_state_observers
+        self._resume_state_observers = []
+        if resume_state is None:
+            return
+        for observer in observers:
+            observer(resume_state)
 
     def _track_deferred_cleanup_task(self, task: asyncio.Task[Any]) -> None:
         if task.done():
@@ -499,7 +523,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
 
             if self._caller_cancelled_during_cleanup and self._any_session_preserves_backend():
                 try:
-                    self._resume_state_after_cleanup_error = self.serialize_resume_state()
+                    self._publish_resume_state_after_cleanup_error(self.serialize_resume_state())
                 except BaseException:
                     self._resume_state_after_cleanup_error = None
             self._resources_by_agent.clear()

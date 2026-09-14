@@ -2269,7 +2269,7 @@ class AgentRunner:
                         usage_delta(task_usage_start, context_wrapper.usage),
                     )
                     current_task_span.finish(reset_current=True)
-                if sandbox_cleanup_cancellation is not None:
+                if sandbox_cleanup_cancellation is not None and run_cancellation is None:
                     raise sandbox_cleanup_cancellation
 
     def run_sync(

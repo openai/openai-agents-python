@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, TypedDict, cast
 
 import pytest
@@ -279,6 +280,23 @@ class _DelayedPreservingStopSession(_FakeSession):
         await self._release.wait()
         self._backend_preservation_required = True
         raise RuntimeError("stop failed after delayed preservation")
+
+
+class _CancelledRunModel(ScriptedModel):
+    def __init__(self, cancellation: asyncio.CancelledError) -> None:
+        super().__init__()
+        self._cancellation = cancellation
+
+    async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        _ = (args, kwargs)
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("cleanup cancellation")
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError as cancellation:
+            raise self._cancellation from cancellation
+        raise AssertionError("expected the task cancellation to be delivered")
 
 
 class _BlockingPreservingStopSession(_FakeSession):
@@ -3862,6 +3880,11 @@ async def test_session_manager_serializes_state_after_cancellation_precedes_pres
     manager.acquire_agent(agent)
     await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
 
+    result = SimpleNamespace(_sandbox_resume_state=None)
+    manager.register_resume_state_observer(
+        lambda resume_state: setattr(result, "_sandbox_resume_state", resume_state)
+    )
+
     cleanup = asyncio.create_task(manager.cleanup())
     try:
         await asyncio.wait_for(session.stop_started.wait(), timeout=0.5)
@@ -3881,6 +3904,7 @@ async def test_session_manager_serializes_state_after_cancellation_precedes_pres
         resume_state = manager.resume_state_after_cleanup_error
         assert resume_state is not None
         assert resume_state["backend_id"] == "fake"
+        assert result._sandbox_resume_state == resume_state
         assert manager._resources_by_agent == {}
     finally:
         release.set()
@@ -3919,6 +3943,25 @@ async def test_runner_propagates_caller_cancellation_during_non_streamed_cleanup
             run_task.cancel()
         with suppress(BaseException):
             await run_task
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_run_cancellation_reason_when_cleanup_detects_cancellation() -> None:
+    cancellation = asyncio.CancelledError("run cancellation")
+    session = _FakeSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=_CancelledRunModel(cancellation),
+        instructions="Base instructions.",
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+
+    assert exc_info.value is cancellation
+    assert exc_info.value.args == ("run cancellation",)
+    assert client.delete_calls == 1
 
 
 @pytest.mark.asyncio

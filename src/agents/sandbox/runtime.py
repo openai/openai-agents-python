@@ -116,6 +116,9 @@ class SandboxRuntime(Generic[TContext]):
     def apply_result_metadata(self, result: RunResult | RunResultStreaming) -> None:
         session = self.current_session
         result._sandbox_session = session
+        self._session_manager.register_resume_state_observer(
+            lambda resume_state: setattr(result, "_sandbox_resume_state", resume_state)
+        )
         if isinstance(result, RunResultStreaming):
 
             async def _cleanup_and_store() -> None:
