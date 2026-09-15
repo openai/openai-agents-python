@@ -1255,14 +1255,25 @@ class DockerSandboxSession(BaseSandboxSession):
             return
         api = container_client.api
 
+        inspect_future = loop.run_in_executor(
+            _DOCKER_EXECUTOR,
+            lambda: api.exec_inspect(entry.exec_id),
+        )
         try:
             inspect_result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _DOCKER_EXECUTOR,
-                    lambda: api.exec_inspect(entry.exec_id),
-                ),
+                asyncio.shield(inspect_future),
                 timeout=_PTY_CLEANUP_TIMEOUT_S,
             )
+        except asyncio.TimeoutError:
+            if not inspect_future.done():
+                self._track_pty_exit_refresh_result(inspect_future, entry)
+                self._track_pty_cleanup_task(inspect_future)
+            return
+        except asyncio.CancelledError:
+            if not inspect_future.done():
+                self._track_pty_exit_refresh_result(inspect_future, entry)
+                self._track_pty_cleanup_task(inspect_future)
+            raise
         except Exception:
             return
 
@@ -1272,6 +1283,26 @@ class DockerSandboxSession(BaseSandboxSession):
         exit_code = inspect_result.get("ExitCode")
         if exit_code is not None:
             entry.exit_code = int(exit_code)
+
+    def _track_pty_exit_refresh_result(
+        self,
+        inspect_future: asyncio.Future[dict[str, object]],
+        entry: _DockerPtyProcessEntry,
+    ) -> None:
+        def apply_exit_code(done: asyncio.Future[dict[str, object]]) -> None:
+            if done.cancelled():
+                return
+            try:
+                inspect_result = done.result()
+            except Exception:
+                return
+            if inspect_result.get("Running", False):
+                return
+            exit_code = inspect_result.get("ExitCode")
+            if isinstance(exit_code, int):
+                entry.exit_code = exit_code
+
+        inspect_future.add_done_callback(apply_exit_code)
 
     async def _collect_pty_output(
         self,

@@ -1305,6 +1305,13 @@ async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finis
     manager.acquire_agent(agent)
     await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
     resources = manager._resources_by_agent[id(agent)]
+    resume_states: list[dict[str, object]] = []
+
+    def observe_resume_state(resume_state: dict[str, object]) -> None:
+        resume_states.append(resume_state)
+        assert client.delete_calls == 0
+
+    manager.register_resume_state_observer(observe_resume_state)
 
     cleanup = asyncio.create_task(manager.cleanup())
     try:
@@ -1314,6 +1321,7 @@ async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finis
 
         assert manager.resume_state_after_cleanup_error is not None
         assert manager.resume_state_after_cleanup_error["backend_id"] == "fake"
+        assert len(resume_states) == 1
 
         next_manager = SandboxRuntimeSessionManager(
             starting_agent=agent,
@@ -1329,6 +1337,10 @@ async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finis
         await asyncio.wait_for(deferred_task, timeout=0.5)
         await asyncio.sleep(0)
 
+        assert len(resume_states) == 2
+        assert manager.resume_state_after_cleanup_error == resume_states[-1]
+        assert client.delete_calls == 1
+
         next_manager.acquire_agent(agent)
         next_manager._release_agents()
     finally:
@@ -1337,6 +1349,42 @@ async def test_session_manager_keeps_agent_acquired_until_deferred_cleanup_finis
         if deferred_task is not None and not deferred_task.done():
             with suppress(BaseException):
                 await asyncio.wait_for(deferred_task, timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_session_manager_logs_detached_follow_up_cleanup_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=session),
+        run_state=None,
+    )
+    manager._cleanup_finished = True
+
+    async def fail_resource_cleanup() -> None:
+        raise RuntimeError("detached follow-up failed")
+
+    resource_cleanup = asyncio.create_task(fail_resource_cleanup())
+    manager._track_resource_cleanup_task(resource_cleanup, resources)
+    follow_up = next(iter(manager._pending_resource_cleanup_tasks))
+
+    with caplog.at_level(logging.ERROR, logger="agents.sandbox.runtime_session_manager"):
+        with pytest.raises(RuntimeError, match="detached follow-up failed"):
+            await follow_up
+
+    assert any(
+        record.name == "agents.sandbox.runtime_session_manager"
+        and record.getMessage().startswith("Detached sandbox cleanup failed")
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

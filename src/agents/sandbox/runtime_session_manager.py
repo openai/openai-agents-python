@@ -65,6 +65,7 @@ class _SandboxSessionResources:
         self._cleaned = False
         self._started = False
         self._deferred_cleanup_task: asyncio.Task[Any] | None = None
+        self._before_backend_delete: Callable[[], bool] | None = None
 
     @property
     def session(self) -> BaseSandboxSession:
@@ -120,6 +121,17 @@ class _SandboxSessionResources:
 
         task.add_done_callback(observe_task_result)
 
+    def _set_before_backend_delete(self, callback: Callable[[], bool]) -> None:
+        self._before_backend_delete = callback
+
+    async def _wait_before_backend_delete(self) -> None:
+        callback = self._before_backend_delete
+        while callback is not None and not callback():
+            await asyncio.sleep(0)
+            callback = self._before_backend_delete
+        if callback is not None:
+            self._before_backend_delete = None
+
     @redact_mount_error_data
     async def _finish_deferred_cleanup(self) -> None:
         cleanup_error: BaseException | None = None
@@ -147,6 +159,7 @@ class _SandboxSessionResources:
                     break
                 try:
                     if self._client is not None:
+                        await self._wait_before_backend_delete()
                         await self._client.delete(cast(SandboxSession, self._session))
                 except BaseException as exc:
                     raise_if_cleanup_owner_force_cancelling(exc)
@@ -239,6 +252,7 @@ class _SandboxSessionResources:
                     and isinstance(self._session, SandboxSession)
                     and not preserve_backend
                 ):
+                    await self._wait_before_backend_delete()
                     await self._client.delete(self._session)
             except BaseException as exc:  # pragma: no cover
                 if cleanup_error is None:
@@ -441,6 +455,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             self._resume_state_after_cleanup_error = None
             try:
                 for resources in list(self._resources_by_agent.values()):
+                    resources._set_before_backend_delete(self._publish_late_resume_state)
                     resource_cleanup_task = create_cleanup_owner(
                         resources.cleanup(), name="agents.resource_cleanup"
                     )
@@ -471,6 +486,19 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                             cleanup_error = exc
                     deferred_cleanup_task = resources.deferred_cleanup_task
                     if deferred_cleanup_task is not None:
+                        if (
+                            caller_cancellation is not None
+                            and resource_cleanup_task.done()
+                            and resource_cleanup_task.cancelled()
+                        ):
+                            # A resource can finish with CancelledError from its own stop()
+                            # failure while its deferred backend cleanup is still running.
+                            # Keep the follow-up owner so it can publish the final snapshot
+                            # before deletion and release the session only afterward.
+                            self._track_resource_cleanup_task(
+                                resource_cleanup_task,
+                                resources,
+                            )
                         self._track_deferred_cleanup_task(deferred_cleanup_task)
                 preserves_backend = self._any_session_preserves_backend()
                 if cleanup_error is None:
@@ -490,11 +518,15 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                             except asyncio.CancelledError as exc:
                                 caller_cancellation = exc
                         if caller_cancellation is not None and preserves_backend:
-                            self._publish_resume_state_after_cleanup_error(resume_state)
+                            self._publish_resume_state_after_cleanup_error(
+                                resume_state,
+                                clear_observers=False,
+                            )
                 elif preserves_backend:
                     try:
                         self._publish_resume_state_after_cleanup_error(
-                            self.serialize_resume_state()
+                            self.serialize_resume_state(),
+                            clear_observers=False,
                         )
                     except BaseException:
                         # Preserve the cleanup failure as the primary error when state
@@ -503,12 +535,21 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         self._resume_state_after_cleanup_error = None
                         await self._clear_preservation_requirements()
             finally:
-                if not self._pending_resource_cleanup_tasks:
+                # Publish cleanup state before a detached resource owner can finish its final
+                # delete. The owner may complete between the cancellation checkpoint and this
+                # manager's finally block.
+                self._cleanup_finished = True
+                self._caller_cancelled_during_cleanup = caller_cancellation is not None
+                retain_resources_for_late_resume_state = (
+                    preserves_backend and self._resume_state_after_cleanup_error is not None
+                )
+                if (
+                    not self._pending_resource_cleanup_tasks
+                    and not retain_resources_for_late_resume_state
+                ):
                     self._resources_by_agent.clear()
                     self._current_agent_id = None
                     self._resume_state_observers.clear()
-                self._cleanup_finished = True
-                self._caller_cancelled_during_cleanup = caller_cancellation is not None
                 if not self._deferred_cleanup_tasks:
                     self._release_agents()
             if caller_cancellation is not None:
@@ -543,11 +584,15 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             )
 
     def _publish_resume_state_after_cleanup_error(
-        self, resume_state: dict[str, object] | None
+        self,
+        resume_state: dict[str, object] | None,
+        *,
+        clear_observers: bool = True,
     ) -> None:
         self._resume_state_after_cleanup_error = resume_state
         observers = self._resume_state_observers
-        self._resume_state_observers = []
+        if clear_observers:
+            self._resume_state_observers = []
         if resume_state is None:
             return
         for observer in observers:
@@ -574,6 +619,8 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         task: asyncio.Task[Any],
         resources: _SandboxSessionResources,
     ) -> None:
+        resources._set_before_backend_delete(self._publish_late_resume_state)
+
         async def settle_resource_cleanup() -> None:
             try:
                 await asyncio.shield(task)
@@ -590,6 +637,14 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         _track_sync_background_task(follow_up)
 
         def finalize_resource_cleanup(_done: asyncio.Task[Any]) -> None:
+            if not _done.cancelled():
+                cleanup_error = _done.exception()
+                if cleanup_error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "Detached sandbox cleanup failed",
+                        cleanup_error,
+                    )
             self._pending_resource_cleanup_tasks.discard(follow_up)
             if not self._cleanup_finished or self._pending_resource_cleanup_tasks:
                 return
@@ -605,6 +660,31 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         follow_up.add_done_callback(finalize_resource_cleanup)
         _track_sync_background_task(follow_up)
         self._track_deferred_cleanup_task(follow_up)
+
+    def _publish_late_resume_state(self) -> bool:
+        if (
+            self._resume_state_after_cleanup_error is None
+            and not self._any_session_preserves_backend()
+        ):
+            return True
+        if not self._cleanup_finished:
+            return False
+        if self._resume_state_after_cleanup_error is None:
+            return True
+        try:
+            self._publish_resume_state_after_cleanup_error(
+                self.serialize_resume_state(),
+                clear_observers=len(self._pending_resource_cleanup_tasks) <= 1,
+            )
+        except BaseException as error:
+            self._resume_state_after_cleanup_error = None
+            self._resume_state_observers = []
+            log_tool_action_error(
+                logger,
+                "Failed to publish sandbox resume state before backend deletion",
+                error,
+            )
+        return True
 
     async def _create_resources(
         self,

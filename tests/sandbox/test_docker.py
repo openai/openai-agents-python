@@ -4840,6 +4840,60 @@ async def test_docker_pty_kill_remains_queued_after_cleanup_timeout(
 
 
 @pytest.mark.asyncio
+async def test_docker_pty_exit_refresh_tracks_timed_out_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakePtyApi()
+    container = _FakePtyContainer(api)
+    session = DockerSandboxSession(
+        docker_client=object(),
+        container=container,
+        state=DockerSandboxSessionState(
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+            container_id="container",
+            workspace_root_ready=True,
+        ),
+    )
+    entry = docker_sandbox._DockerPtyProcessEntry(
+        exec_id="exec-refresh",
+        sock=_FakePtySocket(api),
+        raw_sock=_FakePtySocket(api),
+        pid_path=Path("/tmp/refresh.pid"),
+        tty=False,
+    )
+    executor = ThreadPoolExecutor(max_workers=1)
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+
+    def block_executor() -> None:
+        blocker_started.set()
+        release_blocker.wait()
+
+    executor.submit(block_executor)
+    monkeypatch.setattr(docker_sandbox, "_DOCKER_EXECUTOR", executor)
+    monkeypatch.setattr(docker_sandbox, "_PTY_CLEANUP_TIMEOUT_S", 0.01)
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(blocker_started.wait), timeout=0.5)
+        await session._refresh_pty_exit_code(entry)
+
+        await asyncio.sleep(0.05)
+        assert any(not task.done() for task in (session._pty_cleanup_tasks or ()))
+
+        api.running = False
+        api.exit_code = 0
+        release_blocker.set()
+        await session._wait_for_tracked_cleanup_tasks(timeout=0.5)
+        await asyncio.sleep(0)
+        assert entry.exit_code == 0
+    finally:
+        release_blocker.set()
+        await asyncio.to_thread(executor.shutdown, True)
+
+
+@pytest.mark.asyncio
 async def test_docker_completed_pty_kill_failure_is_observed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
