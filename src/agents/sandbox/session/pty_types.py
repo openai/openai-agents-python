@@ -5,6 +5,7 @@ import random
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 
+from .._cleanup_owner import create_cleanup_owner
 from ..util.token_truncation import formatted_truncate_text_with_token_count
 
 PTY_YIELD_TIME_MS_MIN = 250
@@ -24,17 +25,15 @@ async def _settle_pty_cleanup(
     *,
     initial_cancellation: asyncio.CancelledError | None = None,
 ) -> None:
-    cleanup_task = asyncio.ensure_future(cleanup)
-    completion = asyncio.create_task(asyncio.wait((cleanup_task,)))
+    cleanup_task = create_cleanup_owner(cleanup, name="agents.pty_cleanup")
     cancellation = initial_cancellation
-    while not completion.done():
+    while not cleanup_task.done():
         try:
-            await asyncio.shield(completion)
+            await asyncio.wait((cleanup_task,))
         except asyncio.CancelledError as error:
             if cancellation is None:
                 cancellation = error
 
-    completion.result()
     try:
         cleanup_task.result()
     except BaseException:

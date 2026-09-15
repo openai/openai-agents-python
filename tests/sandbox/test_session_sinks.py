@@ -5,6 +5,7 @@ import io
 import json
 import tarfile
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -972,3 +973,52 @@ async def test_sandbox_session_aclose_flushes_best_effort_sink_tasks(tmp_path: P
 
     assert ("stop", "finish") in seen
     assert ("shutdown", "finish") in seen
+
+
+@pytest.mark.asyncio
+async def test_sandbox_session_flushes_sink_tasks_after_deferred_shutdown(
+    tmp_path: Path,
+) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    cleanup_release = asyncio.Event()
+    shutdown_sink_started = asyncio.Event()
+    shutdown_sink_release = asyncio.Event()
+    seen: list[tuple[str, str]] = []
+
+    async def pending_cleanup() -> None:
+        await cleanup_release.wait()
+
+    async def _callback(event: SandboxSessionEvent, _session: BaseSandboxSession) -> None:
+        if event.op == "shutdown":
+            shutdown_sink_started.set()
+            await shutdown_sink_release.wait()
+        seen.append((event.op, event.phase))
+
+    async def failing_stop() -> None:
+        raise RuntimeError("stop failed")
+
+    inner.stop = failing_stop  # type: ignore[method-assign]
+    inner._track_pty_cleanup_task(asyncio.create_task(pending_cleanup()))
+    instrumentation = Instrumentation(sinks=[CallbackSink(_callback, mode="async", on_error="log")])
+    wrapped = SandboxSession(inner, instrumentation=instrumentation)
+
+    try:
+        with pytest.raises(RuntimeError, match="stop failed"):
+            await wrapped.aclose()
+
+        deferred_task = wrapped._deferred_dependency_close_task
+        assert deferred_task is not None
+        cleanup_release.set()
+        await asyncio.wait_for(shutdown_sink_started.wait(), timeout=0.5)
+        assert not deferred_task.done()
+
+        shutdown_sink_release.set()
+        await asyncio.wait_for(deferred_task, timeout=0.5)
+        assert ("shutdown", "finish") in seen
+    finally:
+        cleanup_release.set()
+        shutdown_sink_release.set()
+        deferred_task = wrapped._deferred_dependency_close_task
+        if deferred_task is not None and not deferred_task.done():
+            with suppress(BaseException):
+                await deferred_task

@@ -6,6 +6,10 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast
 
+from .._cleanup_owner import (
+    create_cleanup_owner,
+    raise_if_cleanup_owner_force_cancelling,
+)
 from ..errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
@@ -50,6 +54,7 @@ async def with_ephemeral_mounts_removed(
             session,
             mount_entry.mount_strategy.teardown_for_snapshot(mount_entry, session, mount_path),
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or transition_cancelled
         if transition_error is not None:
             detach_error = _mount_transition_error(
@@ -90,6 +95,7 @@ async def with_ephemeral_mounts_removed(
             error_path=error_path,
             error_cls=error_cls,
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or restore_cancelled
     if detach_transition_ambiguous and restore_error is None:
         terminal_error, terminal_cancelled = await _terminate_ambiguous_mount_session(session)
@@ -151,6 +157,7 @@ async def _restore_detached_mounts_settled(
             session,
             mount_entry.mount_strategy.restore_after_snapshot(mount_entry, session, mount_path),
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or transition_cancelled
         if transition_error is not None:
             current_error = _mount_transition_error(
@@ -190,19 +197,20 @@ async def _settle_mount_transition(
         finally:
             _MOUNT_TRANSITION_OWNER.reset(owner_token)
 
-    task = asyncio.create_task(
+    raise_if_cleanup_owner_force_cancelling()
+    task = create_cleanup_owner(
         run_registered_transition(),
         name="agents.mount_transition",
     )
-    completion = asyncio.create_task(asyncio.wait((task,)))
     caller_cancelled = False
-    while not completion.done():
+    while not task.done():
         try:
-            await asyncio.shield(completion)
-        except asyncio.CancelledError:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError as error:
+            raise_if_cleanup_owner_force_cancelling(error, nested_tasks=(task,))
             caller_cancelled = True
-    completion.result()
     try:
+        raise_if_cleanup_owner_force_cancelling(nested_tasks=(task,))
         task.result()
     except BaseException as exc:
         return exc, caller_cancelled

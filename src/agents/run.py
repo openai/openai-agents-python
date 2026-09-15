@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import warnings
 from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import Unpack
@@ -39,6 +38,7 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
+from .models import _openai_shared
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -150,6 +150,18 @@ from .run_internal.session_persistence import (
     session_items_for_turn,
     update_run_state_after_resume,
 )
+from .run_internal.sync import (
+    _IS_SYNC_RUN,
+    _SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
+    _create_sync_task,
+    _force_settle_sync_background_work,
+    _get_default_loop,
+    _get_pending_sync_background_tasks,
+    _get_sync_loop,
+    _settle_sync_background_work,
+    _start_sync_loop_driver,
+    _stop_sync_loop_driver,
+)
 from .run_internal.tool_use_tracker import (
     AgentToolUseTracker,
     hydrate_tool_use_tracker,
@@ -254,6 +266,119 @@ def _sandbox_memory_input(
     if original_user_input is not None:
         return copy_input_items(original_user_input)
     return copy_input_items(original_input)
+
+
+def _run_sync_has_caller_owned_dependencies(
+    starting_agent: Agent[Any],
+    *,
+    context: object | None,
+    hooks: object | None,
+    run_config: RunConfig | dict[str, Any] | None,
+    error_handlers: object | None,
+    session: object | None,
+) -> bool:
+    """Return whether a sync run must stay on the caller's default event loop.
+
+    ``run_sync`` cannot safely inspect arbitrary objects captured by a tool, hook, or context to
+    discover loop affinity. Treating explicit executable run surfaces as caller-owned keeps those
+    objects together on the loop selected by the caller while leaving a plain, unbound run on the
+    SDK-owned loop.
+    """
+
+    if (
+        context is not None
+        or hooks is not None
+        or error_handlers is not None
+        or session is not None
+    ):
+        return True
+
+    def agent_has_caller_owned_surface(agent: Agent[Any], seen: set[int]) -> bool:
+        agent_id = id(agent)
+        if agent_id in seen:
+            return False
+        seen.add(agent_id)
+
+        agent_model = getattr(agent, "model", None)
+        if agent_model is not None and not isinstance(agent_model, str):
+            return True
+
+        if any(
+            (
+                getattr(agent, "tools", None),
+                getattr(agent, "mcp_servers", None),
+                getattr(agent, "input_guardrails", None),
+                getattr(agent, "output_guardrails", None),
+                getattr(agent, "hooks", None),
+                callable(getattr(agent, "instructions", None)),
+                callable(getattr(agent, "prompt", None)),
+                callable(getattr(agent, "tool_use_behavior", None)),
+                callable(getattr(agent, "base_instructions", None)),
+                getattr(agent, "capabilities", None),
+            )
+        ):
+            return True
+
+        # Handoffs carry an async invocation callback and may lead to another agent with its own
+        # caller-owned resources. The handoff itself is therefore enough to select the caller loop.
+        if getattr(agent, "handoffs", None):
+            return True
+        return False
+
+    if agent_has_caller_owned_surface(starting_agent, set()):
+        return True
+
+    def config_value(name: str) -> object | None:
+        if run_config is None:
+            return None
+        if isinstance(run_config, dict):
+            return run_config.get(name)
+        return getattr(run_config, name, None)
+
+    configured_model = config_value("model")
+    configured_model_provider = config_value("model_provider")
+    if (configured_model is not None and not isinstance(configured_model, str)) or (
+        configured_model_provider is not None
+        and not getattr(configured_model_provider, "_agents_default_model_provider", False)
+    ):
+        return True
+
+    for callback_name in (
+        "handoff_input_filter",
+        "handoff_history_mapper",
+        "session_input_callback",
+        "call_model_input_filter",
+        "tool_error_formatter",
+    ):
+        if callable(config_value(callback_name)):
+            return True
+
+    configured_provider_is_default = configured_model_provider is None or getattr(
+        configured_model_provider, "_agents_default_model_provider", False
+    )
+    if _openai_shared.get_default_openai_client() is not None and configured_provider_is_default:
+        return True
+
+    if config_value("input_guardrails") or config_value("output_guardrails"):
+        return True
+    blocked_output_message = config_value("output_guardrail_blocked_message")
+    if callable(blocked_output_message):
+        return True
+
+    configured_sandbox = config_value("sandbox")
+    if configured_sandbox is not None:
+        if isinstance(configured_sandbox, dict):
+            if configured_sandbox.get("client") is not None:
+                return True
+            if configured_sandbox.get("session") is not None:
+                return True
+        elif (
+            getattr(configured_sandbox, "client", None) is not None
+            or getattr(configured_sandbox, "session", None) is not None
+        ):
+            return True
+
+    return False
 
 
 class Runner:
@@ -821,6 +946,29 @@ class AgentRunner:
 
                 completed_result: RunResult | None = None
                 run_exception: BaseException | None = None
+                run_cancellation: asyncio.CancelledError | None = None
+                sandbox_cleanup_cancellation: asyncio.CancelledError | None = None
+                sandbox_cleanup_error: BaseException | None = None
+                sandbox_resume_state_after_cleanup: dict[str, object] | None = None
+
+                def _publish_late_sandbox_resume_state(
+                    resume_state: dict[str, object],
+                ) -> None:
+                    nonlocal sandbox_resume_state_after_cleanup
+                    sandbox_resume_state_after_cleanup = resume_state
+                    if completed_result is not None:
+                        completed_result._sandbox_resume_state = resume_state
+                        return
+                    for error in (
+                        run_cancellation,
+                        sandbox_cleanup_cancellation,
+                        run_exception,
+                        sandbox_cleanup_error,
+                    ):
+                        if error is not None:
+                            cast(Any, error)._sandbox_resume_state = resume_state
+
+                sandbox_runtime.register_resume_state_observer(_publish_late_sandbox_resume_state)
 
                 def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
                     result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
@@ -2172,6 +2320,8 @@ class AgentRunner:
                         turn_result.new_step_items.clear()
             except BaseException as exc:
                 run_exception = exc
+                if isinstance(exc, asyncio.CancelledError):
+                    run_cancellation = exc
                 if _is_error_data_redacted(exc):
                     _detach_data_redacted_error_traceback(exc)
                 else:
@@ -2222,18 +2372,48 @@ class AgentRunner:
                             logger, "Failed to enqueue sandbox memory after run", error
                         )
                     sandbox_resume_state = await sandbox_runtime.cleanup()
-                except Exception as error:
+                except (Exception, asyncio.CancelledError) as error:
                     log_tool_action_warning(
                         logger, "Failed to clean up sandbox resources after run", error
                     )
+                    sandbox_cleanup_error = error
+                    sandbox_resume_state_after_cleanup = (
+                        sandbox_runtime.resume_state_after_cleanup_error
+                    )
+                    if completed_result is not None:
+                        completed_result._sandbox_resume_state = sandbox_resume_state_after_cleanup
+                    if isinstance(error, asyncio.CancelledError) and (
+                        completed_result is None or sandbox_runtime.caller_cancelled_during_cleanup
+                    ):
+                        sandbox_cleanup_cancellation = error
                 else:
                     if completed_result is not None:
                         completed_result._sandbox_resume_state = sandbox_resume_state
+                    sandbox_resume_state_after_cleanup = sandbox_resume_state
                 finally:
                     if completed_result is not None:
                         completed_result._sandbox_session = None
+                    elif sandbox_resume_state_after_cleanup is not None:
+                        # A non-streaming cancellation has no result object to carry state. Keep
+                        # the recoverable backend state on the cancellation so callers can resume
+                        # instead of leaving an unreachable preserved backend behind.
+                        recovery_error = (
+                            run_cancellation
+                            or sandbox_cleanup_cancellation
+                            or run_exception
+                            or sandbox_cleanup_error
+                        )
+                        if recovery_error is not None:
+                            cast(
+                                Any, recovery_error
+                            )._sandbox_resume_state = sandbox_resume_state_after_cleanup
                 try:
-                    await dispose_resolved_computers(run_context=context_wrapper)
+                    await dispose_resolved_computers(
+                        run_context=context_wrapper,
+                        caller_cancelled=(
+                            run_cancellation is not None or sandbox_cleanup_cancellation is not None
+                        ),
+                    )
                 except Exception as error:
                     log_tool_action_warning(logger, "Failed to dispose computers after run", error)
                 if current_span is not None:
@@ -2244,6 +2424,8 @@ class AgentRunner:
                         usage_delta(task_usage_start, context_wrapper.usage),
                     )
                     current_task_span.finish(reset_current=True)
+                if sandbox_cleanup_cancellation is not None and run_cancellation is None:
+                    raise sandbox_cleanup_cancellation
 
     def run_sync(
         self,
@@ -2263,7 +2445,10 @@ class AgentRunner:
             if redacted_source is None:
                 raise
             if isinstance(redacted_source, asyncio.CancelledError):
+                sandbox_resume_state = getattr(redacted_source, "_sandbox_resume_state", None)
                 redacted_error = _prepare_data_redacted_error(redacted_source)
+                if sandbox_resume_state is not None:
+                    cast(Any, redacted_error)._sandbox_resume_state = sandbox_resume_state
             else:
                 _detach_data_redacted_error_traceback(redacted_source)
                 redacted_error = redacted_source
@@ -2292,13 +2477,6 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        # Python 3.14 stopped implicitly wiring up a default event loop
-        # when synchronous code touches asyncio APIs for the first time.
-        # Several of our synchronous entry points (for example the Redis/SQLAlchemy session helpers)
-        # construct asyncio primitives like asyncio.Lock during __init__,
-        # which binds them to whatever loop happens to be the thread's default at that moment.
-        # To keep those locks usable we must ensure that run_sync reuses that same default loop
-        # instead of hopping over to a brand-new asyncio.run() loop.
         try:
             already_running_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -2312,58 +2490,84 @@ class AgentRunner:
                 "AgentRunner.run_sync() cannot be called when an event loop is already running."
             )
 
-        policy = asyncio.get_event_loop_policy()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            try:
-                default_loop = policy.get_event_loop()
-            except RuntimeError:
-                default_loop = policy.new_event_loop()
-                policy.set_event_loop(default_loop)
-
-        if default_loop.is_closed():
-            default_loop = policy.new_event_loop()
-            policy.set_event_loop(default_loop)
-
-        # We intentionally leave the default loop open even if we had to create one above. Session
-        # instances and other helpers stash loop-bound primitives between calls and expect to find
-        # the same default loop every time run_sync is invoked on this thread.
-        # Schedule the async run on the default loop so that we can manage cancellation explicitly.
-        task = default_loop.create_task(
-            self.run(
-                starting_agent,
-                input,
-                session=session,
-                context=context,
-                max_turns=max_turns,
-                hooks=hooks,
-                run_config=run_config,
-                error_handlers=error_handlers,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-                conversation_id=conversation_id,
-            )
+        # Keep unbound synchronous runs on an SDK-owned loop so a caller's default loop remains
+        # stopped and closable. Explicit caller-owned run surfaces may already own primitives on
+        # that default loop, so run the foreground coroutine there when one is available.
+        sync_loop = _get_sync_loop()
+        caller_owned_loop = _run_sync_has_caller_owned_dependencies(
+            starting_agent,
+            context=context,
+            hooks=hooks,
+            run_config=run_config,
+            error_handlers=error_handlers,
+            session=session,
         )
+        if caller_owned_loop:
+            dependency_loop = _get_default_loop()
+            if dependency_loop is not None:
+                sync_loop = dependency_loop
+            else:
+                # The fallback loop is SDK-owned, so its deferred work must use the driver path.
+                caller_owned_loop = False
+        _stop_sync_loop_driver(sync_loop)
+
+        sync_run_token = _IS_SYNC_RUN.set(True)
+        try:
+            task = _create_sync_task(
+                sync_loop,
+                self.run(
+                    starting_agent,
+                    input,
+                    session=session,
+                    context=context,
+                    max_turns=max_turns,
+                    hooks=hooks,
+                    run_config=run_config,
+                    error_handlers=error_handlers,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                    conversation_id=conversation_id,
+                ),
+            )
+        finally:
+            _IS_SYNC_RUN.reset(sync_run_token)
 
         try:
             # Drive the coroutine to completion, harvesting the final RunResult.
-            return default_loop.run_until_complete(task)
+            return cast(RunResult, sync_loop.run_until_complete(task))
         except BaseException as error:
             # If the sync caller aborts (KeyboardInterrupt, etc.), make sure the scheduled task
             # does not linger on the shared loop by cancelling it and waiting for completion.
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    default_loop.run_until_complete(task)
+                    sync_loop.run_until_complete(task)
             if _is_error_data_redacted(error) or isinstance(error, ModelBehaviorError):
                 _detach_data_redacted_error_traceback(error)
             raise
         finally:
-            if not default_loop.is_closed():
-                # The loop stays open for subsequent runs, but we still need to flush any pending
-                # async generators so their cleanup code executes promptly.
-                with contextlib.suppress(RuntimeError):
-                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
+            if _get_pending_sync_background_tasks(sync_loop):
+                if caller_owned_loop:
+                    try:
+                        sync_loop.run_until_complete(
+                            asyncio.wait_for(
+                                _settle_sync_background_work(sync_loop),
+                                timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
+                            )
+                        )
+                    except BaseException:
+                        _force_settle_sync_background_work(
+                            sync_loop,
+                            timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
+                        )
+                else:
+                    driver = _start_sync_loop_driver(sync_loop)
+                    driver.schedule_settlement()
+            elif not sync_loop.is_closed():
+                # Normal async generators still close before run_sync returns. Deferred cleanup
+                # keeps the SDK-owned loop alive and settles them after its tracked tasks finish.
+                with contextlib.suppress(BaseException):
+                    sync_loop.run_until_complete(sync_loop.shutdown_asyncgens())
 
     def run_streamed(
         self,

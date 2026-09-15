@@ -48,6 +48,13 @@ DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
 DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
+_DEFAULT_MODEL_PROVIDER_MARKER = "_agents_default_model_provider"
+
+
+def _default_model_provider() -> ModelProvider:
+    provider = MultiProvider()
+    setattr(provider, _DEFAULT_MODEL_PROVIDER_MARKER, True)
+    return provider
 
 
 def _default_trace_include_sensitive_data() -> bool:
@@ -355,7 +362,7 @@ class RunConfig:
     agent. The model_provider passed in below must be able to resolve this model name.
     """
 
-    model_provider: ModelProvider = field(default_factory=MultiProvider)
+    model_provider: ModelProvider = field(default_factory=_default_model_provider)
     """The model provider to use when looking up string model names. Defaults to OpenAI."""
 
     model_settings: ModelSettings | None = None

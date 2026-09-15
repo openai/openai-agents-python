@@ -8,6 +8,11 @@ from typing import cast
 
 from typing_extensions import Self
 
+from .._cleanup_owner import (
+    create_cleanup_owner,
+    raise_if_cleanup_owner_force_cancelling,
+)
+
 DependencyKey = str
 
 
@@ -253,23 +258,35 @@ class Dependencies:
             task.exception()
 
     async def aclose(self) -> None:
+        task = self._get_or_create_close_task()
+        await asyncio.shield(task)
+
+    def _get_or_create_close_task(self) -> asyncio.Task[None]:
+        """Return the single owner for this container's close operation."""
+
         task = self._close_task
         if task is None:
             self._closed = True
-            task = asyncio.create_task(self._close())
+            task = create_cleanup_owner(self._close(), name="agents.dependencies_close")
             self._close_task = task
-        await asyncio.shield(task)
+            from ...run_internal.sync import _track_sync_background_task
+
+            _track_sync_background_task(task)
+        return task
 
     async def _close(self) -> None:
+        raise_if_cleanup_owner_force_cancelling()
         active_tasks = tuple(self._active_tasks)
         for task in active_tasks:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+            raise_if_cleanup_owner_force_cancelling(nested_tasks=active_tasks)
 
         seen_ids: set[int] = set()
         cancellation: asyncio.CancelledError | None = None
         for value in reversed(self._owned_results):
+            raise_if_cleanup_owner_force_cancelling()
             value_id = id(value)
             if value_id in seen_ids:
                 continue
@@ -277,6 +294,7 @@ class Dependencies:
             try:
                 await _close_best_effort(value)
             except asyncio.CancelledError as exc:
+                raise_if_cleanup_owner_force_cancelling(exc)
                 if cancellation is None:
                     cancellation = exc
 

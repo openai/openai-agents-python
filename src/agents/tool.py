@@ -72,6 +72,8 @@ from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
+from .run_internal.sync import _track_sync_background_task
+from .sandbox._cleanup_owner import create_cleanup_owner
 from .strict_schema import _copy_json_schema, ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
@@ -377,6 +379,50 @@ class ComputerProvider(Generic[ComputerT]):
 
 
 ComputerConfig = ComputerLike | ComputerCreate[Any] | ComputerProvider[Any]
+
+_COMPUTER_DISPOSAL_TIMEOUT_S = 5.0
+_background_computer_disposal_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _dispose_computer(
+    *,
+    dispose: ComputerDispose[ComputerLike],
+    run_context: RunContextWrapper[Any],
+    computer: ComputerLike,
+) -> None:
+    try:
+        result = dispose(run_context=run_context, computer=computer)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        log_tool_action_warning(logger, "Failed to dispose computer for run context", exc)
+
+
+def _track_background_computer_disposal(task: asyncio.Task[None]) -> None:
+    _background_computer_disposal_tasks.add(task)
+    _track_sync_background_task(task)
+
+    def forget_task(done: asyncio.Task[None]) -> None:
+        _background_computer_disposal_tasks.discard(done)
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(forget_task)
+
+
+def _start_computer_disposal(
+    *,
+    dispose: ComputerDispose[ComputerLike],
+    run_context: RunContextWrapper[Any],
+    computer: ComputerLike,
+) -> asyncio.Task[None]:
+    task = create_cleanup_owner(
+        _dispose_computer(dispose=dispose, run_context=run_context, computer=computer),
+        name="agents.dispose_computer",
+        cancel_grace_s=_COMPUTER_DISPOSAL_TIMEOUT_S,
+    )
+    _track_background_computer_disposal(task)
+    return task
 
 
 @dataclass
@@ -970,7 +1016,9 @@ async def resolve_computer(
     return computer
 
 
-async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> None:
+async def dispose_resolved_computers(
+    *, run_context: RunContextWrapper[Any], caller_cancelled: bool = False
+) -> None:
     """Dispose any computer instances created for the provided run context."""
     resolved_by_tool = _computers_by_run_context.pop(run_context, None)
     if not resolved_by_tool:
@@ -990,13 +1038,47 @@ async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> 
         if _resolved.dispose is not None:
             disposers.append((_resolved.dispose, _resolved.computer))
 
-    for dispose, computer in disposers:
+    current_task = asyncio.current_task()
+    cancelling = getattr(current_task, "cancelling", None)
+    if caller_cancelled or (cancelling is not None and cancelling()):
+        for dispose, computer in disposers:
+            _start_computer_disposal(
+                dispose=dispose,
+                run_context=run_context,
+                computer=computer,
+            )
+        return
+
+    caller_cancellation: asyncio.CancelledError | None = None
+    for index, (dispose, computer) in enumerate(disposers):
+        disposal_task = _start_computer_disposal(
+            dispose=dispose,
+            run_context=run_context,
+            computer=computer,
+        )
         try:
-            result = dispose(run_context=run_context, computer=computer)
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            log_tool_action_warning(logger, "Failed to dispose computer for run context", exc)
+            await asyncio.wait_for(
+                asyncio.shield(disposal_task), timeout=_COMPUTER_DISPOSAL_TIMEOUT_S
+            )
+        except asyncio.CancelledError as error:
+            caller_cancellation = caller_cancellation or error
+            for remaining_dispose, remaining_computer in disposers[index + 1 :]:
+                _start_computer_disposal(
+                    dispose=remaining_dispose,
+                    run_context=run_context,
+                    computer=remaining_computer,
+                )
+            break
+        except asyncio.TimeoutError:
+            log_tool_action_warning(
+                logger,
+                "Computer disposal exceeded its cleanup deadline and will continue "
+                "in the background",
+                asyncio.TimeoutError(),
+            )
+
+    if caller_cancellation is not None:
+        raise caller_cancellation
 
 
 @dataclass

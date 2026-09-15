@@ -920,6 +920,7 @@ async def start_streaming(
     if current_task_span is not None:
         current_task_span.start(mark_as_current=True)
     task_usage_start = snapshot_usage(context_wrapper.usage)
+    streaming_cancellation = False
 
     try:
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
@@ -2012,6 +2013,8 @@ async def start_streaming(
         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
     except BaseException as error:
+        if isinstance(error, asyncio.CancelledError):
+            streaming_cancellation = True
         if _is_error_data_redacted(error):
             _detach_data_redacted_error_traceback(error)
         raise
@@ -2042,7 +2045,10 @@ async def start_streaming(
                     diagnostic_extra=partial(_agent_diagnostic_extra, current_agent),
                 )
         try:
-            await dispose_resolved_computers(run_context=context_wrapper)
+            await dispose_resolved_computers(
+                run_context=context_wrapper,
+                caller_cancelled=streaming_cancellation,
+            )
         except Exception as error:
             log_tool_action_warning(logger, "Failed to dispose computers after streamed run", error)
         if current_span is not None:

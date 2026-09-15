@@ -1,20 +1,24 @@
 import abc
 import asyncio
 import io
+import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path, PurePath
-from typing import Literal, NoReturn, TypeVar
+from typing import Any, Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
 
 from ...editor import ApplyPatchOperation
+from ...logger import log_tool_action_error
 from ...run_config import (
     DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY,
     DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY,
     SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
+from ...run_internal.sync import _track_sync_background_task
+from .._cleanup_owner import create_cleanup_owner, raise_if_cleanup_owner_force_cancelling
 from .._mount_security import redact_mount_error_data, validate_manifest_mount_credential_boundaries
 from ..apply_patch import PatchFormat, WorkspaceEditor
 from ..entries import BaseEntry
@@ -53,6 +57,7 @@ from .utils import _safe_decode
 
 _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
+_DEFAULT_PTY_CLEANUP_TIMEOUT_S = 5.0
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_SCRIPT = """
@@ -195,6 +200,8 @@ _RM_ACCESS_CHECK_SCRIPT = (
     '[ -d "$parent" ] && [ -w "$parent" ] && [ -x "$parent" ]\n'
 )
 
+logger = logging.getLogger(__name__)
+
 
 class BaseSandboxSession(abc.ABC):
     state: SandboxSessionState
@@ -223,6 +230,18 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
+    _pty_cleanup_tasks: set[asyncio.Future[Any]] | None = None
+    _snapshot_persistence_task: asyncio.Task[None] | None = None
+    _dependencies_close_task: asyncio.Task[None] | None = None
+    _deferred_dependency_close_task: asyncio.Task[Any] | None = None
+    _deferred_shutdown_requested: bool = False
+    # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
+    # cleanup must retain the backend in that case so it can be resumed instead of deleting the
+    # only remaining copy of the workspace.
+    _backend_preservation_required: bool = False
+    _pty_lock: asyncio.Lock
+    _pty_processes: dict[int, Any]
+    _reserved_pty_process_ids: set[int]
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -398,14 +417,115 @@ class BaseSandboxSession(abc.ABC):
         try:
             try:
                 await self._before_stop()
-                await self._persist_snapshot()
-            except Exception as e:
-                wrapped = self._wrap_stop_error(e)
-                if wrapped is e:
+            except BaseException as before_stop_error:
+                # Persist before re-raising cancellation or a cleanup deadline/error so the
+                # backend cannot be deleted with workspace state that exists only remotely.
+                self._backend_preservation_required = True
+                if self._has_pending_pty_cleanup_tasks():
+                    # The detached PTY owner may still mutate the workspace. Do not start a
+                    # snapshot until that owner has finished; the preserved backend remains the
+                    # source of truth for a later resume.
+                    if isinstance(before_stop_error, Exception):
+                        wrapped = self._wrap_stop_error(before_stop_error)
+                        if wrapped is not before_stop_error:
+                            raise wrapped from before_stop_error
                     raise
-                raise wrapped from e
+                snapshot_error = await self._persist_snapshot_before_stop_error(
+                    before_stop_error=before_stop_error
+                )
+                if snapshot_error is None:
+                    self._backend_preservation_required = False
+                else:
+                    # Keep the cleanup failure that caused stop() to fail as the primary error,
+                    # while retaining the snapshot failure as diagnostic context.
+                    if isinstance(before_stop_error, Exception):
+                        wrapped = self._wrap_stop_error(before_stop_error)
+                        if wrapped is not before_stop_error:
+                            raise wrapped from snapshot_error
+                    raise before_stop_error from snapshot_error
+                if isinstance(before_stop_error, Exception):
+                    wrapped = self._wrap_stop_error(before_stop_error)
+                    if wrapped is not before_stop_error:
+                        raise wrapped from before_stop_error
+                raise
+            try:
+                snapshot_task = self._snapshot_persistence_task
+                if snapshot_task is not None and not snapshot_task.done():
+                    # Join an in-flight snapshot instead of starting another upload. Shield it
+                    # so a retry cancellation cannot cancel the upload that still owns the
+                    # preserved backend.
+                    await asyncio.shield(snapshot_task)
+                else:
+                    await self._persist_snapshot()
+                self._backend_preservation_required = False
+            except Exception as error:
+                wrapped = self._wrap_stop_error(error)
+                if wrapped is error:
+                    raise
+                raise wrapped from error
         finally:
             await self._after_stop()
+
+    async def _persist_snapshot_before_stop_error(
+        self, *, before_stop_error: BaseException
+    ) -> BaseException | None:
+        """Persist a snapshot with a deadline without replacing the original stop failure."""
+
+        snapshot_task = self._snapshot_persistence_task
+        if snapshot_task is None or snapshot_task.done():
+            snapshot_task = create_cleanup_owner(
+                self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
+            )
+            self._snapshot_persistence_task = snapshot_task
+            _track_sync_background_task(snapshot_task)
+
+        def mark_snapshot_durable(task: asyncio.Task[Any]) -> None:
+            try:
+                task.result()
+            except BaseException:
+                return
+            self._backend_preservation_required = False
+
+        def forget_snapshot_task(task: asyncio.Task[Any]) -> None:
+            if self._snapshot_persistence_task is task:
+                self._snapshot_persistence_task = None
+
+        snapshot_task.add_done_callback(mark_snapshot_durable)
+        snapshot_task.add_done_callback(forget_snapshot_task)
+        caller_cancellation: asyncio.CancelledError | None = None
+        timed_out = False
+        deadline = asyncio.get_running_loop().time() + self._pty_cleanup_timeout_s()
+        while not snapshot_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                await asyncio.wait((snapshot_task,), timeout=remaining)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+
+        if snapshot_task.done():
+            try:
+                snapshot_task.result()
+            except BaseException as error:
+                if caller_cancellation is not None:
+                    raise caller_cancellation from before_stop_error
+                return error
+            if caller_cancellation is not None:
+                raise caller_cancellation from before_stop_error
+            return None
+
+        if timed_out:
+            # Keep the operation owned after the caller gives up waiting. The backend is
+            # retained because a snapshot that is still running cannot be treated as durable.
+            self._track_pty_cleanup_task(snapshot_task)
+            if caller_cancellation is not None:
+                raise caller_cancellation from before_stop_error
+            return asyncio.TimeoutError()
+        if caller_cancellation is not None:
+            raise caller_cancellation from before_stop_error
+        return asyncio.TimeoutError()
 
     async def _before_stop(self) -> None:
         """Run transient process cleanup before snapshot persistence."""
@@ -434,6 +554,21 @@ class BaseSandboxSession(abc.ABC):
 
     def supports_pty(self) -> bool:
         return False
+
+    def _should_preserve_backend_on_cleanup(self) -> bool:
+        """Return whether cleanup must retain the provider backend for a later resume."""
+
+        return self._backend_preservation_required
+
+    def _clear_backend_preservation_requirement(self) -> None:
+        """Allow deferred cleanup to delete a backend whose resume state cannot be exposed."""
+
+        self._backend_preservation_required = False
+
+    def _require_backend_preservation(self) -> None:
+        """Retain a backend when teardown failed before its deletion was confirmed."""
+
+        self._backend_preservation_required = True
 
     @redact_mount_error_data
     async def shutdown(self) -> None:
@@ -493,20 +628,65 @@ class BaseSandboxSession(abc.ABC):
         try:
             await self.run_pre_stop_hooks()
         except BaseException as exc:
+            raise_if_cleanup_owner_force_cancelling(exc)
             cleanup_error = exc
         try:
             if cleanup_error is None and not self._pre_stop_hooks_failed:
-                await self.stop()
-            await self.shutdown()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        finally:
-            try:
-                await self._aclose_dependencies()
-            except BaseException as exc:
-                if cleanup_error is None:
+                try:
+                    await self.stop()
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     cleanup_error = exc
+                    self._deferred_shutdown_requested = True
+
+            deferred_cleanup_task = self._deferred_dependency_close_task
+            if deferred_cleanup_task is not None and not deferred_cleanup_task.done():
+                try:
+                    await asyncio.shield(deferred_cleanup_task)
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            elif not self._should_preserve_backend_on_cleanup():
+                if self._has_pending_pty_cleanup_tasks():
+                    self._deferred_shutdown_requested = True
+                else:
+                    try:
+                        await self.shutdown()
+                        self._deferred_shutdown_requested = False
+                    except BaseException as exc:
+                        raise_if_cleanup_owner_force_cancelling(exc)
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                        if self._has_pending_pty_cleanup_tasks():
+                            self._deferred_shutdown_requested = True
+        finally:
+            pending_cleanup_before_dependencies = self._has_pending_pty_cleanup_tasks()
+            deferred_cleanup_pending = (
+                self._deferred_dependency_close_task is not None
+                and not self._deferred_dependency_close_task.done()
+            )
+            if (
+                pending_cleanup_before_dependencies
+                or deferred_cleanup_pending
+                or self._has_pending_dependency_close_task()
+            ):
+                self._schedule_deferred_dependency_close(shutdown=self._deferred_shutdown_requested)
+            else:
+                try:
+                    await self._aclose_dependencies()
+                except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
+                    if (
+                        self._has_pending_pty_cleanup_tasks()
+                        or self._has_pending_dependency_close_task()
+                    ):
+                        self._schedule_deferred_dependency_close(
+                            shutdown=self._deferred_shutdown_requested
+                        )
+                    if cleanup_error is None:
+                        cleanup_error = exc
+        raise_if_cleanup_owner_force_cancelling(cleanup_error)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -525,11 +705,16 @@ class BaseSandboxSession(abc.ABC):
             dependencies = Dependencies()
             self._dependencies = dependencies
             self._dependencies_closed = False
+            self._dependencies_close_task = None
         return dependencies
 
     def set_dependencies(self, dependencies: Dependencies | None) -> None:
         if dependencies is None:
             return
+        if dependencies is not self._dependencies:
+            if self._dependencies_close_task is not None and not self._dependencies_closed:
+                raise RuntimeError("Cannot replace session dependencies before close completes")
+            self._dependencies_close_task = None
         self._dependencies = dependencies
         self._dependencies_closed = False
 
@@ -571,11 +756,145 @@ class BaseSandboxSession(abc.ABC):
         await self.run_pre_stop_hooks()
 
     async def _aclose_dependencies(self) -> None:
+        caller_cancellation, timed_out = await self._wait_for_tracked_cleanup_tasks(
+            timeout=self._pty_cleanup_timeout_s()
+        )
+        if timed_out:
+            if caller_cancellation is not None:
+                raise caller_cancellation
+            raise asyncio.TimeoutError()
         dependencies = self._dependencies
-        if dependencies is None or self._dependencies_closed:
+        if dependencies is not None and not self._dependencies_closed:
+            close_task = self._dependencies_close_task
+            if close_task is None:
+                close_task = dependencies._get_or_create_close_task()
+                self._dependencies_close_task = close_task
+            await asyncio.shield(close_task)
+            self._dependencies_closed = True
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+    async def _after_deferred_dependency_close(self) -> None:
+        """Run provider-specific finalization after deferred cleanup is complete."""
+
+        return
+
+    def _has_pending_pty_cleanup_tasks(self) -> bool:
+        return any(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+
+    def _has_pending_dependency_close_task(self) -> bool:
+        task = self._dependencies_close_task
+        return task is not None and not task.done()
+
+    async def _wait_for_tracked_cleanup_tasks(
+        self, *, timeout: float | None = None
+    ) -> tuple[asyncio.CancelledError | None, bool]:
+        """Wait for detached cleanup without cancelling tasks that still own provider resources."""
+
+        caller_cancellation: asyncio.CancelledError | None = None
+        deadline = (
+            None if timeout is None else asyncio.get_running_loop().time() + max(timeout, 0.0)
+        )
+        while True:
+            tasks = tuple(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+            if not tasks:
+                break
+            remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+            if remaining is not None and remaining <= 0:
+                return caller_cancellation, True
+            try:
+                await asyncio.wait(tasks, timeout=remaining)
+                raise_if_cleanup_owner_force_cancelling(nested_tasks=tasks)
+            except asyncio.CancelledError as error:
+                raise_if_cleanup_owner_force_cancelling(error, nested_tasks=tasks)
+                caller_cancellation = caller_cancellation or error
+
+        raise_if_cleanup_owner_force_cancelling()
+        return caller_cancellation, False
+
+    def _schedule_deferred_dependency_close(self, *, shutdown: bool = False) -> None:
+        raise_if_cleanup_owner_force_cancelling()
+        self._deferred_shutdown_requested = self._deferred_shutdown_requested or shutdown
+        task = self._deferred_dependency_close_task
+        if task is not None and not task.done():
             return
-        self._dependencies_closed = True
-        await dependencies.aclose()
+
+        task = create_cleanup_owner(
+            self._finish_deferred_dependency_close(),
+            name="agents.deferred_dependency_close",
+        )
+        self._deferred_dependency_close_task = task
+        _track_sync_background_task(task)
+
+        def consume_task_exception(done: asyncio.Task[Any]) -> None:
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "Deferred sandbox cleanup failed",
+                        error,
+                    )
+
+        task.add_done_callback(consume_task_exception)
+
+    async def _finish_deferred_dependency_close(self) -> None:
+        deferred_error: BaseException | None = None
+        dependency_error: BaseException | None = None
+        try:
+            while True:
+                await self._wait_for_tracked_cleanup_tasks()
+                # Let done callbacks update preservation state before deciding whether the backend
+                # can be torn down. In particular, fallback snapshot completion clears this state.
+                await asyncio.sleep(0)
+                if (
+                    self._deferred_shutdown_requested
+                    and not self._should_preserve_backend_on_cleanup()
+                ):
+                    self._deferred_shutdown_requested = False
+                    try:
+                        await self.shutdown()
+                    except BaseException as exc:
+                        raise_if_cleanup_owner_force_cancelling(exc)
+                        if self._has_pending_pty_cleanup_tasks():
+                            self._deferred_shutdown_requested = True
+                            continue
+                        deferred_error = exc
+                    break
+                if not self._has_pending_pty_cleanup_tasks():
+                    break
+        except BaseException as exc:
+            raise_if_cleanup_owner_force_cancelling(exc)
+            deferred_error = exc
+
+        raise_if_cleanup_owner_force_cancelling()
+        if not self._has_pending_pty_cleanup_tasks():
+            try:
+                await self._aclose_dependencies()
+            except BaseException as error:
+                raise_if_cleanup_owner_force_cancelling(error)
+                if deferred_error is None:
+                    deferred_error = error
+                else:
+                    dependency_error = error
+
+        try:
+            await self._after_deferred_dependency_close()
+        except BaseException as finalization_error:
+            raise_if_cleanup_owner_force_cancelling(finalization_error)
+            if deferred_error is None:
+                raise
+            log_tool_action_error(
+                logger,
+                "Deferred sandbox finalization failed after cleanup error",
+                finalization_error,
+            )
+
+        if dependency_error is not None:
+            assert deferred_error is not None
+            raise deferred_error from dependency_error
+        if deferred_error is not None:
+            raise deferred_error
 
     @staticmethod
     def _workspace_relpaths_overlap(lhs: Path, rhs: Path) -> bool:
@@ -710,6 +1029,186 @@ class BaseSandboxSession(abc.ABC):
         if entry is None:
             raise PtySessionNotFoundError(session_id=session_id)
         return entry
+
+    def _pty_cleanup_timeout_s(self) -> float:
+        timeouts = getattr(getattr(self, "state", None), "timeouts", None)
+        timeout = getattr(timeouts, "cleanup_s", None)
+        if timeout is not None:
+            return float(timeout)
+        return _DEFAULT_PTY_CLEANUP_TIMEOUT_S
+
+    def _track_pty_cleanup_task(self, task: asyncio.Future[Any]) -> None:
+        tasks = self._pty_cleanup_tasks
+        if tasks is None:
+            tasks = set()
+            self._pty_cleanup_tasks = tasks
+        tasks.add(task)
+
+        def forget_task(done: asyncio.Future[Any]) -> None:
+            tasks.discard(done)
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "Background PTY cleanup failed",
+                        error,
+                    )
+
+        task.add_done_callback(forget_task)
+
+    async def _settle_pty_cleanup(
+        self,
+        operation: Awaitable[None],
+        *,
+        timeout: float | None = None,
+        propagate_timeout: bool = True,
+    ) -> None:
+        """Settle cleanup after PTY ownership leaves the session registry.
+
+        The cleanup task is independently owned so caller cancellation cannot
+        abandon it. A timeout bounds how long the caller waits while leaving
+        the provider operation running to finish its ordered cleanup.
+        """
+
+        async def run_operation() -> None:
+            await operation
+
+        task = create_cleanup_owner(
+            run_operation(),
+            name="agents.pty_cleanup",
+            cancel_grace_s=max(
+                self._pty_cleanup_timeout_s() if timeout is None else timeout,
+                0.1,
+            ),
+        )
+        self._track_pty_cleanup_task(task)
+        _track_sync_background_task(task)
+        caller_cancellation: asyncio.CancelledError | None = None
+        deadline = asyncio.get_running_loop().time() + (
+            self._pty_cleanup_timeout_s() if timeout is None else timeout
+        )
+        timed_out = False
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                await asyncio.wait((task,), timeout=remaining)
+            except asyncio.CancelledError as error:
+                raise_if_cleanup_owner_force_cancelling(error, nested_tasks=(task,))
+                caller_cancellation = caller_cancellation or error
+
+        if task.done():
+            task.result()
+            if caller_cancellation is not None:
+                raise caller_cancellation
+        elif caller_cancellation is not None:
+            raise caller_cancellation
+        elif timed_out and propagate_timeout:
+            raise asyncio.TimeoutError()
+
+    async def _rollback_pty_start(
+        self,
+        process_id: int,
+        entry: Any,
+        pty_registry: dict[int, Any],
+        terminate_entry: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Remove and terminate a PTY whose start failed after registration."""
+
+        async def rollback() -> None:
+            async with self._pty_lock:
+                if pty_registry.get(process_id) is not entry:
+                    return
+                pty_registry.pop(process_id)
+                self._reserved_pty_process_ids.discard(process_id)
+
+            await terminate_entry()
+
+        try:
+            await self._settle_pty_cleanup(
+                rollback(),
+                propagate_timeout=False,
+            )
+        except BaseException as error:
+            raise_if_cleanup_owner_force_cancelling(error)
+            if not isinstance(error, asyncio.CancelledError):
+                log_tool_action_error(logger, "Failed to roll back PTY start", error)
+
+    async def _cleanup_pty_entries(
+        self,
+        entries: Sequence[_PtyEntryT],
+        cleanup_entry: Callable[[_PtyEntryT], Awaitable[None]],
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Attempt every PTY cleanup and re-raise the first failure."""
+
+        loop = asyncio.get_running_loop()
+        batch_timeout = self._pty_cleanup_timeout_s() if timeout is None else timeout
+        deadline = loop.time() + batch_timeout
+        cleanup_tasks = [
+            create_cleanup_owner(
+                self._settle_pty_cleanup(
+                    cleanup_entry(entry),
+                    timeout=batch_timeout,
+                    propagate_timeout=False,
+                ),
+                name="agents.pty_cleanup_batch",
+            )
+            for entry in entries
+        ]
+
+        def consume_cleanup_task_exception(task: asyncio.Task[Any]) -> None:
+            if not task.cancelled():
+                error = task.exception()
+                if error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "PTY cleanup batch entry failed",
+                        error,
+                    )
+
+        for task in cleanup_tasks:
+            task.add_done_callback(consume_cleanup_task_exception)
+            _track_sync_background_task(task)
+
+        pending = set(cleanup_tasks)
+        caller_cancellation: asyncio.CancelledError | None = None
+        cleanup_errors: dict[int, BaseException] = {}
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                done, pending = await asyncio.wait(pending, timeout=remaining)
+            except BaseException as error:
+                if isinstance(error, asyncio.CancelledError):
+                    raise_if_cleanup_owner_force_cancelling(error, nested_tasks=tuple(pending))
+                    caller_cancellation = caller_cancellation or error
+                    continue
+                raise
+
+            for index, task in enumerate(cleanup_tasks):
+                if task not in done:
+                    continue
+                try:
+                    task.result()
+                except BaseException as error:
+                    cleanup_errors.setdefault(index, error)
+        if caller_cancellation is not None:
+            cleanup_error = cleanup_errors.get(min(cleanup_errors)) if cleanup_errors else None
+            if cleanup_error is not None:
+                raise caller_cancellation from cleanup_error
+            raise caller_cancellation
+        if cleanup_errors:
+            raise cleanup_errors[min(cleanup_errors)]
+        if self._has_pending_pty_cleanup_tasks():
+            raise asyncio.TimeoutError()
+        if pending:
+            raise asyncio.TimeoutError()
 
     async def pty_exec_start(
         self,

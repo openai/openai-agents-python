@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,9 +105,23 @@ class SandboxRuntime(Generic[TContext]):
     def current_session(self) -> BaseSandboxSession | None:
         return self._session_manager.current_session
 
+    @property
+    def resume_state_after_cleanup_error(self) -> dict[str, object] | None:
+        return self._session_manager.resume_state_after_cleanup_error
+
+    @property
+    def caller_cancelled_during_cleanup(self) -> bool:
+        return self._session_manager.caller_cancelled_during_cleanup
+
+    def register_resume_state_observer(self, observer: Callable[[dict[str, object]], None]) -> None:
+        self._session_manager.register_resume_state_observer(observer)
+
     def apply_result_metadata(self, result: RunResult | RunResultStreaming) -> None:
         session = self.current_session
         result._sandbox_session = session
+        self._session_manager.register_resume_state_observer(
+            lambda resume_state: setattr(result, "_sandbox_resume_state", resume_state)
+        )
         if isinstance(result, RunResultStreaming):
 
             async def _cleanup_and_store() -> None:
@@ -123,8 +137,13 @@ class SandboxRuntime(Generic[TContext]):
                             "Failed to enqueue sandbox memory after streamed run",
                             error,
                         )
-                    payload = await self.cleanup()
-                    result._sandbox_resume_state = payload
+                    try:
+                        payload = await self.cleanup()
+                    except BaseException:
+                        result._sandbox_resume_state = self.resume_state_after_cleanup_error
+                        raise
+                    else:
+                        result._sandbox_resume_state = payload
                 finally:
                     result._sandbox_session = None
 
