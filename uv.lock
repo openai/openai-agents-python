@@ -1598,6 +1598,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
 ]
 
+[package.optional-dependencies]
+http2 = [
+    { name = "h2" },
+]
+
 [[package]]
 name = "httpx2"
 version = "2.12.0"
@@ -4004,20 +4009,20 @@ wheels = [
 
 [[package]]
 name = "runloop-api-client"
-version = "1.16.0"
+version = "1.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "distro" },
-    { name = "httpx" },
+    { name = "httpx", extra = ["http2"] },
     { name = "pydantic" },
     { name = "sniffio" },
     { name = "typing-extensions" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/92/27/8615b05675e0922e87b68c0b8a19158f2f1f7fbac64ca1236fc8e6b156c6/runloop_api_client-1.16.0.tar.gz", hash = "sha256:b43551c4d31eab5294cf63e7e9841f55881800f0eb6eebf594838a6132db2ee0", size = 624901, upload-time = "2026-04-03T21:35:38.369Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/95/dcf9c49bdd06a1beca9e1734bc28440ab8197c87cfc07063ce0bba879519/runloop_api_client-1.31.0.tar.gz", hash = "sha256:674415eb5a62a08c8c9f3fd69fc5cc7a161feb02a4deb5cf939bf9f9b6a93889", size = 666916, upload-time = "2026-08-25T18:26:24.065Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/a3/0bf8858164e44ea52461c37b18530f1a73e9268ddb744fc27ae7e8ae9557/runloop_api_client-1.16.0-py3-none-any.whl", hash = "sha256:ff8d59579a1411d42569fbddc773dd05f74f40aa24354aa35b43be1dec9006f1", size = 366259, upload-time = "2026-04-03T21:35:40.249Z" },
+    { url = "https://files.pythonhosted.org/packages/19/da/49e0b7940d2abd17d4b34c95068756cd7750c59979406e881dfc935e3a5e/runloop_api_client-1.31.0-py3-none-any.whl", hash = "sha256:e1e3dc13d27b20bf25b397050b7e22473c28ab02c8c6703e30fa2004f1755c45", size = 412406, upload-time = "2026-08-25T18:26:22.651Z" },
 ]
 
 [[package]]
