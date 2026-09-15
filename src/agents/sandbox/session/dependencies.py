@@ -294,6 +294,7 @@ class Dependencies:
             try:
                 await _close_best_effort(value)
             except asyncio.CancelledError as exc:
+                raise_if_cleanup_owner_force_cancelling(exc)
                 if cancellation is None:
                     cancellation = exc
 

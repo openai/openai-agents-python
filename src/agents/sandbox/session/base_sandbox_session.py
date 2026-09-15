@@ -4,7 +4,6 @@ import io
 import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
 from pathlib import Path, PurePath
 from typing import Any, Literal, NoReturn, TypeVar
 
@@ -566,6 +565,11 @@ class BaseSandboxSession(abc.ABC):
 
         self._backend_preservation_required = False
 
+    def _require_backend_preservation(self) -> None:
+        """Retain a backend when teardown failed before its deletion was confirmed."""
+
+        self._backend_preservation_required = True
+
     @redact_mount_error_data
     async def shutdown(self) -> None:
         """
@@ -624,12 +628,14 @@ class BaseSandboxSession(abc.ABC):
         try:
             await self.run_pre_stop_hooks()
         except BaseException as exc:
+            raise_if_cleanup_owner_force_cancelling(exc)
             cleanup_error = exc
         try:
             if cleanup_error is None and not self._pre_stop_hooks_failed:
                 try:
                     await self.stop()
                 except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     cleanup_error = exc
                     self._deferred_shutdown_requested = True
 
@@ -638,6 +644,7 @@ class BaseSandboxSession(abc.ABC):
                 try:
                     await asyncio.shield(deferred_cleanup_task)
                 except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     if cleanup_error is None:
                         cleanup_error = exc
             elif not self._should_preserve_backend_on_cleanup():
@@ -648,6 +655,7 @@ class BaseSandboxSession(abc.ABC):
                         await self.shutdown()
                         self._deferred_shutdown_requested = False
                     except BaseException as exc:
+                        raise_if_cleanup_owner_force_cancelling(exc)
                         if cleanup_error is None:
                             cleanup_error = exc
                         if self._has_pending_pty_cleanup_tasks():
@@ -668,6 +676,7 @@ class BaseSandboxSession(abc.ABC):
                 try:
                     await self._aclose_dependencies()
                 except BaseException as exc:
+                    raise_if_cleanup_owner_force_cancelling(exc)
                     if (
                         self._has_pending_pty_cleanup_tasks()
                         or self._has_pending_dependency_close_task()
@@ -677,6 +686,7 @@ class BaseSandboxSession(abc.ABC):
                         )
                     if cleanup_error is None:
                         cleanup_error = exc
+        raise_if_cleanup_owner_force_cancelling(cleanup_error)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -1037,7 +1047,13 @@ class BaseSandboxSession(abc.ABC):
         def forget_task(done: asyncio.Future[Any]) -> None:
             tasks.discard(done)
             if not done.cancelled():
-                done.exception()
+                error = done.exception()
+                if error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "Background PTY cleanup failed",
+                        error,
+                    )
 
         task.add_done_callback(forget_task)
 
@@ -1081,6 +1097,7 @@ class BaseSandboxSession(abc.ABC):
             try:
                 await asyncio.wait((task,), timeout=remaining)
             except asyncio.CancelledError as error:
+                raise_if_cleanup_owner_force_cancelling(error, nested_tasks=(task,))
                 caller_cancellation = caller_cancellation or error
 
         if task.done():
@@ -1110,11 +1127,15 @@ class BaseSandboxSession(abc.ABC):
 
             await terminate_entry()
 
-        with suppress(BaseException):
+        try:
             await self._settle_pty_cleanup(
                 rollback(),
                 propagate_timeout=False,
             )
+        except BaseException as error:
+            raise_if_cleanup_owner_force_cancelling(error)
+            if not isinstance(error, asyncio.CancelledError):
+                log_tool_action_error(logger, "Failed to roll back PTY start", error)
 
     async def _cleanup_pty_entries(
         self,
@@ -1142,7 +1163,13 @@ class BaseSandboxSession(abc.ABC):
 
         def consume_cleanup_task_exception(task: asyncio.Task[Any]) -> None:
             if not task.cancelled():
-                task.exception()
+                error = task.exception()
+                if error is not None:
+                    log_tool_action_error(
+                        logger,
+                        "PTY cleanup batch entry failed",
+                        error,
+                    )
 
         for task in cleanup_tasks:
             task.add_done_callback(consume_cleanup_task_exception)
@@ -1159,6 +1186,7 @@ class BaseSandboxSession(abc.ABC):
                 done, pending = await asyncio.wait(pending, timeout=remaining)
             except BaseException as error:
                 if isinstance(error, asyncio.CancelledError):
+                    raise_if_cleanup_owner_force_cancelling(error, nested_tasks=tuple(pending))
                     caller_cancellation = caller_cancellation or error
                     continue
                 raise
@@ -1170,10 +1198,13 @@ class BaseSandboxSession(abc.ABC):
                     task.result()
                 except BaseException as error:
                     cleanup_errors.setdefault(index, error)
+        if caller_cancellation is not None:
+            cleanup_error = cleanup_errors.get(min(cleanup_errors)) if cleanup_errors else None
+            if cleanup_error is not None:
+                raise caller_cancellation from cleanup_error
+            raise caller_cancellation
         if cleanup_errors:
             raise cleanup_errors[min(cleanup_errors)]
-        if caller_cancellation is not None:
-            raise caller_cancellation
         if self._has_pending_pty_cleanup_tasks():
             raise asyncio.TimeoutError()
         if pending:

@@ -375,7 +375,7 @@ def test_run_sync_bounds_deferred_cleanup_on_dependency_loop(monkeypatch, fresh_
 
         assert cleanup_started.is_set()
         assert elapsed < 0.5
-        assert deferred_tasks and not deferred_tasks[0].done()
+        assert deferred_tasks and deferred_tasks[0].cancelled()
         assert not dependency_loop.is_running()
     finally:
         for task in deferred_tasks:

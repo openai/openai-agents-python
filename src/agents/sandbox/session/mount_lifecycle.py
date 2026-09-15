@@ -54,6 +54,7 @@ async def with_ephemeral_mounts_removed(
             session,
             mount_entry.mount_strategy.teardown_for_snapshot(mount_entry, session, mount_path),
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or transition_cancelled
         if transition_error is not None:
             detach_error = _mount_transition_error(
@@ -94,6 +95,7 @@ async def with_ephemeral_mounts_removed(
             error_path=error_path,
             error_cls=error_cls,
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or restore_cancelled
     if detach_transition_ambiguous and restore_error is None:
         terminal_error, terminal_cancelled = await _terminate_ambiguous_mount_session(session)
@@ -155,6 +157,7 @@ async def _restore_detached_mounts_settled(
             session,
             mount_entry.mount_strategy.restore_after_snapshot(mount_entry, session, mount_path),
         )
+        raise_if_cleanup_owner_force_cancelling()
         caller_cancelled = caller_cancelled or transition_cancelled
         if transition_error is not None:
             current_error = _mount_transition_error(

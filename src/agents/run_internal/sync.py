@@ -149,11 +149,31 @@ async def _settle_sync_background_work(loop: asyncio.AbstractEventLoop) -> None:
     await loop.shutdown_asyncgens()
 
 
+def _force_settle_sync_background_work(loop: asyncio.AbstractEventLoop, *, timeout: float) -> None:
+    """Cancel and drain caller-loop cleanup after the normal settlement bound expires."""
+
+    _force_cancel_sync_background_tasks(loop)
+    try:
+        loop.run_until_complete(
+            asyncio.wait_for(_settle_pending_sync_background_tasks(loop), timeout=timeout)
+        )
+    except BaseException:
+        pass
+
+    try:
+        loop.run_until_complete(asyncio.wait_for(loop.shutdown_asyncgens(), timeout=timeout))
+    except BaseException:
+        pass
+
+
 def _force_cancel_sync_background_tasks(loop: asyncio.AbstractEventLoop) -> None:
     """Force-cancel cleanup owners when caller-owned loop settlement exceeds its bound."""
 
     for task in _get_pending_sync_background_tasks(loop):
-        force_cancel_cleanup_owner(task)
+        if not force_cancel_cleanup_owner(task):
+            # A caller-owned loop can also contain a directly tracked task. It has no delayed
+            # owner cancellation policy, so cancel it immediately before the bounded drain.
+            task.cancel()
 
 
 def _get_default_loop() -> asyncio.AbstractEventLoop | None:

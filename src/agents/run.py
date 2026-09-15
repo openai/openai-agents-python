@@ -154,11 +154,10 @@ from .run_internal.sync import (
     _IS_SYNC_RUN,
     _SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
     _create_sync_task,
-    _force_cancel_sync_background_tasks,
+    _force_settle_sync_background_work,
     _get_default_loop,
     _get_pending_sync_background_tasks,
     _get_sync_loop,
-    _settle_pending_sync_background_tasks,
     _settle_sync_background_work,
     _start_sync_loop_driver,
     _stop_sync_loop_driver,
@@ -949,7 +948,27 @@ class AgentRunner:
                 run_exception: BaseException | None = None
                 run_cancellation: asyncio.CancelledError | None = None
                 sandbox_cleanup_cancellation: asyncio.CancelledError | None = None
+                sandbox_cleanup_error: BaseException | None = None
                 sandbox_resume_state_after_cleanup: dict[str, object] | None = None
+
+                def _publish_late_sandbox_resume_state(
+                    resume_state: dict[str, object],
+                ) -> None:
+                    nonlocal sandbox_resume_state_after_cleanup
+                    sandbox_resume_state_after_cleanup = resume_state
+                    if completed_result is not None:
+                        completed_result._sandbox_resume_state = resume_state
+                        return
+                    for error in (
+                        run_cancellation,
+                        sandbox_cleanup_cancellation,
+                        run_exception,
+                        sandbox_cleanup_error,
+                    ):
+                        if error is not None:
+                            cast(Any, error)._sandbox_resume_state = resume_state
+
+                sandbox_runtime.register_resume_state_observer(_publish_late_sandbox_resume_state)
 
                 def _with_reasoning_item_id_policy(result: RunResult) -> RunResult:
                     result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
@@ -2357,6 +2376,7 @@ class AgentRunner:
                     log_tool_action_warning(
                         logger, "Failed to clean up sandbox resources after run", error
                     )
+                    sandbox_cleanup_error = error
                     sandbox_resume_state_after_cleanup = (
                         sandbox_runtime.resume_state_after_cleanup_error
                     )
@@ -2377,10 +2397,15 @@ class AgentRunner:
                         # A non-streaming cancellation has no result object to carry state. Keep
                         # the recoverable backend state on the cancellation so callers can resume
                         # instead of leaving an unreachable preserved backend behind.
-                        cancellation = run_cancellation or sandbox_cleanup_cancellation
-                        if cancellation is not None:
+                        recovery_error = (
+                            run_cancellation
+                            or sandbox_cleanup_cancellation
+                            or run_exception
+                            or sandbox_cleanup_error
+                        )
+                        if recovery_error is not None:
                             cast(
-                                Any, cancellation
+                                Any, recovery_error
                             )._sandbox_resume_state = sandbox_resume_state_after_cleanup
                 try:
                     await dispose_resolved_computers(
@@ -2530,20 +2555,11 @@ class AgentRunner:
                                 timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
                             )
                         )
-                    except asyncio.TimeoutError:
-                        _force_cancel_sync_background_tasks(sync_loop)
-                        # Cancellation is only a request. Drain the force-cancelled cleanup
-                        # owners until they are terminal before returning control of this loop.
-                        with contextlib.suppress(BaseException):
-                            sync_loop.run_until_complete(
-                                asyncio.wait_for(
-                                    _settle_pending_sync_background_tasks(sync_loop),
-                                    timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
-                                )
-                            )
                     except BaseException:
-                        with contextlib.suppress(BaseException):
-                            sync_loop.run_until_complete(asyncio.sleep(0))
+                        _force_settle_sync_background_work(
+                            sync_loop,
+                            timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
+                        )
                 else:
                     driver = _start_sync_loop_driver(sync_loop)
                     driver.schedule_settlement()

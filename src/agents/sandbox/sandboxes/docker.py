@@ -517,8 +517,8 @@ class DockerSandboxSession(BaseSandboxSession):
                     command_for_errors=tuple(command),
                     kill_on_timeout=False,
                 )
-        except Exception:
-            pass
+        except Exception as error:
+            log_tool_action_warning(logger, "Docker best-effort cleanup command failed", error)
 
     async def _exec_checked(
         self,
@@ -1195,8 +1195,8 @@ class DockerSandboxSession(BaseSandboxSession):
                     loop,
                 )
                 future.result()
-        except Exception:
-            pass
+        except Exception as error:
+            log_tool_action_warning(logger, "Docker PTY output reader failed", error)
         finally:
             future = asyncio.run_coroutine_threadsafe(
                 self._mark_pty_output_closed(entry),
@@ -1204,8 +1204,12 @@ class DockerSandboxSession(BaseSandboxSession):
             )
             try:
                 future.result()
-            except Exception:
-                pass
+            except Exception as error:
+                log_tool_action_warning(
+                    logger,
+                    "Docker PTY output close notification failed",
+                    error,
+                )
 
     async def _append_pty_output_chunks(
         self, entry: _DockerPtyProcessEntry, chunks: list[bytes]
@@ -1232,7 +1236,8 @@ class DockerSandboxSession(BaseSandboxSession):
                     _DOCKER_EXECUTOR,
                     lambda: api.exec_inspect(entry.exec_id),
                 )
-            except Exception:
+            except Exception as error:
+                log_tool_action_warning(logger, "Docker PTY exit watcher failed", error)
                 break
 
             if not inspect_result.get("Running", False):
@@ -1268,13 +1273,24 @@ class DockerSandboxSession(BaseSandboxSession):
             if not inspect_future.done():
                 self._track_pty_exit_refresh_result(inspect_future, entry)
                 self._track_pty_cleanup_task(inspect_future)
+            else:
+                try:
+                    inspect_future.result()
+                except Exception as error:
+                    log_tool_action_warning(logger, "Docker PTY exit inspection failed", error)
             return
         except asyncio.CancelledError:
             if not inspect_future.done():
                 self._track_pty_exit_refresh_result(inspect_future, entry)
                 self._track_pty_cleanup_task(inspect_future)
+            else:
+                self._observe_pty_exit_inspection_result(inspect_future)
             raise
-        except Exception:
+        except Exception as error:
+            if not inspect_future.done():
+                self._track_pty_exit_refresh_result(inspect_future, entry)
+                self._track_pty_cleanup_task(inspect_future)
+            log_tool_action_warning(logger, "Docker PTY exit inspection failed", error)
             return
 
         if inspect_result.get("Running", False):
@@ -1283,6 +1299,17 @@ class DockerSandboxSession(BaseSandboxSession):
         exit_code = inspect_result.get("ExitCode")
         if exit_code is not None:
             entry.exit_code = int(exit_code)
+
+    @staticmethod
+    def _observe_pty_exit_inspection_result(
+        inspect_future: asyncio.Future[dict[str, object]],
+    ) -> None:
+        if inspect_future.cancelled():
+            return
+        try:
+            inspect_future.result()
+        except Exception as error:
+            log_tool_action_warning(logger, "Docker PTY exit inspection failed", error)
 
     def _track_pty_exit_refresh_result(
         self,
@@ -1294,7 +1321,8 @@ class DockerSandboxSession(BaseSandboxSession):
                 return
             try:
                 inspect_result = done.result()
-            except Exception:
+            except Exception as error:
+                log_tool_action_warning(logger, "Deferred Docker PTY exit inspection failed", error)
                 return
             if inspect_result.get("Running", False):
                 return
@@ -1436,6 +1464,7 @@ class DockerSandboxSession(BaseSandboxSession):
             raise
         except Exception as error:
             log_tool_action_warning(logger, "Failed to kill Docker PTY process", error)
+            raise
 
     async def exists(self) -> bool:
         try:

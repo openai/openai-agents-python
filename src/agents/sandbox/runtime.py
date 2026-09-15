@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +112,9 @@ class SandboxRuntime(Generic[TContext]):
     @property
     def caller_cancelled_during_cleanup(self) -> bool:
         return self._session_manager.caller_cancelled_during_cleanup
+
+    def register_resume_state_observer(self, observer: Callable[[dict[str, object]], None]) -> None:
+        self._session_manager.register_resume_state_observer(observer)
 
     def apply_result_metadata(self, result: RunResult | RunResultStreaming) -> None:
         session = self.current_session

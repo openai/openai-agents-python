@@ -4924,7 +4924,8 @@ async def test_docker_completed_pty_kill_failure_is_observed(
     monkeypatch.setattr(container, "exec_run", fail_kill)
     caplog.set_level(logging.WARNING, logger="openai.agents")
 
-    await session._kill_pty_pid_path(Path("/tmp/failed.pid"))
+    with pytest.raises(ExecTransportError):
+        await session._kill_pty_pid_path(Path("/tmp/failed.pid"))
     await asyncio.sleep(0)
 
     assert "Failed to kill Docker PTY process" in caplog.text
