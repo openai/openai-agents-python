@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from functools import cached_property
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx2
 
@@ -22,6 +23,51 @@ from ..logger import (
 from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace
+
+# Warn once per process when OPENAI_BASE_URL is set but traces still go to OpenAI.
+_warned_default_trace_endpoint_with_custom_model_base = False
+
+
+def _split_url(url: str) -> tuple[str, str, int | None, str] | None:
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname or ""
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        return parts.scheme, hostname, port, parts.path
+    except ValueError:
+        return None
+
+
+def _url_origin_and_path(url: str) -> tuple[str, str] | None:
+    parsed = _split_url(url)
+    if parsed is None:
+        return None
+    scheme, hostname, port, path = parsed
+    if not hostname:
+        return None
+    scheme = scheme.lower() or "https"
+    hostname = hostname.lower()
+    if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        origin = f"{scheme}://{hostname}"
+    else:
+        origin = f"{scheme}://{hostname}:{port}"
+    return origin, path.rstrip("/")
+
+
+def _url_origin(url: str) -> str | None:
+    parsed = _url_origin_and_path(url)
+    return None if parsed is None else parsed[0]
+
+
+def _redact_url_for_log(url: str) -> str:
+    """Drop userinfo, path, query, and fragment so gateway credentials never reach logs."""
+    origin = _url_origin(url)
+    if origin is None:
+        return "<invalid-url>"
+    return origin
 
 
 class ConsoleSpanExporter(TracingExporter):
@@ -59,7 +105,7 @@ class BackendSpanExporter(TracingExporter):
         api_key: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        endpoint: str = _OPENAI_TRACING_INGEST_ENDPOINT,
+        endpoint: str | None = None,
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
@@ -72,7 +118,9 @@ class BackendSpanExporter(TracingExporter):
                 `os.environ["OPENAI_ORG_ID"]` if not provided.
             project: The OpenAI project to use. Defaults to
                 `os.environ["OPENAI_PROJECT_ID"]` if not provided.
-            endpoint: The HTTP endpoint to which traces/spans are posted.
+            endpoint: The HTTP endpoint to which traces/spans are posted. Defaults to
+                `os.environ["OPENAI_TRACING_INGEST_ENDPOINT"]` if not provided, otherwise the
+                OpenAI traces ingest endpoint. This is independent of `OPENAI_BASE_URL`.
             max_retries: Maximum number of retries upon failures.
             base_delay: Base delay (in seconds) for the first backoff.
             max_delay: Maximum delay (in seconds) for backoff growth.
@@ -80,7 +128,7 @@ class BackendSpanExporter(TracingExporter):
         self._api_key = api_key
         self._organization = organization
         self._project = project
-        self.endpoint = endpoint
+        self._endpoint = endpoint
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
@@ -115,6 +163,54 @@ class BackendSpanExporter(TracingExporter):
     def project(self):
         return self._project or os.environ.get("OPENAI_PROJECT_ID")
 
+    def _invalidate_endpoint(self) -> None:
+        self.__dict__.pop("_resolved_endpoint", None)
+
+    @property
+    def endpoint(self) -> str:
+        if "_resolved_endpoint" not in self.__dict__:
+            self.__dict__["_resolved_endpoint"] = (
+                self._endpoint
+                or os.environ.get("OPENAI_TRACING_INGEST_ENDPOINT")
+                or self._OPENAI_TRACING_INGEST_ENDPOINT
+            )
+        return self.__dict__["_resolved_endpoint"]
+
+    @endpoint.setter
+    def endpoint(self, value: str) -> None:
+        self._endpoint = value
+        self._invalidate_endpoint()
+
+    def _warn_if_trace_endpoint_ignores_model_base_url(self) -> None:
+        global _warned_default_trace_endpoint_with_custom_model_base
+        if _warned_default_trace_endpoint_with_custom_model_base:
+            return
+        model_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        if not model_base:
+            return
+        if not self._should_sanitize_for_openai_tracing_api():
+            return
+        model_origin = _url_origin(model_base)
+        if model_origin is not None and model_origin == _url_origin(
+            self._OPENAI_TRACING_INGEST_ENDPOINT
+        ):
+            return
+        _warned_default_trace_endpoint_with_custom_model_base = True
+        if self._endpoint is not None:
+            redirect_hint = (
+                "Pass a different endpoint= to BackendSpanExporter, or omit that argument so "
+                "OPENAI_TRACING_INGEST_ENDPOINT can redirect traces"
+            )
+        else:
+            redirect_hint = "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces"
+        logger.warning(
+            "[non-fatal] Tracing still exports to %s while OPENAI_BASE_URL is %s. "
+            "%s, or disable tracing with OPENAI_AGENTS_DISABLE_TRACING=1.",
+            _redact_url_for_log(self.endpoint),
+            _redact_url_for_log(model_base),
+            redirect_hint,
+        )
+
     def export(self, items: list[Trace | Span[Any]]) -> None:
         self._export_with_deadline(items, deadline=None)
 
@@ -132,6 +228,8 @@ class BackendSpanExporter(TracingExporter):
             if not api_key:
                 logger.warning("OPENAI_API_KEY is not set, skipping trace export")
                 continue
+
+            self._warn_if_trace_endpoint_ignores_model_base_url()
 
             sanitize_for_openai = self._should_sanitize_for_openai_tracing_api()
             data: list[dict[str, Any]] = []
@@ -256,7 +354,9 @@ class BackendSpanExporter(TracingExporter):
         return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
-        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
+        endpoint = _url_origin_and_path(self.endpoint)
+        default = _url_origin_and_path(self._OPENAI_TRACING_INGEST_ENDPOINT)
+        return endpoint is not None and endpoint == default
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
         """Drop or truncate span fields known to be rejected by traces ingest."""
