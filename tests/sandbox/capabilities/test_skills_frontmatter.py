@@ -101,6 +101,36 @@ class TestParseFrontmatter:
 
         assert parsed == {"description": "text here\n", "name": "triage"}
 
+    @pytest.mark.parametrize("header", ["|-", ">-", "|", ">"])
+    def test_quotes_inside_a_block_scalar_are_content(self, header: str) -> None:
+        parsed = _frontmatter(f'description: {header}\n  "Use for triage"')
+
+        assert parsed["description"].startswith('"Use for triage"')
+
+    def test_wrapped_plain_scalar_continues_across_a_blank_line(self) -> None:
+        parsed = _frontmatter("description: Use for triage.\n\n  Avoid PR review.")
+
+        assert parsed["description"] == "Use for triage.\nAvoid PR review."
+
+    def test_wrapped_plain_scalar_stops_at_a_blank_line_before_a_new_key(self) -> None:
+        parsed = _parse_frontmatter(
+            "---\ndescription: Use for triage.\n\nname: triage\n---\n# Skill\n"
+        )
+
+        assert parsed == {"description": "Use for triage.", "name": "triage"}
+
+    def test_indented_document_marker_stays_inside_a_block_scalar(self) -> None:
+        parsed = _parse_frontmatter(
+            "---\ndescription: |\n  first\n  ---\n  last\nname: triage\n---\n# Skill\n"
+        )
+
+        assert parsed == {"description": "first\n---\nlast\n", "name": "triage"}
+
+    def test_folded_scalar_keeps_breaks_around_a_more_indented_line(self) -> None:
+        parsed = _frontmatter("description: >\n  first\n    indented\n  last")
+
+        assert parsed["description"] == "first\n  indented\nlast\n"
+
     def test_missing_frontmatter_returns_empty(self) -> None:
         assert _parse_frontmatter("# Skill\nno frontmatter here\n") == {}
 

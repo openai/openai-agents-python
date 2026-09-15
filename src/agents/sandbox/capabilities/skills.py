@@ -384,10 +384,12 @@ def _indent_width(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
+def _is_quoted(value: str) -> bool:
+    return len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}
+
+
 def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        return value[1:-1]
-    return value
+    return value[1:-1] if _is_quoted(value) else value
 
 
 def _read_block_scalar(
@@ -434,14 +436,23 @@ def _read_block_scalar(
     if style == "|":
         text = "\n".join(block)
     else:
+        # A folded scalar joins lines with spaces, but a blank line becomes a break and a
+        # more-indented line keeps its own breaks and leading whitespace.
         folded: list[str] = []
+        previous: str | None = None
         for entry in block:
             if entry == "":
                 folded.append("\n")
-            elif folded and folded[-1] not in {"", "\n"} and not entry.startswith(" "):
-                folded.append(" " + entry)
-            else:
+                previous = "blank"
+                continue
+            kind = "more" if entry.startswith(" ") else "normal"
+            if previous is None or previous == "blank":
                 folded.append(entry)
+            elif kind == "more" or previous == "more":
+                folded.append("\n" + entry)
+            else:
+                folded.append(" " + entry)
+            previous = kind
         text = "".join(folded)
 
     if chomping == "strip":
@@ -461,13 +472,30 @@ def _read_wrapped_plain(
 
     parts = [first] if first else []
     index = start_index
+    consumed = start_index
+    pending_breaks = 0
     while index < len(lines):
         line = lines[index]
-        if line.strip() == "" or _indent_width(line) <= key_indent:
+        if line.strip() == "":
+            pending_breaks += 1
+            index += 1
+            continue
+        if _indent_width(line) <= key_indent:
             break
+        if pending_breaks:
+            parts.append("\n" * pending_breaks)
+            pending_breaks = 0
         parts.append(line.strip())
         index += 1
-    return " ".join(part for part in parts if part), index
+        consumed = index
+
+    text = ""
+    for part in parts:
+        if not text or part.startswith("\n") or text.endswith("\n"):
+            text += part
+        else:
+            text += " " + part
+    return text, consumed
 
 
 def _parse_frontmatter(markdown: str) -> dict[str, str]:
@@ -484,7 +512,8 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
 
     end_index: int | None = None
     for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
+        # An indented "---" is block scalar content, not the closing delimiter.
+        if line.rstrip() == "---":
             end_index = index
             break
     if end_index is None:
@@ -507,14 +536,12 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
 
         if parsed_value and parsed_value[0] in {">", "|"}:
             parsed_value, index = _read_block_scalar(body, index, parsed_value, key_indent)
-        elif (
-            len(parsed_value) < 2
-            or parsed_value[0] != parsed_value[-1]
-            or parsed_value[0] not in {"'", '"'}
-        ):
+        elif _is_quoted(parsed_value):
+            parsed_value = _unquote(parsed_value)
+        else:
             parsed_value, index = _read_wrapped_plain(body, index, parsed_value, key_indent)
 
-        metadata[parsed_key] = _unquote(parsed_value)
+        metadata[parsed_key] = parsed_value
     return metadata
 
 
