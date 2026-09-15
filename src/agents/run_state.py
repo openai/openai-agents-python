@@ -39,6 +39,7 @@ from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import TypedDict, TypeVar
 
 from ._run_state_agent_identity import (
+    _agent_identity_signature,
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
     _build_agent_map,
@@ -226,8 +227,9 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "override a sticky decision for the same tool."
     ),
     "1.17": (
-        "Persists Docker container labels and current-response generated-item ownership across "
-        "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
+        "Persists Docker container labels, current-response generated-item ownership, and "
+        "Agent.as_tool() owner provenance across resume flows, including pending resumed Session "
+        "writes and terminal-unrecoverable runs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -2817,11 +2819,14 @@ def _serialize_pending_nested_agent_tool_runs(
             continue
 
         try:
-            entry["agent_run_state"] = nested_state.to_json(
+            nested_state_data = nested_state.to_json(
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
+            function_tool = getattr(function_run, "function_tool", None)
+            owner = getattr(function_tool, "_agent_instance", None)
+            owner_signature = _agent_identity_signature(owner) if isinstance(owner, Agent) else None
         except Exception:
             if strict_context:
                 raise
@@ -2829,15 +2834,26 @@ def _serialize_pending_nested_agent_tool_runs(
                 "Failed to serialize nested agent run state for tool call %s.",
                 tool_call.call_id,
             )
+            continue
+
+        entry["agent_run_state"] = nested_state_data
+        if owner_signature is not None:
+            entry["agent_tool_owner_signature"] = owner_signature
 
 
 class _SerializedAgentToolRunResult:
     """Minimal run-result wrapper used to restore nested agent-as-tool resumptions."""
 
-    def __init__(self, state: RunState[Any, Agent[Any]]) -> None:
+    def __init__(
+        self,
+        state: RunState[Any, Agent[Any]],
+        *,
+        agent_tool_owner_signature: str | None = None,
+    ) -> None:
         self._state = state
         self.interruptions = list(state.get_interruptions())
         self.final_output = None
+        self.agent_tool_owner_signature = agent_tool_owner_signature
 
     def to_state(self) -> RunState[Any, Agent[Any]]:
         return self._state
@@ -2849,6 +2865,7 @@ class _DeserializedFunctionAction:
 
     action: ToolRunFunction
     nested_agent_run_state_data: Mapping[str, Any] | None
+    agent_tool_owner_signature: str | None = None
 
 
 def _serialize_guardrail_results(
@@ -3013,7 +3030,10 @@ async def _restore_pending_nested_agent_tool_runs(
             )
             continue
 
-        pending_result = _SerializedAgentToolRunResult(nested_state)
+        pending_result = _SerializedAgentToolRunResult(
+            nested_state,
+            agent_tool_owner_signature=function_action.agent_tool_owner_signature,
+        )
         if not pending_result.interruptions:
             continue
 
@@ -3234,6 +3254,12 @@ async def _deserialize_processed_response(
                 )
 
                 nested_state_data = entry.get("agent_run_state")
+                owner_signature = entry.get("agent_tool_owner_signature")
+                if owner_signature is not None and not isinstance(owner_signature, str):
+                    raise validation_error_factory(
+                        "Run state Agent.as_tool() owner provenance has an invalid type.",
+                        UserError,
+                    )
                 deserialized.append(
                     _DeserializedFunctionAction(
                         action=ToolRunFunction(
@@ -3242,6 +3268,9 @@ async def _deserialize_processed_response(
                         ),
                         nested_agent_run_state_data=(
                             nested_state_data if isinstance(nested_state_data, Mapping) else None
+                        ),
+                        agent_tool_owner_signature=(
+                            owner_signature if isinstance(owner_signature, str) else None
                         ),
                     )
                 )
