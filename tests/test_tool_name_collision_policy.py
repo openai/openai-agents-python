@@ -555,6 +555,118 @@ async def test_replacing_interrupted_agent_tool_fails_before_side_effects() -> N
 
 
 @pytest.mark.asyncio
+async def test_replacing_interrupted_agent_tool_before_restore_fails_before_side_effects() -> None:
+    calls: list[str] = []
+
+    original_sensitive_tool = function_tool(
+        lambda: "original-sensitive",
+        name_override="sensitive",
+        needs_approval=True,
+    )
+
+    original_inner_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "sensitive",
+                    "{}",
+                    call_id="call_sensitive",
+                )
+            ]
+        ]
+    )
+    original_inner_model.enqueue([get_text_message("original inner done")])
+
+    # Both owners deliberately have the same public agent name.
+    original_inner_agent = Agent(
+        name="inner",
+        model=original_inner_model,
+        tools=[original_sensitive_tool],
+    )
+
+    original_nested_tool = original_inner_agent.as_tool(
+        tool_name="lookup",
+        tool_description="Look up a value.",
+    )
+
+    outer_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "lookup",
+                    '{"input":"hi"}',
+                    call_id="call_lookup",
+                )
+            ]
+        ]
+    )
+    outer_model.enqueue([get_text_message("outer done")])
+
+    outer_agent = Agent(
+        name="outer",
+        model=outer_model,
+        tools=[original_nested_tool],
+    )
+
+    initial_result = await Runner.run(outer_agent, "Look this up")
+    assert len(initial_result.interruptions) == 1
+
+    # Persist while lookup is still owned by the original inner Agent.
+    state_json = initial_result.to_state().to_json()
+
+    replacement_side_effect = function_tool(
+        lambda: _record(calls, "replacement"),
+        name_override="replacement_side_effect",
+    )
+
+    replacement_inner_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "replacement_side_effect",
+                    "{}",
+                    call_id="call_replacement",
+                )
+            ]
+        ]
+    )
+    replacement_inner_model.enqueue([get_text_message("replacement inner done")])
+
+    # Same public agent name and same outer tool name, but a different
+    # Agent instance with different behavior.
+    replacement_inner_agent = Agent(
+        name="inner",
+        model=replacement_inner_model,
+        tools=[replacement_side_effect],
+    )
+
+    replacement_nested_tool = replacement_inner_agent.as_tool(
+        tool_name="lookup",
+        tool_description="Look up a value.",
+    )
+
+    # The replacement happens before RunState restoration. At this point
+    # object identity for the original Agent.as_tool() owner is unavailable.
+    outer_agent.tools = [replacement_nested_tool]
+
+    restored_state = await RunState.from_json(outer_agent, state_json)
+
+    interruptions = restored_state.get_interruptions()
+    assert len(interruptions) == 1
+    restored_state.approve(interruptions[0])
+
+    # A persisted interrupted Agent.as_tool() invocation must not silently
+    # migrate to a replacement owner during restoration.
+    with pytest.raises(
+        ModelBehaviorError,
+        match="Cannot reconcile queued tool lookup with a new tool",
+    ):
+        await Runner.run(outer_agent, restored_state)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_resume_preserves_model_order_for_function_outcomes() -> None:
     calls: list[str] = []
     missing_tool = function_tool(
