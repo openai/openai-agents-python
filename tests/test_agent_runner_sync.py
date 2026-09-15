@@ -3,11 +3,12 @@ import threading
 import time
 from collections.abc import Generator
 from contextlib import suppress
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import pytest
 
 from agents.agent import Agent
+from agents.exceptions import _mark_error_data_redacted
 from agents.models import _openai_shared
 from agents.models.interface import ModelProvider
 from agents.models.multi_provider import MultiProvider, MultiProviderMap
@@ -232,17 +233,36 @@ def test_run_sync_force_cancels_timed_out_cleanup_on_caller_loop(
     runner = AgentRunner()
     cleanup_started = threading.Event()
     cleanup_cancelled = threading.Event()
+    cleanup_finally_finished = threading.Event()
+    nested_cancelled = threading.Event()
+    nested_finally_finished = threading.Event()
 
     async def fake_run(self, *_args, **_kwargs):
+        from agents.sandbox._cleanup_owner import create_cleanup_owner
+
         async def deferred_work() -> None:
             cleanup_started.set()
+
+            async def nested_work() -> None:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    nested_cancelled.set()
+                    raise
+                finally:
+                    await asyncio.sleep(0)
+                    nested_finally_finished.set()
+
+            nested_task = create_cleanup_owner(nested_work(), name="test.nested_cleanup")
+            _track_sync_background_task(nested_task)
             try:
-                await asyncio.Event().wait()
+                await asyncio.shield(nested_task)
             except asyncio.CancelledError:
                 cleanup_cancelled.set()
                 raise
-
-        from agents.sandbox._cleanup_owner import create_cleanup_owner
+            finally:
+                await asyncio.sleep(0)
+                cleanup_finally_finished.set()
 
         _track_sync_background_task(create_cleanup_owner(deferred_work(), name="test.cleanup"))
         return object()
@@ -256,6 +276,9 @@ def test_run_sync_force_cancels_timed_out_cleanup_on_caller_loop(
         runner.run_sync(Agent(name="test-agent"), "input", context=object())
         assert cleanup_started.is_set()
         assert cleanup_cancelled.is_set()
+        assert cleanup_finally_finished.is_set()
+        assert nested_cancelled.is_set()
+        assert nested_finally_finished.is_set()
         assert not _get_pending_sync_background_tasks(caller_loop)
     finally:
         fresh_event_loop_policy.set_event_loop(None)
@@ -504,6 +527,24 @@ def test_run_sync_cancels_task_when_interrupted(monkeypatch, fresh_event_loop_po
         monkeypatch.undo()
         _stop_sync_loop_driver(sync_loop)
         sync_loop.close()
+
+
+def test_run_sync_preserves_sandbox_resume_state_when_redacting_cancellation(monkeypatch):
+    runner = AgentRunner()
+    resume_state = {"backend_id": "preserved"}
+
+    def fake_run_sync_impl(*_args, **_kwargs):
+        error = asyncio.CancelledError("sensitive cancellation")
+        cast(Any, error)._sandbox_resume_state = resume_state
+        _mark_error_data_redacted(error)
+        raise error
+
+    monkeypatch.setattr(runner, "_run_sync_impl", fake_run_sync_impl)
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        runner.run_sync(Agent(name="test-agent"), "input")
+
+    assert getattr(exc_info.value, "_sandbox_resume_state", None) == resume_state
 
 
 def test_sync_background_registry_prunes_completed_tasks():

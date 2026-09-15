@@ -18,6 +18,7 @@ from ...run_config import (
     SandboxArchiveLimits,
     SandboxConcurrencyLimits,
 )
+from ...run_internal.sync import _track_sync_background_task
 from .._cleanup_owner import create_cleanup_owner, raise_if_cleanup_owner_force_cancelling
 from .._mount_security import redact_mount_error_data, validate_manifest_mount_credential_boundaries
 from ..apply_patch import PatchFormat, WorkspaceEditor
@@ -232,6 +233,7 @@ class BaseSandboxSession(abc.ABC):
     _archive_limits: SandboxArchiveLimits | None = None
     _pty_cleanup_tasks: set[asyncio.Future[Any]] | None = None
     _snapshot_persistence_task: asyncio.Task[None] | None = None
+    _dependencies_close_task: asyncio.Task[None] | None = None
     _deferred_dependency_close_task: asyncio.Task[Any] | None = None
     _deferred_shutdown_requested: bool = False
     # Set when a failed stop could not prove that the current workspace was persisted. Runner-owned
@@ -476,6 +478,7 @@ class BaseSandboxSession(abc.ABC):
                 self._persist_snapshot(), name="agents.persist_snapshot_after_stop_error"
             )
             self._snapshot_persistence_task = snapshot_task
+            _track_sync_background_task(snapshot_task)
 
         def mark_snapshot_durable(task: asyncio.Task[Any]) -> None:
             try:
@@ -557,6 +560,11 @@ class BaseSandboxSession(abc.ABC):
         """Return whether cleanup must retain the provider backend for a later resume."""
 
         return self._backend_preservation_required
+
+    def _clear_backend_preservation_requirement(self) -> None:
+        """Allow deferred cleanup to delete a backend whose resume state cannot be exposed."""
+
+        self._backend_preservation_required = False
 
     @redact_mount_error_data
     async def shutdown(self) -> None:
@@ -650,13 +658,20 @@ class BaseSandboxSession(abc.ABC):
                 self._deferred_dependency_close_task is not None
                 and not self._deferred_dependency_close_task.done()
             )
-            if pending_cleanup_before_dependencies or deferred_cleanup_pending:
+            if (
+                pending_cleanup_before_dependencies
+                or deferred_cleanup_pending
+                or self._has_pending_dependency_close_task()
+            ):
                 self._schedule_deferred_dependency_close(shutdown=self._deferred_shutdown_requested)
             else:
                 try:
                     await self._aclose_dependencies()
                 except BaseException as exc:
-                    if self._has_pending_pty_cleanup_tasks():
+                    if (
+                        self._has_pending_pty_cleanup_tasks()
+                        or self._has_pending_dependency_close_task()
+                    ):
                         self._schedule_deferred_dependency_close(
                             shutdown=self._deferred_shutdown_requested
                         )
@@ -680,11 +695,16 @@ class BaseSandboxSession(abc.ABC):
             dependencies = Dependencies()
             self._dependencies = dependencies
             self._dependencies_closed = False
+            self._dependencies_close_task = None
         return dependencies
 
     def set_dependencies(self, dependencies: Dependencies | None) -> None:
         if dependencies is None:
             return
+        if dependencies is not self._dependencies:
+            if self._dependencies_close_task is not None and not self._dependencies_closed:
+                raise RuntimeError("Cannot replace session dependencies before close completes")
+            self._dependencies_close_task = None
         self._dependencies = dependencies
         self._dependencies_closed = False
 
@@ -735,8 +755,12 @@ class BaseSandboxSession(abc.ABC):
             raise asyncio.TimeoutError()
         dependencies = self._dependencies
         if dependencies is not None and not self._dependencies_closed:
+            close_task = self._dependencies_close_task
+            if close_task is None:
+                close_task = dependencies._get_or_create_close_task()
+                self._dependencies_close_task = close_task
+            await asyncio.shield(close_task)
             self._dependencies_closed = True
-            await dependencies.aclose()
         if caller_cancellation is not None:
             raise caller_cancellation
 
@@ -747,6 +771,10 @@ class BaseSandboxSession(abc.ABC):
 
     def _has_pending_pty_cleanup_tasks(self) -> bool:
         return any(task for task in (self._pty_cleanup_tasks or ()) if not task.done())
+
+    def _has_pending_dependency_close_task(self) -> bool:
+        task = self._dependencies_close_task
+        return task is not None and not task.done()
 
     async def _wait_for_tracked_cleanup_tasks(
         self, *, timeout: float | None = None
@@ -786,6 +814,7 @@ class BaseSandboxSession(abc.ABC):
             name="agents.deferred_dependency_close",
         )
         self._deferred_dependency_close_task = task
+        _track_sync_background_task(task)
 
         def consume_task_exception(done: asyncio.Task[Any]) -> None:
             if not done.cancelled():
@@ -1038,6 +1067,7 @@ class BaseSandboxSession(abc.ABC):
             ),
         )
         self._track_pty_cleanup_task(task)
+        _track_sync_background_task(task)
         caller_cancellation: asyncio.CancelledError | None = None
         deadline = asyncio.get_running_loop().time() + (
             self._pty_cleanup_timeout_s() if timeout is None else timeout
@@ -1116,6 +1146,7 @@ class BaseSandboxSession(abc.ABC):
 
         for task in cleanup_tasks:
             task.add_done_callback(consume_cleanup_task_exception)
+            _track_sync_background_task(task)
 
         pending = set(cleanup_tasks)
         caller_cancellation: asyncio.CancelledError | None = None

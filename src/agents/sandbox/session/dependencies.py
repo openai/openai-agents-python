@@ -258,12 +258,21 @@ class Dependencies:
             task.exception()
 
     async def aclose(self) -> None:
+        task = self._get_or_create_close_task()
+        await asyncio.shield(task)
+
+    def _get_or_create_close_task(self) -> asyncio.Task[None]:
+        """Return the single owner for this container's close operation."""
+
         task = self._close_task
         if task is None:
             self._closed = True
             task = create_cleanup_owner(self._close(), name="agents.dependencies_close")
             self._close_task = task
-        await asyncio.shield(task)
+            from ...run_internal.sync import _track_sync_background_task
+
+            _track_sync_background_task(task)
+        return task
 
     async def _close(self) -> None:
         raise_if_cleanup_owner_force_cancelling()

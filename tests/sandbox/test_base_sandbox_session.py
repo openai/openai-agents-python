@@ -12,6 +12,7 @@ import pytest
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session import base_sandbox_session
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.dependencies import Dependencies
 
 
 class _Session(BaseSandboxSession):
@@ -596,6 +597,78 @@ async def test_aclose_retry_joins_detached_snapshot_before_shutdown(
 
     assert session.snapshot_calls == 1
     assert session.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deferred_close_waits_for_inflight_dependency_close_before_finalization() -> None:
+    class BlockingResource:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.completed = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.started.set()
+            await self.release.wait()
+            self.completed.set()
+
+    resource = BlockingResource()
+    session = _session()
+    session.set_dependencies(
+        Dependencies().bind_factory(
+            "tests.blocking_close",
+            lambda _dependencies: resource,
+            owns_result=True,
+        )
+    )
+    await session.dependencies.require("tests.blocking_close")
+    finalized = asyncio.Event()
+
+    async def after_deferred_close() -> None:
+        assert resource.completed.is_set()
+        finalized.set()
+
+    session._after_deferred_dependency_close = after_deferred_close
+    close = asyncio.create_task(session._aclose_dependencies())
+    try:
+        await asyncio.wait_for(resource.started.wait(), timeout=0.5)
+        close.cancel("caller cancelled dependency close")
+        with pytest.raises(asyncio.CancelledError):
+            await close
+
+        assert not session._dependencies_closed
+        assert session._has_pending_dependency_close_task()
+
+        deferred = asyncio.create_task(session._finish_deferred_dependency_close())
+        await asyncio.sleep(0)
+        assert not finalized.is_set()
+
+        resource.release.set()
+        await asyncio.wait_for(deferred, timeout=0.5)
+        assert resource.completed.is_set()
+        assert finalized.is_set()
+        assert session._dependencies_closed
+    finally:
+        resource.release.set()
+        if not close.done():
+            close.cancel()
+        with suppress(BaseException):
+            await close
+
+
+@pytest.mark.asyncio
+async def test_set_dependencies_rejects_replacement_before_close_completes() -> None:
+    session = _session()
+    first = Dependencies()
+    session.set_dependencies(first)
+    close = asyncio.create_task(session._aclose_dependencies())
+    try:
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="before close completes"):
+            session.set_dependencies(Dependencies())
+    finally:
+        with suppress(BaseException):
+            await close
 
 
 @pytest.mark.asyncio

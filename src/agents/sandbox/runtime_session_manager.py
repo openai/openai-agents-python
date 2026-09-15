@@ -444,6 +444,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                     resource_cleanup_task = create_cleanup_owner(
                         resources.cleanup(), name="agents.resource_cleanup"
                     )
+                    _track_sync_background_task(resource_cleanup_task)
                     try:
                         await asyncio.shield(resource_cleanup_task)
                     except BaseException as exc:  # pragma: no cover
@@ -476,14 +477,18 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                     try:
                         resume_state = self.serialize_resume_state()
                     except BaseException as exc:  # pragma: no cover
-                        if caller_cancellation is None:
-                            raise
                         cleanup_error = exc
+                        self._clear_preservation_requirements()
                     else:
-                        current_task = asyncio.current_task()
-                        cancelling = getattr(current_task, "cancelling", None)
-                        if cancelling is not None and cancelling():
-                            caller_cancellation = caller_cancellation or asyncio.CancelledError()
+                        if caller_cancellation is None:
+                            # Deliver a cancellation that was requested after shielded cleanup
+                            # completed, preserving the caller's cancel(reason) exception. This
+                            # checkpoint also works on Python 3.10, where Task.cancelling() is
+                            # unavailable.
+                            try:
+                                await asyncio.sleep(0)
+                            except asyncio.CancelledError as exc:
+                                caller_cancellation = exc
                         if caller_cancellation is not None and preserves_backend:
                             self._publish_resume_state_after_cleanup_error(resume_state)
                 elif preserves_backend:
@@ -493,8 +498,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         )
                     except BaseException:
                         # Preserve the cleanup failure as the primary error when state
-                        # serialization cannot complete.
+                        # serialization cannot complete. The backend is no longer recoverable,
+                        # so route it through deferred cleanup instead of retaining it.
                         self._resume_state_after_cleanup_error = None
+                        self._clear_preservation_requirements()
             finally:
                 if not self._pending_resource_cleanup_tasks:
                     self._resources_by_agent.clear()
@@ -515,6 +522,16 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             resources.backend_preserved_after_cleanup
             for resources in self._resources_by_agent.values()
         )
+
+    def _clear_preservation_requirements(self) -> None:
+        """Clear internal preservation flags so deferred cleanup can delete unrecoverable state."""
+
+        for resources in self._resources_by_agent.values():
+            resources.session._clear_backend_preservation_requirement()
+            resources._schedule_deferred_cleanup()
+            deferred_cleanup_task = resources.deferred_cleanup_task
+            if deferred_cleanup_task is not None:
+                self._track_deferred_cleanup_task(deferred_cleanup_task)
 
     def _publish_resume_state_after_cleanup_error(
         self, resume_state: dict[str, object] | None
@@ -561,6 +578,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             name="agents.cancelled_resource_cleanup",
         )
         self._pending_resource_cleanup_tasks.add(follow_up)
+        _track_sync_background_task(follow_up)
 
         def finalize_resource_cleanup(_done: asyncio.Task[Any]) -> None:
             self._pending_resource_cleanup_tasks.discard(follow_up)

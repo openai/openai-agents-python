@@ -268,6 +268,9 @@ class SandboxSession(BaseSandboxSession):
     def _should_preserve_backend_on_cleanup(self) -> bool:
         return self._inner._should_preserve_backend_on_cleanup()
 
+    def _clear_backend_preservation_requirement(self) -> None:
+        self._inner._clear_backend_preservation_requirement()
+
     def _has_pending_pty_cleanup_tasks(self) -> bool:
         return self._inner._has_pending_pty_cleanup_tasks()
 

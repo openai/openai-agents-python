@@ -301,6 +301,12 @@ class _CancelledRunModel(ScriptedModel):
         raise AssertionError("expected the task cancellation to be delivered")
 
 
+class _FailingRunModel(ScriptedModel):
+    async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        _ = (args, kwargs)
+        raise RuntimeError("run failed")
+
+
 class _BlockingPreservingStopSession(_FakeSession):
     def __init__(self, manifest: Manifest, stop_gate: asyncio.Event) -> None:
         super().__init__(manifest)
@@ -1307,6 +1313,40 @@ async def test_session_manager_serializes_preserved_backend_from_non_current_age
 
 
 @pytest.mark.asyncio
+async def test_session_manager_preserves_late_caller_cancellation_reason() -> None:
+    agent = SandboxAgent(name="worker", model=ScriptedModel(), instructions="Worker.")
+    session = _FakeSession(Manifest())
+    resources = _SandboxSessionResources(
+        session=session,
+        client=None,
+        owns_session=True,
+    )
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent,
+        sandbox_config=SandboxRunConfig(session=session),
+        run_state=None,
+    )
+    manager.acquire_agent(agent)
+    manager._resources_by_agent[id(agent)] = resources
+    manager._current_agent_id = id(agent)
+    cleanup_owner = asyncio.current_task()
+    assert cleanup_owner is not None
+
+    async def complete_cleanup() -> None:
+        # Request cancellation after the shield has completed, but before cleanup resumes at its
+        # next suspension point.
+        asyncio.get_running_loop().call_later(0, cleanup_owner.cancel, "late cancellation")
+
+    cast(Any, resources).cleanup = complete_cleanup
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await manager.cleanup()
+
+    assert exc_info.value.args == ("late cancellation",)
+    assert manager._cleanup_finished
+
+
+@pytest.mark.asyncio
 async def test_session_manager_prioritizes_caller_cancellation_over_cleanup_error() -> None:
     first_agent = SandboxAgent(name="first", model=ScriptedModel(), instructions="First.")
     second_agent = SandboxAgent(name="second", model=ScriptedModel(), instructions="Second.")
@@ -1381,7 +1421,7 @@ async def test_session_manager_prioritizes_caller_cancellation_over_resume_state
     client = _FailingSerializeClient(session, "resume state serialization failed")
     resources = _SandboxSessionResources(
         session=session,
-        client=None,
+        client=client,
         owns_session=True,
     )
     cleanup_started = asyncio.Event()
@@ -1411,6 +1451,8 @@ async def test_session_manager_prioritizes_caller_cancellation_over_resume_state
     assert client.serialize_calls == 1
     assert manager.resume_state_after_cleanup_error is None
     assert manager._cleanup_finished
+    assert client.delete_calls == 1
+    assert not session._should_preserve_backend_on_cleanup()
 
     async def wait_for_agent_release() -> None:
         while manager._acquired_agents:
@@ -4001,6 +4043,44 @@ async def test_runner_keeps_sandbox_resume_state_when_cleanup_preserves_backend(
     assert result._sandbox_resume_state["backend_id"] == "fake"
     assert state._sandbox == result._sandbox_resume_state
     assert result._sandbox_session is None
+    assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_exposes_sandbox_resume_state_when_cancelled_before_result() -> None:
+    session = _CancelledPreservingStopSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=_CancelledRunModel(asyncio.CancelledError("run cancelled")),
+        instructions="Base instructions.",
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+
+    resume_state = getattr(exc_info.value, "_sandbox_resume_state", None)
+    assert resume_state is not None
+    assert resume_state["backend_id"] == "fake"
+    assert client.delete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_exposes_sandbox_resume_state_when_cleanup_cancels_without_result() -> None:
+    session = _CancelledPreservingStopSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(
+        name="sandbox",
+        model=_FailingRunModel(),
+        instructions="Base instructions.",
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await Runner.run(agent, "hello", run_config=_sandbox_run_config(client))
+
+    resume_state = getattr(exc_info.value, "_sandbox_resume_state", None)
+    assert resume_state is not None
+    assert resume_state["backend_id"] == "fake"
     assert client.delete_calls == 0
 
 
