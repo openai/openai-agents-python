@@ -24,7 +24,7 @@ from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace
 
-# Warn once per process when model traffic is redirected but traces still go to OpenAI.
+# Warn once per process when OPENAI_BASE_URL is set but traces still go to OpenAI.
 _warned_default_trace_endpoint_with_custom_model_base = False
 
 
@@ -204,7 +204,7 @@ class BackendSpanExporter(TracingExporter):
         else:
             redirect_hint = "Set OPENAI_TRACING_INGEST_ENDPOINT to redirect traces"
         logger.warning(
-            "[non-fatal] Tracing still exports to %s while model traffic uses %s. "
+            "[non-fatal] Tracing still exports to %s while OPENAI_BASE_URL is %s. "
             "%s, or disable tracing with OPENAI_AGENTS_DISABLE_TRACING=1.",
             _redact_url_for_log(self.endpoint),
             _redact_url_for_log(model_base),

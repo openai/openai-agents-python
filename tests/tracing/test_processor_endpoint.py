@@ -181,6 +181,8 @@ def test_warns_once_when_model_base_url_diverges(monkeypatch, caplog):
     assert DEFAULT_ORIGIN in warnings[0]
     assert MODEL_ORIGIN in warnings[0]
     assert "/v1" not in warnings[0]
+    assert "OPENAI_BASE_URL" in warnings[0]
+    assert "model traffic uses" not in warnings[0]
     assert "OPENAI_TRACING_INGEST_ENDPOINT" in warnings[0]
 
 
