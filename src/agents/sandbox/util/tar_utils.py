@@ -204,16 +204,22 @@ def strip_tar_member_prefix(
 _MAX_SYMLINK_HOPS = 40
 
 
-def _resolve_through_archive_symlinks(
-    parts: tuple[str, ...], symlinks: dict[str, str]
+def _resolve_through_archive_members(
+    parts: tuple[str, ...], members: dict[str, tarfile.TarInfo]
 ) -> tuple[str, ...] | None:
     """Resolve a root-relative path the way the kernel would after extraction.
 
     Every prefix that names a symlink member is replaced by that member's target, so
-    ``..`` is applied to the link's target rather than to the link's own directory.
-    Returns the resolved components, or ``None`` when the walk leaves the root, follows a
-    target that is not itself relative (external links are hydrate's decision, not a proof
-    of containment), or exceeds the hop budget.
+    ``..`` is applied to the link's target rather than to the link's own directory. Every
+    other component must be established by the archive itself: an intermediate component
+    must be a directory member and the last one any member. Hydration extracts into an
+    existing root, so a component the archive does not create could already be a symlink
+    in the destination and send the restored link somewhere else; only archive-owned
+    components are protected by the extractor's own destination checks. Returns the
+    resolved components, or ``None`` when the walk leaves the root, follows a target that
+    is not itself relative (external links are hydrate's decision, not a proof of
+    containment), meets a component the archive does not establish, or exceeds the hop
+    budget.
     """
 
     pending = list(reversed(parts))
@@ -228,14 +234,18 @@ def _resolve_through_archive_symlinks(
                 return None
             resolved.pop()
             continue
-        target = symlinks.get("/".join([*resolved, part]))
-        if target is None:
-            resolved.append(part)
-            continue
-        hops += 1
-        if hops > _MAX_SYMLINK_HOPS or target.startswith("/"):
+        member = members.get("/".join([*resolved, part]))
+        if member is None:
             return None
-        pending.extend(reversed(PurePosixPath(target).parts))
+        if member.issym():
+            hops += 1
+            if hops > _MAX_SYMLINK_HOPS or member.linkname.startswith("/"):
+                return None
+            pending.extend(reversed(PurePosixPath(member.linkname).parts))
+            continue
+        if pending and not member.isdir():
+            return None
+        resolved.append(part)
     return tuple(resolved)
 
 
@@ -247,16 +257,18 @@ def _validate_rebased_symlinks_contained(
     ``rebase_symlink_target`` keeps the components after the root verbatim, so a target
     such as ``a/link/../tmp`` is only inside the workspace if ``a/link`` resolves there.
     With ``a/link -> ..`` it names ``/tmp`` after extraction, yet hydrate's lexical check
-    accepts it. Resolving through the archive's own symlink members settles the question
-    before the relative form is written out.
+    accepts it. Resolving through the archive's own members settles the question before
+    the relative form is written out; components the archive does not create are not
+    trusted either, because hydration extracts into an existing root where such a
+    component may already be a symlink.
     """
 
     if not rebased_symlinks:
         return
-    symlinks = {member.name: member.linkname for member in tar.getmembers() if member.issym()}
+    members = {member.name: member for member in tar.getmembers()}
     for link_name, target in rebased_symlinks.items():
         parts = (*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)
-        if _resolve_through_archive_symlinks(parts, symlinks) is None:
+        if _resolve_through_archive_members(parts, members) is None:
             raise UnsafeTarMemberError(
                 member=link_name,
                 reason=f"rebased symlink target cannot be proven to stay under the root: {target}",

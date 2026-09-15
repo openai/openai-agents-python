@@ -219,6 +219,11 @@ def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
         add_symlink(tar, "workspace/alias", "sub/deep")
         add_symlink(tar, "workspace/abs_alias", "/workspace/alias/../data.txt")
         # Longer than the 100-byte ustar field, so tarfile records it in a PAX linkpath.
+        nested = "workspace"
+        for _ in range(5):
+            nested += "/deeply-nested-directory"
+            add_dir(tar, nested)
+        add_file(tar, nested + "/target.txt", b"deep")
         long_target = "/workspace/" + "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
         add_symlink(tar, "workspace/long_link", long_target)
         if external_symlink:
@@ -297,6 +302,49 @@ def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_external_links
         _dir("workspace"),
         _symlink("workspace/outside", "/usr"),
         _symlink("workspace/victim", "/workspace/outside/../x"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_absent_components() -> None:
+    """Hydration extracts into an existing root. A component the archive does not create
+    (`alias` here) may already be a symlink in the destination, so `alias/../secret` proves
+    nothing; only archive-established components count."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _file("workspace/secret", b"s"),
+        _symlink("workspace/victim", "/workspace/alias/../secret"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_to_absent_leaf() -> None:
+    """A dangling in-workspace target is left absolute: the leaf could be a pre-existing
+    destination symlink, and hydrate already refuses absolute targets as before."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _symlink("workspace/victim", "/workspace/missing.txt"),
+    )
+
+    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
+        strip_tar_member_prefix(
+            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+        )
+
+
+def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_a_file_component() -> None:
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _file("workspace/notes.txt", b"n"),
+        _symlink("workspace/victim", "/workspace/notes.txt/../secret"),
     )
 
     with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
