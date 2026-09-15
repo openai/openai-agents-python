@@ -2363,7 +2363,7 @@ class AgentRunner:
                     if completed_result is not None:
                         completed_result._sandbox_resume_state = sandbox_resume_state_after_cleanup
                     if isinstance(error, asyncio.CancelledError) and (
-                        sandbox_runtime.caller_cancelled_during_cleanup
+                        completed_result is None or sandbox_runtime.caller_cancelled_during_cleanup
                     ):
                         sandbox_cleanup_cancellation = error
                 else:

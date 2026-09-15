@@ -146,8 +146,8 @@ class _SandboxSessionResources:
                 if self._session._should_preserve_backend_on_cleanup():
                     break
                 try:
-                    if self._client is not None and isinstance(self._session, SandboxSession):
-                        await self._client.delete(self._session)
+                    if self._client is not None:
+                        await self._client.delete(cast(SandboxSession, self._session))
                 except BaseException as exc:
                     raise_if_cleanup_owner_force_cancelling(exc)
                     if cleanup_error is None:
@@ -478,7 +478,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         resume_state = self.serialize_resume_state()
                     except BaseException as exc:  # pragma: no cover
                         cleanup_error = exc
-                        self._clear_preservation_requirements()
+                        await self._clear_preservation_requirements()
                     else:
                         if caller_cancellation is None:
                             # Deliver a cancellation that was requested after shielded cleanup
@@ -501,7 +501,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                         # serialization cannot complete. The backend is no longer recoverable,
                         # so route it through deferred cleanup instead of retaining it.
                         self._resume_state_after_cleanup_error = None
-                        self._clear_preservation_requirements()
+                        await self._clear_preservation_requirements()
             finally:
                 if not self._pending_resource_cleanup_tasks:
                     self._resources_by_agent.clear()
@@ -523,15 +523,24 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             for resources in self._resources_by_agent.values()
         )
 
-    def _clear_preservation_requirements(self) -> None:
+    async def _clear_preservation_requirements(self) -> None:
         """Clear internal preservation flags so deferred cleanup can delete unrecoverable state."""
 
+        deferred_cleanup_tasks: list[asyncio.Task[Any]] = []
         for resources in self._resources_by_agent.values():
+            if not resources.backend_preserved_after_cleanup:
+                continue
             resources.session._clear_backend_preservation_requirement()
             resources._schedule_deferred_cleanup()
             deferred_cleanup_task = resources.deferred_cleanup_task
             if deferred_cleanup_task is not None:
                 self._track_deferred_cleanup_task(deferred_cleanup_task)
+                deferred_cleanup_tasks.append(deferred_cleanup_task)
+        if deferred_cleanup_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in deferred_cleanup_tasks),
+                return_exceptions=True,
+            )
 
     def _publish_resume_state_after_cleanup_error(
         self, resume_state: dict[str, object] | None
