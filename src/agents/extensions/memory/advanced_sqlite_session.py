@@ -77,11 +77,9 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
-        self._current_branch_id = "main"
-        # Synchronized with durable history during initialization and whenever a
-        # branch pointer is established or a write begins. A mismatch means
-        # another instance cleared the session, so the local pointer resets to main.
-        self._generation = 0
+        # Publish branch and generation together so caller-thread snapshots cannot
+        # combine a cleared branch with the new generation from a worker update.
+        self._branch_state: tuple[str, int] = ("main", 0)
         # Order history mutations and usage capture before dispatching workers.
         # The bookkeeping lock never protects SQLite work or an await.
         self._turn_operation_lock = threading.Lock()
@@ -101,6 +99,14 @@ class AdvancedSQLiteSession(SQLiteSession):
                 pass
             raise
         self._logger = logger if logger is not None else logging.getLogger(__name__)
+
+    @property
+    def _current_branch_id(self) -> str:
+        return self._branch_state[0]
+
+    @property
+    def _generation(self) -> int:
+        return self._branch_state[1]
 
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
         """Initialize base tables only after validating advanced-table ownership."""
@@ -132,11 +138,9 @@ class AdvancedSQLiteSession(SQLiteSession):
             ).fetchone()
             durable_generation = row[0] if row is not None else 0
             if durable_generation != generation:
-                self._generation = durable_generation
-                self._current_branch_id = "main"
+                self._branch_state = ("main", durable_generation)
                 return False
-            self._generation = durable_generation
-            self._current_branch_id = branch_id
+            self._branch_state = (branch_id, durable_generation)
             return True
 
     # The structure tables that record which base-table pair owns a database file, and the
@@ -392,13 +396,20 @@ class AdvancedSQLiteSession(SQLiteSession):
         if not items:
             return
 
+        branch_id, generation = self._branch_state
+
         def _add_items_sync():
             """Synchronous helper to add items and structure metadata together."""
             with self._write_connection() as conn:
                 self._refresh_branch_after_external_clear(conn)
+                # Match pop_item's reset behavior after a clear, while keeping a
+                # later branch switch from redirecting an already queued append.
+                target_branch = (
+                    self._current_branch_id if self._generation != generation else branch_id
+                )
                 # Keep both writes in one transaction so metadata failures do not leave orphans.
                 self._insert_items(conn, items)
-                self._insert_structure_metadata(conn, items)
+                self._insert_structure_metadata(conn, items, target_branch)
                 conn.commit()
 
         try:
@@ -509,8 +520,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         # Snapshot the current branch at call time so a concurrent
         # switch_to_branch() cannot redirect this pop to a different branch once
         # it has been dispatched to the worker thread.
-        branch_id = self._current_branch_id
-        generation = self._generation
+        branch_id, generation = self._branch_state
 
         def _pop_item_sync():
             with self._write_connection() as conn:
@@ -647,8 +657,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # the pointer still references a deleted branch. Bumping the
                 # generation invalidates any in-flight switch/create that
                 # captured the pre-clear generation.
-                self._generation = generation
-                self._current_branch_id = "main"
+                self._branch_state = ("main", generation)
 
         await _await_mutation(asyncio.to_thread(_clear_session_sync))
 
@@ -673,8 +682,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # write is skipped. The anchor is scoped to this branch/turn, so
                 # unrelated removals (e.g. delete_branch on another branch) do
                 # not drop this write.
-                branch_id = self._current_branch_id
-                generation = self._generation
+                branch_id, generation = self._branch_state
                 usage = result.context_wrapper.usage
                 capture = self._run_ordered_turn_operation(
                     self._capture_current_turn, branch_id, generation
@@ -844,7 +852,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         self,
         conn: sqlite3.Connection,
         items: list[TResponseInputItem],
+        branch_id: str | None = None,
     ) -> None:
+        target_branch = self._current_branch_id if branch_id is None else branch_id
         # Get the IDs of messages we just inserted, in order.
         with closing(conn.cursor()) as cursor:
             cursor.execute(
@@ -882,7 +892,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 FROM message_structure
                 WHERE session_id = ? AND branch_id = ?
             """,
-                (self.session_id, self._current_branch_id),
+                (self.session_id, target_branch),
             )
             result = cursor.fetchone()
             current_turn = result[0] if result else 0
@@ -908,7 +918,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 (
                     self.session_id,
                     msg_id,
-                    self._current_branch_id,
+                    target_branch,
                     msg_type,
                     seq_start + i + 1,
                     item_turn,
@@ -1394,8 +1404,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         ).fetchone()
         generation = row[0] if row is not None else 0
         if generation != self._generation:
-            self._generation = generation
-            self._current_branch_id = "main"
+            self._branch_state = ("main", generation)
 
     def _resolve_read_branch(
         self,
@@ -1465,8 +1474,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 conn.execute("BEGIN IMMEDIATE")
                 self._ensure_branch_reservations_table(conn)
                 self._refresh_branch_after_external_clear(conn)
-                source_branch_id = self._current_branch_id
-                generation = self._generation
+                source_branch_id, generation = self._branch_state
                 with closing(conn.cursor()) as cursor:
                     cursor.execute(
                         f"""

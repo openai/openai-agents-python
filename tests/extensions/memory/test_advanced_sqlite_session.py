@@ -214,11 +214,12 @@ class FailingOnceStructureMetadataSession(AdvancedSQLiteSession):
         self,
         conn: Any,
         items: list[TResponseInputItem],
+        branch_id: str | None = None,
     ) -> None:
         if self.fail_structure_metadata_once:
             self.fail_structure_metadata_once = False
             raise RuntimeError("structure metadata failed")
-        super()._insert_structure_metadata(conn, items)
+        super()._insert_structure_metadata(conn, items, branch_id)
 
 
 class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
@@ -228,6 +229,7 @@ class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
         self,
         conn: Any,
         items: list[TResponseInputItem],
+        branch_id: str | None = None,
     ) -> None:
         cursor = conn.execute(
             f"SELECT id FROM {self.messages_table} WHERE session_id = ? ORDER BY id ASC LIMIT 1",
@@ -244,7 +246,16 @@ class PartiallyFailingStructureMetadataSession(AdvancedSQLiteSession):
              user_turn_number, branch_turn_number, tool_name)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (self.session_id, row[0], self._current_branch_id, "user", 1, 1, 1, None),
+            (
+                self.session_id,
+                row[0],
+                self._current_branch_id if branch_id is None else branch_id,
+                "user",
+                1,
+                1,
+                1,
+                None,
+            ),
         )
         raise RuntimeError("structure metadata failed after partial write")
 
@@ -3559,6 +3570,126 @@ async def test_store_run_usage_keeps_turn_when_history_changes_during_capture(
             assert recorded_original["total_tokens"] == usage_data.total_tokens
         else:
             assert await session.get_items() == [{"role": "user", "content": "newer turn"}]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("publication", ["clear", "refresh"])
+async def test_add_captures_coherent_branch_after_clear_publication(
+    tmp_path: Path, publication: str
+):
+    """A clear publication cannot pair a removed branch with its new generation."""
+    published = threading.Event()
+    release = threading.Event()
+
+    class PausedPublicationSession(AdvancedSQLiteSession):
+        pause_publication = False
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            # The legacy path exposes its split-field publication; the current
+            # path pauses after publishing the complete immutable branch state.
+            if name in {"_generation", "_branch_state"} and self.pause_publication:
+                self.pause_publication = False
+                published.set()
+                assert release.wait(5), "Branch-state publication was not released"
+
+    db_path = tmp_path / "coherent_branch.db"
+    session = PausedPublicationSession(
+        session_id="coherent_branch", db_path=db_path, create_tables=True
+    )
+    clearer = AdvancedSQLiteSession(session_id="coherent_branch", db_path=db_path)
+    tasks: list[asyncio.Task[Any]] = []
+    added: TResponseInputItem = {"role": "user", "content": "after clear"}
+    try:
+        await session.add_items([{"role": "user", "content": "main"}])
+        await session.create_branch_from_turn(1, "selected")
+        await session.add_items([{"role": "user", "content": "old selected"}])
+        if publication == "refresh":
+            await clearer.clear_session()
+        session.pause_publication = True
+        tasks.append(
+            asyncio.create_task(
+                session.clear_session() if publication == "clear" else session.get_items()
+            )
+        )
+        assert await asyncio.to_thread(published.wait, 5)
+        entered = asyncio.Event()
+
+        async def append() -> None:
+            entered.set()
+            await session.add_items([added])
+
+        tasks.append(asyncio.create_task(append()))
+        await entered.wait()
+        release.set()
+        await asyncio.gather(*tasks)
+        assert await session.get_items() == [added]
+        assert await session.get_items(branch_id="selected") == []
+        assert session._current_branch_id == "main"
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        session.close()
+        clearer.close()
+
+
+@pytest.mark.parametrize("branch_turn", [1, 2])
+@pytest.mark.parametrize("operation", ["switch", "clear"])
+async def test_queued_add_keeps_selected_branch(
+    usage_data: Usage, branch_turn: int, operation: str
+):
+    """A queued append retains branch ownership without reviving cleared history."""
+    session = AdvancedSQLiteSession(session_id="queued_add_branch", create_tables=True)
+    original: list[TResponseInputItem] = [
+        {"role": "user", "content": "main first"},
+        {"role": "user", "content": "main second"},
+    ]
+    added: TResponseInputItem = {"role": "user", "content": "queued branch item"}
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        await session.add_items(original)
+        await session.create_branch_from_turn(branch_turn, "selected")
+        with _gate_worker("_capture_current_turn") as (started, real_to_thread, release):
+            entered = asyncio.Event()
+
+            async def append() -> None:
+                entered.set()
+                await session.add_items([added])
+
+            try:
+                capture = asyncio.create_task(
+                    session.store_run_usage(create_mock_run_result(usage_data))
+                )
+                tasks.append(capture)
+                assert await real_to_thread(started.wait, 5)
+                mutation = asyncio.create_task(append())
+                tasks.append(mutation)
+                # The add has reserved its queue position before this task resumes.
+                await entered.wait()
+                assert not mutation.done()
+                if operation == "switch":
+                    await session.switch_to_branch("main")
+                else:
+                    await session.clear_session()
+                release.set()
+                await asyncio.gather(*tasks)
+            finally:
+                release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert session._current_branch_id == "main"
+        if operation == "switch":
+            assert await session.get_items() == original
+            assert await session.get_items(branch_id="selected") == original[: branch_turn - 1] + [
+                added
+            ]
+            turns = await session.get_conversation_by_turns("selected")
+            assert list(turns) == list(range(1, branch_turn + 1))
+        else:
+            assert await session.get_items() == [added]
+            assert await session.get_items(branch_id="selected") == []
+            assert await session.get_turn_usage() == []
     finally:
         session.close()
 
