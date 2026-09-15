@@ -4801,3 +4801,136 @@ async def test_fallback_call_and_late_reasoning_keep_streamed_output_indexes(
     )
     assert [item.type for item in completed.output] == ["function_call", "function_call", "reasoning"]
     assert [item.name for item in completed.output[:2]] == ["fallback_first", "streamed_second"]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_call_after_message_reserves_slot_before_streamed_call(
+    monkeypatch,
+) -> None:
+    """With the message announced first, a tracked fallback call reserves its
+    post-message slot, so late reasoning cannot shift it onto the streamed
+    call's announced index."""
+    text_chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+    )
+    fallback_first = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(
+            name="fallback_first",
+            arguments='{"a": 1}',
+        ),
+        type="function",
+    )
+    streamed_second_start = ChoiceDeltaToolCall(
+        index=1,
+        id="tool-call-2",
+        function=ChoiceDeltaToolCallFunction(
+            name="streamed_second",
+            arguments="",
+        ),
+        type="function",
+    )
+    streamed_second_args = ChoiceDeltaToolCall(
+        index=1,
+        function=ChoiceDeltaToolCallFunction(arguments='{"b": 2}'),
+        type="function",
+    )
+    reasoning_chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="late-thought"))
+        ],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in (text_chunk, reasoning_chunk):
+            yield chunk
+
+    tool_chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[fallback_first]))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[streamed_second_start]))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[streamed_second_args]))],
+        ),
+    ]
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in (text_chunk, *tool_chunks, reasoning_chunk):
+            yield chunk
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    added_indexes: Final = sorted(
+        event.output_index for event in output_events if event.type == "response.output_item.added"
+    )
+    assert added_indexes == [0, 1, 2, 3]
+
+    done_indexes = [
+        event.output_index for event in output_events if event.type == "response.output_item.done"
+    ]
+    assert sorted(done_indexes) == [0, 1, 2, 3]
+
+    completed = next(
+        event.response for event in output_events if event.type == "response.completed"
+    )
+    assert [item.type for item in completed.output] == [
+        "message",
+        "function_call",
+        "function_call",
+        "reasoning",
+    ]
+    assert [item.name for item in completed.output[1:3]] == ["fallback_first", "streamed_second"]

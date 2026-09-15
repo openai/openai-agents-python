@@ -283,6 +283,15 @@ class _StreamOutputLayout:
                 output_index += function_call_offset
             else:
                 output_index += function_call_offset + 1
+                # Calls tracked below this one after the message reserve the slots
+                # the formula leaves for them, so a late reasoning item cannot
+                # shift them onto already-announced indexes.
+                for position in range(function_call_offset):
+                    call_index = function_call_indices[position]
+                    if call_index not in self.function_call_output_idxs:
+                        self.function_call_output_idxs[call_index] = output_index - (
+                            function_call_offset - position
+                        )
 
         self.function_call_output_idxs[function_call_index] = output_index
         return output_index
