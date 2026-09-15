@@ -193,20 +193,56 @@ class SequenceNumber:
 
 @dataclass
 class _StreamOutputLayout:
-    """Tracks output slots that have been exposed to stream consumers."""
+    """Tracks output slots that have been exposed to stream consumers.
+
+    Function calls and the assistant message keep their original slot model
+    (``[reasoning?][function calls before the message][message][remaining
+    calls]``), which preserves a fallback call's position relative to streamed
+    calls. The reasoning item, however, may be created lazily *after* visible
+    chunks have streamed, so instead of claiming slot 0 unconditionally it takes
+    the next slot nothing has claimed yet at creation time. The final
+    ``response.completed.output`` list is assembled by sorting on these indexes,
+    keeping positions consistent with what consumers saw on the wire.
+
+    Because the reasoning item claims its slot at creation time, tracked-but-
+    unannounced calls must reserve the slots the slot model assumes they occupy
+    as soon as a neighboring slot is handed out; otherwise a late reasoning item
+    would claim one of those slots and the formulas would shift the fallback
+    calls onto indexes already announced on the wire.
+    """
 
     assistant_message_output_idx: int | None = None
     function_call_output_idxs: dict[int, int] = field(default_factory=dict)
+    reasoning_output_idx: int | None = None
 
-    @staticmethod
-    def _reasoning_output_count(state: StreamingState) -> int:
-        return 1 if state.reasoning_content_index_and_output is not None else 0
+    def _reasoning_output_count(self) -> int:
+        return 1 if self.reasoning_output_idx is not None else 0
+
+    def _next_free_output_index(self) -> int:
+        """The first slot no announced item has claimed."""
+        occupied = list(self.function_call_output_idxs.values())
+        if self.assistant_message_output_idx is not None:
+            occupied.append(self.assistant_message_output_idx)
+        return max(occupied, default=-1) + 1
+
+    def reasoning_output_index(self) -> int:
+        """The slot the reasoning item is announced at, allocated lazily."""
+        if self.reasoning_output_idx is None:
+            self.reasoning_output_idx = self._next_free_output_index()
+        return self.reasoning_output_idx
 
     def assistant_message_output_index(self, state: StreamingState) -> int:
         if self.assistant_message_output_idx is None:
-            output_index = self._reasoning_output_count(state)
+            output_index = self._reasoning_output_count()
             if self.function_call_output_idxs:
                 output_index += len(state.function_calls)
+                # Calls already tracked but not announced yet reserve the slots
+                # below the message the formula assumes they occupy.
+                for position, call_index in enumerate(state.function_calls):
+                    if call_index not in self.function_call_output_idxs:
+                        self.function_call_output_idxs[call_index] = output_index - (
+                            len(state.function_calls) - position
+                        )
             self.assistant_message_output_idx = output_index
 
         return self.assistant_message_output_idx
@@ -227,44 +263,38 @@ class _StreamOutputLayout:
                 f"Function call index {function_call_index} has not been tracked"
             ) from exc
 
-        output_index = self._reasoning_output_count(state)
+        output_index = self._reasoning_output_count()
         if self.assistant_message_output_idx is None:
             output_index += function_call_offset
+            # Calls tracked below this one reserve the slots the slot model
+            # leaves for them, so a late reasoning item cannot shift them onto
+            # already-announced indexes.
+            for position in range(function_call_offset):
+                call_index = function_call_indices[position]
+                if call_index not in self.function_call_output_idxs:
+                    self.function_call_output_idxs[call_index] = (
+                        output_index - (function_call_offset - position)
+                    )
         else:
             function_calls_before_message = (
-                self.assistant_message_output_idx - self._reasoning_output_count(state)
+                self.assistant_message_output_idx - self._reasoning_output_count()
             )
             if function_call_offset < function_calls_before_message:
                 output_index += function_call_offset
             else:
                 output_index += function_call_offset + 1
+                # Calls tracked below this one after the message reserve the slots
+                # the formula leaves for them, so a late reasoning item cannot
+                # shift them onto already-announced indexes.
+                for position in range(function_call_offset):
+                    call_index = function_call_indices[position]
+                    if call_index not in self.function_call_output_idxs:
+                        self.function_call_output_idxs[call_index] = output_index - (
+                            function_call_offset - position
+                        )
 
         self.function_call_output_idxs[function_call_index] = output_index
         return output_index
-
-    def function_calls_before_message(
-        self,
-        state: StreamingState,
-    ) -> list[ResponseFunctionToolCall]:
-        if self.assistant_message_output_idx is None:
-            return []
-
-        function_call_count = self.assistant_message_output_idx - self._reasoning_output_count(
-            state
-        )
-        return list(state.function_calls.values())[:function_call_count]
-
-    def function_calls_after_message(
-        self,
-        state: StreamingState,
-    ) -> list[ResponseFunctionToolCall]:
-        if self.assistant_message_output_idx is None:
-            return list(state.function_calls.values())
-
-        function_call_count = self.assistant_message_output_idx - self._reasoning_output_count(
-            state
-        )
-        return list(state.function_calls.values())[function_call_count:]
 
 
 class ChatCmplStreamHandler:
@@ -517,7 +547,7 @@ class ChatCmplStreamHandler:
 
         yield ResponseReasoningSummaryPartDoneEvent(
             item_id=FAKE_RESPONSES_ID,
-            output_index=0,
+            output_index=state.reasoning_content_index_and_output[0],
             summary_index=summary_index,
             part=DoneEventPart(
                 text=reasoning_item.summary[summary_index].text,
@@ -586,7 +616,7 @@ class ChatCmplStreamHandler:
         elif reasoning_item.content is not None:
             yield ResponseReasoningTextDoneEvent(
                 item_id=FAKE_RESPONSES_ID,
-                output_index=0,
+                output_index=state.reasoning_content_index_and_output[0],
                 content_index=0,
                 text=reasoning_item.content[0].text,
                 type="response.reasoning_text.done",
@@ -595,7 +625,7 @@ class ChatCmplStreamHandler:
 
         yield ResponseOutputItemDoneEvent(
             item=reasoning_item,
-            output_index=0,
+            output_index=state.reasoning_content_index_and_output[0],
             type="response.output_item.done",
             sequence_number=sequence_number.get_and_increment(),
         )
@@ -723,10 +753,11 @@ class ChatCmplStreamHandler:
                     )
                     if state.provider_data:
                         reasoning_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    reasoning_output_index = output_layout.reasoning_output_index()
+                    state.reasoning_content_index_and_output = (reasoning_output_index, reasoning_item)
                     yield ResponseOutputItemAddedEvent(
                         item=reasoning_item,
-                        output_index=0,
+                        output_index=reasoning_output_index,
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
@@ -746,10 +777,11 @@ class ChatCmplStreamHandler:
                     )
                     if state.provider_data:
                         reasoning_item.provider_data = state.provider_data.copy()  # type: ignore[attr-defined]
-                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    reasoning_output_index = output_layout.reasoning_output_index()
+                    state.reasoning_content_index_and_output = (reasoning_output_index, reasoning_item)
                     yield ResponseOutputItemAddedEvent(
                         item=reasoning_item,
-                        output_index=0,
+                        output_index=reasoning_output_index,
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
@@ -764,7 +796,7 @@ class ChatCmplStreamHandler:
 
                         yield ResponseReasoningSummaryPartAddedEvent(
                             item_id=FAKE_RESPONSES_ID,
-                            output_index=0,
+                            output_index=state.reasoning_content_index_and_output[0],
                             summary_index=summary_index,
                             part=AddedEventPart(text="", type="summary_text"),
                             type="response.reasoning_summary_part.added",
@@ -776,7 +808,7 @@ class ChatCmplStreamHandler:
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=0,
+                        output_index=state.reasoning_content_index_and_output[0],
                         summary_index=summary_index,
                         type="response.reasoning_summary_text.delta",
                         sequence_number=sequence_number.get_and_increment(),
@@ -802,10 +834,11 @@ class ChatCmplStreamHandler:
                     reasoning_provider_data = state.provider_data.copy()
                     reasoning_provider_data[_CHAT_COMPLETIONS_REASONING_FIELD_KEY] = "reasoning"
                     reasoning_item.provider_data = reasoning_provider_data  # type: ignore[attr-defined]
-                    state.reasoning_content_index_and_output = (0, reasoning_item)
+                    reasoning_output_index = output_layout.reasoning_output_index()
+                    state.reasoning_content_index_and_output = (reasoning_output_index, reasoning_item)
                     yield ResponseOutputItemAddedEvent(
                         item=reasoning_item,
-                        output_index=0,
+                        output_index=reasoning_output_index,
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
@@ -814,7 +847,7 @@ class ChatCmplStreamHandler:
                     yield ResponseReasoningTextDeltaEvent(
                         delta=reasoning_text,
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=0,
+                        output_index=state.reasoning_content_index_and_output[0],
                         content_index=0,
                         type="response.reasoning_text.delta",
                         sequence_number=sequence_number.get_and_increment(),
@@ -1288,14 +1321,22 @@ class ChatCmplStreamHandler:
                 )
 
         # Finally, send the Response completed event
-        outputs: list[ResponseOutputItem] = []
+        # Assemble the output list in the order the items were announced: each
+        # entry carries the output index consumers already saw on the wire, so
+        # sorting on it keeps `response.completed.output` positions consistent
+        # with those indexes even when a reasoning item was created after
+        # visible chunks.
+        output_entries: list[tuple[int, ResponseOutputItem]] = []
 
         # include Reasoning item if it exists
         if state.reasoning_content_index_and_output:
-            reasoning_item = state.reasoning_content_index_and_output[1]
-            outputs.append(reasoning_item)
+            reasoning_index, reasoning_item = state.reasoning_content_index_and_output
+            output_entries.append((reasoning_index, reasoning_item))
 
-        outputs.extend(output_layout.function_calls_before_message(state))
+        for index, function_call in state.function_calls.items():
+            output_entries.append(
+                (output_layout.function_call_output_index(state, index), function_call)
+            )
 
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
@@ -1319,7 +1360,9 @@ class ChatCmplStreamHandler:
                 content_parts.append(state.refusal_content_index_and_output)
             content_parts.sort(key=lambda entry: entry[0])
             assistant_msg.content.extend(part for _, part in content_parts)
-            outputs.append(assistant_msg)
+            output_entries.append(
+                (output_layout.assistant_message_output_index(state), assistant_msg)
+            )
 
             # send a ResponseOutputItemDone for the assistant message
             yield ResponseOutputItemDoneEvent(
@@ -1329,7 +1372,8 @@ class ChatCmplStreamHandler:
                 sequence_number=sequence_number.get_and_increment(),
             )
 
-        outputs.extend(output_layout.function_calls_after_message(state))
+        output_entries.sort(key=lambda entry: entry[0])
+        outputs: list[ResponseOutputItem] = [item for _, item in output_entries]
 
         final_response = response.model_copy()
         final_response.output = outputs
