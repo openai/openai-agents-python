@@ -34,6 +34,7 @@ import agents
 from agents import (
     Agent,
     AgentOutputSchema,
+    ApplyPatchTool,
     Computer,
     ComputerTool,
     FileSearchTool,
@@ -166,6 +167,16 @@ def test_convert_tool_choice_allows_function_named_computer_without_computer_too
     assert Converter.convert_tool_choice("computer_use", tools=[computer_use_function]) == {
         "type": "function",
         "name": "computer_use",
+    }
+
+
+def test_convert_tool_choice_builtin_shell_and_apply_patch() -> None:
+    shell_tool = ShellTool(executor=lambda request: "ok")
+    apply_patch_tool = ApplyPatchTool(editor=cast(Any, object()))
+
+    assert Converter.convert_tool_choice("shell", tools=[shell_tool]) == {"type": "shell"}
+    assert Converter.convert_tool_choice("apply_patch", tools=[apply_patch_tool]) == {
+        "type": "apply_patch"
     }
 
 
