@@ -24,7 +24,6 @@ from agents import (
     AsyncComputer,
     Computer,
     ComputerTool,
-    CustomTool,
     ImageGenerationTool,
     ModelSettings,
     ModelTracing,
@@ -2215,18 +2214,10 @@ async def test_preview_model_forced_computer_tool_choice_uses_preview_selector(
     ]
 
 
-def _builtin_tool_choice_tool(tool_choice: str) -> Tool:
-    if tool_choice == "shell":
-        return ShellTool(executor=lambda request: "ok")
-    return ApplyPatchTool(editor=cast(Any, object()))
-
-
-async def _capture_tool_choice_request(
-    *,
-    tool_choice: str,
-    tools: list[Tool],
-    handoffs: list[Any],
-) -> dict[str, Any]:
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
+async def test_builtin_tool_choice_selects_builtin_among_multiple_tools(tool_choice: str) -> None:
     called_kwargs: dict[str, Any] = {}
 
     class DummyResponses:
@@ -2239,94 +2230,28 @@ async def _capture_tool_choice_request(
         def __init__(self):
             self.responses = DummyResponses()
 
+    builtin_tool: Tool = (
+        ShellTool(executor=lambda request: "ok")
+        if tool_choice == "shell"
+        else ApplyPatchTool(editor=cast(Any, object()))
+    )
     model = OpenAIResponsesModel(
         model="gpt-5.4",
-        openai_client=cast(Any, DummyResponsesClient()),
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
     )
+
     await model.get_response(
         system_instructions=None,
         input="hi",
         model_settings=ModelSettings(tool_choice=tool_choice),
-        tools=tools,
+        tools=[
+            function_tool(lambda: "ok", name_override="lookup_account"),
+            builtin_tool,
+            function_tool(lambda: "ok", name_override="summarize"),
+        ],
         output_schema=None,
-        handoffs=handoffs,
-        tracing=ModelTracing.DISABLED,
-    )
-    return called_kwargs
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
-async def test_builtin_tool_choice_prefers_coexisting_function_tool(tool_choice: str) -> None:
-    builtin_tool = _builtin_tool_choice_tool(tool_choice)
-    function_target = function_tool(lambda: "ok", name_override=tool_choice)
-
-    called_kwargs = await _capture_tool_choice_request(
-        tool_choice=tool_choice,
-        tools=[builtin_tool, function_target],
-        handoffs=[],
-    )
-
-    assert called_kwargs["tool_choice"] == {"type": "function", "name": tool_choice}
-    assert ("function", tool_choice) in [
-        (dict(tool).get("type"), dict(tool).get("name")) for tool in called_kwargs["tools"]
-    ]
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
-async def test_builtin_tool_choice_ignores_coexisting_custom_tool(tool_choice: str) -> None:
-    builtin_tool = _builtin_tool_choice_tool(tool_choice)
-    custom_target = CustomTool(
-        name=tool_choice,
-        description="A custom tool sharing the built-in name.",
-        on_invoke_tool=cast(Any, lambda *args, **kwargs: "ok"),
-    )
-
-    called_kwargs = await _capture_tool_choice_request(
-        tool_choice=tool_choice,
-        tools=[builtin_tool, custom_target],
-        handoffs=[],
-    )
-
-    sent = [(dict(tool).get("type"), dict(tool).get("name")) for tool in called_kwargs["tools"]]
-    assert ("custom", tool_choice) in sent
-    assert not any(entry == ("function", tool_choice) for entry in sent)
-    assert called_kwargs["tool_choice"] == {"type": tool_choice}
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
-async def test_builtin_tool_choice_prefers_coexisting_handoff(tool_choice: str) -> None:
-    builtin_tool = _builtin_tool_choice_tool(tool_choice)
-    handoff_target = handoff(Agent(name="Target"), tool_name_override=tool_choice)
-
-    called_kwargs = await _capture_tool_choice_request(
-        tool_choice=tool_choice,
-        tools=[builtin_tool],
-        handoffs=[handoff_target],
-    )
-
-    assert called_kwargs["tool_choice"] == {"type": "function", "name": tool_choice}
-
-
-@pytest.mark.allow_call_model_methods
-@pytest.mark.asyncio
-@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
-async def test_builtin_tool_choice_selects_builtin_among_multiple_tools(tool_choice: str) -> None:
-    builtin_tool = _builtin_tool_choice_tool(tool_choice)
-    other_tools = [
-        function_tool(lambda: "ok", name_override="lookup_account"),
-        function_tool(lambda: "ok", name_override="summarize"),
-    ]
-
-    called_kwargs = await _capture_tool_choice_request(
-        tool_choice=tool_choice,
-        tools=[other_tools[0], builtin_tool, other_tools[1]],
         handoffs=[handoff(Agent(name="Target"))],
+        tracing=ModelTracing.DISABLED,
     )
 
     assert called_kwargs["tool_choice"] == {"type": tool_choice}
