@@ -654,6 +654,66 @@ async def test_sandbox_session_delegates_pending_dependency_close_state() -> Non
 
 
 @pytest.mark.asyncio
+async def test_sandbox_session_defers_inflight_dependency_close_after_cancellation() -> None:
+    class _BlockingResource:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.completed = asyncio.Event()
+
+        async def aclose(self) -> None:
+            self.started.set()
+            await self.release.wait()
+            self.completed.set()
+
+    resource = _BlockingResource()
+    inner = _FakeSession(Manifest())
+    inner.set_dependencies(
+        Dependencies().bind_factory(
+            "tests.blocking_close",
+            lambda _dependencies: resource,
+            owns_result=True,
+        )
+    )
+    await inner.dependencies.require("tests.blocking_close")
+    finalized = asyncio.Event()
+    session = SandboxSession(inner)
+
+    async def after_deferred_close() -> None:
+        assert resource.completed.is_set()
+        finalized.set()
+
+    session._after_deferred_dependency_close = after_deferred_close  # type: ignore[method-assign]
+    close = asyncio.create_task(session.aclose())
+    try:
+        await asyncio.wait_for(resource.started.wait(), timeout=0.5)
+        close.cancel("caller cancelled dependency close")
+        with pytest.raises(asyncio.CancelledError):
+            await close
+
+        assert not inner._dependencies_closed
+        deferred = session._deferred_dependency_close_task
+        assert deferred is not None
+        assert not deferred.done()
+
+        resource.release.set()
+        await asyncio.wait_for(deferred, timeout=0.5)
+        assert resource.completed.is_set()
+        assert finalized.is_set()
+        assert inner._dependencies_closed
+    finally:
+        resource.release.set()
+        if not close.done():
+            close.cancel()
+        with suppress(BaseException):
+            await close
+        deferred = session._deferred_dependency_close_task
+        if deferred is not None and not deferred.done():
+            with suppress(BaseException):
+                await deferred
+
+
+@pytest.mark.asyncio
 async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> None:
     inner = _FailingStopSession(Manifest())
     session = SandboxSession(inner)

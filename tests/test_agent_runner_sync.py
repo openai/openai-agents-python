@@ -448,23 +448,39 @@ def test_run_sync_uses_sdk_loop_when_caller_owned_surface_has_no_default_loop(
     monkeypatch, fresh_event_loop_policy
 ):
     runner = AgentRunner()
-    completed = threading.Event()
+    cleanup_started = threading.Event()
+    cleanup_finished = threading.Event()
+    release_cleanup = threading.Event()
+    deferred_tasks: list[asyncio.Task[None]] = []
 
     async def fake_run(self, *_args, **_kwargs):
         async def deferred_work():
-            await asyncio.sleep(0.01)
-            completed.set()
+            cleanup_started.set()
+            await asyncio.to_thread(release_cleanup.wait)
+            cleanup_finished.set()
 
-        _track_sync_background_task(asyncio.create_task(deferred_work()))
+        task = asyncio.create_task(deferred_work())
+        deferred_tasks.append(task)
+        _track_sync_background_task(task)
         return object()
 
     monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    monkeypatch.setattr("agents.run._SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S", 0.01)
     fresh_event_loop_policy.set_event_loop(None)
 
     try:
+        started_at = time.monotonic()
         runner.run_sync(Agent(name="test-agent"), "input", context=object())
-        assert completed.wait(timeout=0.5)
+        elapsed = time.monotonic() - started_at
+        assert cleanup_started.is_set()
+        assert elapsed < 0.5
+        assert deferred_tasks and not deferred_tasks[0].done()
+        assert not cleanup_finished.is_set()
+
+        release_cleanup.set()
+        assert cleanup_finished.wait(timeout=0.5)
     finally:
+        release_cleanup.set()
         sync_loop = _get_sync_loop()
         _stop_sync_loop_driver(sync_loop)
         if not sync_loop.is_closed():
