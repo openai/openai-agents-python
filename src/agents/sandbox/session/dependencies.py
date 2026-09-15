@@ -8,7 +8,10 @@ from typing import cast
 
 from typing_extensions import Self
 
-from .._cleanup_owner import create_cleanup_owner
+from .._cleanup_owner import (
+    create_cleanup_owner,
+    raise_if_cleanup_owner_force_cancelling,
+)
 
 DependencyKey = str
 
@@ -263,15 +266,18 @@ class Dependencies:
         await asyncio.shield(task)
 
     async def _close(self) -> None:
+        raise_if_cleanup_owner_force_cancelling()
         active_tasks = tuple(self._active_tasks)
         for task in active_tasks:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+            raise_if_cleanup_owner_force_cancelling(nested_tasks=active_tasks)
 
         seen_ids: set[int] = set()
         cancellation: asyncio.CancelledError | None = None
         for value in reversed(self._owned_results):
+            raise_if_cleanup_owner_force_cancelling()
             value_id = id(value)
             if value_id in seen_ids:
                 continue

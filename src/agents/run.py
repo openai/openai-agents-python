@@ -38,6 +38,7 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import log_model_and_tool_action_warning, log_tool_action_warning, logger
 from .memory import Session
+from .models import _openai_shared
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -153,6 +154,7 @@ from .run_internal.sync import (
     _IS_SYNC_RUN,
     _SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
     _create_sync_task,
+    _force_cancel_sync_background_tasks,
     _get_default_loop,
     _get_pending_sync_background_tasks,
     _get_sync_loop,
@@ -350,6 +352,12 @@ def _run_sync_has_caller_owned_dependencies(
     ):
         if callable(config_value(callback_name)):
             return True
+
+    configured_provider_is_default = configured_model_provider is None or getattr(
+        configured_model_provider, "_agents_default_model_provider", False
+    )
+    if _openai_shared.get_default_openai_client() is not None and configured_provider_is_default:
+        return True
 
     if config_value("input_guardrails") or config_value("output_guardrails"):
         return True
@@ -2496,13 +2504,20 @@ class AgentRunner:
         finally:
             if _get_pending_sync_background_tasks(sync_loop):
                 if caller_owned_loop:
-                    with contextlib.suppress(BaseException):
+                    try:
                         sync_loop.run_until_complete(
                             asyncio.wait_for(
                                 _settle_sync_background_work(sync_loop),
                                 timeout=_SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S,
                             )
                         )
+                    except asyncio.TimeoutError:
+                        _force_cancel_sync_background_tasks(sync_loop)
+                        with contextlib.suppress(BaseException):
+                            sync_loop.run_until_complete(asyncio.sleep(0))
+                    except BaseException:
+                        with contextlib.suppress(BaseException):
+                            sync_loop.run_until_complete(asyncio.sleep(0))
                 else:
                     driver = _start_sync_loop_driver(sync_loop)
                     driver.schedule_settlement()

@@ -6,7 +6,10 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast
 
-from .._cleanup_owner import create_cleanup_owner
+from .._cleanup_owner import (
+    create_cleanup_owner,
+    raise_if_cleanup_owner_force_cancelling,
+)
 from ..errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
@@ -191,6 +194,7 @@ async def _settle_mount_transition(
         finally:
             _MOUNT_TRANSITION_OWNER.reset(owner_token)
 
+    raise_if_cleanup_owner_force_cancelling()
     task = create_cleanup_owner(
         run_registered_transition(),
         name="agents.mount_transition",
@@ -199,9 +203,11 @@ async def _settle_mount_transition(
     while not task.done():
         try:
             await asyncio.wait((task,))
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            raise_if_cleanup_owner_force_cancelling(error, nested_tasks=(task,))
             caller_cancelled = True
     try:
+        raise_if_cleanup_owner_force_cancelling(nested_tasks=(task,))
         task.result()
     except BaseException as exc:
         return exc, caller_cancelled

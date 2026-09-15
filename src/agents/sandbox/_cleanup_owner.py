@@ -80,6 +80,18 @@ def raise_if_cleanup_owner_force_cancelling(
         raise _CleanupOwnerForcedShutdown() from None
 
 
+def force_cancel_cleanup_owner(task: asyncio.Future[Any], msg: object = None) -> bool:
+    """Immediately force-cancel a cleanup owner after its loop cannot wait longer."""
+
+    if not isinstance(task, _CleanupOwnerTask):
+        return False
+    task._forced_cancel_handle = None
+    if task.done():
+        return False
+    task._force_cancelling = True
+    return asyncio.Task.cancel(task, msg)
+
+
 def create_cleanup_owner(
     awaitable: Awaitable[_T], *, name: str, cancel_grace_s: float = _DEFAULT_CANCEL_GRACE_S
 ) -> asyncio.Task[_T]:

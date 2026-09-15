@@ -8,6 +8,11 @@ from ..models.interface import ModelProvider
 from ..run_config import RunConfig, _coerce_run_config
 
 
+def _is_sdk_owned_model_provider(provider: ModelProvider) -> bool:
+    """Return whether the provider and its lazily resolved client are SDK-owned."""
+    return bool(getattr(provider, "_agents_default_model_provider", False))
+
+
 def _normalize_run_config_for_runner(
     value: RunConfig | dict[str, Any] | None,
 ) -> tuple[RunConfig, bool]:
@@ -16,6 +21,9 @@ def _normalize_run_config_for_runner(
         isinstance(value, dict) and "model_provider" not in value
     )
     run_config = RunConfig() if value is None else _coerce_run_config(value)
+    owns_model_provider = owns_model_provider and _is_sdk_owned_model_provider(
+        run_config.model_provider
+    )
     return run_config, owns_model_provider
 
 

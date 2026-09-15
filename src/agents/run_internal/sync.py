@@ -9,6 +9,8 @@ from contextvars import ContextVar
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from ..sandbox._cleanup_owner import force_cancel_cleanup_owner
+
 _IS_SYNC_RUN: ContextVar[bool] = ContextVar("agents_is_sync_run", default=False)
 _SYNC_BACKGROUND_TASKS: WeakKeyDictionary[asyncio.AbstractEventLoop, set[asyncio.Task[Any]]] = (
     WeakKeyDictionary()
@@ -145,6 +147,13 @@ async def _settle_sync_background_work(loop: asyncio.AbstractEventLoop) -> None:
 
     await _settle_pending_sync_background_tasks(loop)
     await loop.shutdown_asyncgens()
+
+
+def _force_cancel_sync_background_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Force-cancel cleanup owners when caller-owned loop settlement exceeds its bound."""
+
+    for task in _get_pending_sync_background_tasks(loop):
+        force_cancel_cleanup_owner(task)
 
 
 def _get_default_loop() -> asyncio.AbstractEventLoop | None:

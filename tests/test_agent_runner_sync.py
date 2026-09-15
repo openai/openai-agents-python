@@ -8,6 +8,7 @@ from typing import Protocol
 import pytest
 
 from agents.agent import Agent
+from agents.models import _openai_shared
 from agents.models.interface import ModelProvider
 from agents.models.multi_provider import MultiProvider, MultiProviderMap
 from agents.run import AgentRunner
@@ -218,6 +219,63 @@ def test_run_sync_uses_default_loop_for_caller_owned_run_surfaces(
     fresh_event_loop_policy.set_event_loop(dependency_loop)
     try:
         runner.run_sync(agent, "input", **kwargs)
+        assert observed_loops == [dependency_loop]
+        assert not dependency_loop.is_running()
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        dependency_loop.close()
+
+
+def test_run_sync_force_cancels_timed_out_cleanup_on_caller_loop(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    cleanup_started = threading.Event()
+    cleanup_cancelled = threading.Event()
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def deferred_work() -> None:
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+
+        from agents.sandbox._cleanup_owner import create_cleanup_owner
+
+        _track_sync_background_task(create_cleanup_owner(deferred_work(), name="test.cleanup"))
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    monkeypatch.setattr("agents.run._SYNC_BACKGROUND_SETTLEMENT_TIMEOUT_S", 0.01)
+
+    caller_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(caller_loop)
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input", context=object())
+        assert cleanup_started.is_set()
+        assert cleanup_cancelled.is_set()
+        assert not _get_pending_sync_background_tasks(caller_loop)
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        caller_loop.close()
+
+
+def test_run_sync_keeps_global_client_provider_on_caller_loop(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+    dependency_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(dependency_loop)
+    monkeypatch.setattr(_openai_shared, "_default_openai_client", object())
+
+    async def fake_run(self, *_args, **_kwargs):
+        observed_loops.append(asyncio.get_running_loop())
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input", run_config=RunConfig())
         assert observed_loops == [dependency_loop]
         assert not dependency_loop.is_running()
     finally:
