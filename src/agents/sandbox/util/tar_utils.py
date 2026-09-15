@@ -7,7 +7,7 @@ import shutil
 import tarfile
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import cast
 
 
@@ -100,24 +100,48 @@ def safe_tar_member_rel_path(
     return Path(*rel.parts)
 
 
-def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase:
+def strip_tar_member_prefix(
+    data: io.IOBase,
+    *,
+    prefix: str | Path,
+    relativize_symlinks_under: str | PurePath | None = None,
+) -> io.IOBase:
     """Return a seekable tar stream after replacing a leading member prefix with `.`.
 
     For example, Docker archives a workspace copied to `/tmp/stage/workspace`
     as `workspace/...`; portable workspace snapshots should store the same
     files as `.` and `...`, independent of the source backend's root name.
+
+    The strict hydrate extractor refuses FIFOs, device nodes, and absolute symlink
+    targets, and a staged workspace copy (`cp -R`) legitimately carries the first two
+    kinds and absolute links into the workspace. FIFOs and device nodes are dropped, and
+    when `relativize_symlinks_under` names the workspace root, an absolute symlink target
+    under it is rebased onto the link's own directory with its components kept verbatim.
+    A rebased target is only accepted when resolving it through the archive's own symlink
+    members provably stays under the root; otherwise the archive is rejected, because the
+    relative form would pass hydrate's lexical check while escaping on disk.
     """
 
     prefix_rel = _normalize_rel(prefix)
     if prefix_rel == Path():
         raise ValueError("tar member prefix must not be empty")
+    symlink_root: str | None = None
+    if relativize_symlinks_under is not None:
+        symlink_root = (
+            relativize_symlinks_under.as_posix()
+            if isinstance(relativize_symlinks_under, PurePath)
+            else relativize_symlinks_under
+        )
 
     out = tempfile.TemporaryFile()
+    rebased_symlinks: dict[str, str] = {}
     try:
         with data:
             with tarfile.open(fileobj=data, mode="r|*") as src:
                 with tarfile.open(fileobj=out, mode="w|") as dst:
                     for member in src:
+                        if member.isfifo() or member.ischr() or member.isblk():
+                            continue
                         rel_path = safe_tar_member_rel_path(
                             member,
                             allow_symlinks=True,
@@ -141,6 +165,15 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
                         rewritten.name = stripped_name
                         rewritten.pax_headers = dict(member.pax_headers)
                         rewritten.pax_headers.pop("path", None)
+                        if rewritten.issym() and symlink_root is not None:
+                            rewritten.linkname = rebase_symlink_target(
+                                rewritten.linkname, link_name=stripped_name, root=symlink_root
+                            )
+                            # A long source target lives in a PAX "linkpath" record that
+                            # would otherwise override the rewritten linkname.
+                            rewritten.pax_headers.pop("linkpath", None)
+                            if rewritten.linkname != member.linkname:
+                                rebased_symlinks[stripped_name] = rewritten.linkname
                         if member.isreg():
                             fileobj = src.extractfile(member)
                             if fileobj is None:
@@ -158,11 +191,121 @@ def strip_tar_member_prefix(data: io.IOBase, *, prefix: str | Path) -> io.IOBase
         out.seek(0)
         with tarfile.open(fileobj=out, mode="r:*") as tar:
             validate_tarfile(tar)
+            _validate_rebased_symlinks_contained(tar, rebased_symlinks)
         out.seek(0)
         return cast(io.IOBase, out)
     except Exception:
         out.close()
         raise
+
+
+# Symlink hops followed while proving that a rebased target stays under the root. Linux
+# gives up after 40 (ELOOP); an archive that needs more is not worth restoring.
+_MAX_SYMLINK_HOPS = 40
+
+
+def _resolve_through_archive_members(
+    parts: tuple[str, ...], members: dict[str, tarfile.TarInfo]
+) -> tuple[str, ...] | None:
+    """Resolve a root-relative path the way the kernel would after extraction.
+
+    Every prefix that names a symlink member is replaced by that member's target, so
+    ``..`` is applied to the link's target rather than to the link's own directory. Every
+    other component must be established by the archive itself: an intermediate component
+    must be a directory member and the last one any member. Hydration extracts into an
+    existing root, so a component the archive does not create could already be a symlink
+    in the destination and send the restored link somewhere else; only archive-owned
+    components are protected by the extractor's own destination checks. Returns the
+    resolved components, or ``None`` when the walk leaves the root, follows a target that
+    is not itself relative (external links are hydrate's decision, not a proof of
+    containment), meets a component the archive does not establish, or exceeds the hop
+    budget.
+    """
+
+    pending = list(reversed(parts))
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                return None
+            resolved.pop()
+            continue
+        member = members.get("/".join([*resolved, part]))
+        if member is None:
+            return None
+        if member.issym():
+            hops += 1
+            if hops > _MAX_SYMLINK_HOPS or member.linkname.startswith("/"):
+                return None
+            pending.extend(reversed(PurePosixPath(member.linkname).parts))
+            continue
+        if pending and not member.isdir():
+            return None
+        resolved.append(part)
+    return tuple(resolved)
+
+
+def _validate_rebased_symlinks_contained(
+    tar: tarfile.TarFile, rebased_symlinks: dict[str, str]
+) -> None:
+    """Reject rebased symlinks whose relative target does not provably stay under the root.
+
+    ``rebase_symlink_target`` keeps the components after the root verbatim, so a target
+    such as ``a/link/../tmp`` is only inside the workspace if ``a/link`` resolves there.
+    With ``a/link -> ..`` it names ``/tmp`` after extraction, yet hydrate's lexical check
+    accepts it. Resolving through the archive's own members settles the question before
+    the relative form is written out; components the archive does not create are not
+    trusted either, because hydration extracts into an existing root where such a
+    component may already be a symlink.
+    """
+
+    if not rebased_symlinks:
+        return
+    members = {member.name: member for member in tar.getmembers()}
+    for link_name, target in rebased_symlinks.items():
+        parts = (*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)
+        if _resolve_through_archive_members(parts, members) is None:
+            raise UnsafeTarMemberError(
+                member=link_name,
+                reason=f"rebased symlink target cannot be proven to stay under the root: {target}",
+            )
+
+
+def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
+    """Rewrite an absolute symlink target under `root` as a target relative to the link.
+
+    Only the root prefix is replaced by the climb out of the link's own archive directory;
+    the remaining components are kept verbatim, because the kernel resolves ``..`` after a
+    symlink component against that link's target: with ``alias -> sub/deep``,
+    ``/workspace/alias/../data.txt`` names ``sub/data.txt`` and must stay
+    ``alias/../data.txt``. Absolute targets outside the root are returned unchanged. A
+    leading ``//`` is collapsed to ``/`` (Linux treats them alike). The textual rewrite
+    does not prove containment on its own; `strip_tar_member_prefix` checks each rebased
+    target against the archive's symlink members afterwards.
+    """
+
+    if not linkname.startswith("/"):
+        return linkname
+    target = "/" + linkname.lstrip("/")
+    prefix = "/" + root.strip("/")
+    if target == prefix:
+        rest = ""
+    elif target.startswith(prefix + "/"):
+        # Consume the whole separator run at the boundary (`/workspace//a.txt`), keeping
+        # every later component, including `..`, untouched.
+        rest = target[len(prefix) :].lstrip("/")
+    else:
+        return linkname
+    # Members beneath a symlink are rejected by the archive validator, so the link's
+    # archive directory holds no symlink components and climbing it is exact.
+    climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
+    if rest and climb:
+        return f"{climb}/{rest}"
+    return rest or climb or "."
 
 
 def _normalize_rel(prefix: str | Path) -> Path:
