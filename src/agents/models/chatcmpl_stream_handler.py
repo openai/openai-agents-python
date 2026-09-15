@@ -203,6 +203,12 @@ class _StreamOutputLayout:
     the next slot nothing has claimed yet at creation time. The final
     ``response.completed.output`` list is assembled by sorting on these indexes,
     keeping positions consistent with what consumers saw on the wire.
+
+    Because the reasoning item claims its slot at creation time, tracked-but-
+    unannounced calls must reserve the slots the slot model assumes they occupy
+    as soon as a neighboring slot is handed out; otherwise a late reasoning item
+    would claim one of those slots and the formulas would shift the fallback
+    calls onto indexes already announced on the wire.
     """
 
     assistant_message_output_idx: int | None = None
@@ -213,8 +219,7 @@ class _StreamOutputLayout:
         return 1 if self.reasoning_output_idx is not None else 0
 
     def _next_free_output_index(self) -> int:
-        """The first slot no announced item has claimed; unannounced function calls
-        tracked in ``state.function_calls`` reserve nothing."""
+        """The first slot no announced item has claimed."""
         occupied = list(self.function_call_output_idxs.values())
         if self.assistant_message_output_idx is not None:
             occupied.append(self.assistant_message_output_idx)
@@ -231,6 +236,13 @@ class _StreamOutputLayout:
             output_index = self._reasoning_output_count()
             if self.function_call_output_idxs:
                 output_index += len(state.function_calls)
+                # Calls already tracked but not announced yet reserve the slots
+                # below the message the formula assumes they occupy.
+                for position, call_index in enumerate(state.function_calls):
+                    if call_index not in self.function_call_output_idxs:
+                        self.function_call_output_idxs[call_index] = output_index - (
+                            len(state.function_calls) - position
+                        )
             self.assistant_message_output_idx = output_index
 
         return self.assistant_message_output_idx
@@ -254,6 +266,15 @@ class _StreamOutputLayout:
         output_index = self._reasoning_output_count()
         if self.assistant_message_output_idx is None:
             output_index += function_call_offset
+            # Calls tracked below this one reserve the slots the slot model
+            # leaves for them, so a late reasoning item cannot shift them onto
+            # already-announced indexes.
+            for position in range(function_call_offset):
+                call_index = function_call_indices[position]
+                if call_index not in self.function_call_output_idxs:
+                    self.function_call_output_idxs[call_index] = (
+                        output_index - (function_call_offset - position)
+                    )
         else:
             function_calls_before_message = (
                 self.assistant_message_output_idx - self._reasoning_output_count()

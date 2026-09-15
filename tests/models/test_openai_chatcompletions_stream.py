@@ -4608,3 +4608,196 @@ async def test_stream_handler_late_reasoning_after_function_call_gets_distinct_o
     assert outputs[0].name == "my_func"
     assert isinstance(outputs[1], ResponseReasoningItem)
     assert outputs[1].summary[0].text == "thinking"
+
+
+@pytest.mark.asyncio
+async def test_trailing_reasoning_content_survives_replay_after_visible_message() -> None:
+    """Reasoning that streams after visible chunks is stored after the message it
+    belongs to; the replay conversion must still attach it to that message."""
+    chunks = [
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta(content="answer"))],
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="summary"))],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks, model="deepseek-r1")
+    added = [event for event in events if event.type == "response.output_item.added"]
+    assert [event.output_index for event in added] == [0, 1]
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    outputs = completed_event.response.output
+    assert isinstance(outputs[0], ResponseOutputMessage)
+    assert isinstance(outputs[1], ResponseReasoningItem)
+
+    replayed_messages = Converter.items_to_messages(
+        [item.model_dump() for item in outputs],
+        model="deepseek-r1",
+    )
+    assert len(replayed_messages) == 1
+    assert replayed_messages[0]["reasoning_content"] == "summary"  # type: ignore[typeddict-item]
+    assert replayed_messages[0]["content"] == "answer"
+
+
+@pytest.mark.asyncio
+async def test_trailing_thinking_blocks_survive_replay_after_visible_message() -> None:
+    """Signed thinking blocks stored after the turn's message must not be dropped
+    when the next turn is converted."""
+    chunks = [
+        _thinking_chunk(content="answer"),
+        _thinking_chunk(
+            thinking_blocks=[{"type": "thinking", "thinking": "hidden", "signature": "sig"}]
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks, model="anthropic/claude-4-opus")
+    completed_event = next(event for event in events if event.type == "response.completed")
+    outputs = completed_event.response.output
+    assert isinstance(outputs[0], ResponseOutputMessage)
+    assert isinstance(outputs[1], ResponseReasoningItem)
+
+    replayed_messages = Converter.items_to_messages(
+        [item.model_dump() for item in outputs],
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+    assert len(replayed_messages) == 1
+    assert replayed_messages[0]["thinking_blocks"] == [  # type: ignore[typeddict-item]
+        {"type": "thinking", "thinking": "hidden", "signature": "sig"}
+    ]
+    assert replayed_messages[0]["content"] == "answer"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fallback_call_and_late_reasoning_keep_streamed_output_indexes(
+    monkeypatch,
+) -> None:
+    """A fallback call preceding a streamed call reserves its slot, so late
+    reasoning cannot shift it onto the streamed call's announced index."""
+    fallback_first = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(
+            name="fallback_first",
+            arguments='{"a": 1}',
+        ),
+        type="function",
+    )
+    streamed_second_start = ChoiceDeltaToolCall(
+        index=1,
+        id="tool-call-2",
+        function=ChoiceDeltaToolCallFunction(
+            name="streamed_second",
+            arguments="",
+        ),
+        type="function",
+    )
+    streamed_second_args = ChoiceDeltaToolCall(
+        index=1,
+        function=ChoiceDeltaToolCallFunction(arguments='{"b": 2}'),
+        type="function",
+    )
+
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[fallback_first]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[streamed_second_start]))],
+    )
+    chunk3 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[streamed_second_args]))],
+    )
+    chunk4 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="late-thought"))
+        ],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in (chunk1, chunk2, chunk3, chunk4):
+            yield chunk
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    added_by_name = {
+        event.item.name: event.output_index
+        for event in output_events
+        if event.type == "response.output_item.added"
+        and isinstance(event.item, ResponseFunctionToolCall)
+    }
+    assert added_by_name == {"fallback_first": 0, "streamed_second": 1}
+
+    reasoning_added = [
+        event
+        for event in output_events
+        if event.type == "response.output_item.added"
+        and isinstance(event.item, ResponseReasoningItem)
+    ]
+    assert [event.output_index for event in reasoning_added] == [2]
+
+    done_indexes = [
+        event.output_index for event in output_events if event.type == "response.output_item.done"
+    ]
+    assert sorted(done_indexes) == [0, 1, 2]
+
+    completed = next(
+        event.response for event in output_events if event.type == "response.completed"
+    )
+    assert [item.type for item in completed.output] == ["function_call", "function_call", "reasoning"]
+    assert [item.name for item in completed.output[:2]] == ["fallback_first", "streamed_second"]

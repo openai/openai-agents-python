@@ -1000,6 +1000,16 @@ class Converter:
                         if reasoning_texts:
                             pending_reasoning_content = "\n".join(reasoning_texts)
 
+                if current_assistant_msg is not None:
+                    # A streamed turn can store the reasoning item after the
+                    # assistant message it belongs to (reasoning that streams
+                    # after visible chunks gets a later output slot, so the
+                    # message is already present here). Attach the pending
+                    # reasoning state to that message now; leaving it pending
+                    # would drop it when the next item flushes the message.
+                    apply_pending_thinking_blocks(current_assistant_msg)
+                    apply_pending_reasoning_content(current_assistant_msg)
+
             # 8) compaction items => reject for chat completions
             elif isinstance(item, dict) and item.get("type") == "compaction":
                 raise UserError(
