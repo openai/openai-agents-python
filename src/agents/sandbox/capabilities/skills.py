@@ -380,8 +380,131 @@ def _get_manifest_entry_by_path(manifest: Manifest, path: Path) -> BaseEntry | N
     return None
 
 
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _is_quoted(value: str) -> bool:
+    return len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}
+
+
+def _unquote(value: str) -> str:
+    return value[1:-1] if _is_quoted(value) else value
+
+
+def _read_block_scalar(
+    lines: Sequence[str],
+    start_index: int,
+    header: str,
+    key_indent: int,
+) -> tuple[str, int]:
+    """Read a ``>``/``|`` block scalar, returning its text and the next index to parse."""
+
+    style = header[0]
+    chomping = "clip"
+    if "-" in header[1:]:
+        chomping = "strip"
+    elif "+" in header[1:]:
+        chomping = "keep"
+
+    block: list[str] = []
+    index = start_index
+    block_indent: int | None = None
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() == "":
+            block.append("")
+            index += 1
+            continue
+        indent = _indent_width(line)
+        if indent <= key_indent:
+            break
+        if block_indent is None:
+            block_indent = indent
+        if indent < block_indent:
+            break
+        block.append(line[block_indent:])
+        index += 1
+
+    trailing_blanks = 0
+    while block and block[-1] == "":
+        block.pop()
+        trailing_blanks += 1
+    if not block:
+        return "", index
+
+    if style == "|":
+        text = "\n".join(block)
+    else:
+        # A folded scalar joins lines with spaces, but a blank line becomes a break and a
+        # more-indented line keeps its own breaks and leading whitespace.
+        folded: list[str] = []
+        previous: str | None = None
+        for entry in block:
+            if entry == "":
+                folded.append("\n")
+                previous = "blank"
+                continue
+            kind = "more" if entry.startswith(" ") else "normal"
+            if previous is None or previous == "blank":
+                folded.append(entry)
+            elif kind == "more" or previous == "more":
+                folded.append("\n" + entry)
+            else:
+                folded.append(" " + entry)
+            previous = kind
+        text = "".join(folded)
+
+    if chomping == "strip":
+        return text, index
+    if chomping == "keep":
+        return text + "\n" * (trailing_blanks + 1), index
+    return text + "\n", index
+
+
+def _read_wrapped_plain(
+    lines: Sequence[str],
+    start_index: int,
+    first: str,
+    key_indent: int,
+) -> tuple[str, int]:
+    """Read the continuation lines of a plain scalar that wraps across lines."""
+
+    parts = [first] if first else []
+    index = start_index
+    consumed = start_index
+    pending_breaks = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() == "":
+            pending_breaks += 1
+            index += 1
+            continue
+        if _indent_width(line) <= key_indent:
+            break
+        if pending_breaks:
+            parts.append("\n" * pending_breaks)
+            pending_breaks = 0
+        parts.append(line.strip())
+        index += 1
+        consumed = index
+
+    text = ""
+    for part in parts:
+        if not text or part.startswith("\n") or text.endswith("\n"):
+            text += part
+        else:
+            text += " " + part
+    return text, consumed
+
+
 def _parse_frontmatter(markdown: str) -> dict[str, str]:
-    """Parse the simple YAML frontmatter shape used by skill indexes."""
+    """Parse the simple YAML frontmatter shape used by skill indexes.
+
+    Supports plain and quoted scalars, ``>`` folded and ``|`` literal block scalars
+    (including the ``-``/``+`` chomping indicators), and plain scalars wrapped across
+    indented continuation lines.
+    """
 
     lines = markdown.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -389,26 +512,35 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
 
     end_index: int | None = None
     for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
+        # An indented "---" is block scalar content, not the closing delimiter.
+        if line.rstrip() == "---":
             end_index = index
             break
     if end_index is None:
         return {}
 
+    body = lines[1:end_index]
     metadata: dict[str, str] = {}
-    for line in lines[1:end_index]:
+    index = 0
+    while index < len(body):
+        line = body[index]
         stripped = line.strip()
+        index += 1
         if stripped == "" or stripped.startswith("#") or ":" not in stripped:
             continue
+
+        key_indent = _indent_width(line)
         key, value = stripped.split(":", 1)
         parsed_key = key.strip()
         parsed_value = value.strip()
-        if (
-            len(parsed_value) >= 2
-            and parsed_value[0] == parsed_value[-1]
-            and parsed_value[0] in {"'", '"'}
-        ):
-            parsed_value = parsed_value[1:-1]
+
+        if parsed_value and parsed_value[0] in {">", "|"}:
+            parsed_value, index = _read_block_scalar(body, index, parsed_value, key_indent)
+        elif _is_quoted(parsed_value):
+            parsed_value = _unquote(parsed_value)
+        else:
+            parsed_value, index = _read_wrapped_plain(body, index, parsed_value, key_indent)
+
         metadata[parsed_key] = parsed_value
     return metadata
 
@@ -849,7 +981,8 @@ class Skills(Capability):
                 skill_name=skill.name,
                 path=skill.path,
             )
-            available_skill_lines.append(f"- {skill.name}: {skill.description} (file: {path_str})")
+            description = " ".join(skill.description.split())
+            available_skill_lines.append(f"- {skill.name}: {description} (file: {path_str})")
 
         how_to_use_section = (
             _HOW_TO_USE_LAZY_SKILLS_SECTION
