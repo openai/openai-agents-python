@@ -24,7 +24,7 @@ import termios
 import time
 import uuid
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -119,7 +119,9 @@ def _close_fd_quietly(fd: int) -> None:
         os.close(fd)
 
 
-def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInfo | None:
+def _restorable_tar_member(
+    ti: tarfile.TarInfo, *, root: Path, skip_rel_paths: Iterable[str | Path] = ()
+) -> tarfile.TarInfo | None:
     """Rewrite one ``persist_workspace`` member so ``hydrate_workspace`` can restore it.
 
     The strict extractor used for hydrate refuses hardlink members, special files, and
@@ -145,7 +147,7 @@ def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInf
             ti.linkname, link_name=ti.name, roots=(root, root.resolve(strict=False))
         )
         if rebased != ti.linkname and _symlink_target_stays_under(
-            root, link_name=ti.name, target=rebased
+            root, link_name=ti.name, target=rebased, skip_rel_paths=skip_rel_paths
         ):
             ti.linkname = rebased
     return ti
@@ -156,7 +158,9 @@ def _restorable_tar_member(ti: tarfile.TarInfo, *, root: Path) -> tarfile.TarInf
 _MAX_SYMLINK_HOPS = 40
 
 
-def _symlink_target_stays_under(root: Path, *, link_name: str, target: str) -> bool:
+def _symlink_target_stays_under(
+    root: Path, *, link_name: str, target: str, skip_rel_paths: Iterable[str | Path] = ()
+) -> bool:
     """Whether a rebased, link-relative target provably resolves under the workspace root.
 
     The rebase keeps the components after the root verbatim, so ``a/link/../tmp`` is only
@@ -166,8 +170,15 @@ def _symlink_target_stays_under(root: Path, *, link_name: str, target: str) -> b
     follows the workspace's own relative links, which restore verbatim; a hop through a
     link whose target is absolute proves nothing about the restored tree (on the live tree
     it may happen to lead back inside), so it fails the proof, as do leaving the root and
-    exceeding the hop budget. A target that cannot be proven contained keeps its absolute
-    form, which hydrate refuses as it always has.
+    exceeding the hop budget.
+
+    Every other component must be established by the snapshot itself: it has to exist in
+    the workspace, not be excluded by ``skip_rel_paths``, and be a directory unless it is
+    the last one, which must be a regular file or directory. ``hydrate_workspace`` extracts
+    into an existing root, so a component the snapshot does not create may already be a
+    symlink in the destination and send the restored link elsewhere; only snapshot-owned
+    components are protected by the extractor's destination checks. A target that cannot
+    be proven contained keeps its absolute form, which hydrate refuses as it always has.
     """
 
     pending = list(reversed((*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)))
@@ -182,15 +193,23 @@ def _symlink_target_stays_under(root: Path, *, link_name: str, target: str) -> b
                 return False
             resolved.pop()
             continue
-        candidate = root.joinpath(*resolved, part)
-        if not candidate.is_symlink():
-            resolved.append(part)
-            continue
-        hops += 1
-        link_target = os.readlink(candidate)
-        if hops > _MAX_SYMLINK_HOPS or link_target.startswith("/"):
+        rel_name = "/".join([*resolved, part])
+        if should_skip_tar_member(f"./{rel_name}", skip_rel_paths=skip_rel_paths, root_name=None):
             return False
-        pending.extend(reversed(PurePosixPath(link_target).parts))
+        candidate = root / rel_name
+        if candidate.is_symlink():
+            hops += 1
+            link_target = os.readlink(candidate)
+            if hops > _MAX_SYMLINK_HOPS or link_target.startswith("/"):
+                return False
+            pending.extend(reversed(PurePosixPath(link_target).parts))
+            continue
+        if pending:
+            if not candidate.is_dir():
+                return False
+        elif not (candidate.is_dir() or candidate.is_file()):
+            return False
+        resolved.append(part)
     return True
 
 
@@ -1254,7 +1273,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                             skip_rel_paths=skip,
                             root_name=None,
                         )
-                        else _restorable_tar_member(ti, root=root)
+                        else _restorable_tar_member(ti, root=root, skip_rel_paths=skip)
                     ),
                 )
 

@@ -668,6 +668,37 @@ class TestUnixLocalPersistWorkspaceRestorable:
             assert members["a/fine"].linkname == "../b/a"
 
     @pytest.mark.asyncio
+    async def test_rebased_symlink_through_components_the_snapshot_does_not_create_stays_absolute(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hydration extracts into an existing root, so a component the snapshot does not
+        create may already be a symlink there. Only components the snapshot establishes
+        (present, not skipped, directories on the way) count towards the proof."""
+        workspace = tmp_path / "workspace"
+        (workspace / "skipped").mkdir(parents=True)
+        (workspace / "secret").write_text("s", encoding="utf-8")
+        (workspace / "notes.txt").write_text("n", encoding="utf-8")
+        (workspace / "via_missing").symlink_to(workspace / "alias" / ".." / "secret")
+        (workspace / "dangling").symlink_to(workspace / "missing.txt")
+        (workspace / "via_file").symlink_to(workspace / "notes.txt" / ".." / "secret")
+        (workspace / "via_skipped").symlink_to(workspace / "skipped" / ".." / "secret")
+        (workspace / "fine").symlink_to(workspace / "secret")
+
+        session = _RecordingUnixLocalSession(workspace)
+        session._runtime_persist_workspace_skip_relpaths = {Path("skipped")}
+        blob = await session.persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert "skipped" not in members
+            assert members["via_missing"].linkname == str(workspace / "alias" / ".." / "secret")
+            assert members["dangling"].linkname == str(workspace / "missing.txt")
+            assert members["via_file"].linkname == str(workspace / "notes.txt" / ".." / "secret")
+            assert members["via_skipped"].linkname == str(workspace / "skipped" / ".." / "secret")
+            assert members["fine"].linkname == "secret"
+
+    @pytest.mark.asyncio
     async def test_persisted_workspace_hydrates_into_a_new_root(self, tmp_path: Path) -> None:
         workspace = self._workspace(tmp_path)
         (workspace / "outside").unlink()  # hydrate rejects external targets by design
