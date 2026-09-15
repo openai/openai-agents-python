@@ -32,6 +32,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from .. import _debug
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
+from .._run_state_agent_identity import _agent_identity_signature
 from .._tool_identity import (
     FunctionToolLookupKey,
     build_function_tool_lookup_map,
@@ -2093,8 +2094,6 @@ async def resolve_interrupted_turn(
             pending_nested_drops.append(run.tool_call)
             return
         qualified_name = get_tool_call_qualified_name(run.tool_call) or run.tool_call.name
-        # TODO: Persist Agent.as_tool() owner identity so replacement before RunState
-        # restoration can be detected and safely migrated.
         raise ModelBehaviorError(
             f"Cannot reconcile queued tool {qualified_name} with a new tool or handoff while "
             "its Agent.as_tool() run is interrupted. Restore the original tool configuration "
@@ -2109,6 +2108,21 @@ async def resolve_interrupted_turn(
             return current_run
         cached_result = _cached_nested_result(stale_run)
         pending_result = _pending_nested_result(stale_run)
+
+        if pending_result is not None:
+            persisted_owner_signature = getattr(
+                pending_result,
+                "agent_tool_owner_signature",
+                None,
+            )
+            if persisted_owner_signature is not None:
+                current_owner = getattr(current_run.function_tool, "_agent_instance", None)
+                if (
+                    not isinstance(current_owner, Agent)
+                    or _agent_identity_signature(current_owner) != persisted_owner_signature
+                ):
+                    _reject_nested_replacement(stale_run)
+
         if stale_run.function_tool is not current_run.function_tool:
             stale_owner = getattr(stale_run.function_tool, "_agent_instance", None)
             current_owner = getattr(current_run.function_tool, "_agent_instance", None)

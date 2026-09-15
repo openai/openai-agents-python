@@ -38,6 +38,55 @@ def _record(calls: list[str], value: str, result: str | None = None) -> str:
     return value if result is None else result
 
 
+def _nested_agent_tool_entry(state_json: dict[str, Any]) -> dict[str, Any]:
+    processed_response = state_json["last_processed_response"]
+    assert isinstance(processed_response, dict)
+
+    function_entries = processed_response["functions"]
+    assert isinstance(function_entries, list)
+
+    return next(
+        entry
+        for entry in function_entries
+        if isinstance(entry, dict) and "agent_run_state" in entry
+    )
+
+
+async def _interrupted_agent_tool_snapshot() -> tuple[
+    Agent[Any],
+    dict[str, Any],
+]:
+    sensitive_tool = function_tool(
+        lambda: "sensitive",
+        name_override="sensitive",
+        needs_approval=True,
+    )
+    inner_model = ScriptedModel(
+        steps=[[get_function_tool_call("sensitive", "{}", call_id="call_sensitive")]]
+    )
+    inner_agent = Agent(name="inner", model=inner_model, tools=[sensitive_tool])
+    nested_tool = inner_agent.as_tool(
+        tool_name="lookup",
+        tool_description="Look up a value.",
+    )
+    outer_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "lookup",
+                    '{"input":"hi"}',
+                    call_id="call_lookup",
+                )
+            ]
+        ]
+    )
+    outer_agent = Agent(name="outer", model=outer_model, tools=[nested_tool])
+
+    initial_result = await Runner.run(outer_agent, "Look this up")
+    assert len(initial_result.interruptions) == 1
+    return outer_agent, initial_result.to_state().to_json()
+
+
 def _authoritative_interruption(
     state: RunState[Any, Agent[Any]],
     call_id: str,
@@ -664,6 +713,123 @@ async def test_replacing_interrupted_agent_tool_before_restore_fails_before_side
         await Runner.run(outer_agent, restored_state)
 
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_equivalent_agent_tool_owner_can_resume_after_restore() -> None:
+    calls: list[str] = []
+
+    original_sensitive_tool = function_tool(
+        lambda: "sensitive",
+        name_override="sensitive",
+        needs_approval=True,
+    )
+    original_inner_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "sensitive",
+                    "{}",
+                    call_id="call_sensitive",
+                )
+            ]
+        ]
+    )
+    original_inner_model.enqueue([get_text_message("inner done")])
+    original_inner_agent = Agent(
+        name="inner",
+        model=original_inner_model,
+        tools=[original_sensitive_tool],
+    )
+    original_nested_tool = original_inner_agent.as_tool(
+        tool_name="lookup",
+        tool_description="Look up a value.",
+    )
+
+    original_outer_model = ScriptedModel(
+        steps=[
+            [
+                get_function_tool_call(
+                    "lookup",
+                    '{"input":"hi"}',
+                    call_id="call_lookup",
+                )
+            ]
+        ]
+    )
+    original_outer_model.enqueue([get_text_message("outer done")])
+    original_outer_agent = Agent(
+        name="outer",
+        model=original_outer_model,
+        tools=[original_nested_tool],
+    )
+
+    initial_result = await Runner.run(original_outer_agent, "Look this up")
+    assert len(initial_result.interruptions) == 1
+    state_json = initial_result.to_state().to_json()
+
+    nested_entry = _nested_agent_tool_entry(state_json)
+    owner_signature = nested_entry.get("agent_tool_owner_signature")
+    assert isinstance(owner_signature, str)
+    assert owner_signature
+
+    # Reconstruct the graph with entirely new Python objects but equivalent
+    # logical configuration.
+    restored_sensitive_tool = function_tool(
+        lambda: _record(calls, "sensitive"),
+        name_override="sensitive",
+        needs_approval=True,
+    )
+    restored_inner_model = ScriptedModel()
+    restored_inner_model.enqueue([get_text_message("inner done")])
+    restored_inner_agent = Agent(
+        name="inner",
+        model=restored_inner_model,
+        tools=[restored_sensitive_tool],
+    )
+    restored_nested_tool = restored_inner_agent.as_tool(
+        tool_name="lookup",
+        tool_description="Look up a value.",
+    )
+
+    restored_outer_model = ScriptedModel()
+    restored_outer_model.enqueue([get_text_message("outer done")])
+    restored_outer_agent = Agent(
+        name="outer",
+        model=restored_outer_model,
+        tools=[restored_nested_tool],
+    )
+
+    restored_state = await RunState.from_json(restored_outer_agent, state_json)
+    interruptions = restored_state.get_interruptions()
+    assert len(interruptions) == 1
+    restored_state.approve(interruptions[0])
+
+    resumed_result = await Runner.run(restored_outer_agent, restored_state)
+
+    assert resumed_result.final_output == "outer done"
+    assert calls == ["sensitive"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_tool_state_without_owner_provenance_still_restores() -> None:
+    outer_agent, state_json = await _interrupted_agent_tool_snapshot()
+    nested_entry = _nested_agent_tool_entry(state_json)
+    assert nested_entry.pop("agent_tool_owner_signature", None) is not None
+
+    restored_state = await RunState.from_json(outer_agent, state_json)
+
+    assert len(restored_state.get_interruptions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_agent_tool_owner_provenance_fails_closed() -> None:
+    outer_agent, state_json = await _interrupted_agent_tool_snapshot()
+    nested_entry = _nested_agent_tool_entry(state_json)
+    nested_entry["agent_tool_owner_signature"] = 123
+
+    with pytest.raises(RuntimeError, match="Error details are redacted"):
+        await RunState.from_json(outer_agent, state_json)
 
 
 @pytest.mark.asyncio
