@@ -4527,3 +4527,84 @@ async def test_streamed_span_counts_request_on_length_truncation_without_usage(
     assert generation.span_data.usage is not None
     assert generation.span_data.usage["requests"] == 1
     assert generation.span_data.usage["total_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_late_reasoning_gets_distinct_output_index() -> None:
+    """A reasoning item created after visible text must take a fresh output slot.
+
+    The reasoning item is created lazily, so when a text chunk has already been
+    announced at index 0 the reasoning item gets index 1 instead of colliding
+    with the message, and `response.completed.output` orders items by the
+    indexes consumers already saw.
+    """
+    chunks = [
+        _annotated_chunk({"content": "visible answer"}),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="thinking"))
+            ],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    added = [event for event in events if event.type == "response.output_item.added"]
+    assert sorted(event.output_index for event in added) == [0, 1]
+    message_added = next(event for event in added if event.item.type == "message")
+    reasoning_added = next(event for event in added if event.item.type == "reasoning")
+    assert message_added.output_index == 0
+    assert reasoning_added.output_index == 1
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    outputs = completed_event.response.output
+    assert [item.type for item in outputs] == ["message", "reasoning"]
+    assert isinstance(outputs[0], ResponseOutputMessage)
+    assert isinstance(outputs[1], ResponseReasoningItem)
+    assert outputs[1].summary[0].text == "thinking"
+
+
+@pytest.mark.asyncio
+async def test_stream_handler_late_reasoning_after_function_call_gets_distinct_output_index() -> None:
+    """A reasoning item created after a function call must not reuse index 0 or
+    shift the function-call prefix slicing."""
+    chunks = [
+        _annotated_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "my_func", "arguments": '{"a":1}'},
+                    }
+                ]
+            }
+        ),
+        ChatCompletionChunk(
+            id="chunk-id",
+            created=1,
+            model="fake",
+            object="chat.completion.chunk",
+            choices=[
+                Choice(index=0, delta=ChoiceDelta.model_construct(reasoning_content="thinking"))
+            ],
+        ),
+    ]
+
+    events = await _collect_handler_events(*chunks)
+
+    added = [event for event in events if event.type == "response.output_item.added"]
+    assert sorted(event.output_index for event in added) == [0, 1]
+
+    completed_event = next(event for event in events if event.type == "response.completed")
+    outputs = completed_event.response.output
+    assert [item.type for item in outputs] == ["function_call", "reasoning"]
+    assert isinstance(outputs[0], ResponseFunctionToolCall)
+    assert outputs[0].name == "my_func"
+    assert isinstance(outputs[1], ResponseReasoningItem)
+    assert outputs[1].summary[0].text == "thinking"
