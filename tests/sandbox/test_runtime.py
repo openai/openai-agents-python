@@ -643,6 +643,17 @@ async def test_sandbox_session_aclose_runs_public_cleanup_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sandbox_session_delegates_pending_dependency_close_state() -> None:
+    inner = _FakeSession(Manifest())
+    session = SandboxSession(inner)
+    close_task = inner.dependencies._get_or_create_close_task()
+    inner._dependencies_close_task = close_task
+
+    assert session._has_pending_dependency_close_task()
+    await close_task
+
+
+@pytest.mark.asyncio
 async def test_sandbox_session_aclose_closes_dependencies_when_stop_fails() -> None:
     inner = _FailingStopSession(Manifest())
     session = SandboxSession(inner)

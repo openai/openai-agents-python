@@ -2481,6 +2481,9 @@ class AgentRunner:
             dependency_loop = _get_default_loop()
             if dependency_loop is not None:
                 sync_loop = dependency_loop
+            else:
+                # The fallback loop is SDK-owned, so its deferred work must use the driver path.
+                caller_owned_loop = False
         _stop_sync_loop_driver(sync_loop)
 
         sync_run_token = _IS_SYNC_RUN.set(True)

@@ -289,6 +289,9 @@ class SandboxSession(BaseSandboxSession):
     async def _aclose_dependencies(self) -> None:
         await self._inner._aclose_dependencies()
 
+    def _has_pending_dependency_close_task(self) -> bool:
+        return self._inner._has_pending_dependency_close_task()
+
     async def _after_deferred_dependency_close(self) -> None:
         await self._instrumentation.flush()
 

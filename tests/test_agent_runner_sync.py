@@ -444,6 +444,33 @@ def test_run_sync_does_not_create_or_replace_default_loop_when_missing(
     sync_loop.close()
 
 
+def test_run_sync_uses_sdk_loop_when_caller_owned_surface_has_no_default_loop(
+    monkeypatch, fresh_event_loop_policy
+):
+    runner = AgentRunner()
+    completed = threading.Event()
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def deferred_work():
+            await asyncio.sleep(0.01)
+            completed.set()
+
+        _track_sync_background_task(asyncio.create_task(deferred_work()))
+        return object()
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+    fresh_event_loop_policy.set_event_loop(None)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input", context=object())
+        assert completed.wait(timeout=0.5)
+    finally:
+        sync_loop = _get_sync_loop()
+        _stop_sync_loop_driver(sync_loop)
+        if not sync_loop.is_closed():
+            sync_loop.close()
+
+
 def test_run_sync_does_not_replace_closed_default_loop(monkeypatch, fresh_event_loop_policy):
     runner = AgentRunner()
     observed_loops: list[asyncio.AbstractEventLoop] = []
