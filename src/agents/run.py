@@ -2067,6 +2067,7 @@ class AgentRunner:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
                                 )
+                                result._trace_state = run_state._trace_state
                             result._original_input = copy_input_items(original_input)
                             if run_state is not None:
                                 run_state._current_step = None

@@ -424,6 +424,36 @@ async def test_resumed_run_reuses_original_trace_without_duplicate_trace_start()
 
 
 @pytest.mark.asyncio
+async def test_resumed_run_after_completed_turn_reuses_original_trace():
+    model = ScriptedModel()
+    model.extend(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="call-1")],
+            [get_text_message("done")],
+            [get_text_message("continued")],
+        ]
+    )
+    agent = _make_approval_agent(model)
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    approved = await Runner.run(agent, state)
+    assert approved.final_output == "done"
+
+    continued = await Runner.run(agent, approved.to_state())
+    assert continued.final_output == "continued"
+
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
 async def test_resumed_run_task_span_usage_is_run_local_delta():
     model = ScriptedModel()
     model.extend(
