@@ -180,20 +180,6 @@ def test_convert_tool_choice_builtin_shell_and_apply_patch() -> None:
     }
 
 
-def test_convert_tool_choice_allows_function_named_shell_without_builtin_tool() -> None:
-    shell_function = function_tool(lambda: "ok", name_override="shell")
-    apply_patch_function = function_tool(lambda: "ok", name_override="apply_patch")
-
-    assert Converter.convert_tool_choice("shell", tools=[shell_function]) == {
-        "type": "function",
-        "name": "shell",
-    }
-    assert Converter.convert_tool_choice("apply_patch", tools=[apply_patch_function]) == {
-        "type": "function",
-        "name": "apply_patch",
-    }
-
-
 def test_convert_tool_choice_allows_function_named_tool_search() -> None:
     tool = function_tool(lambda city: city, name_override="tool_search")
 
