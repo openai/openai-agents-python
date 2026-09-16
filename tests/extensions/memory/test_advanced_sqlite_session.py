@@ -18,10 +18,24 @@ from unittest.mock import Mock, patch
 import pytest
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
+from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
+    LocalShellCallAction,
+)
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 import agents._debug as _debug
-from agents import Agent, ApplyPatchTool, Runner, ShellTool, TResponseInputItem, function_tool
+from agents import (
+    Agent,
+    ApplyPatchTool,
+    ImageGenerationTool,
+    LocalShellTool,
+    Runner,
+    ShellTool,
+    TResponseInputItem,
+    function_tool,
+)
 from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
@@ -882,6 +896,155 @@ async def test_tool_usage_tracks_shell_and_patch_calls(
         assert await session.get_tool_usage() == [(tool_name, 1, 1)]
         turns = await session.get_conversation_by_turns()
         assert turns[1][1]["tool_name"] == tool_name
+    finally:
+        session.close()
+
+
+def _make_image_generation_call(item_id: str) -> TResponseInputItem:
+    """Build the image_generation_call payload a run persists."""
+    return cast(
+        TResponseInputItem,
+        {
+            "id": item_id,
+            "result": "aW1hZ2U=",
+            "status": "completed",
+            "type": "image_generation_call",
+        },
+    )
+
+
+def _make_local_shell_call(item_id: str) -> TResponseInputItem:
+    """Build the local_shell_call payload a run persists."""
+    return cast(
+        TResponseInputItem,
+        {
+            "id": item_id,
+            "action": {"command": ["bash", "-c", "echo hello"], "env": {}, "type": "exec"},
+            "call_id": f"call_{item_id}",
+            "status": "completed",
+            "type": "local_shell_call",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "call,tool_name",
+    [
+        pytest.param(_make_image_generation_call("img-1"), "image_generation_call", id="image"),
+        pytest.param(_make_local_shell_call("lsh-1"), "local_shell_call", id="local-shell"),
+    ],
+)
+async def test_tool_usage_tracks_image_generation_and_local_shell_calls(
+    call: TResponseInputItem, tool_name: str
+) -> None:
+    """Store hosted calls that carry no name with a derived name and count them."""
+    session = AdvancedSQLiteSession(session_id="hosted-tools", create_tables=True)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Draw it and run the command."},
+        call,
+    ]
+    try:
+        await session.add_items(items)
+        assert await session.get_items() == items
+        assert await session.get_tool_usage() == [(tool_name, 1, 1)]
+        turns = await session.get_conversation_by_turns()
+        assert turns[1][1]["tool_name"] == tool_name
+    finally:
+        session.close()
+
+
+async def test_tool_usage_reads_legacy_image_generation_and_local_shell_names(
+    tmp_path: Path,
+) -> None:
+    """Read old NULL names at query time without rewriting the stored metadata."""
+    db_path = tmp_path / "legacy-hosted-tools.db"
+    session = AdvancedSQLiteSession(session_id="legacy-hosted", db_path=db_path, create_tables=True)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Draw it and run the command."},
+        _make_image_generation_call("img-1"),
+        _make_local_shell_call("lsh-1"),
+    ]
+    try:
+        await session.add_items(items)
+    finally:
+        session.close()
+
+    # Earlier SDK versions stored these calls with NULL tool names.
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE message_structure SET tool_name = NULL "
+            "WHERE message_type IN ('image_generation_call', 'local_shell_call')"
+        )
+        conn.commit()
+
+    reopened = AdvancedSQLiteSession(session_id="legacy-hosted", db_path=db_path)
+    try:
+        assert sorted(await reopened.get_tool_usage()) == [
+            ("image_generation_call", 1, 1),
+            ("local_shell_call", 1, 1),
+        ]
+        assert await reopened.get_items() == items
+        turns = await reopened.get_conversation_by_turns()
+        assert [item["tool_name"] for item in turns[1][1:]] == [None, None]
+        await reopened.add_items([_make_local_shell_call("lsh-2")])
+        assert sorted(await reopened.get_tool_usage()) == [
+            ("image_generation_call", 1, 1),
+            ("local_shell_call", 2, 1),
+        ]
+    finally:
+        reopened.close()
+
+
+async def test_tool_usage_tracks_runner_image_generation_and_local_shell_calls() -> None:
+    """Count hosted calls a real run persists, and do not count the local shell output."""
+    model = ScriptedModel(
+        steps=[
+            [
+                ImageGenerationCall(
+                    id="img-1",
+                    result="aW1hZ2U=",
+                    status="completed",
+                    type="image_generation_call",
+                ),
+                LocalShellCall(
+                    id="lsh-1",
+                    call_id="call_lsh-1",
+                    status="completed",
+                    type="local_shell_call",
+                    action=LocalShellCallAction(
+                        command=["bash", "-c", "echo hello"],
+                        env={},
+                        type="exec",
+                    ),
+                ),
+            ],
+            [get_text_message("Done.")],
+        ]
+    )
+    shell_executor = Mock(return_value="shell result")
+    agent = Agent(
+        name="hosted",
+        model=model,
+        tools=[
+            LocalShellTool(executor=shell_executor),
+            ImageGenerationTool(tool_config={"type": "image_generation"}),
+        ],
+    )
+    session = AdvancedSQLiteSession(session_id="runner-hosted", create_tables=True)
+    try:
+        result = await Runner.run(agent, "Draw it and run the command.", session=session)
+        assert result.final_output == "Done."
+        assert shell_executor.call_count == 1
+        items = await session.get_items()
+        assert {item.get("type") for item in items} >= {
+            "image_generation_call",
+            "local_shell_call",
+            "local_shell_call_output",
+        }
+        assert sorted(await session.get_tool_usage()) == [
+            ("image_generation_call", 1, 1),
+            ("local_shell_call", 1, 1),
+        ]
     finally:
         session.close()
 
