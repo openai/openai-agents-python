@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import errno
 import io
+import os
 import queue
 import shutil
 import socket
@@ -501,9 +502,10 @@ class _HostBackedDockerSession(DockerSandboxSession):
             src = self._host_path(cmd[3])
             dst = self._host_path(cmd[4])
             if src.is_dir():
-                shutil.copytree(src, dst)
+                # Like `cp -R`, keep symlinks as symlinks instead of following them.
+                shutil.copytree(src, dst, symlinks=True)
             else:
-                shutil.copy2(src, dst)
+                shutil.copy2(src, dst, follow_symlinks=False)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if cmd[:2] == ["cat", "--"]:
             src = self._host_path(cmd[2])
@@ -749,6 +751,106 @@ async def test_docker_persist_workspace_stages_copy_before_get_archive(
     assert "." in names
     assert "README.md" in names
     assert not any(name == "workspace" or name.startswith("workspace/") for name in names)
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_and_hydrate_keep_absolute_workspace_symlinks_resolving(
+    tmp_path: Path,
+) -> None:
+    """Persist stages the workspace with `cp -R`, the daemon archives the copy, and the
+    archive is normalized for the strict hydrate extractor. An absolute in-workspace
+    symlink whose target is a plain path the archive establishes comes back relative
+    (`/workspace/sub/data.txt` from `sub/abs_up` as `../sub/data.txt`); a target whose
+    destination depends on another link (`/workspace/alias/../data.txt`) is left absolute
+    and refused by strict hydration, see the sibling test."""
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    (workspace / "sub" / "deep").mkdir(parents=True)
+    (workspace / "data.txt").write_text("wrong", encoding="utf-8")
+    (workspace / "sub" / "data.txt").write_text("right", encoding="utf-8")
+    (workspace / "alias").symlink_to("sub/deep")
+    (workspace / "sub" / "abs_up").symlink_to("/workspace/sub/data.txt")
+    (workspace / "to_deep").symlink_to("/workspace/sub/deep")
+    session = _HostBackedDockerSession(host_root=host_root, manifest=Manifest(root="/workspace"))
+
+    archive = await session.persist_workspace()
+
+    restored_host_root = tmp_path / "restored-container"
+    (restored_host_root / "workspace").mkdir(parents=True)
+    restored = _HostBackedDockerSession(
+        host_root=restored_host_root, manifest=Manifest(root="/workspace")
+    )
+
+    async def _extract_like_tar(
+        *,
+        cmd: list[str],
+        stream: io.IOBase,
+        error_path: Path,
+        user: object = None,
+    ) -> None:
+        _ = (error_path, user)
+        assert cmd[:3] == ["tar", "-x", "-C"]
+        # The container runs GNU tar, which restores link targets verbatim. Spell that out
+        # instead of relying on `extractall`, whose default filter rewrites symlink targets
+        # on Python 3.14.
+        root = restored._host_path(cmd[3])
+        with tarfile.open(fileobj=stream, mode="r|*") as tar:
+            for member in tar:
+                dest = root / member.name
+                if member.isdir():
+                    dest.mkdir(parents=True, exist_ok=True)
+                elif member.issym():
+                    os.symlink(member.linkname, dest)
+                elif member.isreg():
+                    payload = tar.extractfile(member)
+                    assert payload is not None
+                    with payload:
+                        dest.write_bytes(payload.read())
+                else:
+                    raise AssertionError(f"unexpected member type: {member.name}")
+
+    restored._stream_into_exec = _extract_like_tar  # type: ignore[method-assign]
+    await restored.hydrate_workspace(archive)
+
+    # Assert on the restored link metadata: the targets are POSIX paths that only the
+    # sandbox's own filesystem resolves the way these assertions describe.
+    restored_workspace = restored_host_root / "workspace"
+    assert os.readlink(restored_workspace / "sub" / "abs_up") == "../sub/data.txt"
+    assert os.readlink(restored_workspace / "to_deep") == "sub/deep"
+    assert os.readlink(restored_workspace / "alias") == "sub/deep"
+    assert (restored_workspace / "sub" / "data.txt").read_text(encoding="utf-8") == "right"
+
+
+@pytest.mark.asyncio
+async def test_docker_persist_keeps_link_dependent_symlink_targets_absolute_for_hydrate(
+    tmp_path: Path,
+) -> None:
+    """`alias -> sub/deep` makes `/workspace/alias/../data.txt` name `sub/data.txt` only
+    through another symlink. The archive keeps such a target absolute rather than
+    guessing, and the strict hydrate check refuses it."""
+    host_root = tmp_path / "container"
+    workspace = host_root / "workspace"
+    (workspace / "sub" / "deep").mkdir(parents=True)
+    (workspace / "data.txt").write_text("wrong", encoding="utf-8")
+    (workspace / "sub" / "data.txt").write_text("right", encoding="utf-8")
+    (workspace / "alias").symlink_to("sub/deep")
+    (workspace / "abs_alias").symlink_to("/workspace/alias/../data.txt")
+    session = _HostBackedDockerSession(host_root=host_root, manifest=Manifest(root="/workspace"))
+
+    archive = await session.persist_workspace()
+
+    with tarfile.open(fileobj=archive, mode="r:*") as tar:
+        assert tar.getmember("abs_alias").linkname == "/workspace/alias/../data.txt"
+        assert tar.getmember("alias").linkname == "sub/deep"
+    archive.seek(0)
+
+    restored_host_root = tmp_path / "restored-container"
+    (restored_host_root / "workspace").mkdir(parents=True)
+    restored = _HostBackedDockerSession(
+        host_root=restored_host_root, manifest=Manifest(root="/workspace")
+    )
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await restored.hydrate_workspace(archive)
 
 
 @pytest.mark.asyncio
