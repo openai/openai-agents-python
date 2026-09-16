@@ -1715,6 +1715,8 @@ def is_responses_tool_search_surface(tool: Tool) -> bool:
     """Return True when a tool can be exposed through hosted Responses tool search."""
     if isinstance(tool, FunctionTool):
         return tool.defer_loading or get_explicit_function_tool_namespace(tool) is not None
+    if isinstance(tool, CustomTool):
+        return tool.defer_loading
     if isinstance(tool, HostedMCPTool):
         return bool(tool.tool_config.get("defer_loading"))
     return False
@@ -1728,6 +1730,8 @@ def has_responses_tool_search_surface(tools: list[Tool]) -> bool:
 def is_required_tool_search_surface(tool: Tool) -> bool:
     """Return True when a tool requires ToolSearchTool() to stay reachable."""
     if isinstance(tool, FunctionTool):
+        return tool.defer_loading
+    if isinstance(tool, CustomTool):
         return tool.defer_loading
     if isinstance(tool, HostedMCPTool):
         return bool(tool.tool_config.get("defer_loading"))
@@ -1763,7 +1767,8 @@ def validate_responses_tool_search_configuration(
         raise UserError(
             "ToolSearchTool() requires at least one searchable Responses surface: a "
             "tool_namespace(...) function tool, a deferred-loading function tool "
-            "(`function_tool(..., defer_loading=True)`), or a deferred-loading hosted MCP "
+            "(`function_tool(..., defer_loading=True)`), a deferred-loading custom tool "
+            "(`CustomTool(..., defer_loading=True)`), or a deferred-loading hosted MCP "
             "server (`HostedMCPTool(tool_config={..., 'defer_loading': True})`)."
         )
 

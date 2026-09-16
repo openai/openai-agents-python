@@ -11,7 +11,12 @@ from typing import Any, cast
 import httpx2
 import pytest
 from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
-from openai.types.responses import Response, ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseCustomToolCall,
+    ResponseErrorEvent,
+)
 from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_create_params import ContextManagement, PromptCacheOptions
 from openai.types.responses.response_usage import ResponseUsage
@@ -23,6 +28,7 @@ from agents import (
     AsyncComputer,
     Computer,
     ComputerTool,
+    CustomTool,
     ImageGenerationTool,
     ModelSettings,
     ModelTracing,
@@ -1771,6 +1777,67 @@ async def test_prompt_id_keeps_explicit_tool_search_without_local_surface() -> N
 
     assert called_kwargs["prompt"] == {"id": "pmpt_123"}
     assert called_kwargs["tools"] == [{"type": "tool_search"}]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_deferred_custom_tool_is_searchable_and_invocable() -> None:
+    invoked_inputs: list[str] = []
+    sent_tools: list[Any] = []
+
+    class DummyResponses:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def create(self, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                sent_tools.extend(kwargs["tools"])
+                return get_response_obj(
+                    [
+                        ResponseCustomToolCall(
+                            type="custom_tool_call",
+                            id="ctc_1",
+                            call_id="call_1",
+                            name="raw_editor",
+                            input="hello",
+                        )
+                    ]
+                )
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    def on_invoke_tool(_ctx: Any, raw_input: str) -> str:
+        invoked_inputs.append(raw_input)
+        return "edited"
+
+    deferred_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=on_invoke_tool,
+        defer_loading=True,
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-5.4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+    )
+    agent = Agent(name="test", model=model, tools=[ToolSearchTool(), deferred_tool])
+
+    await Runner.run(agent, "hi")
+
+    assert sent_tools == [
+        {"type": "tool_search"},
+        {
+            "type": "custom",
+            "name": "raw_editor",
+            "description": "Edit raw text.",
+            "defer_loading": True,
+        },
+    ]
+    assert invoked_inputs == ["hello"]
 
 
 @pytest.mark.allow_call_model_methods

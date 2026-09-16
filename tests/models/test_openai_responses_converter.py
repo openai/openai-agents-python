@@ -36,6 +36,7 @@ from agents import (
     AgentOutputSchema,
     Computer,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     Handoff,
     HostedMCPTool,
@@ -842,6 +843,39 @@ def test_convert_tools_top_level_deferred_function_with_tool_search() -> None:
             "description": deferred_tool.description,
             "parameters": deferred_tool.params_json_schema,
             "strict": True,
+            "defer_loading": True,
+        },
+        {"type": "tool_search"},
+    ]
+
+
+def test_convert_tools_deferred_custom_tool_requires_tool_search() -> None:
+    deferred_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=lambda _ctx, raw_input: raw_input,
+        defer_loading=True,
+    )
+
+    with pytest.raises(UserError, match="ToolSearchTool\\(\\)"):
+        Converter.convert_tools(tools=[deferred_tool], handoffs=[])
+
+
+def test_convert_tools_deferred_custom_tool_with_tool_search() -> None:
+    deferred_tool = CustomTool(
+        name="raw_editor",
+        description="Edit raw text.",
+        on_invoke_tool=lambda _ctx, raw_input: raw_input,
+        defer_loading=True,
+    )
+
+    converted = Converter.convert_tools(tools=[deferred_tool, ToolSearchTool()], handoffs=[])
+
+    assert converted.tools == [
+        {
+            "type": "custom",
+            "name": "raw_editor",
+            "description": deferred_tool.description,
             "defer_loading": True,
         },
         {"type": "tool_search"},
