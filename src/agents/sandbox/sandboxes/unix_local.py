@@ -37,6 +37,7 @@ from ..errors import (
     ExecTransportError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
+    WorkspaceIOError,
     WorkspaceReadNotFoundError,
     WorkspaceRootNotFoundError,
     WorkspaceStartError,
@@ -161,21 +162,29 @@ _SPECIAL_FILE_KINDS: tuple[tuple[Callable[[int], bool], str], ...] = (
 )
 _SPECIAL_FILE_EXIT_CODE = 3
 
-# User-scoped writer, run as the requested user via the confined exec path. It does the
-# special-file classification itself (host-side checks cannot see inside a directory only
-# that user may search): an existing entry is opened read-write, which unlike a write-only
-# open never blocks on a FIFO, and the type of the *descriptor* is tested through /dev/fd.
+# User-scoped writer, run as the requested user via the confined exec path. It never
+# opens the target: the payload lands in a temporary file next to it and is renamed into
+# place, so a FIFO, socket, or device node at the target is neither opened (which could
+# block or trigger a driver) nor written through; such an entry is refused instead. The
+# classification is the user's own (host-side checks cannot see inside a directory only
+# that user may search), and an existing regular file keeps its permission bits.
 _USER_WRITE_SCRIPT = (
     'target="$1"\n'
-    'mkdir -p "$(dirname "$target")" || exit 1\n'
+    'dir="$(dirname "$target")"\n'
+    'mkdir -p "$dir" || exit 1\n'
+    'mode=""\n'
     'if [ -e "$target" ] || [ -L "$target" ]; then\n'
-    '    exec 3<>"$target" || exit 1\n'
-    "    if [ -p /dev/fd/3 ] || [ -S /dev/fd/3 ] || [ -c /dev/fd/3 ] || [ -b /dev/fd/3 ]; then\n"
+    '    if [ -L "$target" ] || [ ! -f "$target" ]; then\n'
     f"        exit {_SPECIAL_FILE_EXIT_CODE}\n"
     "    fi\n"
-    "    exec 3>&-\n"
+    '    mode="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null)"\n'
     "fi\n"
-    'cat > "$target"\n'
+    'tmp="$(mktemp "$dir/.write.XXXXXX")" || exit 1\n'
+    "trap 'rm -f \"$tmp\"' EXIT\n"
+    'cat > "$tmp" || exit 1\n'
+    'if [ -n "$mode" ]; then chmod "$mode" "$tmp" || exit 1; else chmod 644 "$tmp" || exit 1; fi\n'
+    'mv -f "$tmp" "$target" || exit 1\n'
+    "trap - EXIT\n"
 )
 
 
@@ -198,6 +207,13 @@ def _classify_mode(mode: int, *, workspace_path: Path, path: Path, for_write: bo
     _raise_for_special_file(_special_file_kind(mode), path=path, for_write=for_write)
 
 
+def _replaced_error(workspace_path: Path, *, path: Path, for_write: bool) -> WorkspaceIOError:
+    context = {"reason": "entry replaced during open", "path": str(workspace_path)}
+    if for_write:
+        return WorkspaceArchiveWriteError(path=path, context=context)
+    return WorkspaceArchiveReadError(path=path, context=context)
+
+
 def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> int:
     """Open a workspace file for in-process I/O, refusing FIFOs, sockets, and device nodes.
 
@@ -208,8 +224,9 @@ def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> 
     Where the platform offers `O_PATH` (Linux), the entry is pinned with a descriptor that
     does not open it, classified with `fstat()`, and then that same inode is opened for I/O
     through `/proc/self/fd`, so a replacement of the path between the two steps cannot
-    reach a blocking open. A missing target is created with `O_EXCL`, which guarantees the
-    created entry is a regular file. Elsewhere the entry is classified with `stat()`
+    reach a blocking open. Without procfs the pathname is opened non-blocking and the
+    descriptor is accepted only if `fstat()` reports the pinned inode. A missing target is
+    created with `O_EXCL`, which guarantees the created entry is a regular file. Elsewhere the entry is classified with `stat()`
     before a non-blocking open and again with `fstat()` on the opened descriptor.
     Missing paths keep their existing error handling; a directory is reported like the
     blocking `open()` did.
@@ -230,10 +247,28 @@ def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> 
             # regular file this call created, never an entry swapped in meanwhile.
             return os.open(workspace_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | cloexec, 0o666)
         try:
+            pinned = os.fstat(pin)
             _classify_mode(
-                os.fstat(pin).st_mode, workspace_path=workspace_path, path=path, for_write=for_write
+                pinned.st_mode, workspace_path=workspace_path, path=path, for_write=for_write
             )
-            return os.open(f"/proc/self/fd/{pin}", io_flags | cloexec)
+            try:
+                return os.open(f"/proc/self/fd/{pin}", io_flags | cloexec)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.EACCES, errno.ENOTDIR):
+                    raise
+            # procfs is unavailable (chroot, minimal container): open the pathname
+            # non-blocking and accept the descriptor only if it is the pinned inode.
+            fd = os.open(workspace_path, io_flags | os.O_NONBLOCK | cloexec)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino) != (pinned.st_dev, pinned.st_ino):
+                    raise _replaced_error(workspace_path, path=path, for_write=for_write)
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            except BaseException:
+                os.close(fd)
+                raise
+            return fd
         finally:
             os.close(pin)
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -617,6 +619,48 @@ def test_open_regular_file_never_opens_a_fifo_for_io(
     assert fifo.is_fifo()
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="exercises the O_PATH pinning path")
+def test_open_regular_file_works_without_procfs_and_detects_a_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "data.txt"
+    target.write_bytes(b"hello")
+    real_open = os.open
+
+    def no_procfs_open(path: object, flags: int, *args: object) -> int:
+        if str(path).startswith("/proc/self/fd/"):
+            raise FileNotFoundError(errno.ENOENT, "no procfs", str(path))
+        return real_open(cast(Any, path), flags, *cast(Any, args))
+
+    monkeypatch.setattr(unix_local_module.os, "open", no_procfs_open)
+
+    fd = unix_local_module._open_regular_file(target, path=Path("data.txt"), for_write=False)
+    with os.fdopen(fd, "rb") as handle:
+        assert handle.read() == b"hello"
+    fd = unix_local_module._open_regular_file(target, path=Path("data.txt"), for_write=True)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(b"rewritten")
+    assert target.read_bytes() == b"rewritten"
+
+    # The pathname is replaced between pinning and opening: the swapped-in inode is refused.
+    real_fstat = os.fstat
+    swapped = {"done": False}
+
+    def swapping_fstat(fd_: int) -> os.stat_result:
+        result = real_fstat(fd_)
+        if not swapped["done"]:
+            swapped["done"] = True
+            other = tmp_path / "other.txt"
+            other.write_bytes(b"other")
+            os.replace(other, target)
+        return result
+
+    monkeypatch.setattr(unix_local_module.os, "fstat", swapping_fstat)
+    with pytest.raises(WorkspaceArchiveReadError) as swap_error:
+        unix_local_module._open_regular_file(target, path=Path("data.txt"), for_write=False)
+    assert swap_error.value.context["reason"] == "entry replaced during open"
+
+
 def test_open_regular_file_creates_missing_targets_and_reads_them_back(tmp_path: Path) -> None:
     target = tmp_path / "new.txt"
     fd = unix_local_module._open_regular_file(target, path=Path("new.txt"), for_write=True)
@@ -662,9 +706,47 @@ def test_user_write_script_refuses_a_fifo_and_writes_regular_files(tmp_path: Pat
 
     existing = tmp_path / "existing.txt"
     existing.write_bytes(b"old content that is longer")
+    existing.chmod(0o640)
     rewritten = _run_user_write_script(existing, b"new", user=None)
     assert rewritten.returncode == 0, rewritten.stderr
     assert existing.read_bytes() == b"new"
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o640, "permission bits must survive"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["existing.txt", "pipe", "sub"], (
+        "no temporary file may be left behind"
+    )
+
+    # A write-only file is still writable: the target is never opened for reading.
+    write_only = tmp_path / "write-only.txt"
+    write_only.write_bytes(b"old")
+    write_only.chmod(0o200)
+    try:
+        rewritten = _run_user_write_script(write_only, b"replaced", user=None)
+        assert rewritten.returncode == 0, rewritten.stderr
+        assert stat.S_IMODE(write_only.stat().st_mode) == 0o200
+        write_only.chmod(0o600)
+        assert write_only.read_bytes() == b"replaced"
+    finally:
+        write_only.chmod(0o600)
+
+    # A symlink at the target is an entry of its own kind, not written through.
+    link = tmp_path / "alias"
+    link.symlink_to(existing)
+    refused = _run_user_write_script(link, b"through", user=None)
+    assert refused.returncode == unix_local_module._SPECIAL_FILE_EXIT_CODE, refused.stderr
+    assert existing.read_bytes() == b"new"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
+def test_user_write_script_never_opens_the_target(tmp_path: Path) -> None:
+    """The writer stages into a temp file and renames; the FIFO is refused unopened."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    # No peer holds the pipe: any open for writing would block, so a 5 s watchdog on the
+    # subprocess is the assertion that the script does not open it.
+    refused = _run_user_write_script(fifo, b"payload", user=None)
+    assert refused.returncode == unix_local_module._SPECIAL_FILE_EXIT_CODE, refused.stderr
+    assert fifo.is_fifo()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["pipe"]
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires FIFO support")
