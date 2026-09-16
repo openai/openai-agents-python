@@ -47,7 +47,12 @@ from ...models._openai_retry import get_openai_retry_advice
 from ...models._retry_runtime import should_disable_provider_managed_retries
 from ...models._trace import model_config_for_trace, populate_generation_span
 from ...models.chatcmpl_converter import Converter
-from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
+from ...models.chatcmpl_helpers import (
+    HEADERS,
+    HEADERS_OVERRIDE,
+    ChatCmplHelpers,
+    ChatCmplUnsupportedFeatures,
+)
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
@@ -156,11 +161,17 @@ class LitellmModel(Model):
         base_url: str | None = None,
         api_key: str | None = None,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
+        strict_feature_validation: bool = False,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.should_replay_reasoning_content = should_replay_reasoning_content
+        self._strict_feature_validation = strict_feature_validation
+        self._unsupported_features = ChatCmplUnsupportedFeatures(
+            type(self).__name__,
+            strict_feature_validation,
+        )
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         # LiteLLM exceptions mirror OpenAI-style status/header fields.
@@ -215,10 +226,17 @@ class LitellmModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: Any | None = None,
     ) -> ModelResponse:
+        self._unsupported_features.check_server_managed_conversation_state(
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+        self._unsupported_features.check_prompt(prompt)
+        self._unsupported_features.check_reasoning_settings(model_settings)
+
         with (
             generation_span(
                 model=str(self.model),
@@ -343,6 +361,7 @@ class LitellmModel(Model):
                 Converter.message_to_output_items(
                     LitellmConverter.convert_message_to_openai(message, model=self.model),
                     provider_data=provider_data,
+                    strict_feature_validation=self._strict_feature_validation,
                 )
                 if message is not None
                 else []
@@ -388,10 +407,17 @@ class LitellmModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        self._unsupported_features.check_server_managed_conversation_state(
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+        self._unsupported_features.check_prompt(prompt)
+        self._unsupported_features.check_reasoning_settings(model_settings)
+
         with (
             generation_span(
                 model=str(self.model),
@@ -426,7 +452,10 @@ class LitellmModel(Model):
             yielded_terminal_event = False
             try:
                 async for chunk in ChatCmplStreamHandler.handle_stream(
-                    response, stream, model=self.model
+                    response,
+                    stream,
+                    model=self.model,
+                    strict_feature_validation=self._strict_feature_validation,
                 ):
                     if chunk.type == "response.completed":
                         final_response = chunk.response
@@ -521,6 +550,7 @@ class LitellmModel(Model):
             preserve_tool_output_all_content=True,
             model=self.model,
             should_replay_reasoning_content=self.should_replay_reasoning_content,
+            strict_feature_validation=self._strict_feature_validation,
         )
 
         # Fix message ordering: reorder to ensure tool_use comes before tool_result.

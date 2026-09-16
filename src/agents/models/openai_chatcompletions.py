@@ -41,7 +41,12 @@ from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
 from ._trace import model_config_for_trace, populate_generation_span
 from .chatcmpl_converter import Converter
-from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
+from .chatcmpl_helpers import (
+    HEADERS,
+    HEADERS_OVERRIDE,
+    ChatCmplHelpers,
+    ChatCmplUnsupportedFeatures,
+)
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
@@ -70,9 +75,10 @@ class OpenAIChatCompletionsModel(Model):
         self.should_replay_reasoning_content = should_replay_reasoning_content
         self._strict_feature_validation = strict_feature_validation
         self._buffer_streamed_tool_calls = buffer_streamed_tool_calls
-        self._has_warned_unsupported_prompt = False
-        self._has_warned_unsupported_conversation_state = False
-        self._has_warned_unsupported_reasoning_settings = False
+        self._unsupported_features = ChatCmplUnsupportedFeatures(
+            type(self).__name__,
+            strict_feature_validation,
+        )
 
     def _non_null_or_omit(self, value: Any) -> Any:
         return value if value is not None else omit
@@ -81,51 +87,10 @@ class OpenAIChatCompletionsModel(Model):
         return ChatCmplHelpers.is_openai(self._get_client())
 
     def _handle_unsupported_prompt(self, prompt: ResponsePromptParam | None) -> None:
-        if prompt is None:
-            return
-
-        message = (
-            "Reusable prompts are only supported by the Responses API. "
-            "OpenAIChatCompletionsModel does not support `prompt`; use a Responses model "
-            "instead."
-        )
-        if self._strict_feature_validation:
-            raise UserError(message)
-
-        if not self._has_warned_unsupported_prompt:
-            logger.warning(
-                "%s Ignoring `prompt`; enable strict feature validation to raise an error instead.",
-                message,
-            )
-            self._has_warned_unsupported_prompt = True
+        self._unsupported_features.check_prompt(prompt)
 
     def _handle_unsupported_reasoning_settings(self, model_settings: ModelSettings) -> None:
-        reasoning = model_settings.reasoning
-        if reasoning is None:
-            return
-
-        unsupported = [
-            name for name in ("mode", "context") if getattr(reasoning, name, None) is not None
-        ]
-        if not unsupported:
-            return
-
-        unsupported_params = ", ".join(f"reasoning.{name}" for name in unsupported)
-        message = (
-            f"OpenAIChatCompletionsModel does not support {unsupported_params}. "
-            "These reasoning settings require the Responses API; Chat Completions only "
-            "uses reasoning.effort."
-        )
-        if self._strict_feature_validation:
-            raise UserError(message)
-
-        if not self._has_warned_unsupported_reasoning_settings:
-            logger.warning(
-                "%s Ignoring unsupported reasoning settings; enable strict feature validation "
-                "to raise an error instead.",
-                message,
-            )
-            self._has_warned_unsupported_reasoning_settings = True
+        self._unsupported_features.check_reasoning_settings(model_settings)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
@@ -541,31 +506,10 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
     ) -> None:
-        unsupported: list[str] = []
-        if previous_response_id is not None:
-            unsupported.append("previous_response_id")
-        if conversation_id is not None:
-            unsupported.append("conversation_id")
-        if not unsupported:
-            return
-
-        unsupported_params = ", ".join(unsupported)
-        message = (
-            "OpenAIChatCompletionsModel does not support server-managed conversation state "
-            f"({unsupported_params}). Chat Completions requires callers to pass the full "
-            "conversation history; use a Responses API model for previous_response_id or a "
-            "conversation-capable model for conversation_id."
+        self._unsupported_features.check_server_managed_conversation_state(
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
         )
-        if self._strict_feature_validation:
-            raise UserError(message)
-
-        if not self._has_warned_unsupported_conversation_state:
-            logger.warning(
-                "%s Ignoring unsupported server-managed conversation state; enable strict feature "
-                "validation to raise an error instead.",
-                message,
-            )
-            self._has_warned_unsupported_conversation_state = True
 
     @overload
     async def _fetch_response(

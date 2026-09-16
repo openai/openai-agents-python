@@ -13,8 +13,8 @@ from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
+from ..models.chatcmpl_helpers import owns_chatcmpl_feature_validation
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
-from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -286,8 +286,10 @@ def validate_output_guardrails_with_server_managed_conversation(
         return
     if not agent.output_guardrails and not run_config.output_guardrails:
         return
-    if isinstance(get_model(agent, run_config), OpenAIChatCompletionsModel):
+    if owns_chatcmpl_feature_validation(get_model(agent, run_config)):
         # Chat Completions owns its released warn-and-ignore or strict rejection behavior.
+        # That covers LitellmModel too: it speaks the same API and keeps no history
+        # server-side, so the rejection below would name a store that does not exist.
         return
     raise UserError(
         "Output guardrails cannot be combined with conversation_id, previous_response_id, "

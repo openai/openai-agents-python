@@ -12,12 +12,14 @@ from openai.types.responses.response_output_text import (
     Logprob,
     LogprobTopLogprob,
 )
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_text_delta_event import (
     Logprob as DeltaLogprob,
     LogprobTopLogprob as DeltaTopLogprob,
 )
 from pydantic import ValidationError
 
+from ..exceptions import UserError
 from ..logger import log_model_action_debug, logger
 from ..model_settings import ModelSettings
 from ..version import __version__
@@ -168,3 +170,118 @@ class ChatCmplHelpers:
         if model and "gemini" in model.lower() and "__thought__" in tool_call_id:
             return tool_call_id.split("__thought__")[0]
         return tool_call_id
+
+
+class ChatCmplUnsupportedFeatures:
+    """Warn about, or reject, Responses-only features a Chat Completions call cannot carry.
+
+    Two adapters in this SDK speak Chat Completions: :class:`OpenAIChatCompletionsModel`
+    and ``LitellmModel``. Both hit the same wall — the API has no server-managed
+    conversation state, no reusable prompts, and only ``reasoning.effort`` — so the
+    decision of what to say and whether to raise lives here once instead of in each
+    adapter.
+
+    Args:
+        model_class_name: Name of the adapter, used in the message so a reader knows
+            which model dropped the feature.
+        strict: Whether to raise :class:`UserError` instead of warning once.
+    """
+
+    def __init__(self, model_class_name: str, strict: bool) -> None:
+        self._model_class_name = model_class_name
+        self._strict = strict
+        self._warned_prompt = False
+        self._warned_conversation_state = False
+        self._warned_reasoning_settings = False
+
+    def _raise_or_warn_once(self, message: str, hint: str, warned_attr: str) -> None:
+        if self._strict:
+            raise UserError(message)
+
+        if not getattr(self, warned_attr):
+            logger.warning("%s %s", message, hint)
+            setattr(self, warned_attr, True)
+
+    def check_prompt(self, prompt: ResponsePromptParam | None) -> None:
+        """Handle a reusable prompt, which only the Responses API can resolve."""
+        if prompt is None:
+            return
+
+        message = (
+            "Reusable prompts are only supported by the Responses API. "
+            f"{self._model_class_name} does not support `prompt`; use a Responses model "
+            "instead."
+        )
+        self._raise_or_warn_once(
+            message,
+            "Ignoring `prompt`; enable strict feature validation to raise an error instead.",
+            "_warned_prompt",
+        )
+
+    def check_server_managed_conversation_state(
+        self,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+    ) -> None:
+        """Handle ids that point at history living on the server, not in the request.
+
+        The runner sends only the new items once either id is set, so an adapter that
+        drops them silently sends a conversation with its earlier turns missing.
+        """
+        unsupported: list[str] = []
+        if previous_response_id is not None:
+            unsupported.append("previous_response_id")
+        if conversation_id is not None:
+            unsupported.append("conversation_id")
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(unsupported)
+        message = (
+            f"{self._model_class_name} does not support server-managed conversation state "
+            f"({unsupported_params}). Chat Completions requires callers to pass the full "
+            "conversation history; use a Responses API model for previous_response_id or a "
+            "conversation-capable model for conversation_id."
+        )
+        self._raise_or_warn_once(
+            message,
+            "Ignoring unsupported server-managed conversation state; enable strict feature "
+            "validation to raise an error instead.",
+            "_warned_conversation_state",
+        )
+
+    def check_reasoning_settings(self, model_settings: ModelSettings) -> None:
+        """Handle the reasoning settings that need the Responses API."""
+        reasoning = model_settings.reasoning
+        if reasoning is None:
+            return
+
+        unsupported = [
+            name for name in ("mode", "context") if getattr(reasoning, name, None) is not None
+        ]
+        if not unsupported:
+            return
+
+        unsupported_params = ", ".join(f"reasoning.{name}" for name in unsupported)
+        message = (
+            f"{self._model_class_name} does not support {unsupported_params}. "
+            "These reasoning settings require the Responses API; Chat Completions only "
+            "uses reasoning.effort."
+        )
+        self._raise_or_warn_once(
+            message,
+            "Ignoring unsupported reasoning settings; enable strict feature validation "
+            "to raise an error instead.",
+            "_warned_reasoning_settings",
+        )
+
+
+def owns_chatcmpl_feature_validation(model: Any) -> bool:
+    """Whether ``model`` is a Chat Completions adapter that handles the ids itself.
+
+    Used by the runner to tell an adapter that warns about (or rejects)
+    ``previous_response_id`` / ``conversation_id`` from one that really does keep the
+    conversation on a server.
+    """
+    return isinstance(getattr(model, "_unsupported_features", None), ChatCmplUnsupportedFeatures)
