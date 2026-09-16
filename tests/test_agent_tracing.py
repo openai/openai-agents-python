@@ -454,6 +454,26 @@ async def test_resumed_run_after_completed_turn_reuses_original_trace():
 
 
 @pytest.mark.asyncio
+async def test_fresh_completed_run_state_reuses_original_trace():
+    model = ScriptedModel()
+    model.extend([[get_text_message("done")], [get_text_message("continued")]])
+    agent = Agent(name="test_agent", model=model)
+
+    first = await Runner.run(agent, input="first_test")
+    assert first.final_output == "done"
+    assert not first.interruptions
+
+    continued = await Runner.run(agent, first.to_state())
+    assert continued.final_output == "continued"
+
+    traces = fetch_traces()
+    assert len(traces) == 1
+    assert fetch_events().count("trace_start") == 1
+    assert fetch_events().count("trace_end") == 1
+    assert all(span.trace_id == traces[0].trace_id for span in fetch_ordered_spans())
+
+
+@pytest.mark.asyncio
 async def test_resumed_run_task_span_usage_is_run_local_delta():
     model = ScriptedModel()
     model.extend(
