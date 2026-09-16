@@ -5,7 +5,7 @@ import math
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ..logger import log_tool_action_debug, log_tool_action_error, logger
 from ._logging import get_mcp_server_log_message
@@ -35,11 +35,76 @@ class _ServerCommand:
 
 
 class _ServerWorker:
-    def __init__(self, server: MCPServer) -> None:
+    def __init__(
+        self,
+        server: MCPServer,
+        cleanup_timeout_seconds_fn: Callable[[], float | None],
+    ) -> None:
         self._server = server
+        # The emergency cleanup below is a cleanup, not a connect, so it must be
+        # bounded by the manager cleanup timeout rather than by the interrupted
+        # command's own timeout. The callable is read at cancel time so runtime
+        # reassignment of the manager property stays honored.
+        self._cleanup_timeout_seconds_fn = cleanup_timeout_seconds_fn
         self._queue: asyncio.Queue[_ServerCommand] = asyncio.Queue()
-        self._task = asyncio.create_task(self._run())
+        # The worker needs to tell an external cancel from a CancelledError a
+        # server raised on its own. Task.cancelling() covers that only on
+        # Python 3.11+, and this package still supports 3.10, so every cancel()
+        # call on the worker task is counted here.
+        self._cancel_requests = 0
+        self._task: asyncio.Task[None] = self._create_task()
         self._cleanup_future: asyncio.Future[None] | None = None
+
+    def _create_task(self) -> asyncio.Task[None]:
+        # Route worker creation through the event loop's task factory so
+        # applications supervising or instrumenting tasks through
+        # set_task_factory still see this worker. The temporary factory keeps
+        # the app factory in charge of the task type and only adds the cancel
+        # counting on top, because loop shutdown and supervisors cancel the
+        # task object directly and would otherwise bypass the count.
+        loop = asyncio.get_running_loop()
+        app_factory = loop.get_task_factory()
+
+        def factory(
+            loop: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any
+        ) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = (
+                cast(asyncio.Task[None], app_factory(loop, coro, **kwargs))
+                if app_factory
+                else cast(asyncio.Task[None], asyncio.Task(coro, loop=loop, **kwargs))
+            )
+            original_cancel = task.cancel
+
+            def counting_cancel(msg: Any = None) -> bool:
+                self._cancel_requests += 1
+                return bool(original_cancel(msg))
+
+            task.cancel = counting_cancel  # type: ignore[method-assign]
+            return task
+
+        # The typeshed _TaskFactory protocol is a private generic stub; this
+        # factory matches its runtime call shape exactly.
+        loop.set_task_factory(factory)  # type: ignore[arg-type]
+        try:
+            return asyncio.create_task(self._run())
+        finally:
+            loop.set_task_factory(app_factory)
+
+    def _record_cleanup_failure(self, exc: BaseException) -> None:
+        """Record an emergency cleanup failure on the cleanup result future.
+
+        The done callback reads the cleanup_error property through that
+        future, so a recorded failure keeps the worker registered instead of
+        letting the manager treat the server as cleanly stopped. A later
+        cleanup() call awaits the same settled future and surfaces the failure
+        to the manager, which keeps reconnect from starting a second
+        connection over a transport that was never successfully cleaned up.
+        """
+        if self._cleanup_future is None:
+            self._cleanup_future = asyncio.get_running_loop().create_future()
+        if self._cleanup_future.done():
+            return
+        self._cleanup_future.set_exception(exc)
 
     @property
     def is_done(self) -> bool:
@@ -91,23 +156,67 @@ class _ServerWorker:
         await future
 
     async def _run(self) -> None:
-        while True:
-            command = await self._queue.get()
-            should_exit = command.action == "cleanup"
-            try:
-                if command.action == "connect":
-                    await _run_with_timeout_in_task(self._server.connect, command.timeout_seconds)
-                elif command.action == "cleanup":
-                    await _run_with_timeout_in_task(self._server.cleanup, command.timeout_seconds)
-                else:
-                    raise ValueError(f"Unknown command: {command.action}")
-                if not command.future.cancelled():
-                    command.future.set_result(None)
-            except BaseException as exc:
-                if not command.future.cancelled():
-                    command.future.set_exception(exc)
-            if should_exit:
-                return
+        try:
+            while True:
+                command = await self._queue.get()
+                should_exit = command.action == "cleanup"
+                cancellation_baseline = self._cancel_requests
+                try:
+                    if command.action == "connect":
+                        await _run_with_timeout_in_task(
+                            self._server.connect, command.timeout_seconds
+                        )
+                    elif command.action == "cleanup":
+                        await _run_with_timeout_in_task(
+                            self._server.cleanup, command.timeout_seconds
+                        )
+                    else:
+                        raise ValueError(f"Unknown command: {command.action}")
+                    if not command.future.cancelled():
+                        command.future.set_result(None)
+                except BaseException as exc:
+                    external_cancel = (
+                        isinstance(exc, asyncio.CancelledError)
+                        and self._cancel_requests > cancellation_baseline
+                    )
+                    if external_cancel and command.action != "cleanup":
+                        # The worker task itself was cancelled while the command
+                        # was running. A partially acquired connection from the
+                        # interrupted command still needs cleanup, and this task
+                        # owns it (some transports require cleanup in the same
+                        # task), so clean up here before the caller is released.
+                        # The manager cleanup timeout bounds the emergency
+                        # cleanup, not the interrupted command's own timeout.
+                        try:
+                            await _run_with_timeout_in_task(
+                                self._server.cleanup, self._cleanup_timeout_seconds_fn()
+                            )
+                        except BaseException as cleanup_exc:
+                            # A failed or timed-out emergency cleanup must not be
+                            # swallowed silently. Recording it on the cleanup
+                            # result future keeps the worker registered, so a
+                            # later reconnect surfaces the failure and never
+                            # starts a second connection over the transport
+                            # that was never cleaned up.
+                            self._record_cleanup_failure(cleanup_exc)
+                    if not command.future.cancelled():
+                        command.future.set_exception(exc)
+                    if external_cancel:
+                        # The future carries the error to the caller; re-raise
+                        # here to end the task and honor the cancellation.
+                        raise
+                if should_exit:
+                    return
+        finally:
+            # The worker loop has ended, so commands still queued will never run.
+            # Settle their futures so waiting callers do not hang forever.
+            while True:
+                try:
+                    pending = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if not pending.future.done():
+                    pending.future.cancel()
 
 
 async def _run_with_timeout_in_task(
@@ -535,7 +644,10 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             self._discard_worker(server, worker)
             worker = self._workers.get(server)
         if worker is None:
-            worker = _ServerWorker(server=server)
+            worker = _ServerWorker(
+                server=server,
+                cleanup_timeout_seconds_fn=lambda: self.cleanup_timeout_seconds,
+            )
             self._workers[server] = worker
             worker.add_done_callback(lambda _task: self._handle_worker_done(server, worker))
         return worker
