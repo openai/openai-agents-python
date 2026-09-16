@@ -226,10 +226,10 @@ def _open_regular_file(workspace_path: Path, *, path: Path, for_write: bool) -> 
     through `/proc/self/fd`, so a replacement of the path between the two steps cannot
     reach a blocking open. Without procfs the pathname is opened non-blocking and the
     descriptor is accepted only if `fstat()` reports the pinned inode. A missing target is
-    created with `O_EXCL`, which guarantees the created entry is a regular file. Elsewhere the entry is classified with `stat()`
-    before a non-blocking open and again with `fstat()` on the opened descriptor.
-    Missing paths keep their existing error handling; a directory is reported like the
-    blocking `open()` did.
+    created with `O_EXCL`, which guarantees the created entry is a regular file. Elsewhere the
+    entry is classified with `stat()` before a non-blocking open and again with `fstat()` on
+    the opened descriptor. Missing paths keep their existing error handling; a directory is
+    reported like the blocking `open()` did.
     """
     cloexec = getattr(os, "O_CLOEXEC", 0)
     if for_write:
