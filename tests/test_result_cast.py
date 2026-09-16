@@ -177,6 +177,23 @@ def test_run_result_repr_and_asdict_after_release_agents() -> None:
     assert serialized["_last_agent"] is None
 
 
+def test_run_result_str_after_release_agents_and_gc() -> None:
+    agent = Agent(name="released-print-agent")
+    result = create_run_result("done", last_agent=agent)
+
+    result.release_agents()
+    del agent
+    gc.collect()
+
+    with pytest.raises(AgentsException):
+        _ = result.last_agent
+
+    text = str(result)
+    assert "RunResult:" in text
+    assert 'Agent(name="<released>", ...)' in text
+    assert "done" in text
+
+
 def test_run_result_release_agents_without_releasing_new_items() -> None:
     message = _create_message("keep")
     item_agent = Agent(name="item-agent")

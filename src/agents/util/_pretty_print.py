@@ -23,9 +23,25 @@ def _final_output_str(result: "RunResultBase") -> str:
         return str(result.final_output)
 
 
+def _agent_name(result: object) -> str:
+    """Return the agent name for display, even after ``release_agents()`` + GC.
+
+    ``RunResult.last_agent`` raises once the weakref is gone. ``str(result)`` and
+    logging should still work after that cleanup path.
+    """
+    try:
+        agent = result.last_agent  # type: ignore[attr-defined]
+    except Exception:
+        return "<released>"
+    if agent is None:
+        return "<released>"
+    name = getattr(agent, "name", None)
+    return name if isinstance(name, str) else "<released>"
+
+
 def pretty_print_result(result: "RunResult") -> str:
     output = "RunResult:"
-    output += f'\n- Last agent: Agent(name="{result.last_agent.name}", ...)'
+    output += f'\n- Last agent: Agent(name="{_agent_name(result)}", ...)'
     output += (
         f"\n- Final output ({type(result.final_output).__name__}):\n"
         f"{_indent(_final_output_str(result), 2)}"
@@ -55,7 +71,7 @@ def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
 
 def pretty_print_run_result_streaming(result: "RunResultStreaming") -> str:
     output = "RunResultStreaming:"
-    output += f'\n- Current agent: Agent(name="{result.last_agent.name}", ...)'
+    output += f'\n- Current agent: Agent(name="{_agent_name(result)}", ...)'
     output += f"\n- Current turn: {result.current_turn}"
     output += f"\n- Max turns: {result.max_turns}"
     output += f"\n- Is complete: {result.is_complete}"
