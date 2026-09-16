@@ -108,7 +108,7 @@ def _import_any_llm_module(
     fake_any_llm: Any = pytypes.ModuleType("any_llm")
     fake_any_llm.AnyLLM = FakeAnyLLMFactory
 
-    sys.modules.pop("agents.extensions.models.any_llm_model", None)
+    monkeypatch.delitem(sys.modules, "agents.extensions.models.any_llm_model", raising=False)
     monkeypatch.setitem(sys.modules, "any_llm", fake_any_llm)
 
     module = importlib.import_module("agents.extensions.models.any_llm_model")
