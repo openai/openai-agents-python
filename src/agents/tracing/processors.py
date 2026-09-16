@@ -52,6 +52,9 @@ class BackendSpanExporter(TracingExporter):
         }
     )
     _OPENAI_TRACING_USAGE_SPAN_TYPES = frozenset({"generation"})
+    # 4xx statuses that are transient, mirroring the OpenAI client's own retry policy:
+    # request timeout, conflict, and rate limiting.
+    _RETRYABLE_CLIENT_STATUS_CODES = frozenset({408, 409, 429})
     _UNSERIALIZABLE = object()
 
     def __init__(
@@ -158,7 +161,9 @@ class BackendSpanExporter(TracingExporter):
             # Exponential backoff loop
             attempt = 0
             delay = self.base_delay
+            retry_after: float | None = None
             while True:
+                retry_after = None
                 request_timeout = self._timeout_for_deadline(deadline)
                 if deadline is not None and request_timeout is None:
                     logger.warning(
@@ -182,8 +187,20 @@ class BackendSpanExporter(TracingExporter):
                         logger.debug("Exported %s items", len(grouped))
                         break
 
-                    # If the response is a client error (4xx), we won't retry
-                    if 400 <= response.status_code < 500:
+                    # A rate limit, request timeout, or conflict is transient: retry it
+                    # like a server error, waiting at least the advertised Retry-After,
+                    # unless the server says outright not to retry.
+                    if (
+                        response.status_code in self._RETRYABLE_CLIENT_STATUS_CODES
+                        and self._server_allows_retry(response)
+                    ):
+                        retry_after = self._retry_after_seconds(response)
+                        logger.warning(
+                            "[non-fatal] Tracing: client error %s, retrying.",
+                            response.status_code,
+                        )
+                    # Any other client error (4xx) won't be retried
+                    elif 400 <= response.status_code < 500:
                         if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
                             logger.error(
                                 "[non-fatal] Tracing client error %s. Response data is redacted.",
@@ -197,10 +214,12 @@ class BackendSpanExporter(TracingExporter):
                             )
                         break
 
-                    # For 5xx or other unexpected codes, treat it as transient and retry
-                    logger.warning(
-                        "[non-fatal] Tracing: server error %s, retrying.", response.status_code
-                    )
+                    else:
+                        # For 5xx or other unexpected codes, treat it as transient and retry
+                        logger.warning(
+                            "[non-fatal] Tracing: server error %s, retrying.",
+                            response.status_code,
+                        )
                 except httpx2.RequestError as exc:
                     # Network or other I/O error, we'll retry
                     log_model_and_tool_action_warning(
@@ -216,9 +235,39 @@ class BackendSpanExporter(TracingExporter):
 
                 # Exponential backoff + jitter
                 sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
+                if retry_after is not None:
+                    # Honour the server's wait, bounded by max_delay so a large
+                    # Retry-After cannot stall the export thread.
+                    sleep_time = min(max(sleep_time, retry_after), self.max_delay)
                 if not self._sleep_before_retry(sleep_time, deadline):
                     break
                 delay = min(delay * 2, self.max_delay)
+
+    def _server_allows_retry(self, response: httpx2.Response) -> bool:
+        # Mirror the OpenAI client: an explicit `x-should-retry: false` wins over the
+        # status code classification.
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return True
+        should_retry = headers.get("x-should-retry")
+        if not isinstance(should_retry, str):
+            return True
+        return should_retry.strip().lower() != "false"
+
+    def _retry_after_seconds(self, response: httpx2.Response) -> float | None:
+        # Imported lazily: the models package pulls in the OpenAI client, which must not
+        # become an import-time dependency of tracing.
+        from ..models._retry_runtime import parse_retry_after_ms, parse_retry_after_value
+
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        retry_after = parse_retry_after_ms(headers.get("retry-after-ms"))
+        if retry_after is None:
+            retry_after = parse_retry_after_value(headers.get("retry-after"))
+        if retry_after is None or not math.isfinite(retry_after):
+            return None
+        return retry_after
 
     def _timeout_for_deadline(self, deadline: float | None) -> httpx2.Timeout | None:
         if deadline is None:
