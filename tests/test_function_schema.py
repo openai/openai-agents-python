@@ -438,6 +438,34 @@ def test_run_context_in_non_first_position_raises_value_error():
         function_schema(func, use_docstring_info=False)
 
 
+def keyword_only_context_function(*, ctx: RunContextWrapper[str], a: int) -> int:
+    return a + len(ctx.context or "")
+
+
+def var_positional_context_function(*ctx: RunContextWrapper[str]) -> int:
+    return len(ctx)
+
+
+def var_keyword_context_function(**ctx: RunContextWrapper[str]) -> int:
+    return len(ctx)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        pytest.param(keyword_only_context_function, id="keyword-only"),
+        pytest.param(var_positional_context_function, id="var-positional"),
+        pytest.param(var_keyword_context_function, id="var-keyword"),
+    ],
+)
+def test_non_positional_context_param_raises_value_error(func: Callable[..., Any]) -> None:
+    # The context argument is always passed positionally by the caller, so a context parameter
+    # that cannot be passed positionally must be rejected instead of silently building a schema
+    # that excludes it.
+    with pytest.raises(UserError, match="first positional parameter"):
+        function_schema(func, use_docstring_info=False)
+
+
 def test_var_positional_tuple_annotation():
     # A variadic tuple annotation applies to each positional argument.
     def func(*args: tuple[int, ...]) -> int:

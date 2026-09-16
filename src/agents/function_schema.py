@@ -400,6 +400,14 @@ def function_schema(
         if ann is not inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper or origin is ToolContext:
+                if first_param.kind not in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    raise UserError(
+                        "RunContextWrapper/ToolContext param must be the first positional"
+                        f" parameter in function {func.__name__}"
+                    )
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
