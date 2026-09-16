@@ -117,9 +117,12 @@ def strip_tar_member_prefix(
     kinds and absolute links into the workspace. FIFOs and device nodes are dropped, and
     when `relativize_symlinks_under` names the workspace root, an absolute symlink target
     under it is rebased onto the link's own directory with its components kept verbatim.
-    A rebased target is only accepted when resolving it through the archive's own symlink
-    members provably stays under the root; otherwise the archive is rejected, because the
-    relative form would pass hydrate's lexical check while escaping on disk.
+    Only *simple* targets are rebased: every component is a plain name and every directory
+    the relative target walks through (the link's own parents and the target's parents) is
+    a directory member of the archive, with a regular-file or directory leaf. A target
+    whose meaning depends on how another symlink resolves (``alias/../x``), or that walks
+    through a directory the archive does not create, is left absolute so the strict
+    hydrate validation refuses it rather than this rewrite guessing where it lands.
     """
 
     prefix_rel = _normalize_rel(prefix)
@@ -133,12 +136,12 @@ def strip_tar_member_prefix(
             else relativize_symlinks_under
         )
 
-    out = tempfile.TemporaryFile()
-    rebased_symlinks: dict[str, str] = {}
+    staged = tempfile.TemporaryFile()
+    candidates: dict[str, str] = {}
     try:
         with data:
             with tarfile.open(fileobj=data, mode="r|*") as src:
-                with tarfile.open(fileobj=out, mode="w|") as dst:
+                with tarfile.open(fileobj=staged, mode="w|") as dst:
                     for member in src:
                         if member.isfifo() or member.ischr() or member.isblk():
                             continue
@@ -166,14 +169,11 @@ def strip_tar_member_prefix(
                         rewritten.pax_headers = dict(member.pax_headers)
                         rewritten.pax_headers.pop("path", None)
                         if rewritten.issym() and symlink_root is not None:
-                            rewritten.linkname = rebase_symlink_target(
+                            rebased = rebase_symlink_target(
                                 rewritten.linkname, link_name=stripped_name, root=symlink_root
                             )
-                            # A long source target lives in a PAX "linkpath" record that
-                            # would otherwise override the rewritten linkname.
-                            rewritten.pax_headers.pop("linkpath", None)
-                            if rewritten.linkname != member.linkname:
-                                rebased_symlinks[stripped_name] = rewritten.linkname
+                            if rebased != rewritten.linkname:
+                                candidates[stripped_name] = rebased
                         if member.isreg():
                             fileobj = src.extractfile(member)
                             if fileobj is None:
@@ -188,124 +188,126 @@ def strip_tar_member_prefix(
                         else:
                             dst.addfile(rewritten)
 
-        out.seek(0)
-        with tarfile.open(fileobj=out, mode="r:*") as tar:
-            validate_tarfile(tar)
-            _validate_rebased_symlinks_contained(tar, rebased_symlinks)
-        out.seek(0)
-        return cast(io.IOBase, out)
-    except Exception:
-        out.close()
-        raise
+        # Second pass: now that every member is known, rewrite only the simple targets
+        # whose every component the archive itself establishes; the rest stay absolute.
+        staged.seek(0)
+        out = tempfile.TemporaryFile()
+        try:
+            with tarfile.open(fileobj=staged, mode="r:*") as src:
+                members = {member.name: member for member in src.getmembers()}
+                with tarfile.open(fileobj=out, mode="w|") as dst:
+                    for member in src.getmembers():
+                        rewritten = member
+                        candidate = candidates.get(member.name)
+                        if candidate is not None and symlink_root is not None:
+                            parts = _simple_rebase_components(member.linkname, root=symlink_root)
+                            if parts is not None and _archive_establishes(
+                                parts, link_name=member.name, members=members
+                            ):
+                                rewritten = copy.copy(member)
+                                rewritten.linkname = candidate
+                                # A long source target lives in a PAX "linkpath" record
+                                # that would otherwise override the rewritten linkname.
+                                rewritten.pax_headers = dict(member.pax_headers)
+                                rewritten.pax_headers.pop("linkpath", None)
+                        if member.isreg():
+                            fileobj = src.extractfile(member)
+                            if fileobj is None:
+                                raise UnsafeTarMemberError(
+                                    member=member.name, reason="missing file payload"
+                                )
+                            try:
+                                dst.addfile(rewritten, fileobj)
+                            finally:
+                                fileobj.close()
+                        else:
+                            dst.addfile(rewritten)
+            out.seek(0)
+            with tarfile.open(fileobj=out, mode="r:*") as tar:
+                validate_tarfile(tar)
+            out.seek(0)
+            return cast(io.IOBase, out)
+        except Exception:
+            out.close()
+            raise
+    finally:
+        staged.close()
 
 
-# Symlink hops followed while proving that a rebased target stays under the root. Linux
-# gives up after 40 (ELOOP); an archive that needs more is not worth restoring.
-_MAX_SYMLINK_HOPS = 40
+def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | None:
+    """Return the root-relative components of a *simple* absolute target under `root`.
 
-
-def _resolve_through_archive_members(
-    parts: tuple[str, ...], members: dict[str, tarfile.TarInfo]
-) -> tuple[str, ...] | None:
-    """Resolve a root-relative path the way the kernel would after extraction.
-
-    Every prefix that names a symlink member is replaced by that member's target, so
-    ``..`` is applied to the link's target rather than to the link's own directory. Every
-    other component must be established by the archive itself: an intermediate component
-    must be a directory member and the last one any member. Hydration extracts into an
-    existing root, so a component the archive does not create could already be a symlink
-    in the destination and send the restored link somewhere else; only archive-owned
-    components are protected by the extractor's own destination checks. Returns the
-    resolved components, or ``None`` when the walk leaves the root, follows a target that
-    is not itself relative (external links are hydrate's decision, not a proof of
-    containment), meets a component the archive does not establish, or exceeds the hop
-    budget.
-    """
-
-    pending = list(reversed(parts))
-    resolved: list[str] = []
-    hops = 0
-    while pending:
-        part = pending.pop()
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not resolved:
-                return None
-            resolved.pop()
-            continue
-        member = members.get("/".join([*resolved, part]))
-        if member is None:
-            return None
-        if member.issym():
-            hops += 1
-            if hops > _MAX_SYMLINK_HOPS or member.linkname.startswith("/"):
-                return None
-            pending.extend(reversed(PurePosixPath(member.linkname).parts))
-            continue
-        if pending and not member.isdir():
-            return None
-        resolved.append(part)
-    return tuple(resolved)
-
-
-def _validate_rebased_symlinks_contained(
-    tar: tarfile.TarFile, rebased_symlinks: dict[str, str]
-) -> None:
-    """Reject rebased symlinks whose relative target does not provably stay under the root.
-
-    ``rebase_symlink_target`` keeps the components after the root verbatim, so a target
-    such as ``a/link/../tmp`` is only inside the workspace if ``a/link`` resolves there.
-    With ``a/link -> ..`` it names ``/tmp`` after extraction, yet hydrate's lexical check
-    accepts it. Resolving through the archive's own members settles the question before
-    the relative form is written out; components the archive does not create are not
-    trusted either, because hydration extracts into an existing root where such a
-    component may already be a symlink.
-    """
-
-    if not rebased_symlinks:
-        return
-    members = {member.name: member for member in tar.getmembers()}
-    for link_name, target in rebased_symlinks.items():
-        parts = (*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)
-        if _resolve_through_archive_members(parts, members) is None:
-            raise UnsafeTarMemberError(
-                member=link_name,
-                reason=f"rebased symlink target cannot be proven to stay under the root: {target}",
-            )
-
-
-def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
-    """Rewrite an absolute symlink target under `root` as a target relative to the link.
-
-    Only the root prefix is replaced by the climb out of the link's own archive directory;
-    the remaining components are kept verbatim, because the kernel resolves ``..`` after a
-    symlink component against that link's target: with ``alias -> sub/deep``,
-    ``/workspace/alias/../data.txt`` names ``sub/data.txt`` and must stay
-    ``alias/../data.txt``. Absolute targets outside the root are returned unchanged. A
-    leading ``//`` is collapsed to ``/`` (Linux treats them alike). The textual rewrite
-    does not prove containment on its own; `strip_tar_member_prefix` checks each rebased
-    target against the archive's symlink members afterwards.
+    Simple means every component after the root is a plain name: no ``.``, ``..``, or
+    empty segment. A leading ``//`` is collapsed to ``/`` and the whole separator run at
+    the root boundary is consumed (``/workspace//a.txt``). Targets outside the root, and
+    targets whose meaning depends on how a symlink component resolves (``alias/../x``),
+    return ``None`` and are left absolute for the strict hydrate check to refuse.
     """
 
     if not linkname.startswith("/"):
-        return linkname
+        return None
     target = "/" + linkname.lstrip("/")
     prefix = "/" + root.strip("/")
     if target == prefix:
         rest = ""
     elif target.startswith(prefix + "/"):
-        # Consume the whole separator run at the boundary (`/workspace//a.txt`), keeping
-        # every later component, including `..`, untouched.
         rest = target[len(prefix) :].lstrip("/")
     else:
+        return None
+    parts = tuple(part for part in rest.split("/") if part)
+    if any(part in (".", "..") for part in parts):
+        return None
+    return parts
+
+
+def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
+    """Rewrite a simple absolute symlink target under `root` as a target relative to the link.
+
+    Only targets whose components are all plain names are rewritten (see
+    `_simple_rebase_components`): ``/workspace/sub/data.txt`` from ``sub/abs_up`` becomes
+    ``../sub/data.txt``. Anything that would need a symlink component resolved to know
+    where it lands (``/workspace/alias/../data.txt``) is returned unchanged, so the strict
+    hydrate validation refuses it as an absolute target instead of this function guessing.
+    Whether the components are established by the archive itself is checked by
+    `strip_tar_member_prefix`, which sees every member.
+    """
+
+    parts = _simple_rebase_components(linkname, root=root)
+    if parts is None:
         return linkname
-    # Members beneath a symlink are rejected by the archive validator, so the link's
-    # archive directory holds no symlink components and climbing it is exact.
     climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
+    rest = "/".join(parts)
     if rest and climb:
         return f"{climb}/{rest}"
     return rest or climb or "."
+
+
+def _archive_establishes(
+    parts: tuple[str, ...], *, link_name: str, members: dict[str, tarfile.TarInfo]
+) -> bool:
+    """Whether every component a rebased target walks through is an ordinary archive path.
+
+    Hydration extracts into an existing root, so a directory the archive does not create
+    could already be a symlink in the destination and redirect the restored link. Every
+    directory the relative target climbs out of (the link's own parents) and every
+    directory it descends into must therefore be a directory member of the archive, and
+    the leaf must be a regular file or directory member: a symlink leaf would make the
+    result depend on another link, which is exactly what this rewrite refuses to model.
+    """
+
+    if not parts:
+        return False
+    link_parents = PurePosixPath(link_name).parent.parts
+    for depth in range(1, len(link_parents) + 1):
+        parent = members.get("/".join(link_parents[:depth]))
+        if parent is None or not parent.isdir():
+            return False
+    for depth in range(1, len(parts)):
+        intermediate = members.get("/".join(parts[:depth]))
+        if intermediate is None or not intermediate.isdir():
+            return False
+    leaf = members.get("/".join(parts))
+    return leaf is not None and (leaf.isreg() or leaf.isdir())
 
 
 def _normalize_rel(prefix: str | Path) -> Path:

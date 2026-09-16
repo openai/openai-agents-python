@@ -180,7 +180,9 @@ def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
         assert tar.getnames() == [".", "pkg", "pkg/main.py", "pkg/python"]
 
 
-def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
+def _prefixed_workspace_archive(
+    *, external_symlink: bool, link_through_alias: bool = True
+) -> io.BytesIO:
     """A `workspace/...` archive shaped like Docker's staged copy, with members that the
     strict hydrate extractor refuses as-is."""
 
@@ -215,9 +217,11 @@ def _prefixed_workspace_archive(*, external_symlink: bool) -> io.BytesIO:
         add_symlink(tar, "workspace/rel", "a.txt")
         add_symlink(tar, "workspace/double_slash", "//workspace/a.txt")
         add_symlink(tar, "workspace/double_sep", "/workspace//a.txt")
-        # `alias/..` resolves against the alias target (sub/deep), so this names sub/data.txt.
         add_symlink(tar, "workspace/alias", "sub/deep")
-        add_symlink(tar, "workspace/abs_alias", "/workspace/alias/../data.txt")
+        if link_through_alias:
+            # `alias/..` resolves against the alias target (sub/deep): where this lands
+            # depends on another symlink, so the rewrite must leave it absolute.
+            add_symlink(tar, "workspace/abs_alias", "/workspace/alias/../data.txt")
         # Longer than the 100-byte ustar field, so tarfile records it in a PAX linkpath.
         nested = "workspace"
         for _ in range(5):
@@ -248,7 +252,8 @@ def test_strip_tar_member_prefix_rewrites_members_hydrate_refuses() -> None:
         assert members["double_slash"].linkname == "a.txt"
         assert members["double_sep"].linkname == "a.txt"
         # Components after the root prefix are kept verbatim; `..` is not collapsed.
-        assert members["abs_alias"].linkname == "alias/../data.txt"
+        # Depends on how `alias` resolves: left absolute for strict hydration to refuse.
+        assert members["abs_alias"].linkname == "/workspace/alias/../data.txt"
         long_link = members["long_link"]
         assert long_link.linkname == "/".join(["deeply-nested-directory"] * 5) + "/target.txt"
         assert "linkpath" not in long_link.pax_headers or (
@@ -262,7 +267,7 @@ def test_strip_tar_member_prefix_output_passes_strict_hydrate_validation(
     tmp_path: Path,
 ) -> None:
     stripped = strip_tar_member_prefix(
-        _prefixed_workspace_archive(external_symlink=False),
+        _prefixed_workspace_archive(external_symlink=False, link_through_alias=False),
         prefix="workspace",
         relativize_symlinks_under=PurePosixPath("/workspace"),
     )
@@ -274,109 +279,121 @@ def test_strip_tar_member_prefix_output_passes_strict_hydrate_validation(
     # Inspect the restored link metadata rather than reading through the links: the
     # targets are POSIX paths that only a POSIX host resolves the way the sandbox does.
     assert os.readlink(tmp_path / "sub" / "abs_up") == "../a.txt"
-    assert os.readlink(tmp_path / "abs_alias") == "alias/../data.txt"
+    assert os.readlink(tmp_path / "alias") == "sub/deep"
     assert (tmp_path / "sub" / "data.txt").read_bytes() == b"right"
     assert not os.path.lexists(tmp_path / "dev.fifo")
 
 
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_that_escape_via_links() -> None:
-    """`a/link -> ..` resolves to the workspace root, so the rebased `a/link/../tmp` names
-    `/tmp` after extraction even though hydrate's lexical check would accept it."""
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _dir("workspace/a"),
-        _symlink("workspace/a/link", ".."),
-        _symlink("workspace/victim", "/workspace/a/link/../tmp"),
+def test_strip_tar_member_prefix_output_with_alias_link_is_refused_by_strict_hydrate() -> None:
+    """The archive keeps `/workspace/alias/../data.txt` absolute, and the strict hydrate
+    validation is what refuses it: this rewrite never guesses through another link."""
+    stripped = strip_tar_member_prefix(
+        _prefixed_workspace_archive(external_symlink=False),
+        prefix="workspace",
+        relativize_symlinks_under=PurePosixPath("/workspace"),
     )
 
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        assert tar.getmember("abs_alias").linkname == "/workspace/alias/../data.txt"
+        with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+            validate_tarfile(tar, allow_external_symlink_targets=False)
 
 
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_external_links() -> None:
-    """A hop through a link that stays absolute (`outside -> /usr`) proves nothing about
-    where `outside/../x` ends up, so the rebased target is refused rather than guessed."""
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _symlink("workspace/outside", "/usr"),
-        _symlink("workspace/victim", "/workspace/outside/../x"),
+@pytest.mark.parametrize(
+    ("members", "victim", "target"),
+    [
+        pytest.param(
+            (_dir("workspace/a"), _symlink("workspace/a/link", "..")),
+            "workspace/victim",
+            "/workspace/a/link/../tmp",
+            id="dot-dot after a link that climbs out",
+        ),
+        pytest.param(
+            (_symlink("workspace/outside", "/usr"),),
+            "workspace/victim",
+            "/workspace/outside/../x",
+            id="dot-dot after an external link",
+        ),
+        pytest.param(
+            (_file("workspace/secret", b"s"),),
+            "workspace/victim",
+            "/workspace/alias/../secret",
+            id="dot-dot through a component the archive does not create",
+        ),
+        pytest.param(
+            (),
+            "workspace/victim",
+            "/workspace/missing.txt",
+            id="leaf the archive does not create",
+        ),
+        pytest.param(
+            (_file("workspace/notes.txt", b"n"),),
+            "workspace/victim",
+            "/workspace/notes.txt/secret",
+            id="descends through a regular file",
+        ),
+        pytest.param(
+            (_symlink("workspace/loop", "loop"),),
+            "workspace/victim",
+            "/workspace/loop/x",
+            id="descends through a symlink member",
+        ),
+        pytest.param(
+            (_symlink("workspace/alias", "sub"), _dir("workspace/sub")),
+            "workspace/victim",
+            "/workspace/alias",
+            id="leaf is a symlink member",
+        ),
+        pytest.param(
+            (_file("workspace/implied/deep/data.txt", b"d"),),
+            "workspace/victim",
+            "/workspace/implied/deep/data.txt",
+            id="directories only implied by a file path",
+        ),
+        pytest.param(
+            (
+                _dir("workspace/a"),
+                _dir("workspace/sub"),
+                _file("workspace/data.txt", b"root"),
+                _symlink("workspace/a/link2", "../sub"),
+                _symlink("workspace/b", "a/link2"),
+            ),
+            "workspace/sub/victim",
+            "/workspace/b/../data.txt",
+            id="would resolve inside, but only by interpreting two links",
+        ),
+    ],
+)
+def test_strip_tar_member_prefix_leaves_non_simple_targets_absolute(
+    members: tuple[bytes, ...], victim: str, target: str
+) -> None:
+    """Targets whose destination depends on another symlink, or that walk through a path
+    the archive does not establish as an ordinary directory, are not rewritten. They stay
+    absolute so the strict hydrate validation refuses them instead of a rewrite guessing."""
+    raw = _tar_bytes(_dir("workspace"), *members, _symlink(victim, target))
+
+    stripped = strip_tar_member_prefix(
+        io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
     )
 
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        name = victim.removeprefix("workspace/")
+        assert tar.getmember(name).linkname == target
+        with pytest.raises(UnsafeTarMemberError, match="absolute symlink target not allowed"):
+            validate_tarfile(tar, allow_external_symlink_targets=False)
 
 
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_absent_components() -> None:
-    """Hydration extracts into an existing root. A component the archive does not create
-    (`alias` here) may already be a symlink in the destination, so `alias/../secret` proves
-    nothing; only archive-established components count."""
+def test_strip_tar_member_prefix_rebases_simple_targets_established_by_the_archive() -> None:
+    """Every directory the relative target walks through is an explicit directory member
+    and the leaf is a regular file, so the rewrite is exact."""
     raw = _tar_bytes(
         _dir("workspace"),
-        _file("workspace/secret", b"s"),
-        _symlink("workspace/victim", "/workspace/alias/../secret"),
-    )
-
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
-
-
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_to_absent_leaf() -> None:
-    """A dangling in-workspace target is left absolute: the leaf could be a pre-existing
-    destination symlink, and hydrate already refuses absolute targets as before."""
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _symlink("workspace/victim", "/workspace/missing.txt"),
-    )
-
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
-
-
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_through_a_file_component() -> None:
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _file("workspace/notes.txt", b"n"),
-        _symlink("workspace/victim", "/workspace/notes.txt/../secret"),
-    )
-
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
-
-
-def test_strip_tar_member_prefix_rejects_rebased_symlinks_in_a_link_cycle() -> None:
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _symlink("workspace/loop", "loop"),
-        _symlink("workspace/victim", "/workspace/loop/x"),
-    )
-
-    with pytest.raises(UnsafeTarMemberError, match="cannot be proven to stay under the root"):
-        strip_tar_member_prefix(
-            io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-        )
-
-
-def test_strip_tar_member_prefix_keeps_rebased_symlinks_that_resolve_inside() -> None:
-    """`..` after a link is applied to the link's target, so `b/../data.txt` with
-    `b -> a/link2` and `a/link2 -> ../sub` names `data.txt` at the root and is kept."""
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _dir("workspace/a"),
         _dir("workspace/sub"),
-        _file("workspace/data.txt", b"root"),
-        _symlink("workspace/a/link2", "../sub"),
-        _symlink("workspace/b", "a/link2"),
-        _symlink("workspace/sub/victim", "/workspace/b/../data.txt"),
+        _dir("workspace/sub/deep"),
+        _file("workspace/sub/deep/data.txt", b"d"),
+        _dir("workspace/other"),
+        _symlink("workspace/other/victim", "/workspace/sub/deep/data.txt"),
+        _symlink("workspace/to_dir", "/workspace/sub"),
     )
 
     stripped = strip_tar_member_prefix(
@@ -384,7 +401,26 @@ def test_strip_tar_member_prefix_keeps_rebased_symlinks_that_resolve_inside() ->
     )
 
     with tarfile.open(fileobj=stripped, mode="r:*") as tar:
-        assert tar.getmember("sub/victim").linkname == "../b/../data.txt"
+        assert tar.getmember("other/victim").linkname == "../sub/deep/data.txt"
+        assert tar.getmember("to_dir").linkname == "sub"
+        validate_tarfile(tar, allow_external_symlink_targets=False)
+
+
+def test_strip_tar_member_prefix_leaves_link_under_unestablished_parent_absolute() -> None:
+    """The link's own parent directory is only implied, so the `..` climb cannot be trusted
+    either: hydration could find a symlink there in the destination."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _file("workspace/data.txt", b"d"),
+        _symlink("workspace/implied/victim", "/workspace/data.txt"),
+    )
+
+    stripped = strip_tar_member_prefix(
+        io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        assert tar.getmember("implied/victim").linkname == "/workspace/data.txt"
 
 
 def test_strip_tar_member_prefix_keeps_absolute_symlinks_without_a_root() -> None:
