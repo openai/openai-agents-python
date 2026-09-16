@@ -14,7 +14,7 @@ search:
 
 <div class="sandbox-harness-image" markdown="1">
 
-![带计算环境的沙箱智能体运行框架](../assets/images/harness_with_compute.png)
+![带计算环境的沙箱智能体运行框架](../../assets/images/harness_with_compute.png)
 
 </div>
 

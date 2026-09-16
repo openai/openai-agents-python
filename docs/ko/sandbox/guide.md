@@ -14,7 +14,7 @@ search:
 
 <div class="sandbox-harness-image" markdown="1">
 
-![컴퓨팅을 포함한 샌드박스 에이전트 하네스](../assets/images/harness_with_compute.png)
+![컴퓨팅을 포함한 샌드박스 에이전트 하네스](../../assets/images/harness_with_compute.png)
 
 </div>
 
