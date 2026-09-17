@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -2012,6 +2013,138 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert exc_info.value is close_error
         assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
         assert model._interrupted_audio_response_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_close_resets_per_connection_item_and_session_state(self, model):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta(
+            "audio_item",
+            0,
+            b"\x00" * 4800,
+            response_id="response_1",
+        )
+        model._current_item_id = "audio_item"
+        model._update_created_session(
+            {
+                "type": "realtime",
+                "model": "gpt-realtime",
+                "audio": {"input": {"turn_detection": {"type": "semantic_vad"}}},
+            }
+        )
+        assert model._created_session is not None
+
+        await model.close()
+
+        assert model._audio_state_tracker.get_last_audio_item() is None
+        assert model._current_item_id is None
+        assert model._created_session is None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_after_close_does_not_act_on_previous_session_items(self, monkeypatch):
+        """A second connection on the same model instance must start with no memory of
+        the first one's items. The runner reuses one model across runs, so this is the
+        ordinary path for every application that runs more than one session."""
+
+        class RecordingWebSocket:
+            def __init__(self) -> None:
+                self._closed = asyncio.Event()
+                self.sent: list[dict[str, Any]] = []
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> str:
+                await self._closed.wait()
+                raise StopAsyncIteration
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(json.loads(payload))
+
+            async def close(self) -> None:
+                self._closed.set()
+
+        model = OpenAIRealtimeWebSocketModel()
+        listener = AsyncMock()
+        model.add_listener(listener)
+        sockets: list[RecordingWebSocket] = []
+
+        async def fake_create_websocket_connection(*args, **kwargs):
+            socket = RecordingWebSocket()
+            sockets.append(socket)
+            return socket
+
+        monkeypatch.setattr(model, "_create_websocket_connection", fake_create_websocket_connection)
+        session_created = {
+            "type": "session.created",
+            "event_id": "event_created",
+            "session": {
+                "type": "realtime",
+                "model": "gpt-realtime",
+                "audio": {
+                    "input": {
+                        "turn_detection": {"type": "semantic_vad", "interrupt_response": True}
+                    },
+                    "output": {"format": {"type": "audio/pcm", "rate": 24000}},
+                },
+            },
+        }
+
+        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        await model._handle_ws_event(session_created)
+        await model._handle_ws_event(
+            {
+                "type": "response.output_audio.delta",
+                "event_id": "event_1",
+                "response_id": "response_old",
+                "item_id": "item_old",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": base64.b64encode(b"\x00\x01" * 2400).decode(),
+            }
+        )
+        await model._handle_ws_event(
+            {"type": "response.done", "event_id": "event_2", "response": {"id": "response_old"}}
+        )
+        await model.close()
+        listener.on_event.reset_mock()
+
+        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        await model._handle_ws_event(session_created)
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "event_id": "event_3",
+                "audio_start_ms": 0,
+                "item_id": "item_user_new",
+            }
+        )
+        await model._handle_ws_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "event_id": "event_4",
+                "item_id": "item_user_new",
+                "content_index": 0,
+                "transcript": "hello",
+                "usage": {
+                    "type": "tokens",
+                    "total_tokens": 1,
+                    "input_tokens": 1,
+                    "output_tokens": 0,
+                },
+            }
+        )
+        await model.send_event(RealtimeModelSendInterrupt())
+        await model.close()
+
+        emitted = [call.args[0] for call in listener.on_event.call_args_list]
+        assert not any(isinstance(event, RealtimeModelAudioInterruptedEvent) for event in emitted)
+        second_socket_messages = sockets[1].sent
+        assert [
+            m for m in second_socket_messages if m["type"] == "conversation.item.truncate"
+        ] == []
+        assert [
+            m for m in second_socket_messages if m["type"] == "conversation.item.retrieve"
+        ] == []
 
     @pytest.mark.asyncio
     async def test_response_only_interrupt_requires_response_id(self, model):

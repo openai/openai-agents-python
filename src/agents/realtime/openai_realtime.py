@@ -1290,7 +1290,19 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             if cleanup_error is not None:
                 raise cleanup_error
         finally:
-            self._clear_response_audio_indexes()
+            self._reset_connection_state()
+
+    def _reset_connection_state(self) -> None:
+        # The runner reuses one model instance across runs and connect() accepts a new
+        # connection after close(), so every value that names an item or a session of the
+        # closed connection has to go here. Left in place, the next connection would emit
+        # audio_interrupted for the old item on its first speech_started and send
+        # conversation.item.truncate and conversation.item.retrieve for an item id the new
+        # server session has never seen.
+        self._clear_response_audio_indexes()
+        self._audio_state_tracker = ModelAudioTracker()
+        self._current_item_id = None
+        self._created_session = None
 
     def _retire_response_audio(self, response_id: str) -> None:
         self._interrupted_audio_response_ids.discard(response_id)
