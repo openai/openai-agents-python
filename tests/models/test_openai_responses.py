@@ -20,6 +20,7 @@ from openai.types.shared.reasoning import Reasoning
 
 from agents import (
     Agent,
+    ApplyPatchTool,
     AsyncComputer,
     Computer,
     ComputerTool,
@@ -27,6 +28,7 @@ from agents import (
     ModelSettings,
     ModelTracing,
     Runner,
+    ShellTool,
     Tool,
     ToolSearchTool,
     WebSearchTool,
@@ -2210,6 +2212,50 @@ async def test_preview_model_forced_computer_tool_choice_uses_preview_selector(
             "display_height": 600,
         }
     ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["shell", "apply_patch"])
+async def test_builtin_tool_choice_selects_builtin_among_multiple_tools(tool_choice: str) -> None:
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    builtin_tool: Tool = (
+        ShellTool(executor=lambda request: "ok")
+        if tool_choice == "shell"
+        else ApplyPatchTool(editor=cast(Any, object()))
+    )
+    model = OpenAIResponsesModel(
+        model="gpt-5.4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(tool_choice=tool_choice),
+        tools=[
+            function_tool(lambda: "ok", name_override="lookup_account"),
+            builtin_tool,
+            function_tool(lambda: "ok", name_override="summarize"),
+        ],
+        output_schema=None,
+        handoffs=[handoff(Agent(name="Target"))],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert called_kwargs["tool_choice"] == {"type": tool_choice}
+    assert tool_choice in [dict(tool).get("type") for tool in called_kwargs["tools"]]
 
 
 @pytest.mark.allow_call_model_methods

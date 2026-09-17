@@ -1829,6 +1829,14 @@ class Converter:
             return {
                 "type": "code_interpreter",
             }
+        elif tool_choice == "shell" and cls._has_shell_tool(tools):
+            return {
+                "type": "shell",
+            }
+        elif tool_choice == "apply_patch" and cls._has_apply_patch_tool(tools):
+            return {
+                "type": "apply_patch",
+            }
         elif tool_choice == "mcp":
             # Note that this is still here for backwards compatibility,
             # but migrating to MCPToolChoice is recommended.
@@ -1940,6 +1948,14 @@ class Converter:
                 "tools on the OpenAI Responses API. Use `auto`, `required`, `none`, or load "
                 "the tool via ToolSearchTool() first."
             )
+
+    @classmethod
+    def _has_shell_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(isinstance(tool, ShellTool) for tool in tools or ())
+
+    @classmethod
+    def _has_apply_patch_tool(cls, tools: Sequence[Tool] | None) -> bool:
+        return any(isinstance(tool, ApplyPatchTool) for tool in tools or ())
 
     @classmethod
     def _has_computer_tool(cls, tools: Sequence[Tool] | None) -> bool:
