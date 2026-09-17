@@ -983,6 +983,26 @@ def test_process_model_response_accepts_program_output_for_retained_program() ->
     assert isinstance(processed.new_items[0], ToolCallOutputItem)
 
 
+def test_process_model_response_accepts_program_output_for_program_in_input() -> None:
+    agent = Agent(name="inventory", tools=[ProgrammaticToolCallingTool()])
+
+    processed = process_model_response(
+        agent=agent,
+        all_tools=agent.tools,
+        response=ModelResponse(
+            output=[_program_output()],
+            usage=Usage(),
+            response_id="response_1",
+        ),
+        output_schema=None,
+        handoffs=[],
+        input_items=[_program().model_dump(exclude_none=True)],
+    )
+
+    assert len(processed.new_items) == 1
+    assert isinstance(processed.new_items[0], ToolCallOutputItem)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "remove_field", "error_match"),
     [
@@ -1447,7 +1467,7 @@ def test_process_model_response_accepts_server_owned_parent_from_submitted_delta
         output_schema=None,
         handoffs=[],
         server_manages_conversation=True,
-        server_managed_input_items=submitted_delta,
+        input_items=submitted_delta,
     )
 
     assert child_type in {_raw_item_type(item.raw_item) for item in processed.new_items}
@@ -1905,6 +1925,46 @@ def test_process_model_response_accepts_allowed_program_owned_shell_output(
     )
 
     assert len(processed.new_items) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_completes_a_program_replayed_as_client_managed_input() -> None:
+    """A run resumed from prior items finishes the program those items started.
+
+    An application that pauses a run, for example for a human-in-the-loop
+    approval of a program-owned call, and resumes by passing its own history as
+    input has the parent program only in that input.
+    """
+    model = ScriptedModel([[_program_output(), get_text_message("42 units are available")]])
+
+    @function_tool(allowed_callers=["programmatic"])
+    def lookup_inventory(sku: str) -> InventoryOutput:
+        return InventoryOutput(sku=sku, available_units=42)
+
+    agent = Agent(
+        name="inventory",
+        model=model,
+        tools=[ProgrammaticToolCallingTool(), lookup_inventory],
+    )
+    prior_items: list[Any] = [
+        {"role": "user", "content": "Check inventory"},
+        _program().model_dump(exclude_none=True),
+        _function_call().model_dump(exclude_none=True),
+        {
+            "type": "function_call_output",
+            "call_id": FUNCTION_CALL_ID,
+            "output": '{"sku":"A-1","available_units":42}',
+            "caller": PROGRAM_CALLER,
+        },
+    ]
+
+    result = await Runner.run(agent, prior_items)
+
+    assert result.final_output == "42 units are available"
+    assert [_raw_item_type(item.raw_item) for item in result.new_items] == [
+        "program_output",
+        "message",
+    ]
 
 
 @pytest.mark.asyncio
