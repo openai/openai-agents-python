@@ -283,16 +283,24 @@ class EncryptedSession(SessionABC):
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> TResponseInputItem | None:
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
-        while True:
-            enc = await _call_session_method(
-                self.underlying_session.pop_item,
+        enc = await _call_session_method(
+            self.underlying_session.pop_item,
+            wrapper=wrapper,
+        )
+        if not enc:
+            return None
+        item = self._unwrap(enc)
+        if item is None:
+            # Could not decrypt the item (wrong key or otherwise). Push it
+            # back so that a future call with the correct key can still
+            # recover it.
+            await _call_session_method(
+                self.underlying_session.add_items,
+                [enc],
                 wrapper=wrapper,
             )
-            if not enc:
-                return None
-            item = self._unwrap(enc)
-            if item is not None:
-                return item
+            return None
+        return item
 
     async def clear_session(
         self,
