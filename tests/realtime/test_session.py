@@ -331,6 +331,58 @@ async def test_close_clears_response_bookkeeping_when_model_close_fails():
 
 
 @pytest.mark.asyncio
+async def test_close_failure_wakes_waiting_iterators():
+    class FailingCloseModel(_DummyModel):
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    session = RealtimeSession(FailingCloseModel(), RealtimeAgent(name="agent"), None)
+    iterator = session.__aiter__()
+    next_event = asyncio.ensure_future(iterator.__anext__())
+    await asyncio.sleep(0.01)
+    assert session._event_iterator_waiters == 1
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await session.close()
+
+    done, pending = await asyncio.wait({next_event}, timeout=0.1)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+    assert done == {next_event}
+    with pytest.raises(StopAsyncIteration):
+        next_event.result()
+    assert session._closing
+    assert not session._closed
+
+
+@pytest.mark.asyncio
+async def test_iteration_drains_queued_events_then_ends_after_failed_close():
+    class FailingCloseModel(_DummyModel):
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    session = RealtimeSession(FailingCloseModel(), RealtimeAgent(name="agent"), None)
+    queued = RealtimeError(info=session._event_info, error={"message": "queued before close"})
+    assert session._put_event_nowait(queued)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await session.close()
+
+    async def collect() -> list[Any]:
+        return [event async for event in session]
+
+    # A consumer that starts iterating after the failed close is not a registered waiter,
+    # so no wake-up sentinel reaches it. It must still see the events queued before the
+    # close and then end instead of waiting for events that can no longer arrive.
+    events = await asyncio.wait_for(collect(), timeout=1)
+
+    assert events == [queued]
+    assert not session._closed
+
+
+@pytest.mark.asyncio
 async def test_cancelling_one_close_waiter_does_not_cancel_cleanup():
     class BlockingCloseModel(_DummyModel):
         def __init__(self) -> None:

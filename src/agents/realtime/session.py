@@ -312,7 +312,12 @@ class RealtimeSession(RealtimeModelListener):
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
         while True:
-            if (self._closed or self._model_stream_ended) and self._event_queue.empty():
+            # Once close() has started, the listener is gone and _put_event refuses new
+            # events, so an empty queue is final even when the model close failed and
+            # the session is still retryable rather than closed.
+            if (
+                self._closed or self._closing or self._model_stream_ended
+            ) and self._event_queue.empty():
                 return
 
             # Check if there's a stored exception to raise
@@ -2007,8 +2012,14 @@ class RealtimeSession(RealtimeModelListener):
         await self._cancel_background_tasks()
         self._clear_response_bookkeeping()
 
-        # Close the model connection
-        await self._model.close()
+        # Close the model connection. A failing close keeps the session retryable, but
+        # the iterators must be released here: the listener is already removed, so no
+        # event would ever wake a consumer parked on the queue.
+        try:
+            await self._model.close()
+        except BaseException:
+            self._wake_event_iterators()
+            raise
 
         # Clear pending approval tracking
         self._pending_tool_calls.clear()
