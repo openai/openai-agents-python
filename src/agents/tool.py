@@ -59,6 +59,11 @@ from typing_extensions import (
 
 from . import _debug
 from ._config_coercion import coerce_pydantic_config
+from ._function_tool_arguments import (
+    PreparedFunctionArguments,
+    arguments_unchanged,
+    can_prepare_without_user_code,
+)
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -498,7 +503,12 @@ class FunctionTool:
     and the tool call will need to be approved using RunState.approve() or rejected using
     RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
     function that takes (run_context, tool_parameters, call_id) and returns whether this
-    specific call needs approval."""
+    specific call needs approval. For decorated Python tools, callable policies receive raw
+    parsed arguments only when validation preserves their values, types, and dictionary order.
+    Defaults, transformations, or arguments that cannot be inspected require manual approval.
+    Application models, custom validators, and custom default factories require manual approval
+    before validation runs. Invalid arguments also require manual approval; validation errors
+    follow the tool's failure policy only after approval, without invoking its body."""
 
     # Keep timeout fields after needs_approval to preserve positional constructor compatibility.
     timeout_seconds: float | None = None
@@ -657,6 +667,10 @@ class _FailureHandlingFunctionToolInvoker:
         if getattr(self, _SYNC_FUNCTION_TOOL_MARKER, False):
             setattr(bound_invoker, _SYNC_FUNCTION_TOOL_MARKER, True)
         return bound_invoker
+
+    def prepare_arguments(self, input: str, tool_name: str) -> PreparedFunctionArguments | None:
+        prepare = getattr(self._invoke_tool_impl, "__agents_prepare_arguments__", None)
+        return prepare(input, tool_name) if prepare is not None else None
 
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
         try:
@@ -2701,17 +2715,18 @@ def function_tool(
             output_json_schema=output_json_schema,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
-            tool_name = ctx.tool_name
+        def _prepare_arguments(
+            input: str, tool_name: str, *, inspect_approval: bool = False
+        ) -> PreparedFunctionArguments:
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
-            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
-
+            # Keep mutable policy input separate from prepared execution values.
+            validation_input = copy.deepcopy(json_data) if inspect_approval else json_data
             base_message = f"Invalid JSON input for tool {tool_name}"
             validation_failed = False
             try:
                 parsed = (
-                    schema.params_pydantic_model(**json_data)
-                    if json_data
+                    schema.params_pydantic_model(**validation_input)
+                    if validation_input
                     else schema.params_pydantic_model()
                 )
             except ValidationError as e:
@@ -2723,6 +2738,24 @@ def function_tool(
                 raise ModelBehaviorError(base_message)
 
             args, kwargs_dict = schema.to_call_args(parsed)
+            return PreparedFunctionArguments(
+                owner=_prepare_arguments,
+                arguments=input,
+                args=args,
+                kwargs=kwargs_dict,
+                unchanged=inspect_approval and arguments_unchanged(parsed, json_data),
+            )
+
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+            tool_name = ctx.tool_name
+            prepared = ctx._function_tool_arguments
+            ctx._function_tool_arguments = None
+            if prepared is None:
+                prepared = _prepare_arguments(input, tool_name)
+            elif prepared.owner is not _prepare_arguments or prepared.arguments != input:
+                raise UserError("Prepared function arguments do not match this invocation.")
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
+            args, kwargs_dict = prepared.args, prepared.kwargs
 
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug("Tool call args: %s, kwargs: %s", args, kwargs_dict)
@@ -2757,6 +2790,21 @@ def function_tool(
 
             return result
 
+        def _prepare_for_approval(input: str, tool_name: str) -> PreparedFunctionArguments:
+            if not can_prepare_without_user_code(schema.params_pydantic_model):
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+            try:
+                return _prepare_arguments(input, tool_name, inspect_approval=True)
+            except Exception:
+                # Failed inspection cannot authorize the invocation's error handler.
+                # Revalidate through the ordinary invocation path after approval.
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+
+        cast(Any, _on_invoke_tool_impl).__agents_prepare_arguments__ = _prepare_for_approval
         setattr(
             _on_invoke_tool_impl,
             _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,

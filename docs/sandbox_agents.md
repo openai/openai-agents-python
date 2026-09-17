@@ -12,7 +12,7 @@ The SDK gives you that execution harness without making you wire together file s
 
 - Python 3.10 or higher
 - Basic familiarity with the OpenAI Agents SDK
-- A sandbox client. For local development, start with `UnixLocalSandboxClient`.
+- A sandbox client. For trusted local development, start with `UnixLocalSandboxClient`.
 
 ## Installation
 
@@ -31,6 +31,10 @@ pip install "openai-agents[docker]"
 ## Create a local sandbox agent
 
 This example stages a local repo under `repo/`, loads local skills lazily, and has the runner create a Unix-local sandbox session for the run.
+
+!!! warning "Local commands use host permissions"
+
+    On Linux, `UnixLocalSandboxClient` adds no OS-level confinement to commands. On macOS, it applies filesystem restrictions through `sandbox-exec`, but does not provide network isolation. Use this example for trusted local development or within an externally isolated environment. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted sandbox, or provide external isolation. See [Unix-local execution limits](sandbox/clients.md#decision-guide).
 
 ```python
 import asyncio
