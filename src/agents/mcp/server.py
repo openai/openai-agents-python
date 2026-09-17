@@ -355,15 +355,29 @@ def _validated_v2_http_client_factory(factory: Callable[..., Any]) -> Callable[.
     return create_client
 
 
-def _jsonrpc_request_method(request: Any) -> str | None:
+def _jsonrpc_message_payload(request: Any) -> dict[str, Any] | None:
+    """Return the JSON-RPC message this request carries, or `None` for any other request."""
     try:
         payload = json.loads(request.content)
     except (TypeError, ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or "jsonrpc" not in payload:
         return None
+    return payload
+
+
+_V2_HANDSHAKE_REQUEST_METHODS = frozenset({"server/discover", "initialize"})
+
+
+def _is_v2_post_handshake_message(payload: dict[str, Any] | None) -> bool:
+    """Whether MCP v2 owns the failure handling for this transport message."""
+    if payload is None:
+        return False
     method = payload.get("method")
-    return method if isinstance(method, str) else None
+    if method is None:
+        # A response the client sends for a server-initiated request.
+        return True
+    return isinstance(method, str) and method not in _V2_HANDSHAKE_REQUEST_METHODS
 
 
 def _configure_v2_session_id_hook(
@@ -372,12 +386,17 @@ def _configure_v2_session_id_hook(
     on_session_id: Callable[[str], None] | None,
 ) -> None:
     async def handle_response(response: Any) -> None:
-        if response.status_code >= 500:
+        payload = _jsonrpc_message_payload(response.request)
+        if response.status_code >= 500 and not _is_v2_post_handshake_message(payload):
+            # MCP v2 fails a post-handshake transport message on its own, so raising here would
+            # tear down the transport that every later request shares. Every other response keeps
+            # the existing HTTP error mapping: a handshake 5xx must fail the connection instead of
+            # looking like a legacy server, and OAuth sub-request failures stay on that path too.
             response.raise_for_status()
-        method = _jsonrpc_request_method(response.request)
         if (
             on_session_id is not None
-            and method == "initialize"
+            and payload is not None
+            and payload.get("method") == "initialize"
             and 200 <= response.status_code < 300
         ):
             session_id = response.headers.get("mcp-session-id")
