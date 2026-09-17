@@ -1520,6 +1520,8 @@ def _effective_runloop_home(user_parameters: RunloopUserParameters | None) -> Pu
         return _RUNLOOP_DEFAULT_HOME
     if user_parameters.username == "root" and user_parameters.uid == 0:
         return _RUNLOOP_ROOT_HOME
+    if not user_parameters.username:
+        return _RUNLOOP_DEFAULT_HOME
     return PurePosixPath("/home") / str(user_parameters.username)
 
 

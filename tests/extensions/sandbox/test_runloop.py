@@ -1153,8 +1153,8 @@ class _FakeLaunchAfterIdle(BaseModel):
 
 
 class _FakeUserParameters(BaseModel):
-    username: str
-    uid: int
+    username: str | None = None
+    uid: int | None = None
 
     def to_dict(
         self,
@@ -3125,3 +3125,25 @@ class TestRunloopSandbox:
         assert "hello" in output
         assert len(devbox.exec_calls) == exec_calls_before + 1
         assert len(devbox.exec_async_calls) == exec_async_calls_before
+
+    def test_effective_runloop_home_defaults_when_username_missing_or_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runloop_module = _load_runloop_module(monkeypatch)
+        _effective_runloop_home = runloop_module._effective_runloop_home
+        RunloopUserParameters = runloop_module.RunloopUserParameters
+
+        assert _effective_runloop_home(None) == PurePosixPath("/home/user")
+        assert _effective_runloop_home(RunloopUserParameters(username=None)) == PurePosixPath(
+            "/home/user"
+        )
+        assert _effective_runloop_home(RunloopUserParameters(username="")) == PurePosixPath(
+            "/home/user"
+        )
+        assert _effective_runloop_home(
+            RunloopUserParameters(username="root", uid=0)
+        ) == PurePosixPath("/root")
+        assert _effective_runloop_home(
+            RunloopUserParameters(username="alice", uid=1001)
+        ) == PurePosixPath("/home/alice")
