@@ -51,6 +51,7 @@ plugins:
           nav:
             - Intro: index.md
             - Quickstart: quickstart.md
+            - Examples: examples.md
             - Configuration: config.md
             - Documentation:
                 - Agents: agents.md

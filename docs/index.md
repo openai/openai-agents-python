@@ -96,3 +96,4 @@ Use this table when you know the job you want to do, but not which page explains
 | Review outputs, run items, interruptions, and resume state | [Results](results.md) |
 | Build a low-latency voice agent with `gpt-realtime-2.1` | [Realtime agents quickstart](realtime/quickstart.md) and [Realtime transport](realtime/transport.md) |
 | Build a speech-to-text / agent / text-to-speech pipeline | [Voice pipeline quickstart](voice/quickstart.md) |
+| Browse or run the full example suite from a clone | [Examples](examples.md) |
