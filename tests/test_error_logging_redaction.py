@@ -197,6 +197,20 @@ def _emit_data_warning_for_location(test_logger) -> None:
     )
 
 
+def _warnings_under_test(
+    caught: list[warnings.WarningMessage],
+) -> list[warnings.WarningMessage]:
+    """Drop ``ResourceWarning`` records before asserting on captured warnings.
+
+    ``warnings.simplefilter("always")`` also surfaces the ``ResourceWarning`` that the
+    interpreter emits while garbage-collecting unrelated objects left behind by earlier
+    tests in the same process (unclosed files, event loops, ``scandir`` iterators).
+    When such a collection lands inside the capture window, it is unrelated to the
+    redaction policy under test, so it must not decide these assertions.
+    """
+    return [w for w in caught if not issubclass(w.category, ResourceWarning)]
+
+
 def _responses_model() -> OpenAIResponsesModel:
     return OpenAIResponsesModel(
         model="test-model",
@@ -2600,7 +2614,7 @@ async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction
                 )
 
     error = exc_info.value
-    assert not caught_warnings
+    assert not _warnings_under_test(caught_warnings)
     assert str(error) == "Error details are redacted."
     assert error.run_data is None
     assert error.__cause__ is None
@@ -2649,9 +2663,10 @@ async def test_invalid_final_output_handler_fallback_serialization_follows_redac
             )
             actual_final_output = run_result.final_output
 
-    rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
+    relevant_warnings = _warnings_under_test(caught_warnings)
+    rendered_warnings = "\n".join(str(warning.message) for warning in relevant_warnings)
     if redacted:
-        assert not caught_warnings
+        assert not relevant_warnings
     else:
         assert fallback_secret in rendered_warnings
     assert actual_final_output == _PermissiveFallbackOutput(
@@ -2710,9 +2725,10 @@ async def test_empty_final_output_handler_fallback_serialization_follows_redacti
             )
             actual_final_output = run_result.final_output
 
-    rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
+    relevant_warnings = _warnings_under_test(caught_warnings)
+    rendered_warnings = "\n".join(str(warning.message) for warning in relevant_warnings)
     if redacted:
-        assert not caught_warnings
+        assert not relevant_warnings
     else:
         assert fallback_secret in rendered_warnings
     assert actual_final_output == _PermissiveFallbackOutput(
