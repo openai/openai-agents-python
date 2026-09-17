@@ -168,19 +168,20 @@ class Thread:
         usage: Usage | None = None
         turn_failure: ThreadError | None = None
 
-        async for event in generator:
-            if isinstance(event, ItemCompletedEvent):
-                item = event.item
-                if is_agent_message_item(item):
-                    final_response = item.text
-                items.append(item)
-            elif isinstance(event, TurnCompletedEvent):
-                usage = event.usage
-            elif isinstance(event, TurnFailedEvent):
-                turn_failure = event.error
-                break
-            elif isinstance(event, ThreadErrorEvent):
-                raise RuntimeError(f"Codex stream error: {event.message}")
+        async with contextlib.aclosing(generator):
+            async for event in generator:
+                if isinstance(event, ItemCompletedEvent):
+                    item = event.item
+                    if is_agent_message_item(item):
+                        final_response = item.text
+                    items.append(item)
+                elif isinstance(event, TurnCompletedEvent):
+                    usage = event.usage
+                elif isinstance(event, TurnFailedEvent):
+                    turn_failure = event.error
+                    break
+                elif isinstance(event, ThreadErrorEvent):
+                    raise RuntimeError(f"Codex stream error: {event.message}")
 
         if turn_failure is not None:
             raise RuntimeError(turn_failure.message)
