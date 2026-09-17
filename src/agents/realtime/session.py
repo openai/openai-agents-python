@@ -611,6 +611,11 @@ class RealtimeSession(RealtimeModelListener):
                 event.response_id is None or event.response_id == self._active_output_response_id
             )
             if is_active_response_ended:
+                # A handoff inside the response has already moved _current_agent to the
+                # new agent, so the agent that produced this turn is the one captured at
+                # turn_started, the same snapshot the output guardrails use.
+                ended_agent = self._active_output_response_agent or self._current_agent
+
                 # Clear guardrail state for next turn.
                 self._item_transcripts.clear()
                 self._item_guardrail_run_counts.clear()
@@ -620,7 +625,7 @@ class RealtimeSession(RealtimeModelListener):
 
                 await self._put_event(
                     RealtimeAgentEndEvent(
-                        agent=self._current_agent,
+                        agent=ended_agent,
                         info=self._event_info,
                     )
                 )
