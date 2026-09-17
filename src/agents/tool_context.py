@@ -17,6 +17,7 @@ from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from ._function_tool_arguments import PreparedFunctionArguments
     from .agent import AgentBase
     from .items import ToolApprovalItem, TResponseInputItem
     from .run_config import RunConfig
@@ -116,6 +117,7 @@ class ToolContext(RunContextWrapper[TContext]):
             self.run_config = None
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._custom_data: dict[str, Any] | None = None
+        self._function_tool_arguments: PreparedFunctionArguments | None = None
 
     @property
     def qualified_tool_name(self) -> str:
