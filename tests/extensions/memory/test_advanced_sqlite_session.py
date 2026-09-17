@@ -2176,6 +2176,37 @@ async def test_branch_deletion_with_force():
     session.close()
 
 
+async def test_failed_force_delete_keeps_current_branch():
+    """A force delete that raises must not move the session off its current branch."""
+    session = AdvancedSQLiteSession(session_id="failed_force_delete", create_tables=True)
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main question"},
+        {"role": "assistant", "content": "Main answer"},
+    ]
+    branch_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch question"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+
+        # Branching from turn 1 copies no messages, so the new branch has no history yet.
+        branch_id = await session.create_branch_from_turn(1, "alternative_path")
+        assert session._current_branch_id == branch_id
+
+        with pytest.raises(ValueError, match="Branch 'alternative_path' does not exist"):
+            await session.delete_branch(branch_id, force=True)
+
+        assert session._current_branch_id == branch_id
+
+        # The next turn must stay on the branch instead of landing in main.
+        await session.add_items(branch_items)
+        assert await session.get_items() == branch_items
+        assert await session.get_items(branch_id="main") == main_items
+    finally:
+        session.close()
+
+
 async def test_get_items_with_parameters():
     """Test get_items with new parameters (include_inactive, branch_id)."""
     session_id = "get_items_params_test"
