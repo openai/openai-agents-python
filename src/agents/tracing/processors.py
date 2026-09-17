@@ -298,12 +298,11 @@ class BackendSpanExporter(TracingExporter):
         if deadline is not None:
             # The final drain runs after shutdown is requested; its deadline bounds retries.
             time.sleep(wait_for)
-
-        if remaining is not None and (sleep_time >= remaining or time.monotonic() >= deadline):
-            logger.warning(
-                "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
-            )
-            return False
+            if remaining is not None and (sleep_time >= remaining or time.monotonic() >= deadline):
+                logger.warning(
+                    "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
+                )
+                return False
         return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
