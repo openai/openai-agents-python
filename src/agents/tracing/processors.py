@@ -477,20 +477,24 @@ class BackendSpanExporter(TracingExporter):
         existing_details = usage.get("details")
         if isinstance(existing_details, dict):
             for key, value in existing_details.items():
-                if not isinstance(key, str):
+                json_key = self._json_object_key(key)
+                if json_key is None:
                     continue
                 sanitized_value = self._sanitize_json_compatible_value(value)
                 if sanitized_value is self._UNSERIALIZABLE:
                     continue
-                details[key] = sanitized_value
+                details[json_key] = sanitized_value
 
         for key, value in usage.items():
             if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS or key == "details" or value is None:
                 continue
+            json_key = self._json_object_key(key)
+            if json_key is None:
+                continue
             sanitized_value = self._sanitize_json_compatible_value(value)
             if sanitized_value is self._UNSERIALIZABLE:
                 continue
-            details[key] = sanitized_value
+            details[json_key] = sanitized_value
 
         sanitized_usage: dict[str, Any] = {
             "input_tokens": input_tokens,

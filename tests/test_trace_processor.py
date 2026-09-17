@@ -1372,6 +1372,32 @@ def test_sanitize_for_openai_tracing_api_filters_non_json_values_in_usage_detail
     exporter.close()
 
 
+def test_sanitize_for_openai_tracing_api_keeps_json_encodable_usage_detail_keys():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "details": {200: 3, True: 4, None: 5, 1.5: 6, "ok": 7},
+                "provider_usage": {404: "missing"},
+            },
+        },
+    }
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    assert sanitized["span_data"]["usage"]["details"] == {
+        "200": 3,
+        "true": 4,
+        "null": 5,
+        "1.5": 6,
+        "ok": 7,
+        "provider_usage": {"404": "missing"},
+    }
+    exporter.close()
+
+
 def test_sanitize_for_openai_tracing_api_handles_cyclic_usage_values():
     exporter = BackendSpanExporter(api_key="test_key")
     cyclic_dict: dict[str, Any] = {}
