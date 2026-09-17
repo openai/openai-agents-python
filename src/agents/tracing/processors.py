@@ -149,7 +149,13 @@ class BackendSpanExporter(TracingExporter):
                 if exported:
                     if sanitize_for_openai:
                         exported = self._sanitize_for_openai_tracing_api(exported)
-                    data.append(exported)
+                    # A single user-provided metadata value must not make the
+                    # whole batch fail JSON encoding and discard unrelated
+                    # traces. Remove values that cannot be represented in the
+                    # tracing payload before sending the request.
+                    json_safe_exported = self._sanitize_json_compatible_value(exported)
+                    if json_safe_exported is not self._UNSERIALIZABLE:
+                        data.append(cast(dict[str, Any], json_safe_exported))
             payload = {"data": data}
 
             headers = {

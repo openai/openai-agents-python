@@ -5,6 +5,7 @@ import sys
 import textwrap
 import threading
 import time
+import uuid
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -532,6 +533,26 @@ def test_backend_span_exporter_2xx_success(mock_client):
 
     # Should have called post exactly once
     mock_client.return_value.post.assert_called_once()
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_drops_unserializable_values_per_item(mock_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key")
+    good_trace = get_trace(mock_processor())
+    bad_trace = get_trace(mock_processor())
+    bad_trace.metadata = {"request_id": uuid.uuid4()}
+
+    exporter.export([good_trace, bad_trace])
+
+    payload = mock_client.return_value.post.call_args.kwargs["json"]
+    assert len(payload["data"]) == 2
+    assert payload["data"][0]["metadata"] == {}
+    assert payload["data"][1]["metadata"] == {}
     exporter.close()
 
 
