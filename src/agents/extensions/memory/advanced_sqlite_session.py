@@ -960,6 +960,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 "code_interpreter_call",
                 "shell_call",
                 "apply_patch_call",
+                "image_generation_call",
+                "local_shell_call",
                 "tool_search_call",
                 "tool_search_output",
             }:
@@ -1680,15 +1682,18 @@ class AdvancedSQLiteSession(SQLiteSession):
                         FROM (
                             SELECT COALESCE(
                                 tool_name,
-                                CASE WHEN message_type IN ('shell_call', 'apply_patch_call')
-                                    THEN message_type END
+                                CASE WHEN message_type IN (
+                                    'shell_call', 'apply_patch_call',
+                                    'image_generation_call', 'local_shell_call'
+                                ) THEN message_type END
                             ) AS tool_name, 1 AS usage_count, user_turn_number
                             FROM message_structure
                             WHERE session_id = ? AND branch_id = ? AND message_type IN (
                                 'tool_call', 'function_call', 'computer_call', 'file_search_call',
                                 'web_search_call', 'code_interpreter_call', 'tool_search_call',
                                 'custom_tool_call', 'mcp_call', 'mcp_approval_request',
-                                'shell_call', 'apply_patch_call'
+                                'shell_call', 'apply_patch_call',
+                                'image_generation_call', 'local_shell_call'
                             )
 
                             UNION ALL
