@@ -587,7 +587,7 @@
   <a href="#how-the-pieces-fit-together" class="md-nav__link">
     <span class="md-ellipsis">
       
-        各组件的组合方式
+        各组件的协作方式
       
     </span>
   </a>
@@ -631,7 +631,7 @@
   <a href="#how-a-sandbox-run-is-prepared" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱运行的准备过程
+        沙箱运行的准备流程
       
     </span>
   </a>
@@ -814,7 +814,7 @@
   <a href="#full-example-coding-task" class="md-nav__link">
     <span class="md-ellipsis">
       
-        完整示例：编码任务
+        完整代码示例：编码任务
       
     </span>
   </a>
@@ -837,7 +837,7 @@
   <a href="#switch-sandbox-clients" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱客户端的切换
+        沙箱客户端切换
       
     </span>
   </a>
@@ -848,7 +848,7 @@
   <a href="#override-the-workspace" class="md-nav__link">
     <span class="md-ellipsis">
       
-        工作区的覆盖
+        工作区覆盖
       
     </span>
   </a>
@@ -859,7 +859,7 @@
   <a href="#inject-a-sandbox-session" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱会话的注入
+        沙箱会话注入
       
     </span>
   </a>
@@ -870,7 +870,7 @@
   <a href="#resume-from-session-state" class="md-nav__link">
     <span class="md-ellipsis">
       
-        会话状态的恢复
+        会话状态恢复
       
     </span>
   </a>
@@ -881,7 +881,7 @@
   <a href="#start-from-a-snapshot" class="md-nav__link">
     <span class="md-ellipsis">
       
-        快照的使用
+        快照初始化
       
     </span>
   </a>
@@ -1985,7 +1985,7 @@
   <a href="#how-the-pieces-fit-together" class="md-nav__link">
     <span class="md-ellipsis">
       
-        各组件的组合方式
+        各组件的协作方式
       
     </span>
   </a>
@@ -2029,7 +2029,7 @@
   <a href="#how-a-sandbox-run-is-prepared" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱运行的准备过程
+        沙箱运行的准备流程
       
     </span>
   </a>
@@ -2212,7 +2212,7 @@
   <a href="#full-example-coding-task" class="md-nav__link">
     <span class="md-ellipsis">
       
-        完整示例：编码任务
+        完整代码示例：编码任务
       
     </span>
   </a>
@@ -2235,7 +2235,7 @@
   <a href="#switch-sandbox-clients" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱客户端的切换
+        沙箱客户端切换
       
     </span>
   </a>
@@ -2246,7 +2246,7 @@
   <a href="#override-the-workspace" class="md-nav__link">
     <span class="md-ellipsis">
       
-        工作区的覆盖
+        工作区覆盖
       
     </span>
   </a>
@@ -2257,7 +2257,7 @@
   <a href="#inject-a-sandbox-session" class="md-nav__link">
     <span class="md-ellipsis">
       
-        沙箱会话的注入
+        沙箱会话注入
       
     </span>
   </a>
@@ -2268,7 +2268,7 @@
   <a href="#resume-from-session-state" class="md-nav__link">
     <span class="md-ellipsis">
       
-        会话状态的恢复
+        会话状态恢复
       
     </span>
   </a>
@@ -2279,7 +2279,7 @@
   <a href="#start-from-a-snapshot" class="md-nav__link">
     <span class="md-ellipsis">
       
-        快照的使用
+        快照初始化
       
     </span>
   </a>
@@ -2463,31 +2463,31 @@
 <h1 id="_1">概念</h1>
 <div class="admonition warning">
 <p class="admonition-title">Beta 功能</p>
-<p>沙箱智能体目前处于 Beta 阶段。在正式发布前，API 细节、默认值和受支持的功能可能会发生变化，并且未来会逐步提供更高级的功能。</p>
+<p>沙箱智能体目前处于 Beta 阶段。在正式发布前，API 细节、默认值和支持的功能可能会发生变化，并且后续将逐步提供更多高级功能。</p>
 </div>
-<p>现代智能体在能够操作文件系统中的真实文件时效果最佳。<strong>沙箱智能体</strong>可以利用专用工具和 shell 命令检索及处理大型文档集、编辑文件、生成产物和运行命令。沙箱为模型提供一个持久工作区，智能体可以使用它代您执行工作。Agents SDK 中的沙箱智能体可帮助您轻松运行与沙箱环境配对的智能体，从而便捷地将所需文件放入文件系统，并编排沙箱，以便大规模启动、停止和恢复任务。</p>
-<p>您可以围绕智能体所需的数据定义工作区。工作区可以基于 GitHub 仓库、本地文件和目录、合成任务文件、S3 或 Azure Blob Storage 等远程文件系统，以及您提供的其他沙箱输入来创建。</p>
+<p>现代智能体在能够操作文件系统中的真实文件时效果最佳。<strong>沙箱智能体</strong>可以利用专用工具和 shell 命令搜索和操作大型文档集、编辑文件、生成制品以及运行命令。沙箱为模型提供一个持久化工作区，智能体可以使用它代您完成工作。Agents SDK 中的沙箱智能体可帮助您轻松运行与沙箱环境配对的智能体，便于将正确的文件放入文件系统，并编排沙箱，从而轻松地大规模启动、停止和恢复任务。</p>
+<p>您可以围绕智能体所需的数据定义工作区。工作区可以从 GitHub 仓库、本地文件和目录、合成任务文件、S3 或 Azure Blob Storage 等远程文件系统，以及您提供的其他沙箱输入开始构建。</p>
 <div class="sandbox-harness-image">
-<p><img alt="带计算环境的沙箱智能体运行框架" src="../../../assets/images/harness_with_compute.png" /></p>
+<p><img alt="包含计算环境的沙箱智能体运行框架" src="../../../assets/images/harness_with_compute.png" /></p>
 </div>
-<p><code>SandboxAgent</code> 仍然是一个 <code>Agent</code>。它保留了常见的智能体接口，例如 <code>instructions</code>、<code>prompt</code>、<code>tools</code>、<code>handoffs</code>、<code>mcp_servers</code>、<code>model_settings</code>、<code>output_type</code>、安全防护措施和钩子，并且仍通过常规的 <code>Runner</code> API 运行。变化的是执行边界：</p>
+<p><code>SandboxAgent</code> 仍然是 <code>Agent</code>。它保留常规的智能体接口，例如 <code>instructions</code>、<code>prompt</code>、<code>tools</code>、<code>handoffs</code>、<code>mcp_servers</code>、<code>model_settings</code>、<code>output_type</code>、安全防护措施和钩子，并且仍通过常规的 <code>Runner</code> API 运行。变化之处在于执行边界：</p>
 <ul>
-<li><code>SandboxAgent</code> 定义智能体本身：包括常规智能体配置、<code>default_manifest</code>、<code>base_instructions</code>、<code>run_as</code> 等沙箱专用默认值，以及文件系统工具、shell 访问、技能、记忆或压缩等功能。</li>
-<li><code>Manifest</code> 声明新沙箱工作区所需的初始内容和布局，包括文件、仓库、挂载点和环境。</li>
-<li>沙箱会话是运行命令和修改文件的实时隔离环境。</li>
+<li><code>SandboxAgent</code> 定义智能体本身：常规的智能体配置，以及 <code>default_manifest</code>、<code>base_instructions</code>、<code>run_as</code> 等沙箱专用默认值，还有文件系统工具、shell 访问、技能、记忆或压缩等能力。</li>
+<li><code>Manifest</code> 声明新沙箱工作区所需的初始内容和布局，包括文件、仓库、挂载和环境。</li>
+<li>沙箱会话是运行命令和更改文件的实时执行环境。会话提供的隔离程度取决于其后端和配置。</li>
 <li><a class="autorefs autorefs-internal" title="SandboxRunConfig
 
 
   
       dataclass
-  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 决定运行如何获得该沙箱会话，例如直接注入会话、通过序列化的沙箱会话状态重新连接，或通过沙箱客户端创建新的沙箱会话。</li>
-<li>已保存的沙箱状态和快照可让后续运行重新连接到之前的工作，或根据已保存的内容初始化新的沙箱会话。</li>
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 决定运行如何获取该沙箱会话，例如直接注入会话、从序列化的沙箱会话状态重新连接，或通过沙箱客户端创建新的沙箱会话。</li>
+<li>保存的沙箱状态和快照让后续运行能够重新连接到先前的工作，或使用保存的内容初始化新的沙箱会话。</li>
 </ul>
-<p><code>Manifest</code> 是新会话的工作区约定，而不是每个实时沙箱的完整事实来源。一次运行的有效工作区也可以来自复用的沙箱会话、序列化的沙箱会话状态，或运行时选择的快照。</p>
-<p>在本页中，“沙箱会话”指由沙箱客户端管理的实时执行环境。它不同于<a href="../../sessions/">会话</a>中介绍的 SDK 对话式 <a class="autorefs autorefs-internal" title="Session" href="../../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> 接口。</p>
-<p>外层运行时仍负责审批、追踪、任务转移，以及跟踪恢复运行所需的状态。沙箱会话负责命令、文件变更和环境隔离。这种职责划分是该模型的核心组成部分。</p>
-<h3 id="how-the-pieces-fit-together">各组件的组合方式</h3>
-<p>沙箱运行会将智能体定义与每次运行的沙箱配置组合起来。运行器会准备智能体，将其绑定到实时沙箱会话，并可保存状态供后续运行使用。</p>
+<p><code>Manifest</code> 是新会话的工作区约定，而不是每个实时沙箱的完整事实来源。一次运行的实际工作区也可以来自复用的沙箱会话、序列化的沙箱会话状态，或运行时选择的快照。</p>
+<p>在本页中，“沙箱会话”是指由沙箱客户端管理的实时执行环境。它不同于<a href="../../sessions/">会话</a>中介绍的 SDK 对话式 <a class="autorefs autorefs-internal" title="Session" href="../../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> 接口。</p>
+<p>外层运行时仍负责审批、追踪、任务转移，以及跟踪恢复运行所需的状态。沙箱会话通过其后端管理命令和文件更改。适用哪些隔离控制措施由后端决定；会话本身并不保证操作系统级隔离。</p>
+<h3 id="how-the-pieces-fit-together">各组件的协作方式</h3>
+<p>沙箱运行将智能体定义与单次运行的沙箱配置相结合。运行器会准备智能体，将其绑定到实时沙箱会话，并可保存状态供后续运行使用。</p>
 <pre class="mermaid"><code>flowchart LR
     agent["SandboxAgent&lt;br/&gt;&lt;small&gt;full Agent + sandbox defaults&lt;/small&gt;"]
     config["SandboxRunConfig&lt;br/&gt;&lt;small&gt;client / session / resume inputs&lt;/small&gt;"]
@@ -2499,62 +2499,64 @@
     config --&gt; runner
     runner --&gt; sandbox
     sandbox --&gt; saved</code></pre>
-<p>沙箱专用默认值保留在 <code>SandboxAgent</code> 上。每次运行的沙箱会话选择则保留在 <code>SandboxRunConfig</code> 中。</p>
+<p>沙箱专用的默认值保留在 <code>SandboxAgent</code> 上。单次运行的沙箱会话选择保留在 <code>SandboxRunConfig</code> 中。</p>
 <p>可以将生命周期分为三个阶段：</p>
 <ol>
-<li>使用 <code>SandboxAgent</code>、<code>Manifest</code> 和各项功能定义智能体及新工作区约定。</li>
-<li>向 <code>Runner</code> 提供一个 <code>SandboxRunConfig</code>，以注入、恢复或创建沙箱会话并执行运行。</li>
-<li>后续从运行器管理的 <code>RunState</code>、显式沙箱 <code>session_state</code> 或已保存的工作区快照继续运行。</li>
+<li>使用 <code>SandboxAgent</code>、<code>Manifest</code> 和能力定义智能体及新工作区约定。</li>
+<li>通过向 <code>Runner</code> 提供一个 <code>SandboxRunConfig</code> 来执行运行，由其注入、恢复或创建沙箱会话。</li>
+<li>稍后从运行器管理的 <code>RunState</code>、显式沙箱 <code>session_state</code> 或已保存的工作区快照继续运行。</li>
 </ol>
-<p>如果 shell 访问只是您偶尔使用的一项工具，请先参阅<a href="../../tools/">工具指南</a>中的托管 shell。当工作区隔离、沙箱客户端选择或沙箱会话恢复行为属于设计的一部分时，再使用沙箱智能体。</p>
+<p>如果 shell 访问只是偶尔使用的一项工具，请从<a href="../../tools/">工具指南</a>中的托管 shell 开始。当工作区隔离、沙箱客户端选择或沙箱会话恢复行为属于设计的一部分时，请使用沙箱智能体。</p>
 <h2 id="when-to-use-them">适用场景</h2>
 <p>沙箱智能体非常适合以工作区为中心的工作流，例如：</p>
 <ul>
 <li>编码和调试，例如针对 GitHub 仓库中的问题报告编排自动修复并运行针对性测试</li>
-<li>文档处理和编辑，例如从用户的财务文档中提取信息，并创建填写完成的税表草稿</li>
-<li>基于文件的审核或分析，例如在回答前检查入职资料包、生成的报告或产物包</li>
-<li>隔离的多智能体模式，例如为每个审核智能体或编码子智能体提供各自的工作区</li>
+<li>文档处理和编辑，例如从用户的财务文档中提取信息并创建填写完成的税表草稿</li>
+<li>基于文件的审查或分析，例如在回答前检查入职资料包、生成的报告或制品包</li>
+<li>使用独立工作区的多智能体模式，例如为每位审查者或编码子智能体分别提供自己的工作区</li>
 <li>多步骤工作区任务，例如在一次运行中修复错误，之后再添加回归测试，或从快照或沙箱会话状态恢复</li>
 </ul>
-<p>如果您不需要访问文件或使用有状态、可变的文件系统，请继续使用 <code>Agent</code>。如果 shell 访问只是一项偶尔使用的功能，请添加托管 shell；如果工作区边界本身就是功能的一部分，请使用沙箱智能体。</p>
+<p>如果不需要访问文件或有状态、可变的文件系统，请继续使用 <code>Agent</code>。如果 shell 访问只是偶尔需要的一项能力，请添加托管 shell；如果工作区边界本身就是功能的一部分，请使用沙箱智能体。</p>
 <h2 id="choose-a-sandbox-client">沙箱客户端的选择</h2>
-<p>在 macOS 或 Linux 上进行本地开发时，请从 <code>UnixLocalSandboxClient</code> 开始。在 Windows 上，请改用 <code>DockerSandboxClient</code> 或托管提供商。在任何受支持的平台上，当您需要容器隔离或镜像一致性时，请迁移到 <code>DockerSandboxClient</code>；当您需要由提供商管理执行时，请迁移到托管提供商。</p>
-<p>在大多数情况下，<code>SandboxAgent</code> 定义保持不变，只需在 <a class="autorefs autorefs-internal" title="SandboxRunConfig
+<p>对于 macOS 或 Linux 上受信任的本地开发，或在外部隔离环境中，请使用 <code>UnixLocalSandboxClient</code>。在 Linux 上，此后端将命令作为宿主机进程运行，不会增加操作系统级隔离。在 macOS 上，它通过 <code>sandbox-exec</code> 应用文件系统限制，但不提供网络隔离。</p>
+<p>默认情况下，新的 Unix 本地会话会获得各自独立的临时工作区。如果您为多个会话配置相同的自定义 <code>Manifest.root</code>，这些会话将共享工作区。不同会话并不保证操作系统级隔离。</p>
+<p>对于不受信任的命令，包括受不受信任输入影响的命令，请选择经过适当配置的 <code>DockerSandboxClient</code> 或托管提供商，或提供外部隔离。在 Windows 上，请使用 Docker 或托管提供商。选择本地后端前，请参阅 <a href="../clients/#decision-guide">Unix 本地执行限制</a>。</p>
+<p>在大多数情况下，<code>SandboxAgent</code> 定义保持不变，而沙箱客户端及其选项在 <a class="autorefs autorefs-internal" title="SandboxRunConfig
 
 
   
       dataclass
-  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 中更改沙箱客户端及其选项。有关本地、Docker、托管和远程挂载选项，请参阅<a href="../clients/">沙箱客户端</a>。</p>
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 中变化。有关本地、Docker、托管和远程挂载选项，请参阅<a href="../clients/">沙箱客户端</a>。</p>
 <h2 id="core-pieces">核心组件</h2>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
 <tr>
-<th>层</th>
+<th>层级</th>
 <th>主要 SDK 组件</th>
-<th>回答的问题</th>
+<th>所回答的问题</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>智能体定义</td>
-<td><code>SandboxAgent</code>、<code>Manifest</code>、功能</td>
-<td>将运行哪个智能体，它应从怎样的新会话工作区约定开始？</td>
+<td><code>SandboxAgent</code>、<code>Manifest</code>、能力</td>
+<td>将运行哪个智能体，以及它应从什么样的新会话工作区约定开始？</td>
 </tr>
 <tr>
 <td>沙箱执行</td>
 <td><code>SandboxRunConfig</code>、沙箱客户端和实时沙箱会话</td>
-<td>此次运行如何获得实时沙箱会话，工作在哪里执行？</td>
+<td>此次运行如何获得实时沙箱会话，工作又在哪里执行？</td>
 </tr>
 <tr>
-<td>已保存的沙箱状态</td>
-<td><code>RunState</code> 沙箱载荷、<code>session_state</code> 和快照</td>
-<td>此工作流如何重新连接到之前的沙箱工作，或使用已保存的内容初始化新的沙箱会话？</td>
+<td>保存的沙箱状态</td>
+<td><code>RunState</code> 沙箱负载、<code>session_state</code> 和快照</td>
+<td>此工作流如何重新连接到先前的沙箱工作，或使用保存的内容初始化新的沙箱会话？</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>主要 SDK 组件与这些层的对应关系如下：</p>
+<p>主要 SDK 组件与这些层级的对应关系如下：</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
@@ -2573,17 +2575,17 @@
       dataclass
   " href="../../../ref/sandbox/sandbox_agent/#agents.sandbox.sandbox_agent.SandboxAgent"><code>SandboxAgent</code></a></td>
 <td>智能体定义</td>
-<td>此智能体应执行什么操作，哪些默认值应随其一同使用？</td>
+<td>此智能体应执行什么操作，哪些默认值应随其一起传递？</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a></td>
-<td>新会话工作区的文件和文件夹</td>
+<td>新会话工作区中的文件和文件夹</td>
 <td>运行开始时，文件系统中应存在哪些文件和文件夹？</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="Capability" href="../../../ref/sandbox/capabilities/capability/#agents.sandbox.capabilities.capability.Capability"><code>Capability</code></a></td>
 <td>沙箱原生行为</td>
-<td>应向此智能体附加哪些工具、指令片段或运行时行为？</td>
+<td>应为此智能体附加哪些工具、指令片段或运行时行为？</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="SandboxRunConfig
@@ -2592,7 +2594,7 @@
   
       dataclass
   " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a></td>
-<td>每次运行的沙箱客户端和沙箱会话来源</td>
+<td>单次运行的沙箱客户端和沙箱会话来源</td>
 <td>此次运行应注入、恢复还是创建沙箱会话？</td>
 </tr>
 <tr>
@@ -2603,7 +2605,7 @@
       dataclass
   " href="../../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a></td>
 <td>运行器管理的已保存沙箱状态</td>
-<td>我是否正在恢复之前由运行器管理的工作流，并自动延续其沙箱状态？</td>
+<td>我是否正在恢复先前由运行器管理的工作流，并自动继承其沙箱状态？</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="session_state
@@ -2625,31 +2627,31 @@
       instance-attribute
   " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig.snapshot"><code>SandboxRunConfig.snapshot</code></a></td>
 <td>用于新沙箱会话的已保存工作区内容</td>
-<td>新的沙箱会话是否应从已保存的文件和产物开始？</td>
+<td>新的沙箱会话是否应从保存的文件和制品开始？</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>实用的设计顺序如下：</p>
+<p>实际的设计顺序如下：</p>
 <ol>
 <li>使用 <code>Manifest</code> 定义新会话工作区约定。</li>
 <li>使用 <code>SandboxAgent</code> 定义智能体。</li>
-<li>添加内置或自定义功能。</li>
-<li>在 <code>RunConfig(sandbox=SandboxRunConfig(...))</code> 中决定每次运行应如何获得其沙箱会话。</li>
+<li>添加内置或自定义能力。</li>
+<li>在 <code>RunConfig(sandbox=SandboxRunConfig(...))</code> 中决定每次运行应如何获取其沙箱会话。</li>
 </ol>
-<h2 id="how-a-sandbox-run-is-prepared">沙箱运行的准备过程</h2>
-<p>在运行时，运行器会将该定义转换为具体的沙箱支持运行：</p>
+<h2 id="how-a-sandbox-run-is-prepared">沙箱运行的准备流程</h2>
+<p>在运行时，运行器会将该定义转化为具体的沙箱支持运行：</p>
 <ol>
-<li>它从 <code>SandboxRunConfig</code> 解析沙箱会话。如果您传入 <code>session=...</code>，它会复用该实时沙箱会话。否则，它会使用 <code>client=...</code> 创建或恢复会话。</li>
-<li>它确定此次运行的有效工作区输入。如果此次运行注入或恢复沙箱会话，则以现有沙箱状态为准。否则，运行器会从一次性的清单覆盖项或 <code>agent.default_manifest</code> 开始。这就是为什么仅靠 <code>Manifest</code> 无法定义每次运行的最终实时工作区。</li>
-<li>它允许各项功能处理生成的清单。这样，功能便可在准备最终智能体之前添加文件、挂载点或其他工作区范围的行为。</li>
-<li>它按固定顺序构建最终指令：首先是 SDK 的默认沙箱提示词；如果您显式覆盖它，则使用 <code>base_instructions</code>；然后是 <code>instructions</code>、功能指令片段、任何远程挂载策略文本，最后是渲染后的文件系统树。</li>
-<li>它将功能工具绑定到实时沙箱会话，并通过常规的 <code>Runner</code> API 运行准备好的智能体。</li>
+<li>它从 <code>SandboxRunConfig</code> 解析沙箱会话。如果您传入 <code>session=...</code>，它会复用该实时沙箱会话。否则，它使用 <code>client=...</code> 创建或恢复会话。</li>
+<li>它确定此次运行的实际工作区输入。如果运行注入或恢复了沙箱会话，则以现有沙箱状态为准。否则，运行器将从单次清单覆盖项或 <code>agent.default_manifest</code> 开始。因此，仅靠 <code>Manifest</code> 并不能定义每次运行最终的实时工作区。</li>
+<li>它允许能力处理生成的清单。这样，能力便可在最终智能体准备完成前添加文件、挂载或其他工作区范围内的行为。</li>
+<li>它按固定顺序构建最终指令：SDK 的默认沙箱提示词，或您显式覆盖时使用的 <code>base_instructions</code>；然后是 <code>instructions</code>；接着是能力指令片段；再之后是任何远程挂载策略文本；最后是渲染后的文件系统树。</li>
+<li>它将能力工具绑定到实时沙箱会话，并通过常规的 <code>Runner</code> API 运行准备好的智能体。</li>
 </ol>
-<p>沙箱不会改变轮次的含义。一个轮次仍然是一个模型步骤，而不是单条 shell 命令或沙箱操作。沙箱侧操作与轮次之间不存在固定的一对一映射：部分工作可能一直留在沙箱执行层中，而其他操作则会返回需要另一个模型步骤的信息，例如工具结果、审批或其他类型的状态。作为实用规则，仅当智能体运行时需要在沙箱工作完成后获取另一个模型响应时，才会消耗另一个轮次。</p>
-<p>正是由于这些准备步骤，在设计 <code>SandboxAgent</code> 时，<code>default_manifest</code>、<code>instructions</code>、<code>base_instructions</code>、<code>capabilities</code> 和 <code>run_as</code> 才是需要重点考虑的主要沙箱专用选项。</p>
+<p>沙箱化不会改变轮次的含义。一个轮次仍然是一个模型步骤，而不是一条 shell 命令或一次沙箱操作。沙箱侧操作与轮次之间不存在固定的 1:1 映射：有些工作可能完全在沙箱执行层内完成，而另一些操作则会返回需要另一个模型步骤的信息，例如工具结果、审批或其他类型的状态。实际而言，只有在沙箱工作完成后智能体运行时仍需要模型再次响应时，才会消耗另一个轮次。</p>
+<p>这些准备步骤说明了为什么在设计 <code>SandboxAgent</code> 时，<code>default_manifest</code>、<code>instructions</code>、<code>base_instructions</code>、<code>capabilities</code> 和 <code>run_as</code> 是需要重点考虑的沙箱专用选项。</p>
 <h2 id="sandboxagent-options"><code>SandboxAgent</code> 选项</h2>
-<p>除常规的 <code>Agent</code> 字段外，还提供以下沙箱专用选项：</p>
+<p>除常规 <code>Agent</code> 字段外，还提供以下沙箱专用选项：</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
@@ -2661,23 +2663,23 @@
 <tbody>
 <tr>
 <td><code>default_manifest</code></td>
-<td>由运行器创建的新沙箱会话的默认工作区。</td>
+<td>运行器所创建的新沙箱会话的默认工作区。</td>
 </tr>
 <tr>
 <td><code>instructions</code></td>
-<td>追加在 SDK 沙箱提示词之后的其他角色、工作流和成功标准。</td>
+<td>附加在 SDK 沙箱提示词之后的额外角色、工作流和成功标准。</td>
 </tr>
 <tr>
 <td><code>base_instructions</code></td>
-<td>用于替换 SDK 沙箱提示词的高级后备选项。</td>
+<td>用于替换 SDK 沙箱提示词的高级逃生舱选项。</td>
 </tr>
 <tr>
 <td><code>capabilities</code></td>
-<td>应随此智能体一同使用的沙箱原生工具和行为。</td>
+<td>应随此智能体一起传递的沙箱原生工具和行为。</td>
 </tr>
 <tr>
 <td><code>run_as</code></td>
-<td>用于面向模型的沙箱工具（例如 shell 命令、文件读取和补丁）的用户身份。</td>
+<td>用于 shell 命令、文件读取和补丁等面向模型的沙箱工具的用户身份。</td>
 </tr>
 </tbody>
 </table>
@@ -2689,11 +2691,11 @@
       dataclass
   " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 中，而不是智能体上。</p>
 <h3 id="default_manifest"><code>default_manifest</code></h3>
-<p><code>default_manifest</code> 是运行器为此智能体创建新沙箱会话时使用的默认 <a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a>。使用它指定智能体通常应从哪些文件、仓库、辅助材料、输出目录和挂载点开始。</p>
+<p><code>default_manifest</code> 是运行器为此智能体创建新沙箱会话时使用的默认 <a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a>。它适用于智能体通常应从中开始工作的文件、仓库、辅助材料、输出目录和挂载。</p>
 <p>这只是默认值。运行可以通过 <code>SandboxRunConfig(manifest=...)</code> 覆盖它，而复用或恢复的沙箱会话会保留其现有工作区状态。</p>
 <h3 id="instructions-and-base_instructions"><code>instructions</code> 和 <code>base_instructions</code></h3>
-<p>对于应在不同提示词中保持有效的简短规则，请使用 <code>instructions</code>。在 <code>SandboxAgent</code> 中，这些指令会追加到 SDK 的沙箱基础提示词之后，因此您可以保留内置沙箱指导，同时添加自己的角色、工作流和成功标准。</p>
-<p>只有当您希望替换 SDK 沙箱基础提示词时，才应使用 <code>base_instructions</code>。大多数智能体都不应设置它。</p>
+<p>对于应在不同提示词下保持有效的简短规则，请使用 <code>instructions</code>。在 <code>SandboxAgent</code> 中，这些指令会附加在 SDK 的沙箱基础提示词之后，因此您可以保留内置沙箱指导，并添加自己的角色、工作流和成功标准。</p>
+<p>仅当您希望替换 SDK 的沙箱基础提示词时，才使用 <code>base_instructions</code>。大多数智能体不应设置它。</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
@@ -2706,13 +2708,13 @@
 <tbody>
 <tr>
 <td><code>instructions</code></td>
-<td>智能体的稳定角色、工作流规则和成功标准。</td>
-<td>“检查入职文档，然后进行任务转移。”、“将最终文件写入 <code>output/</code>。”</td>
+<td>智能体稳定的角色、工作流规则和成功标准。</td>
+<td>“检查入职文档，然后进行任务转移。”“将最终文件写入 <code>output/</code>。”</td>
 </tr>
 <tr>
 <td><code>base_instructions</code></td>
-<td>完整替换 SDK 沙箱基础提示词。</td>
-<td>自定义底层沙箱包装提示词。</td>
+<td>完整替换 SDK 的沙箱基础提示词。</td>
+<td>自定义底层沙箱包装器提示词。</td>
 </tr>
 <tr>
 <td>用户提示词</td>
@@ -2721,7 +2723,7 @@
 </tr>
 <tr>
 <td>清单中的工作区文件</td>
-<td>较长的任务规范、仓库本地指令或有明确范围的参考材料。</td>
+<td>较长的任务规范、仓库本地指令或范围有限的参考材料。</td>
 <td><code>repo/task.md</code>、文档包、示例资料包。</td>
 </tr>
 </tbody>
@@ -2729,22 +2731,22 @@
 </div>
 <p><code>instructions</code> 的良好用法包括：</p>
 <ul>
-<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_pty.py">examples/sandbox/unix_local_pty.py</a> 在 PTY 状态很重要时，让智能体始终在同一个交互式进程中运行。</li>
-<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a> 禁止沙箱审核智能体在检查后直接回答用户。</li>
-<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a> 要求最终填写完成的文件必须实际保存到 <code>output/</code> 中。</li>
-<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> 固定确切的验证命令，并明确说明当 <code>SandboxRunConfig.cwd</code> 未设置时，补丁路径相对于工作区根目录。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_pty.py">examples/sandbox/unix_local_pty.py</a> 会在 PTY 状态很重要时，让智能体始终处于同一个交互式进程中。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a> 禁止沙箱审查智能体在检查后直接回答用户。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a> 要求最终填写完成的文件实际写入 <code>output/</code>。</li>
+<li><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> 固定了确切的验证命令，并明确说明当 <code>SandboxRunConfig.cwd</code> 未设置时，补丁路径是相对于工作区根目录的。</li>
 </ul>
-<p>请避免将用户的一次性任务复制到 <code>instructions</code> 中、嵌入本应放在清单中的长篇参考材料、重复说明内置功能已经注入的工具文档，或混入模型在运行时不需要的本地安装说明。</p>
-<p>如果省略 <code>instructions</code>，SDK 仍会包含默认沙箱提示词。对于底层包装器而言，这已经足够，但大多数面向用户的智能体仍应提供显式的 <code>instructions</code>。</p>
+<p>请避免将用户的一次性任务复制到 <code>instructions</code>、嵌入本应放入清单的长篇参考材料、重复内置能力已注入的工具文档，或混入模型在运行时不需要的本地安装说明。</p>
+<p>如果省略 <code>instructions</code>，SDK 仍会包含默认沙箱提示词。对于底层包装器而言，这已足够；但大多数面向用户的智能体仍应提供明确的 <code>instructions</code>。</p>
 <h3 id="capabilities"><code>capabilities</code></h3>
-<p>功能可将沙箱原生行为附加到 <code>SandboxAgent</code>。它们可以在运行开始前调整工作区、追加沙箱专用指令、公开绑定到实时沙箱会话的工具，并调整该智能体的模型行为或输入处理方式。</p>
-<p>内置功能包括：</p>
+<p>能力可将沙箱原生行为附加到 <code>SandboxAgent</code>。它们可以在运行开始前调整工作区、附加沙箱专用指令、公开绑定到实时沙箱会话的工具，以及调整该智能体的模型行为或输入处理方式。</p>
+<p>内置能力包括：</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
 <tr>
-<th>功能</th>
-<th>添加条件</th>
+<th>能力</th>
+<th>添加时机</th>
 <th>说明</th>
 </tr>
 </thead>
@@ -2761,13 +2763,13 @@
 </tr>
 <tr>
 <td><code>Skills</code></td>
-<td>您希望在沙箱中进行技能发现和实体化。</td>
-<td>应优先使用此功能，而不是手动挂载 <code>.agents</code> 或 <code>.agents/skills</code>；<code>Skills</code> 会为您将技能编入索引并实体化到沙箱中。</td>
+<td>您希望在沙箱中发现并实体化技能。</td>
+<td>优先使用此能力，而不是手动挂载 <code>.agents</code> 或 <code>.agents/skills</code>；<code>Skills</code> 会为您将技能编入索引并实体化到沙箱中。</td>
 </tr>
 <tr>
 <td><code>Memory</code></td>
-<td>后续运行应读取或生成记忆产物。</td>
-<td>需要 <code>Shell</code>；在运行期间更新记忆产物还需要 <code>Filesystem</code>。</td>
+<td>后续运行应读取或生成记忆制品。</td>
+<td>需要 <code>Shell</code>；在运行期间更新记忆制品还需要 <code>Filesystem</code>。</td>
 </tr>
 <tr>
 <td><code>Compaction</code></td>
@@ -2777,23 +2779,23 @@
 </tbody>
 </table>
 </div>
-<p>默认情况下，<code>SandboxAgent.capabilities</code> 使用 <code>Capabilities.default()</code>，其中包括 <code>Filesystem()</code>、<code>Shell()</code> 和 <code>Compaction()</code>。如果传入 <code>capabilities=[...]</code>，该列表将替换默认列表，因此请将仍需使用的所有默认功能包含在内。</p>
-<p><code>view_image</code> 工具根据文件内容而非文件扩展名识别 PNG、JPEG、GIF、WebP、BMP 和 TIFF 光栅图像。如果文件名具有光栅图像扩展名，但内容不受支持，则会被拒绝；即使文件名没有图像扩展名，只要光栅内容受支持，也可以加载。对于 <code>.svg</code> 和 <code>.svgz</code> 文件，除了通过文件内容识别 SVG 标记外，该工具还会保留基于文件名的兼容性。</p>
-<p>对于技能，请根据您希望其如何实体化来选择来源：</p>
+<p>默认情况下，<code>SandboxAgent.capabilities</code> 使用 <code>Capabilities.default()</code>，其中包括 <code>Filesystem()</code>、<code>Shell()</code> 和 <code>Compaction()</code>。如果传入 <code>capabilities=[...]</code>，该列表将替换默认列表，因此请包含您仍需要的所有默认能力。</p>
+<p><code>view_image</code> 工具根据文件内容而不是文件扩展名识别 PNG、JPEG、GIF、WebP、BMP 和 TIFF 光栅图像。如果文件名具有光栅图像扩展名，但其内容不受支持，则会被拒绝；即使文件名没有图像扩展名，只要光栅内容受支持，也可以加载。对于 <code>.svg</code> 和 <code>.svgz</code> 文件，该工具除了能从文件内容识别 SVG 标记外，还保留基于文件名的兼容性。</p>
+<p>对于技能，请根据所需的实体化方式选择来源：</p>
 <ul>
-<li><code>Skills(lazy_from=LocalDirLazySkillSource(...))</code> 是较大型本地技能目录的良好默认选择，因为模型可以先发现索引，然后仅加载所需内容。</li>
-<li><code>LocalDirLazySkillSource(source=LocalDir(src=...))</code> 从 SDK 进程运行所在的文件系统读取。请传入原始主机侧技能目录，而不是仅存在于沙箱镜像或工作区中的路径。</li>
-<li><code>Skills(from_=LocalDir(src=...))</code> 更适合希望预先暂存的小型本地包。</li>
-<li>当技能本身应来自某个仓库时，<code>Skills(from_=GitRepo(repo=..., ref=...))</code> 是合适的选择。</li>
+<li>对于较大的本地技能目录，<code>Skills(lazy_from=LocalDirLazySkillSource(...))</code> 是一个良好的默认选择，因为模型可以先发现索引，然后仅加载所需内容。</li>
+<li><code>LocalDirLazySkillSource(source=LocalDir(src=...))</code> 从 SDK 进程运行所在的文件系统读取。请传入原始宿主机侧技能目录，而不是仅存在于沙箱镜像或工作区内部的路径。</li>
+<li>对于希望预先暂存的小型本地技能包，<code>Skills(from_=LocalDir(src=...))</code> 更合适。</li>
+<li>当技能本身应来自仓库时，<code>Skills(from_=GitRepo(repo=..., ref=...))</code> 更适合。</li>
 </ul>
-<p><code>LocalDir.src</code> 是 SDK 主机上的源路径。<code>skills_path</code> 是沙箱工作区内的相对目标路径；调用 <code>load_skill</code> 时，技能会暂存到该路径中。</p>
-<p>如果您的技能已存储在类似 <code>.agents/skills/&lt;name&gt;/SKILL.md</code> 的磁盘路径下，请将 <code>LocalDir(...)</code> 指向该源根目录，并仍使用 <code>Skills(...)</code> 将其公开。除非现有工作区约定依赖不同的沙箱内布局，否则请保留默认的 <code>skills_path=".agents"</code>。</p>
-<p>如果内置功能符合需求，请优先使用它们。仅当您需要内置功能未涵盖的沙箱专用工具或指令接口时，才编写自定义功能。</p>
+<p><code>LocalDir.src</code> 是 SDK 宿主机上的源路径。<code>skills_path</code> 是沙箱工作区内的相对目标路径，调用 <code>load_skill</code> 时，技能会暂存到此路径。</p>
+<p>如果您的技能已存储在类似 <code>.agents/skills/&lt;name&gt;/SKILL.md</code> 的磁盘位置，请将 <code>LocalDir(...)</code> 指向该源根目录，并仍使用 <code>Skills(...)</code> 将其公开。除非现有工作区约定依赖不同的沙箱内布局，否则请保留默认的 <code>skills_path=".agents"</code>。</p>
+<p>当内置能力满足需求时，应优先使用它们。仅当您需要内置能力未涵盖的沙箱专用工具或指令接口时，才编写自定义能力。</p>
 <h2 id="concepts_1">概念</h2>
 <h3 id="manifest">清单</h3>
-<p><a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a> 描述新沙箱会话的工作区。它可以设置工作区 <code>root</code>、声明文件和目录、复制本地文件、克隆 Git 仓库、附加远程存储挂载点、设置环境变量、定义用户或组，以及授予对工作区外特定绝对路径的访问权限。</p>
-<p>清单条目路径相对于工作区。它们不能是绝对路径，也不能通过 <code>..</code> 逸出工作区，从而确保工作区约定可在本地、Docker 和托管客户端之间移植。</p>
-<p>使用清单条目指定智能体开始工作前所需的材料：</p>
+<p><a class="autorefs autorefs-internal" title="Manifest" href="../../../ref/sandbox/manifest/#agents.sandbox.manifest.Manifest"><code>Manifest</code></a> 描述新沙箱会话的工作区。它可以设置工作区 <code>root</code>、声明文件和目录、复制本地文件、克隆 Git 仓库、附加远程存储挂载、设置环境变量、定义用户或组，以及授予对工作区外特定绝对路径的访问权限。</p>
+<p>清单条目路径是工作区相对路径。它们不能是绝对路径，也不能通过 <code>..</code> 逃逸出工作区，这使工作区约定能够在本地、Docker 和托管客户端之间移植。</p>
+<p>对于智能体开始工作前所需的材料，请使用清单条目：</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
@@ -2809,24 +2811,24 @@
 </tr>
 <tr>
 <td><code>LocalFile</code>、<code>LocalDir</code></td>
-<td>应实体化到沙箱中的主机文件或目录。</td>
+<td>应实体化到沙箱中的宿主机文件或目录。</td>
 </tr>
 <tr>
 <td><code>GitRepo</code></td>
 <td>应提取到工作区中的仓库。</td>
 </tr>
 <tr>
-<td><code>S3Mount</code>、<code>GCSMount</code>、<code>R2Mount</code>、<code>AzureBlobMount</code>、<code>BoxMount</code>、<code>S3FilesMount</code> 等挂载项</td>
-<td>应在沙箱内部呈现的外部存储。</td>
+<td><code>S3Mount</code>、<code>GCSMount</code>、<code>R2Mount</code>、<code>AzureBlobMount</code>、<code>BoxMount</code>、<code>S3FilesMount</code> 等挂载</td>
+<td>应显示在沙箱内的外部存储。</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p><code>Dir</code> 根据合成子项在沙箱工作区内创建目录，或将其创建为输出位置；它不会从主机文件系统读取内容。如果应将现有主机目录复制到沙箱工作区，请使用 <code>LocalDir</code>。</p>
-<p>默认情况下，<code>LocalFile.src</code> 和 <code>LocalDir.src</code> 相对于 SDK 进程的工作目录解析。源必须位于该基础目录之下，除非它包含在 <code>extra_path_grants</code> 中。这样可确保本地源实体化与沙箱清单的其余部分处于相同的主机路径信任边界内。</p>
+<p><code>Dir</code> 根据合成子项在沙箱工作区内创建目录，或将其创建为输出位置；它不会从宿主机文件系统读取内容。当现有宿主机目录应复制到沙箱工作区时，请使用 <code>LocalDir</code>。</p>
+<p>默认情况下，<code>LocalFile.src</code> 和 <code>LocalDir.src</code> 相对于 SDK 进程的工作目录进行解析。源必须位于该基础目录下，除非它已包含在 <code>extra_path_grants</code> 中。这会将本地源实体化限制在与沙箱清单其余部分相同的宿主机路径信任边界内。</p>
 <p>挂载条目描述要公开的存储；挂载策略描述沙箱后端如何附加该存储。有关挂载选项和提供商支持，请参阅<a href="../clients/#mounts-and-remote-storage">沙箱客户端</a>。</p>
-<p>良好的清单设计通常意味着保持工作区约定精简、将较长的任务流程放入 <code>repo/task.md</code> 等工作区文件，并在指令中使用相对工作区路径，例如 <code>repo/task.md</code> 或 <code>output/report.md</code>。如果智能体使用 <code>Filesystem</code> 功能的 <code>apply_patch</code> 工具编辑文件，请记住：补丁路径默认使用沙箱工作区根目录，配置后则使用 <code>SandboxRunConfig.cwd</code>；它们不使用 shell 的 <code>workdir</code>。</p>
-<p>仅当智能体需要工作区外的具体绝对路径，或清单需要复制 SDK 进程工作目录之外受信任的本地源时，才使用 <code>extra_path_grants</code>。示例包括用于临时工具输出的 <code>/tmp</code>、用于只读运行时的 <code>/opt/toolchain</code>，或应实体化到沙箱中的已生成技能目录。授权适用于本地源实体化和 SDK 文件 API。当后端可以强制执行文件系统策略时，它也适用于 shell 执行：</p>
+<p>良好的清单设计通常意味着保持工作区约定的范围精简，将较长的任务流程放在 <code>repo/task.md</code> 等工作区文件中，并在指令中使用相对工作区路径，例如 <code>repo/task.md</code> 或 <code>output/report.md</code>。如果智能体使用 <code>Filesystem</code> 能力的 <code>apply_patch</code> 工具编辑文件，请记住：补丁路径默认使用沙箱工作区根目录，配置后则使用 <code>SandboxRunConfig.cwd</code>；它们不使用 shell 的 <code>workdir</code>。</p>
+<p>仅当智能体需要工作区外的具体绝对路径，或清单需要复制 SDK 进程工作目录外的受信任本地源时，才使用 <code>extra_path_grants</code>。示例包括用于临时工具输出的 <code>/tmp</code>、用于只读运行时的 <code>/opt/toolchain</code>，或应实体化到沙箱中的已生成技能目录。授权适用于本地源实体化和 SDK 文件 API。当后端能够强制执行文件系统策略时，它也适用于 shell 执行：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxPathGrant</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">Manifest</span><span class="p">(</span>
@@ -2836,12 +2838,13 @@
 </span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="p">),</span>
 </span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当 Docker 应将其他绝对主机路径绑定挂载到容器内的绝对 POSIX <code>path</code> 时，请设置 <code>host_path</code>。<code>UnixLocalSandboxClient</code> 仅支持路径相同的纯路径授权，并拒绝 <code>host_path</code>。对于沙箱不应修改的主机数据，请使用 <code>read_only=True</code>；如果复制即可满足需求，请使用 <code>LocalFile</code> 或 <code>LocalDir</code>。</p>
-<p>请将包含 <code>extra_path_grants</code> 的清单视为受信任配置。除非应用已经批准这些主机路径，否则不要从模型输出或其他不受信任的载荷中加载授权。</p>
-<p>快照和 <code>persist_workspace()</code> 仍然只包含工作区根目录。额外授权的路径属于运行时访问权限，而不是持久工作区状态。</p>
+<p>当 Docker 应将不同的宿主机绝对路径绑定挂载到容器内的 POSIX 绝对 <code>path</code> 时，请设置 <code>host_path</code>。<code>UnixLocalSandboxClient</code> 仅支持两个路径相同的纯路径授权，并拒绝 <code>host_path</code>。对于沙箱不应修改的宿主机数据，请使用 <code>read_only=True</code>；如果复制即可满足需求，请使用 <code>LocalFile</code> 或 <code>LocalDir</code>。</p>
+<p>Unix 本地路径授权控制哪些宿主机源可以复制到工作区，以及 SDK 文件 API 可以访问哪些路径。<code>read_only=True</code> 会阻止 SDK 文件 API 写入已授权路径。在 Linux 上，这些设置不会限制任意 shell 命令：即使某些路径没有授权，只要进程权限和任何外部隔离允许，命令仍可访问这些宿主机路径。macOS 文件系统配置文件和 Docker 绑定挂载会对命令应用各自的授权限制。</p>
+<p>请将包含 <code>extra_path_grants</code> 的清单视为受信任配置。除非您的应用已经批准这些宿主机路径，否则请勿从模型输出或其他不受信任的负载中加载授权。</p>
+<p>快照和 <code>persist_workspace()</code> 仍仅包含工作区根目录。额外授权的路径属于运行时访问，而非持久化工作区状态。</p>
 <h3 id="permissions">权限</h3>
-<p><code>Permissions</code> 控制清单条目的文件系统权限。它涉及沙箱实体化的文件，而非模型权限、审批策略或 API 凭据。</p>
-<p>默认情况下，清单条目允许所有者读取、写入和执行，并允许组和其他用户读取和执行。当暂存文件应为私有、只读或可执行文件时，请覆盖此设置：</p>
+<p><code>Permissions</code> 控制清单条目的文件系统权限。它所针对的是沙箱实体化的文件，而不是模型权限、审批策略或 API 凭据。</p>
+<p>默认情况下，清单条目对所有者可读、可写、可执行，对组和其他用户可读、可执行。当暂存文件应设为私有、只读或可执行时，请覆盖此设置：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Permissions</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">File</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
@@ -2854,8 +2857,8 @@
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="p">),</span>
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">)</span>
 </span></code></pre></div>
-<p><code>Permissions</code> 分别存储所有者、组和其他用户的权限位，以及条目是否为目录。您可以直接构建它、使用 <code>Permissions.from_str(...)</code> 从模式字符串解析它，或使用 <code>Permissions.from_mode(...)</code> 从操作系统模式派生它。</p>
-<p>用户是可在沙箱中执行工作的身份。如果希望某个身份存在于沙箱中，请向清单添加 <code>User</code>；当面向模型的沙箱工具（例如 shell 命令、文件读取和补丁）应以该用户身份运行时，再设置 <code>SandboxAgent.run_as</code>。如果 <code>run_as</code> 指向清单中尚不存在的用户，运行器会自动将其添加到有效清单。</p>
+<p><code>Permissions</code> 分别存储所有者、组和其他用户的权限位，以及条目是否为目录。您可以直接构建它、使用 <code>Permissions.from_str(...)</code> 从模式字符串进行解析，或使用 <code>Permissions.from_mode(...)</code> 从操作系统模式派生。</p>
+<p>用户是可以执行工作的沙箱身份。当您希望该身份存在于沙箱中时，请向清单添加 <code>User</code>；随后，如果 shell 命令、文件读取和补丁等面向模型的沙箱工具应以该用户身份运行，请设置 <code>SandboxAgent.run_as</code>。如果 <code>run_as</code> 指向清单中尚不存在的用户，运行器会自动将其添加到实际清单中。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">Permissions</span><span class="p">,</span> <span class="n">SandboxAgent</span><span class="p">,</span> <span class="n">SandboxRunConfig</span><span class="p">,</span> <span class="n">User</span>
@@ -2904,10 +2907,10 @@
 </span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>    <span class="p">),</span>
 </span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>如果还需要文件级共享规则，请将用户与清单组及条目 <code>group</code> 元数据结合使用。<code>run_as</code> 用户控制谁执行沙箱原生操作；在沙箱实体化工作区后，<code>Permissions</code> 控制该用户可以读取、写入或执行哪些文件。</p>
+<p>如果还需要文件级共享规则，请将用户与清单组及条目 <code>group</code> 元数据组合使用。<code>run_as</code> 用户控制由谁执行沙箱原生操作；<code>Permissions</code> 控制沙箱实体化工作区后，该用户可以读取、写入或执行哪些文件。</p>
 <h3 id="snapshotspec">SnapshotSpec</h3>
-<p><code>SnapshotSpec</code> 指定新沙箱会话应从何处恢复已保存的工作区内容，以及将其持久化回何处。它是沙箱工作区的快照策略，而 <code>session_state</code> 是用于恢复特定沙箱后端的序列化连接状态。</p>
-<p>使用 <code>LocalSnapshotSpec</code> 创建本地持久快照；当应用提供远程快照客户端时，请使用 <code>RemoteSnapshotSpec</code>。如果无法设置本地快照，则使用空操作快照作为后备；不希望持久化工作区快照的高级调用方也可以显式使用空操作快照。</p>
+<p><code>SnapshotSpec</code> 指定新沙箱会话应从何处恢复已保存的工作区内容，以及应将内容持久化回何处。它是沙箱工作区的快照策略，而 <code>session_state</code> 是用于恢复特定沙箱后端的序列化连接状态。</p>
+<p>对于本地持久快照，请使用 <code>LocalSnapshotSpec</code>；当您的应用提供远程快照客户端时，请使用 <code>RemoteSnapshotSpec</code>。本地快照设置不可用时，会使用空操作快照作为后备；不希望持久化工作区快照的高级调用方也可以显式使用空操作快照。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
@@ -2921,10 +2924,10 @@
 </span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="p">)</span>
 </span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当运行器创建新沙箱会话时，沙箱客户端会为该会话构建一个快照实例。启动时，如果快照可恢复，沙箱会先恢复已保存的工作区内容，再继续运行。清理时，运行器所有的沙箱会话会归档工作区，并通过快照将其持久化回去。</p>
-<p>如果省略 <code>snapshot</code>，运行时会尽可能尝试使用默认的本地快照位置。如果无法设置，则回退到空操作快照。挂载路径和临时路径不会作为持久工作区内容复制到快照中。</p>
+<p>当运行器创建新的沙箱会话时，沙箱客户端会为该会话构建快照实例。启动时，如果快照可恢复，沙箱会先恢复已保存的工作区内容，然后继续运行。清理时，运行器拥有的沙箱会话会归档工作区，并通过快照将其持久化回去。</p>
+<p>如果省略 <code>snapshot</code>，运行时会在可行时尝试使用默认的本地快照位置。如果无法设置，则会回退到空操作快照。挂载路径和临时路径不会作为持久工作区内容复制到快照中。</p>
 <h3 id="sandbox-lifecycle">沙箱生命周期</h3>
-<p>生命周期分为两种模式：<strong>SDK 管理型</strong>和<strong>开发者管理型</strong>。</p>
+<p>生命周期有两种模式：<strong>SDK 所有</strong>和<strong>开发者所有</strong>。</p>
 <div class="sandbox-lifecycle-diagram">
 <pre class="mermaid"><code>sequenceDiagram
     participant App
@@ -2946,7 +2949,7 @@
     Runner-&gt;&gt;Sandbox: run tools
     App-&gt;&gt;Sandbox: cleanup on context exit / aclose()</code></pre>
 </div>
-<p>如果沙箱只需在一次运行期间存在，请使用 SDK 管理型生命周期。传入一个 <code>client</code>，并可选择传入 <code>manifest</code>、<code>snapshot</code> 和所需的任何客户端 <code>options</code>；运行器会创建或恢复沙箱、启动沙箱、运行智能体、持久化由快照支持的工作区状态、结束沙箱会话，并让客户端清理运行器所有的资源。</p>
+<p>当沙箱只需在一次运行期间存在时，请使用 SDK 所有的生命周期。传入 <code>client</code>，可选传入 <code>manifest</code> 和 <code>snapshot</code>，以及所需的任何客户端 <code>options</code>；运行器会创建或恢复沙箱、启动沙箱、运行智能体、持久化由快照支持的工作区状态、结束沙箱会话，并让客户端清理运行器拥有的资源。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">agent</span><span class="p">,</span>
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="s2">&quot;Inspect the workspace and summarize what changed.&quot;</span><span class="p">,</span>
@@ -2955,7 +2958,7 @@
 </span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="p">),</span>
 </span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>如果您希望立即创建沙箱、在多次运行间复用一个实时沙箱、在运行后检查文件、通过自己创建的沙箱进行流式传输，或精确决定何时清理，请使用开发者管理型生命周期。传入 <code>session=...</code> 会让运行器使用该实时沙箱，但不会替您关闭它。</p>
+<p>当您希望预先创建沙箱、在多次运行间复用同一个实时沙箱、在运行后检查文件、通过自己创建的沙箱进行流式传输，或精确决定清理时机时，请使用开发者所有的生命周期。传入 <code>session=...</code> 会指示运行器使用该实时沙箱，但不会替您关闭它。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">manifest</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">default_manifest</span><span class="p">)</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="k">async</span> <span class="k">with</span> <span class="n">sandbox</span><span class="p">:</span>
@@ -2963,7 +2966,7 @@
 </span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Analyze the files.&quot;</span><span class="p">,</span> <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">)</span>
 </span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Write the final report.&quot;</span><span class="p">,</span> <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">)</span>
 </span></code></pre></div>
-<p>上下文管理器是常见用法：进入时启动沙箱，退出时运行会话清理生命周期。如果应用无法使用上下文管理器，请直接调用生命周期方法：</p>
+<p>上下文管理器是常用形式：进入时启动沙箱，退出时执行会话清理生命周期。如果您的应用无法使用上下文管理器，请直接调用生命周期方法：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">sandbox</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">manifest</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">default_manifest</span><span class="p">,</span>
 </span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">snapshot</span><span class="o">=</span><span class="n">LocalSnapshotSpec</span><span class="p">(</span><span class="n">base_path</span><span class="o">=</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/tmp/my-sandbox-snapshots&quot;</span><span class="p">)),</span>
@@ -2981,14 +2984,14 @@
 </span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="k">finally</span><span class="p">:</span>
 </span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="k">await</span> <span class="n">sandbox</span><span class="o">.</span><span class="n">aclose</span><span class="p">()</span>
 </span></code></pre></div>
-<p><code>stop()</code> 只持久化由快照支持的工作区内容；它不会拆除沙箱。<code>aclose()</code> 是完整的会话清理路径：它会运行停止前钩子、调用 <code>stop()</code>、关闭沙箱资源，并关闭会话范围的依赖项。</p>
+<p><code>stop()</code> 只会持久化由快照支持的工作区内容；它不会拆除沙箱。<code>aclose()</code> 是完整的会话清理路径：它运行停止前钩子、调用 <code>stop()</code>、关闭沙箱资源，并关闭会话范围内的依赖项。</p>
 <h2 id="sandboxrunconfig-options"><code>SandboxRunConfig</code> 选项</h2>
 <p><a class="autorefs autorefs-internal" title="SandboxRunConfig
 
 
   
       dataclass
-  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 包含每次运行的选项，用于决定沙箱会话的来源，以及应如何初始化新会话。</p>
+  " href="../../../ref/run_config/#agents.run_config.SandboxRunConfig"><code>SandboxRunConfig</code></a> 保存单次运行的选项，用于决定沙箱会话的来源，以及如何初始化新会话。</p>
 <h3 id="sandbox-source">沙箱来源</h3>
 <p>以下选项决定运行器应复用、恢复还是创建沙箱会话：</p>
 <div class="sandbox-nowrap-first-column-table">
@@ -2996,7 +2999,7 @@
 <thead>
 <tr>
 <th>选项</th>
-<th>使用场景</th>
+<th>使用时机</th>
 <th>说明</th>
 </tr>
 </thead>
@@ -3004,26 +3007,26 @@
 <tr>
 <td><code>client</code></td>
 <td>您希望运行器替您创建、恢复和清理沙箱会话。</td>
-<td>除非提供实时沙箱 <code>session</code>，否则为必需项。</td>
+<td>除非提供实时沙箱 <code>session</code>，否则此项为必需。</td>
 </tr>
 <tr>
 <td><code>session</code></td>
 <td>您已自行创建实时沙箱会话。</td>
-<td>调用方负责生命周期；运行器复用该实时沙箱会话。</td>
+<td>调用方拥有生命周期；运行器复用该实时沙箱会话。</td>
 </tr>
 <tr>
 <td><code>session_state</code></td>
-<td>您已有序列化的沙箱会话状态，但没有实时沙箱会话对象。</td>
-<td>需要 <code>client</code>；运行器从该显式状态恢复，并负责已恢复会话的生命周期。</td>
+<td>您拥有序列化的沙箱会话状态，但没有实时沙箱会话对象。</td>
+<td>需要 <code>client</code>；运行器从该显式状态恢复，并拥有恢复后会话的生命周期。</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>在实践中，运行器按以下顺序解析沙箱会话：</p>
+<p>实际上，运行器按以下顺序解析沙箱会话：</p>
 <ol>
 <li>如果注入 <code>run_config.sandbox.session</code>，则直接复用该实时沙箱会话。</li>
-<li>否则，如果此次运行正在从 <code>RunState</code> 恢复，则恢复已存储的沙箱会话状态。</li>
-<li>否则，如果传入 <code>run_config.sandbox.session_state</code>，运行器会从该显式序列化沙箱会话状态恢复。</li>
+<li>否则，如果此次运行正在从 <code>RunState</code> 恢复，则恢复其中存储的沙箱会话状态。</li>
+<li>否则，如果传入 <code>run_config.sandbox.session_state</code>，运行器会从该显式序列化的沙箱会话状态恢复。</li>
 <li>否则，运行器会创建新的沙箱会话。对于该新会话，如果提供了 <code>run_config.sandbox.manifest</code>，则使用它；否则使用 <code>agent.default_manifest</code>。</li>
 </ol>
 <h3 id="fresh-session-inputs">新会话输入</h3>
@@ -3033,14 +3036,14 @@
 <thead>
 <tr>
 <th>选项</th>
-<th>使用场景</th>
+<th>使用时机</th>
 <th>说明</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>manifest</code></td>
-<td>您希望对新会话工作区进行一次性覆盖。</td>
+<td>您需要一次性覆盖新会话工作区。</td>
 <td>省略时回退到 <code>agent.default_manifest</code>。</td>
 </tr>
 <tr>
@@ -3057,7 +3060,7 @@
 </table>
 </div>
 <h3 id="model-facing-working-directory">面向模型的工作目录</h3>
-<p>当多次运行应共享一个沙箱会话，但需要在不同子目录中操作时，请将 <code>cwd</code> 设置为相对于工作区的 POSIX 目录。运行器验证 <code>cwd</code> 时，该目录必须存在，并且已配置的沙箱用户必须能够访问它。对于新会话，运行器会先实体化清单，因此清单可以在验证前创建该目录。</p>
+<p>当多次运行应共享同一个沙箱会话，但在不同子目录中操作时，请将 <code>cwd</code> 设置为 POSIX 工作区相对目录。运行器验证 <code>cwd</code> 时，该目录必须存在，并且配置的沙箱用户必须能够访问它。对于新会话，运行器会先实体化清单，因此清单可以在此验证前创建该目录。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
@@ -3073,26 +3076,26 @@
 </span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>    <span class="p">),</span>
 </span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>内置 <code>exec_command</code>、<code>view_image</code> 和 <code>apply_patch</code> 工具使用的相对路径从 <code>cwd</code> 开始解析。对于 <code>cwd</code> 值本身，绝对路径、<code>..</code> 等父目录段和空值均会被拒绝。字符串值必须使用正斜杠。相对 <code>PurePath</code> 值会规范化为 POSIX 格式，而绝对 <code>PurePath</code> 值仍然无效。直接使用的 <code>BaseSandboxSession</code> 文件 API 仍相对于工作区根目录，因此 <code>cwd</code> 不会更改 <code>Manifest.root</code> 或会话的底层工作区边界。该设置仅更改相对路径解析方式：它不会将运行限制在 <code>cwd</code> 内，也不会阻止访问共享会话工作区策略允许的其他路径。</p>
-<p>带路径的自定义功能在解析模型提供的相对路径时，必须应用其绑定的 <a class="autorefs autorefs-internal" title="SandboxWorkspaceScope
+<p>内置 <code>exec_command</code>、<code>view_image</code> 和 <code>apply_patch</code> 工具使用的相对路径从 <code>cwd</code> 开始解析。对于 <code>cwd</code> 值本身，绝对路径、<code>..</code> 等父目录段以及空值都会被拒绝。字符串值必须使用正斜杠。相对 <code>PurePath</code> 值会规范化为 POSIX 格式，而绝对 <code>PurePath</code> 值仍然无效。直接使用的 <code>BaseSandboxSession</code> 文件 API 仍相对于工作区根目录，因此 <code>cwd</code> 不会更改 <code>Manifest.root</code> 或会话底层的工作区边界。此设置只会更改相对路径解析：它不会将运行限制在 <code>cwd</code> 中，也不会阻止访问共享会话工作区策略所允许的其他路径。</p>
+<p>自定义的含路径能力在解析模型提供的相对路径时，必须应用其绑定的 <a class="autorefs autorefs-internal" title="SandboxWorkspaceScope
 
 
   
       dataclass
   " href="../../../ref/sandbox/workspace_paths/#agents.sandbox.workspace_paths.SandboxWorkspaceScope"><code>SandboxWorkspaceScope</code></a>。有关共享一个沙箱会话、同时保持各自面向模型的工作目录相互独立的两个并发运行，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/shared_session_workdirs.py">examples/sandbox/shared_session_workdirs.py</a>。</p>
 <h3 id="materialization-controls">实体化控制</h3>
-<p><code>concurrency_limits</code> 控制可并行运行的沙箱实体化工作量。当大型清单或本地目录复制需要更严格的资源控制时，请使用 <code>SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)</code>。将任一值设置为 <code>None</code> 可禁用对应限制。</p>
-<p><code>archive_limits</code> 控制 SDK 侧对归档提取的资源检查。将其设置为 <code>archive_limits=SandboxArchiveLimits()</code> 可启用 SDK 默认阈值；当归档需要更严格的资源控制时，也可传入 <code>SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)</code> 等显式值。保留 <code>archive_limits=None</code> 可维持不设 SDK 归档资源限制的默认行为，或将单个字段设置为 <code>None</code>，只禁用该项限制。</p>
-<p>请注意以下几点：</p>
+<p><code>concurrency_limits</code> 控制可以并行运行多少沙箱实体化工作。当大型清单或本地目录复制需要更严格的资源控制时，请使用 <code>SandboxConcurrencyLimits(manifest_entries=..., local_dir_files=...)</code>。将任一值设置为 <code>None</code> 可禁用对应限制。</p>
+<p><code>archive_limits</code> 控制 SDK 侧针对归档提取的资源检查。设置 <code>archive_limits=SandboxArchiveLimits()</code> 可启用 SDK 默认阈值；当归档需要更严格的资源控制时，也可以传入 <code>SandboxArchiveLimits(max_input_bytes=..., max_extracted_bytes=..., max_members=...)</code> 等显式值。保留 <code>archive_limits=None</code> 可维持不设 SDK 归档资源限制的默认行为，或将单个字段设置为 <code>None</code>，以仅禁用该项限制。</p>
+<p>需要注意以下几点：</p>
 <ul>
 <li>新会话：<code>manifest=</code> 和 <code>snapshot=</code> 仅在运行器创建新沙箱会话时适用。</li>
-<li>恢复与快照：<code>session_state=</code> 重新连接到之前序列化的沙箱状态，而 <code>snapshot=</code> 使用已保存的工作区内容初始化新的沙箱会话。</li>
+<li>恢复与快照：<code>session_state=</code> 重新连接到先前序列化的沙箱状态，而 <code>snapshot=</code> 使用保存的工作区内容初始化新的沙箱会话。</li>
 <li>客户端专用选项：<code>options=</code> 取决于沙箱客户端；Docker 和许多托管客户端都需要它。</li>
-<li>注入的实时会话：如果传入正在运行的沙箱 <code>session</code>，由功能驱动的清单更新可以添加兼容的非挂载条目，但不能更改 <code>manifest.root</code>、<code>manifest.environment</code>、<code>manifest.users</code> 或 <code>manifest.groups</code>；也不能删除现有条目、替换条目类型，或添加或更改挂载条目。</li>
+<li>注入的实时会话：如果传入正在运行的沙箱 <code>session</code>，由能力驱动的清单更新可以添加兼容的非挂载条目。它们不能更改 <code>manifest.root</code>、<code>manifest.environment</code>、<code>manifest.users</code> 或 <code>manifest.groups</code>；不能删除现有条目；不能替换条目类型；也不能添加或更改挂载条目。</li>
 <li>运行器 API：<code>SandboxAgent</code> 执行仍使用常规的 <code>Runner.run()</code>、<code>Runner.run_sync()</code> 和 <code>Runner.run_streamed()</code> API。</li>
 </ul>
-<h2 id="full-example-coding-task">完整示例：编码任务</h2>
-<p>以下编码风格示例是一个良好的默认起点：</p>
+<h2 id="full-example-coding-task">完整代码示例：编码任务</h2>
+<p>这个编码风格的代码示例是一个良好的默认起点：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
@@ -3168,12 +3171,12 @@
 </span><span id="__span-8-73"><a id="__codelineno-8-73" name="__codelineno-8-73" href="#__codelineno-8-73"></a>        <span class="p">)</span>
 </span><span id="__span-8-74"><a id="__codelineno-8-74" name="__codelineno-8-74" href="#__codelineno-8-74"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<p>请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>。它使用一个基于 shell 的微型仓库，因此可以在 Unix 本地运行中以确定性方式验证该示例。当然，您的实际任务仓库可以使用 Python、JavaScript 或任何其他语言。</p>
+<p>请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>。它使用一个基于 shell 的小型仓库，因此可以在 Unix 本地运行中以确定性方式验证该代码示例。实际任务仓库当然可以使用 Python、JavaScript 或任何其他语言。</p>
 <h2 id="common-patterns">常见模式</h2>
-<p>请从上面的完整示例开始。在许多情况下，同一个 <code>SandboxAgent</code> 可以保持不变，只需更改沙箱客户端、沙箱会话来源或工作区来源。</p>
-<h3 id="switch-sandbox-clients">沙箱客户端的切换</h3>
+<p>请从上面的完整代码示例开始。在许多情况下，同一个 <code>SandboxAgent</code> 可以保持不变，只需更改沙箱客户端、沙箱会话来源或工作区来源。</p>
+<h3 id="switch-sandbox-clients">沙箱客户端切换</h3>
 <p>保持智能体定义不变，只更改运行配置。如果需要容器隔离或镜像一致性，请使用 Docker；如果需要由提供商管理执行，请使用托管提供商。有关代码示例和提供商选项，请参阅<a href="../clients/">沙箱客户端</a>。</p>
-<h3 id="override-the-workspace">工作区的覆盖</h3>
+<h3 id="override-the-workspace">工作区覆盖</h3>
 <p>保持智能体定义不变，只替换新会话清单：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">SandboxRunConfig</span>
@@ -3191,9 +3194,9 @@
 </span><span id="__span-9-14"><a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>    <span class="p">),</span>
 </span><span id="__span-9-15"><a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当同一智能体角色需要针对不同仓库、资料包或任务包运行，而无需重新构建智能体时，请使用此模式。上面经过验证的编码示例展示了相同模式，但它使用 <code>default_manifest</code>，而不是一次性覆盖。</p>
-<h3 id="inject-a-sandbox-session">沙箱会话的注入</h3>
-<p>当您需要显式控制生命周期、在运行后进行检查或复制输出时，请注入实时沙箱会话：</p>
+<p>当同一智能体角色应针对不同仓库、资料包或任务包运行，而无需重新构建智能体时，请使用此模式。上面经过验证的编码代码示例使用 <code>default_manifest</code> 而非一次性覆盖来展示同一模式。</p>
+<h3 id="inject-a-sandbox-session">沙箱会话注入</h3>
+<p>当您需要显式控制生命周期、在运行后检查内容或复制输出时，请注入实时沙箱会话：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
@@ -3211,9 +3214,9 @@
 </span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>        <span class="p">),</span>
 </span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<p>当您希望在运行后检查工作区，或通过已启动的沙箱会话进行流式传输时，请使用此模式。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> 和 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py">examples/sandbox/docker/docker_runner.py</a>。</p>
-<h3 id="resume-from-session-state">会话状态的恢复</h3>
-<p>如果您已在 <code>RunState</code> 外部序列化沙箱状态，请让运行器从该状态重新连接：</p>
+<p>当您希望在运行后检查工作区，或通过已经启动的沙箱会话进行流式传输时，请使用此模式。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> 和 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py">examples/sandbox/docker/docker_runner.py</a>。</p>
+<h3 id="resume-from-session-state">会话状态恢复</h3>
+<p>如果您已经在 <code>RunState</code> 外部序列化了沙箱状态，请让运行器从该状态重新连接：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxRunConfig</span>
 </span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>
@@ -3227,11 +3230,11 @@
 </span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>    <span class="p">),</span>
 </span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当沙箱状态存储在您自己的存储或作业系统中，并希望 <code>Runner</code> 直接从中恢复时，请使用此模式。有关序列化/反序列化流程，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py">examples/sandbox/extensions/blaxel_runner.py</a>。</p>
-<p>会话状态序列化会省略原生 <code>host_path</code> 值。要恢复由主机支持的授权，请通过 <code>SandboxRunConfig.manifest</code> 或 <code>agent.default_manifest</code> 提供当前受信任清单；否则，恢复会在沙箱启动前失败。绝不要从序列化输入或其他不受信任的输入中派生主机路径。</p>
-<p>会话状态和 <code>RunState</code> 序列化还会移除云挂载凭据、包含凭据的辅助配置，以及对容器内凭据暴露的确认。对于支持恢复已挂载会话的后端，当状态包含已遮盖的挂载权限时，请通过 <code>SandboxRunConfig.manifest</code> 或 <code>agent.default_manifest</code> 提供当前受信任清单。当名为 <code>"data"</code> 的挂载条目需要挂载范围的确认时，请在恢复前使用 <code>trusted_manifest = trusted_manifest.with_in_container_mount_credential_exposure_acknowledged("data")</code> 保留复制的清单。对于广泛权限，请使用 <code>trusted_manifest = trusted_manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")</code>；当挂载使用两类权限时，请调用这两种方法。请传入需要确认的每个确切挂载路径。只有当前受信任清单具有与持久化状态完全相同且不含凭据的挂载拓扑时，Agents SDK 才会恢复凭据。缺失或不匹配的受信任配置会导致恢复在沙箱启动前失败；序列化状态本身绝不会授予权限。<code>VercelSandboxClient</code> 无法恢复已挂载会话，因此应改为使用受信任清单启动新沙箱。</p>
-<h3 id="start-from-a-snapshot">快照的使用</h3>
-<p>使用已保存的文件和产物初始化新沙箱：</p>
+<p>当沙箱状态存储在您自己的存储或作业系统中，并且希望 <code>Runner</code> 直接从中恢复时，请使用此模式。有关序列化和反序列化流程，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py">examples/sandbox/extensions/blaxel_runner.py</a>。</p>
+<p>会话状态序列化会省略原生 <code>host_path</code> 值。要恢复由宿主机支持的授权，请通过 <code>SandboxRunConfig.manifest</code> 或 <code>agent.default_manifest</code> 提供当前受信任清单；否则，恢复会在沙箱启动前失败。切勿从序列化输入或其他不受信任输入派生宿主机路径。</p>
+<p>会话状态和 <code>RunState</code> 序列化还会移除云挂载凭据、包含凭据的辅助配置，以及容器内凭据暴露确认。对于支持恢复已挂载会话的后端，当状态中包含已删减的挂载权限时，请通过 <code>SandboxRunConfig.manifest</code> 或 <code>agent.default_manifest</code> 提供当前受信任清单。当名为 <code>"data"</code> 的挂载条目需要挂载范围确认时，请在恢复前使用 <code>trusted_manifest = trusted_manifest.with_in_container_mount_credential_exposure_acknowledged("data")</code> 保留复制的清单。对于广泛权限，请使用 <code>trusted_manifest = trusted_manifest.with_in_container_mount_broad_credential_exposure_acknowledged("data")</code>；当挂载同时使用两类权限时，请调用这两个方法。请传入所有需要确认的确切挂载路径。只有当前受信任清单的无凭据挂载拓扑与持久化状态完全相同时，Agents SDK 才会恢复凭据。受信任配置缺失或不匹配会导致恢复在沙箱启动前失败；序列化状态本身绝不会授予权限。<code>VercelSandboxClient</code> 无法恢复已挂载会话，因此应改用受信任清单启动新沙箱。</p>
+<h3 id="start-from-a-snapshot">快照初始化</h3>
+<p>使用保存的文件和制品初始化新沙箱：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
 </span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
@@ -3245,9 +3248,9 @@
 </span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>    <span class="p">),</span>
 </span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当创建新沙箱会话的运行应从已保存的工作区内容开始，而不只是从 <code>agent.default_manifest</code> 开始时，请使用此模式。有关本地快照流程，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/memory.py">examples/sandbox/memory.py</a>；有关远程快照客户端，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_remote_snapshot.py">examples/sandbox/sandbox_agent_with_remote_snapshot.py</a>。</p>
+<p>当创建新沙箱会话的运行应从已保存的工作区内容开始，而不仅仅从 <code>agent.default_manifest</code> 开始时，请使用此模式。有关本地快照流程，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/memory.py">examples/sandbox/memory.py</a>；有关远程快照客户端，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_remote_snapshot.py">examples/sandbox/sandbox_agent_with_remote_snapshot.py</a>。</p>
 <h3 id="load-skills-from-git">从 Git 加载技能</h3>
-<p>将本地技能源替换为由仓库支持的技能源：</p>
+<p>将本地技能来源替换为由仓库支持的来源：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="n">Capabilities</span><span class="p">,</span> <span class="n">Skills</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.entries</span><span class="w"> </span><span class="kn">import</span> <span class="n">GitRepo</span>
 </span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>
@@ -3255,9 +3258,9 @@
 </span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>    <span class="n">Skills</span><span class="p">(</span><span class="n">from_</span><span class="o">=</span><span class="n">GitRepo</span><span class="p">(</span><span class="n">repo</span><span class="o">=</span><span class="s2">&quot;sdcoffey/tax-prep-skills&quot;</span><span class="p">,</span> <span class="n">ref</span><span class="o">=</span><span class="s2">&quot;main&quot;</span><span class="p">)),</span>
 </span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="p">]</span>
 </span></code></pre></div>
-<p>当技能包有自己的发布节奏，或应在多个沙箱间共享时，请使用此模式。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a>。</p>
+<p>当技能包具有自己的发布节奏，或应在多个沙箱间共享时，请使用此模式。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/tax_prep.py">examples/sandbox/tax_prep.py</a>。</p>
 <h3 id="expose-as-tools">工具形式的公开</h3>
-<p>工具智能体既可以拥有自己的沙箱边界，也可以复用父级运行中的实时沙箱。复用适用于快速的只读探索智能体：它可以检查父级运行正在使用的确切工作区，而无需承担创建、填充或快照另一个沙箱的成本。</p>
+<p>工具智能体可以拥有自己的沙箱边界，也可以复用父运行中的实时沙箱。对于快速的只读探索智能体，复用非常有用：它可以检查父运行正在使用的确切工作区，而无需付出创建、填充或快照另一个沙箱的成本。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
 </span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">FileMode</span><span class="p">,</span> <span class="n">Manifest</span><span class="p">,</span> <span class="n">Permissions</span><span class="p">,</span> <span class="n">SandboxAgent</span><span class="p">,</span> <span class="n">SandboxRunConfig</span><span class="p">,</span> <span class="n">User</span>
@@ -3336,8 +3339,8 @@
 </span><span id="__span-14-76"><a id="__codelineno-14-76" name="__codelineno-14-76" href="#__codelineno-14-76"></a>        <span class="n">run_config</span><span class="o">=</span><span class="n">shared_run_config</span><span class="p">,</span>
 </span><span id="__span-14-77"><a id="__codelineno-14-77" name="__codelineno-14-77" href="#__codelineno-14-77"></a>    <span class="p">)</span>
 </span></code></pre></div>
-<p>此处，父智能体以 <code>coordinator</code> 身份运行，探索工具智能体则以 <code>explorer</code> 身份在同一实时沙箱会话中运行。<code>pricing_packet/</code> 条目允许 <code>other</code> 用户读取，因此探索智能体可以快速检查它们，但没有写入权限位。<code>work/</code> 目录仅对协调器的用户/组开放，因此父智能体可以写入最终产物，而探索智能体保持只读。</p>
-<p>当工具智能体需要真正隔离时，请为其提供自己的沙箱 <code>RunConfig</code>：</p>
+<p>在此处，父智能体以 <code>coordinator</code> 身份运行，而探索工具智能体以 <code>explorer</code> 身份在同一个实时沙箱会话中运行。<code>pricing_packet/</code> 条目可由 <code>other</code> 用户读取，因此探索智能体可以快速检查它们，但没有写入权限位。<code>work/</code> 目录仅供协调智能体的用户或组使用，因此父智能体可以写入最终制品，而探索智能体保持只读。</p>
+<p>当工具智能体需要自己的容器时，请为其提供创建 Docker 会话的沙箱 <code>RunConfig</code>：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">docker</span><span class="w"> </span><span class="kn">import</span> <span class="n">from_env</span> <span class="k">as</span> <span class="n">docker_from_env</span>
 </span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>
 </span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.run</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span>
@@ -3360,9 +3363,9 @@
 </span><span id="__span-15-20"><a id="__codelineno-15-20" name="__codelineno-15-20" href="#__codelineno-15-20"></a>    <span class="p">),</span>
 </span><span id="__span-15-21"><a id="__codelineno-15-21" name="__codelineno-15-21" href="#__codelineno-15-21"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>当工具智能体应自由修改内容、运行不受信任的命令，或使用不同后端/镜像时，请使用独立沙箱。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a>。</p>
+<p>当工具智能体应独立编辑文件时，请使用单独的工作区；当它需要不同后端或镜像时，请使用单独的会话。对于不受信任的命令，请选择能够提供所需隔离的后端和配置；仅使用单独的 Unix 本地会话并不能提供 Linux 操作系统级隔离。有关独立本地工作区，请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a>。</p>
 <h3 id="combine-with-local-tools-and-mcp">与本地工具和 MCP 的组合</h3>
-<p>保留沙箱工作区，同时在同一个智能体上使用普通工具：</p>
+<p>保留沙箱工作区，同时在同一智能体上使用普通工具：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox</span><span class="w"> </span><span class="kn">import</span> <span class="n">SandboxAgent</span>
 </span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.sandbox.capabilities</span><span class="w"> </span><span class="kn">import</span> <span class="n">Shell</span>
 </span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>
@@ -3376,36 +3379,36 @@
 </span></code></pre></div>
 <p>当工作区检查只是智能体工作的一部分时，请使用此模式。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agent_with_tools.py">examples/sandbox/sandbox_agent_with_tools.py</a>。</p>
 <h2 id="memory">记忆</h2>
-<p>当未来的沙箱智能体运行应从之前的运行中学习时，请使用 <code>Memory</code> 功能。该记忆与 SDK 的对话式 <code>Session</code> 记忆不同：它会将经验提炼为沙箱工作区内的文件，后续运行可以读取这些文件。</p>
-<p>有关设置、读取/生成行为、多轮对话和布局隔离，请参阅<a href="../memory/">智能体记忆</a>。</p>
+<p>当未来的沙箱智能体运行应从先前运行中学习时，请使用 <code>Memory</code> 能力。记忆与 SDK 的对话式 <code>Session</code> 记忆不同：它会将经验提炼为沙箱工作区内的文件，后续运行可以读取这些文件。</p>
+<p>有关设置、读取和生成行为、多轮对话以及布局隔离，请参阅<a href="../memory/">智能体记忆</a>。</p>
 <h2 id="composition-patterns">组合模式</h2>
-<p>明确单智能体模式后，下一个设计问题是沙箱边界在大型系统中应位于何处。</p>
-<p>沙箱智能体仍可与 SDK 的其余部分组合：</p>
+<p>明确单智能体模式后，下一个设计问题是在更大型系统中将沙箱边界放在哪里。</p>
+<p>沙箱智能体仍然可以与 SDK 的其余部分组合：</p>
 <ul>
-<li><a href="../../handoffs/">任务转移</a>：将文档密集型工作从非沙箱接收智能体转交给沙箱审核智能体。</li>
-<li><a href="../../tools/#agents-as-tools">Agents as tools</a>：将多个沙箱智能体公开为工具，通常在每次 <code>Agent.as_tool(...)</code> 调用时传入 <code>run_config=RunConfig(sandbox=SandboxRunConfig(...))</code>，使每个工具拥有自己的沙箱边界。</li>
-<li><a href="../../mcp/">MCP</a> 和普通函数工具：沙箱功能可与 <code>mcp_servers</code> 和普通 Python 工具共存。</li>
-<li><a href="../../running_agents/">运行智能体</a>：沙箱运行仍使用常规的 <code>Runner</code> API。</li>
+<li><a href="../../handoffs/">任务转移</a>：将文档密集型工作从非沙箱接收智能体转移到沙箱审查智能体。</li>
+<li><a href="../../tools/#agents-as-tools">Agents as tools</a>：将多个沙箱智能体公开为工具，通常在每次 <code>Agent.as_tool(...)</code> 调用时传入 <code>run_config=RunConfig(sandbox=SandboxRunConfig(...))</code>，以便每个工具获得自己的会话。每个会话提供的隔离程度由后端和配置决定。</li>
+<li><a href="../../mcp/">MCP</a> 和普通函数工具：沙箱能力可以与 <code>mcp_servers</code> 和普通 Python 工具共存。</li>
+<li><a href="../../running_agents/">智能体运行</a>：沙箱运行仍使用常规的 <code>Runner</code> API。</li>
 </ul>
 <p>以下两种模式尤其常见：</p>
 <ul>
 <li>非沙箱智能体仅针对工作流中需要工作区隔离的部分，将任务转移给沙箱智能体</li>
-<li>编排器将多个沙箱智能体公开为工具，通常为每次 <code>Agent.as_tool(...)</code> 调用提供单独的沙箱 <code>RunConfig</code>，使每个工具拥有自己的隔离工作区</li>
+<li>编排智能体将多个沙箱智能体公开为工具，通常为每次 <code>Agent.as_tool(...)</code> 调用分别提供一个沙箱 <code>RunConfig</code>，使每个工具获得自己的工作区</li>
 </ul>
 <h3 id="turns-and-sandbox-runs">轮次与沙箱运行</h3>
-<p>分别说明任务转移和智能体即工具调用会更容易理解。</p>
-<p>使用任务转移时，仍然只有一个顶层运行和一个顶层轮次循环。活跃智能体会发生变化，但运行不会变为嵌套运行。如果非沙箱接收智能体将任务转移给沙箱审核智能体，则同一运行中的下一个模型调用会针对该沙箱智能体进行准备，并由该沙箱智能体执行下一轮。换言之，任务转移会改变哪个智能体负责同一次运行的下一轮。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a>。</p>
-<p>对于 <code>Agent.as_tool(...)</code>，两者之间的关系则不同。外层编排器使用一个外层轮次决定调用工具，而该工具调用会为沙箱智能体启动嵌套运行。嵌套运行拥有自己的轮次循环、<code>max_turns</code>、审批，以及通常独立的沙箱 <code>RunConfig</code>。它可能在一个嵌套轮次中完成，也可能需要多个轮次。从外层编排器的角度看，所有这些工作仍位于一次工具调用之后，因此嵌套轮次不会增加外层运行的轮次计数器。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a>。</p>
-<p>审批行为遵循相同的职责划分：</p>
+<p>分别说明任务转移和智能体工具调用会更容易理解。</p>
+<p>使用任务转移时，仍然只有一个顶层运行和一个顶层轮次循环。活动智能体会发生变化，但运行不会变为嵌套运行。如果非沙箱接收智能体将任务转移给沙箱审查智能体，则同一次运行中的下一次模型调用会为沙箱智能体进行准备，并由该沙箱智能体执行下一个轮次。换言之，任务转移会更改同一次运行中下一个轮次的负责智能体。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/handoffs.py">examples/sandbox/handoffs.py</a>。</p>
+<p>对于 <code>Agent.as_tool(...)</code>，两者的关系有所不同。外层编排智能体使用一个外层轮次来决定调用工具，而该工具调用会为沙箱智能体启动嵌套运行。嵌套运行拥有自己的轮次循环、<code>max_turns</code>、审批，通常也拥有自己的沙箱 <code>RunConfig</code>。它可能在一个嵌套轮次内完成，也可能需要多个轮次。从外层编排智能体的角度看，所有这些工作仍位于一次工具调用之后，因此嵌套轮次不会增加外层运行的轮次计数器。请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py">examples/sandbox/sandbox_agents_as_tools.py</a>。</p>
+<p>审批行为遵循同样的区别：</p>
 <ul>
-<li>使用任务转移时，审批仍属于同一个顶层运行，因为沙箱智能体现在是该运行中的活跃智能体</li>
-<li>使用 <code>Agent.as_tool(...)</code> 时，沙箱工具智能体内部触发的审批仍会呈现在外层运行中，但它们来自已存储的嵌套运行状态，并会在外层运行恢复时恢复嵌套沙箱运行</li>
+<li>使用任务转移时，审批仍属于同一个顶层运行，因为沙箱智能体现在是该运行中的活动智能体</li>
+<li>使用 <code>Agent.as_tool(...)</code> 时，沙箱工具智能体内部发起的审批仍会呈现在外层运行中，但它们来自存储的嵌套运行状态，并会在外层运行恢复时恢复嵌套沙箱运行</li>
 </ul>
 <h2 id="further-reading">延伸阅读</h2>
 <ul>
 <li><a href="../../sandbox_agents/">快速入门</a>：运行一个沙箱智能体。</li>
 <li><a href="../clients/">沙箱客户端</a>：选择本地、Docker、托管和挂载选项。</li>
-<li><a href="../memory/">智能体记忆</a>：保留并复用之前沙箱运行中的经验。</li>
+<li><a href="../memory/">智能体记忆</a>：保留并复用先前沙箱运行中的经验。</li>
 <li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/sandbox">examples/sandbox/</a>：可运行的本地、编码、记忆、任务转移和智能体组合模式。</li>
 </ul>
 

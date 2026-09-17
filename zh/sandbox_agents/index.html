@@ -559,7 +559,7 @@
   <a href="#prerequisites" class="md-nav__link">
     <span class="md-ellipsis">
       
-        前置条件
+        前提条件
       
     </span>
   </a>
@@ -592,7 +592,7 @@
   <a href="#key-choices" class="md-nav__link">
     <span class="md-ellipsis">
       
-        关键选项
+        关键选择
       
     </span>
   </a>
@@ -1647,7 +1647,7 @@
   <a href="#prerequisites" class="md-nav__link">
     <span class="md-ellipsis">
       
-        前置条件
+        前提条件
       
     </span>
   </a>
@@ -1680,7 +1680,7 @@
   <a href="#key-choices" class="md-nav__link">
     <span class="md-ellipsis">
       
-        关键选项
+        关键选择
       
     </span>
   </a>
@@ -1786,16 +1786,16 @@
 
 <h1 id="_1">快速入门</h1>
 <div class="admonition warning">
-<p class="admonition-title">Beta 功能</p>
-<p>沙箱智能体目前处于 Beta 阶段。在正式发布之前，API 细节、默认设置和支持的能力可能会发生变化，后续也将逐步提供更高级的功能。</p>
+<p class="admonition-title">测试版功能</p>
+<p>沙箱智能体目前处于测试阶段。在正式发布前，API 细节、默认设置和支持的能力可能会发生变化，未来还将陆续推出更多高级功能。</p>
 </div>
-<p>现代智能体只有能够操作文件系统中的真实文件，才能发挥最佳效果。Agents SDK 中的<strong>沙箱智能体</strong>为模型提供持久化工作区，使其能够检索大型文档集、编辑文件、运行命令、生成产物，并从保存的沙箱状态继续工作。</p>
-<p>SDK 提供了这套执行框架，无需你自行整合文件暂存、文件系统工具、Shell 访问、沙箱生命周期、快照以及特定于提供商的适配逻辑。你可以继续使用常规的 <code>Agent</code> 和 <code>Runner</code> 流程，然后添加用于工作区的 <code>Manifest</code>、沙箱原生工具所需的能力，以及用于指定工作运行位置的 <code>SandboxRunConfig</code>。</p>
-<h2 id="prerequisites">前置条件</h2>
+<p>现代智能体只有能够操作文件系统中的真实文件时，才能发挥最佳效果。Agents SDK 中的<strong>沙箱智能体</strong>为模型提供持久工作区，使其能够检索大型文档集、编辑文件、运行命令、生成工件，并从保存的沙箱状态中恢复工作。</p>
+<p>SDK 提供了这套执行框架，你无需自行串联文件暂存、文件系统工具、shell 访问、沙箱生命周期、快照以及特定于提供商的适配代码。你可以保留常规的 <code>Agent</code> 和 <code>Runner</code> 流程，然后添加用于工作区的 <code>Manifest</code>、沙箱原生工具的能力，以及用于指定工作运行位置的 <code>SandboxRunConfig</code>。</p>
+<h2 id="prerequisites">前提条件</h2>
 <ul>
 <li>Python 3.10 或更高版本</li>
-<li>基本熟悉 OpenAI Agents SDK</li>
-<li>一个沙箱客户端。进行本地开发时，可从 <code>UnixLocalSandboxClient</code> 开始。</li>
+<li>对OpenAI Agents SDK有基本了解</li>
+<li>一个沙箱客户端。对于可信的本地开发，请从 <code>UnixLocalSandboxClient</code> 开始。</li>
 </ul>
 <h2 id="installation">安装</h2>
 <p>如果尚未安装 SDK：</p>
@@ -1805,7 +1805,11 @@
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;openai-agents[docker]&quot;</span>
 </span></code></pre></div>
 <h2 id="create-a-local-sandbox-agent">本地沙箱智能体的创建</h2>
-<p>此代码示例将本地仓库存放到 <code>repo/</code> 下，按需延迟加载本地技能，并让运行器为本次运行创建 Unix 本地沙箱会话。</p>
+<p>此示例会将本地代码仓库暂存到 <code>repo/</code> 下，延迟加载本地技能，并让运行器为本次运行创建 Unix 本地沙箱会话。</p>
+<div class="admonition warning">
+<p class="admonition-title">本地命令使用主机权限</p>
+<p>在 Linux 上，<code>UnixLocalSandboxClient</code> 不会对命令施加任何操作系统级别的限制。在 macOS 上，它会通过 <code>sandbox-exec</code> 应用文件系统限制，但不提供网络隔离。请仅将此示例用于可信的本地开发，或在外部隔离的环境中使用。对于不可信的命令，包括受不可信输入影响的命令，请选择经过适当配置的 Docker 沙箱或托管沙箱，或者提供外部隔离。请参阅 <a href="../sandbox/clients/#decision-guide">Unix 本地执行限制</a>。</p>
+</div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
@@ -1862,15 +1866,15 @@
 </span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p>请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>。它使用一个基于 Shell 的微型仓库，因此可在不同的 Unix 本地运行中以确定性方式验证该代码示例。</p>
-<h2 id="key-choices">关键选项</h2>
-<p>基本运行正常后，大多数人接下来会使用以下选项：</p>
+<p>请参阅 <a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>。它使用一个基于 shell 的微型代码仓库，因此可以在不同的 Unix 本地运行中以确定性的方式验证此示例。</p>
+<h2 id="key-choices">关键选择</h2>
+<p>基本运行正常后，大多数人接下来通常会使用以下选项：</p>
 <ul>
-<li><code>default_manifest</code>：用于新沙箱会话的文件、仓库、目录和挂载</li>
-<li><code>instructions</code>：应适用于不同提示词的简短工作流规则</li>
-<li><code>base_instructions</code>：用于替换 SDK 沙箱提示词的高级扩展入口</li>
-<li><code>capabilities</code>：沙箱原生工具，例如文件系统编辑、图像检查、Shell、技能、记忆，以及 SDK 的压缩机制</li>
-<li><code>run_as</code>：面向模型的工具执行时使用的沙箱用户账户</li>
+<li><code>default_manifest</code>：新沙箱会话使用的文件、代码仓库、目录和挂载</li>
+<li><code>instructions</code>：应在不同提示词中统一应用的简短工作流规则</li>
+<li><code>base_instructions</code>：用于替换 SDK 沙箱提示词的高级备用机制</li>
+<li><code>capabilities</code>：沙箱原生工具，例如文件系统编辑/图像检查、shell、技能、记忆，以及 SDK 的压缩机制</li>
+<li><code>run_as</code>：面向模型的工具执行时所使用的沙箱用户账户</li>
 <li><code>SandboxRunConfig.client</code>：沙箱后端</li>
 <li><code>SandboxRunConfig.session</code>、<code>session_state</code> 或 <code>snapshot</code>：后续运行重新连接到先前工作的方式</li>
 </ul>
@@ -1878,9 +1882,9 @@
 <ul>
 <li><a href="../sandbox/guide/">概念</a>：了解清单、能力、权限、快照、运行配置和组合模式。</li>
 <li><a href="../sandbox/clients/">沙箱客户端</a>：选择 Unix 本地、Docker、托管提供商和挂载策略。</li>
-<li><a href="../sandbox/memory/">智能体记忆</a>：保留并复用之前沙箱运行中获得的经验。</li>
+<li><a href="../sandbox/memory/">智能体记忆</a>：保留并复用以往沙箱运行中积累的经验。</li>
 </ul>
-<p>如果 Shell 访问只是你偶尔使用的一项工具，请先从<a href="../tools/">工具指南</a>中的托管 Shell 开始。当工作区隔离、沙箱客户端选择或沙箱会话恢复行为属于设计的一部分时，请使用沙箱智能体。</p>
+<p>如果 shell 访问只是你偶尔使用的工具之一，请从<a href="../tools/">工具指南</a>中的托管 shell 开始。当工作区隔离、沙箱客户端选择或沙箱会话恢复行为属于整体设计的一部分时，请使用沙箱智能体。</p>
 
 
 

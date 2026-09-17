@@ -1785,23 +1785,27 @@
 <p class="admonition-title">ベータ機能</p>
 <p>サンドボックスエージェントはベータ版です。一般提供までに API の詳細、デフォルト、サポートされる機能が変更される可能性があります。また、今後さらに高度な機能が追加される予定です。</p>
 </div>
-<p>最新のエージェントは、ファイルシステム上の実際のファイルを操作できる場合に最も効果的に機能します。Agents SDK の <strong>サンドボックスエージェント</strong> は、大規模なドキュメント群の検索、ファイルの編集、コマンドの実行、成果物の生成、保存されたサンドボックス状態からの作業再開が可能な永続的ワークスペースをモデルに提供します。</p>
-<p>SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、サンドボックスのライフサイクル、スナップショット、プロバイダー固有の連携を自分で組み合わせることなく、この実行基盤を提供します。通常の <code>Agent</code> と <code>Runner</code> のフローを維持したまま、ワークスペース用の <code>Manifest</code>、サンドボックスネイティブツールの機能、作業の実行場所を指定する <code>SandboxRunConfig</code> を追加します。</p>
+<p>最新のエージェントは、ファイルシステム内の実ファイルを操作できる場合に最も効果を発揮します。Agents SDK の <strong>サンドボックスエージェント</strong> は、大規模なドキュメント群の検索、ファイルの編集、コマンドの実行、成果物の生成、保存されたサンドボックス状態からの作業再開が可能な永続ワークスペースをモデルに提供します。</p>
+<p>SDK は、ファイルのステージング、ファイルシステムツール、シェルアクセス、サンドボックスのライフサイクル、スナップショット、プロバイダー固有の連携を自身で組み合わせることなく、この実行基盤を提供します。通常の <code>Agent</code> と <code>Runner</code> のフローを維持したまま、ワークスペース用の <code>Manifest</code>、サンドボックスネイティブツール用の機能、作業の実行場所を指定する <code>SandboxRunConfig</code> を追加できます。</p>
 <h2 id="prerequisites">前提条件</h2>
 <ul>
 <li>Python 3.10 以降</li>
-<li>OpenAI Agents SDK に関する基本的な知識</li>
-<li>サンドボックスクライアント。ローカル開発では、まず <code>UnixLocalSandboxClient</code> を使用します。</li>
+<li>OpenAIAgents SDK に関する基本的な知識</li>
+<li>サンドボックスクライアント。信頼できるローカル開発では、<code>UnixLocalSandboxClient</code> から始めてください。</li>
 </ul>
 <h2 id="installation">インストール</h2>
-<p>SDK をまだインストールしていない場合：</p>
+<p>SDK をまだインストールしていない場合:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents
 </span></code></pre></div>
-<p>Docker ベースのサンドボックスの場合：</p>
+<p>Docker ベースのサンドボックスの場合:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;openai-agents[docker]&quot;</span>
 </span></code></pre></div>
 <h2 id="create-a-local-sandbox-agent">ローカルサンドボックスエージェントの作成</h2>
-<p>この例では、<code>repo/</code> 配下にローカルリポジトリをステージングし、ローカルスキルを遅延読み込みして、実行時にランナーが Unix ローカルのサンドボックスセッションを作成します。</p>
+<p>この例では、ローカルリポジトリを <code>repo/</code> 配下にステージングし、ローカルスキルを遅延ロードして、Runner に実行用の Unix ローカルサンドボックスセッションを作成させます。</p>
+<div class="admonition warning">
+<p class="admonition-title">ローカルコマンドによるホスト権限の使用</p>
+<p>Linux では、<code>UnixLocalSandboxClient</code> はコマンドに OS レベルの制約を追加しません。macOS では、<code>sandbox-exec</code> を通じてファイルシステムの制限を適用しますが、ネットワーク分離は提供しません。この例は、信頼できるローカル開発、または外部で分離された環境内で使用してください。信頼できない入力の影響を受けるコマンドを含む、信頼できないコマンドには、適切に構成された Docker またはホスト型サンドボックスを選択するか、外部の分離環境を用意してください。<a href="../sandbox/clients/#decision-guide">Unix ローカル実行の制限</a>を参照してください。</p>
+</div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
@@ -1858,25 +1862,25 @@
 </span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a> を参照してください。このコード例では、シェルベースの小さなリポジトリを使用しているため、Unix ローカルでの実行全体にわたって決定論的に検証できます。</p>
+<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>を参照してください。この例では、Unix ローカル実行で決定論的に検証できるように、小規模なシェルベースのリポジトリを使用しています。</p>
 <h2 id="key-choices">主な選択肢</h2>
-<p>基本的な実行が機能した後、多くの方が次に検討する選択肢は以下のとおりです。</p>
+<p>基本的な実行が機能した後、一般的に次に検討する選択肢は次のとおりです。</p>
 <ul>
-<li><code>default_manifest</code>：新しいサンドボックスセッションで使用するファイル、リポジトリ、ディレクトリ、マウント</li>
-<li><code>instructions</code>：複数のプロンプトにわたって適用する短いワークフロールール</li>
-<li><code>base_instructions</code>：SDK のサンドボックスプロンプトを置き換えるための高度なエスケープハッチ</li>
-<li><code>capabilities</code>：ファイルシステムの編集／画像検査、シェル、スキル、メモリ、SDK の圧縮メカニズムなどのサンドボックスネイティブツール</li>
-<li><code>run_as</code>：モデル向けツールの実行に使用されるサンドボックスのユーザーアカウント</li>
-<li><code>SandboxRunConfig.client</code>：サンドボックスのバックエンド</li>
-<li><code>SandboxRunConfig.session</code>、<code>session_state</code>、または <code>snapshot</code>：後続の実行を以前の作業に再接続する方法</li>
+<li><code>default_manifest</code>: 新しいサンドボックスセッション用のファイル、リポジトリ、ディレクトリ、マウント</li>
+<li><code>instructions</code>: 複数のプロンプトに共通して適用する短いワークフロールール</li>
+<li><code>base_instructions</code>: SDK のサンドボックスプロンプトを置き換えるための高度なエスケープハッチ</li>
+<li><code>capabilities</code>: ファイルシステムの編集や画像検査、シェル、スキル、メモリ、SDK のコンパクション機構などのサンドボックスネイティブツール</li>
+<li><code>run_as</code>: モデル向けツールを実行するサンドボックスのユーザーアカウント</li>
+<li><code>SandboxRunConfig.client</code>: サンドボックスバックエンド</li>
+<li><code>SandboxRunConfig.session</code>、<code>session_state</code>、または <code>snapshot</code>: 後続の実行で以前の作業に再接続する方法</li>
 </ul>
 <h2 id="where-to-go-next">次のステップ</h2>
 <ul>
-<li><a href="../sandbox/guide/">概念</a>：マニフェスト、機能、権限、スナップショット、実行設定、構成パターンについて説明します。</li>
-<li><a href="../sandbox/clients/">サンドボックスクライアント</a>：Unix ローカル、Docker、ホステッドプロバイダー、マウント戦略を選択します。</li>
-<li><a href="../sandbox/memory/">エージェントメモリ</a>：以前のサンドボックス実行から得た知見を保持し、再利用します。</li>
+<li><a href="../sandbox/guide/">概念</a>: マニフェスト、機能、権限、スナップショット、実行設定、構成パターンについて理解します。</li>
+<li><a href="../sandbox/clients/">サンドボックスクライアント</a>: Unix ローカル、Docker、ホスト型プロバイダー、マウント戦略を選択します。</li>
+<li><a href="../sandbox/memory/">エージェントメモリ</a>: 以前のサンドボックス実行から得た知見を保存し、再利用します。</li>
 </ul>
-<p>シェルアクセスをときどき使用するツールの 1 つとしてのみ必要とする場合は、<a href="../tools/">ツールガイド</a>のホステッドシェルから始めてください。ワークスペースの分離、サンドボックスクライアントの選択、サンドボックスセッションの再開動作が設計の一部となる場合は、サンドボックスエージェントを使用してください。</p>
+<p>シェルアクセスをたまに使用するツールの 1 つとしてのみ必要とする場合は、<a href="../tools/">ツールガイド</a>のホスト型シェルから始めてください。ワークスペースの分離、サンドボックスクライアントの選択、またはサンドボックスセッションの再開動作が設計の一部である場合は、サンドボックスエージェントを使用してください。</p>
 
 
 

@@ -5104,7 +5104,7 @@
 <ul>
 <li>Python 3.10 or higher</li>
 <li>Basic familiarity with the OpenAI Agents SDK</li>
-<li>A sandbox client. For local development, start with <code>UnixLocalSandboxClient</code>.</li>
+<li>A sandbox client. For trusted local development, start with <code>UnixLocalSandboxClient</code>.</li>
 </ul>
 <h2 id="installation">Installation</h2>
 <p>If you have not already installed the SDK:</p>
@@ -5115,6 +5115,10 @@
 </span></code></pre></div>
 <h2 id="create-a-local-sandbox-agent">Create a local sandbox agent</h2>
 <p>This example stages a local repo under <code>repo/</code>, loads local skills lazily, and has the runner create a Unix-local sandbox session for the run.</p>
+<div class="admonition warning">
+<p class="admonition-title">Local commands use host permissions</p>
+<p>On Linux, <code>UnixLocalSandboxClient</code> adds no OS-level confinement to commands. On macOS, it applies filesystem restrictions through <code>sandbox-exec</code>, but does not provide network isolation. Use this example for trusted local development or within an externally isolated environment. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted sandbox, or provide external isolation. See <a href="../sandbox/clients/#decision-guide">Unix-local execution limits</a>.</p>
+</div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>

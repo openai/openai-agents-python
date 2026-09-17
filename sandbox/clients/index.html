@@ -5206,9 +5206,9 @@
 </thead>
 <tbody>
 <tr>
-<td>Fastest local iteration on macOS or Linux</td>
+<td>Trusted local development on macOS or Linux</td>
 <td><code>UnixLocalSandboxClient</code></td>
-<td>No extra install, simple local filesystem development.</td>
+<td>No extra install; commands run as local host processes.</td>
 </tr>
 <tr>
 <td>Basic container isolation</td>
@@ -5222,6 +5222,12 @@
 </tr>
 </tbody>
 </table>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Unix-local execution limits</p>
+<p><code>UnixLocalSandboxClient</code> runs commands as local host processes. On Linux, this backend adds no OS-level confinement: commands can access files and network resources permitted by the host process and any external isolation. A workspace directory, <code>HOME</code>, or <code>cwd</code> does not restrict that access.</p>
+<p>On macOS, this backend uses <code>sandbox-exec</code> to apply filesystem restrictions. Those restrictions do not provide network isolation or the same boundary as a container.</p>
+<p>Use Unix-local for trusted local development or within an externally isolated environment. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted sandbox, or provide external isolation. Review the selected environment's permissions, mounts, credentials, and network access for your workload.</p>
 </div>
 <h2 id="local-clients">Local clients</h2>
 <p>For most users, start with one of these two sandbox clients:</p>
@@ -5239,7 +5245,7 @@
 <tr>
 <td><code>UnixLocalSandboxClient</code></td>
 <td>none</td>
-<td>Fastest local iteration on macOS or Linux. Good default for local development.</td>
+<td>Trusted local development on macOS or Linux, or execution within external isolation.</td>
 <td><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py">Unix-local starter</a></td>
 </tr>
 <tr>
@@ -5251,7 +5257,7 @@
 </tbody>
 </table>
 </div>
-<p>Unix-local is the easiest way to start developing against a local filesystem. Move to Docker or a hosted provider when you need stronger environment isolation or production-style parity.</p>
+<p>Unix-local provides a local workspace without requiring a container. Choose Docker or a hosted provider when you need an isolation boundary supplied by that backend or an image that matches another environment.</p>
 <p><code>SandboxPathGrant.host_path</code> is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See <a href="../guide/#manifest">Manifest path grants</a> for details.</p>
 <h3 id="limit-host-environment-inheritance-for-unix-local-sessions">Limit host environment inheritance for Unix-local sessions</h3>
 <p>By default, <code>UnixLocalSandboxClient</code> starts every command environment from the complete host process environment. Set <code>inherit_host_environment=False</code> to pass only a conservative allowlist of host variables instead:</p>
@@ -5264,7 +5270,7 @@
 </span></code></pre></div>
 <p>When <code>inherit_host_environment=False</code> and <code>host_environment_allowlist</code> is omitted, the SDK allows <code>PATH</code>, <code>LANG</code>, <code>LC_ALL</code>, <code>LC_COLLATE</code>, <code>LC_CTYPE</code>, <code>LC_MESSAGES</code>, <code>LC_MONETARY</code>, <code>LC_NUMERIC</code>, <code>LC_TIME</code>, <code>TZ</code>, <code>TERM</code>, <code>TMPDIR</code>, <code>SSL_CERT_FILE</code>, <code>SSL_CERT_DIR</code>, <code>REQUESTS_CA_BUNDLE</code>, <code>NODE_EXTRA_CA_CERTS</code>, <code>UV_PYTHON</code>, <code>NO_COLOR</code>, <code>FORCE_COLOR</code>, and <code>CI</code>. Pass a custom collection to replace that default allowlist. A custom allowlist requires <code>inherit_host_environment=False</code>.</p>
 <p>Values from <code>Manifest.environment</code> are applied after host filtering and override inherited values. Unix-local commands always receive the workspace root as <code>HOME</code>. The inheritance policy belongs to the current client rather than serialized session state, so <code>create(...)</code> and <code>resume(...)</code> apply the policy of the client that performs that operation.</p>
-<p>This option filters inherited environment variables only. Unix-local commands still run as local host processes with local filesystem and network access. Use Docker or a hosted sandbox when the workload requires stronger isolation.</p>
+<p>This option filters inherited environment variables only; it does not add OS-level confinement. The Unix-local execution limits above still apply.</p>
 <p>To switch from Unix-local to Docker, keep the agent definition the same and change only the run config:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">docker</span><span class="w"> </span><span class="kn">import</span> <span class="n">from_env</span> <span class="k">as</span> <span class="n">docker_from_env</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>

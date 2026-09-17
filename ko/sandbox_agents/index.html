@@ -1785,25 +1785,29 @@
 <h1 id="_1">빠른 시작</h1>
 <div class="admonition warning">
 <p class="admonition-title">베타 기능</p>
-<p>샌드박스 에이전트는 베타 버전입니다. 정식 출시 전까지 API 세부 사항, 기본값, 지원 기능이 변경될 수 있으며, 시간이 지남에 따라 더 고급 기능이 추가될 수 있습니다.</p>
+<p>샌드박스 에이전트는 베타 버전입니다. 정식 출시 전까지 API의 세부 사항, 기본값, 지원 기능이 변경될 수 있으며, 향후 더 고급 기능이 추가될 예정입니다.</p>
 </div>
-<p>최신 에이전트는 파일 시스템의 실제 파일을 다룰 수 있을 때 가장 효과적으로 작동합니다. Agents SDK의 <strong>샌드박스 에이전트</strong>는 모델에 영구적인 작업 공간을 제공하여 대규모 문서 모음을 검색하고, 파일을 편집하고, 명령을 실행하고, 결과물을 생성하고, 저장된 샌드박스 상태에서 작업을 재개할 수 있게 합니다.</p>
-<p>SDK는 파일 스테이징, 파일 시스템 도구, 셸 액세스, 샌드박스 수명 주기, 스냅샷, 제공업체별 연동 코드를 직접 연결하지 않아도 이러한 실행 하네스를 제공합니다. 기존 <code>Agent</code> 및 <code>Runner</code> 흐름을 유지하면서 작업 공간용 <code>Manifest</code>, 샌드박스 네이티브 도구의 기능, 작업이 실행될 위치를 지정하는 <code>SandboxRunConfig</code>을 추가하면 됩니다.</p>
+<p>최신 에이전트는 파일 시스템의 실제 파일을 직접 다룰 수 있을 때 가장 효과적으로 작동합니다. Agents SDK의 <strong>샌드박스 에이전트</strong>는 모델에 대규모 문서 모음을 검색하고, 파일을 편집하고, 명령을 실행하고, 결과물을 생성하고, 저장된 샌드박스 상태에서 작업을 이어갈 수 있는 영구 워크스페이스를 제공합니다.</p>
+<p>SDK는 파일 스테이징, 파일 시스템 도구, 셸 액세스, 샌드박스 수명 주기, 스냅샷, 공급자별 연동 코드를 직접 조합하지 않아도 이러한 실행 환경을 제공합니다. 기존의 <code>Agent</code> 및 <code>Runner</code> 흐름을 유지하면서 워크스페이스용 <code>Manifest</code>, 샌드박스 네이티브 도구의 기능, 작업 실행 위치를 지정하는 <code>SandboxRunConfig</code>을 추가하면 됩니다.</p>
 <h2 id="prerequisites">사전 요구 사항</h2>
 <ul>
 <li>Python 3.10 이상</li>
-<li>OpenAI Agents SDK에 대한 기본 지식</li>
-<li>샌드박스 클라이언트. 로컬 개발에서는 <code>UnixLocalSandboxClient</code>로 시작</li>
+<li>OpenAI Agents SDK에 대한 기본적인 이해</li>
+<li>샌드박스 클라이언트. 신뢰할 수 있는 로컬 개발 환경에서는 <code>UnixLocalSandboxClient</code>로 시작합니다.</li>
 </ul>
 <h2 id="installation">설치</h2>
-<p>아직 SDK를 설치하지 않았다면 다음을 실행합니다.</p>
+<p>SDK를 아직 설치하지 않았다면 다음을 실행합니다.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents
 </span></code></pre></div>
 <p>Docker 기반 샌드박스의 경우:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;openai-agents[docker]&quot;</span>
 </span></code></pre></div>
 <h2 id="create-a-local-sandbox-agent">로컬 샌드박스 에이전트 생성</h2>
-<p>이 예제는 <code>repo/</code> 아래에 로컬 저장소를 스테이징하고, 로컬 스킬을 지연 로드하며, 러너가 실행을 위한 Unix 로컬 샌드박스 세션을 생성하도록 합니다.</p>
+<p>이 예제는 로컬 저장소를 <code>repo/</code> 아래에 스테이징하고, 로컬 스킬을 지연 로드하며, 실행 시 러너가 Unix 로컬 샌드박스 세션을 생성하도록 합니다.</p>
+<div class="admonition warning">
+<p class="admonition-title">호스트 권한을 사용하는 로컬 명령</p>
+<p>Linux에서 <code>UnixLocalSandboxClient</code>은 명령에 운영 체제 수준의 격리를 추가하지 않습니다. macOS에서는 <code>sandbox-exec</code>을 통해 파일 시스템 제한을 적용하지만 네트워크 격리는 제공하지 않습니다. 이 예제는 신뢰할 수 있는 로컬 개발 환경이나 외부에서 격리된 환경 내에서 사용하세요. 신뢰할 수 없는 입력의 영향을 받는 명령을 포함하여 신뢰할 수 없는 명령에는 적절하게 구성된 Docker 또는 호스티드 샌드박스를 선택하거나 외부 격리를 제공하세요. <a href="../sandbox/clients/#decision-guide">Unix 로컬 실행 제한</a>을 참고하세요.</p>
+</div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
@@ -1860,25 +1864,25 @@
 </span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>를 참고하세요. 이 예제는 소규모 셸 기반 저장소를 사용하므로 Unix 로컬 실행 전반에서 결정론적으로 검증할 수 있습니다.</p>
+<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py">examples/sandbox/docs/coding_task.py</a>를 참고하세요. 이 예제는 작은 셸 기반 저장소를 사용하므로 Unix 로컬 실행에서 결정론적으로 검증할 수 있습니다.</p>
 <h2 id="key-choices">주요 선택 사항</h2>
-<p>기본 실행이 정상적으로 작동한 후 대부분 다음 항목을 선택합니다.</p>
+<p>기본 실행이 정상적으로 작동하면 일반적으로 다음 항목을 선택하게 됩니다.</p>
 <ul>
-<li><code>default_manifest</code>: 새 샌드박스 세션에서 사용할 파일, 저장소, 디렉터리 및 마운트</li>
-<li><code>instructions</code>: 여러 프롬프트에 걸쳐 적용할 간단한 워크플로 규칙</li>
-<li><code>base_instructions</code>: SDK 샌드박스 프롬프트를 대체하기 위한 고급 우회 수단</li>
-<li><code>capabilities</code>: 파일 시스템 편집/이미지 검사, 셸, 스킬, 메모리 및 SDK의 압축 메커니즘과 같은 샌드박스 네이티브 도구</li>
-<li><code>run_as</code>: 모델에 노출되는 도구가 실행되는 샌드박스 사용자 계정</li>
+<li><code>default_manifest</code>: 새 샌드박스 세션에 사용할 파일, 저장소, 디렉터리 및 마운트</li>
+<li><code>instructions</code>: 여러 프롬프트에 공통으로 적용할 간단한 워크플로 규칙</li>
+<li><code>base_instructions</code>: SDK 샌드박스 프롬프트를 교체하기 위한 고급 우회 수단</li>
+<li><code>capabilities</code>: 파일 시스템 편집/이미지 검사, 셸, 스킬, 메모리 및 SDK의 컨텍스트 압축 메커니즘과 같은 샌드박스 네이티브 도구</li>
+<li><code>run_as</code>: 모델이 사용하는 도구를 실행할 샌드박스 사용자 계정</li>
 <li><code>SandboxRunConfig.client</code>: 샌드박스 백엔드</li>
-<li><code>SandboxRunConfig.session</code>, <code>session_state</code> 또는 <code>snapshot</code>: 후속 실행에서 이전 작업에 다시 연결하는 방법</li>
+<li><code>SandboxRunConfig.session</code>, <code>session_state</code> 또는 <code>snapshot</code>: 이후 실행에서 이전 작업에 다시 연결하는 방식</li>
 </ul>
 <h2 id="where-to-go-next">다음 단계</h2>
 <ul>
 <li><a href="../sandbox/guide/">개념</a>: 매니페스트, 기능, 권한, 스냅샷, 실행 구성 및 구성 패턴을 이해합니다.</li>
-<li><a href="../sandbox/clients/">샌드박스 클라이언트</a>: Unix 로컬, Docker, 호스티드 제공업체 및 마운트 전략을 선택합니다.</li>
-<li><a href="../sandbox/memory/">에이전트 메모리</a>: 이전 샌드박스 실행에서 얻은 교훈을 보존하고 재사용합니다.</li>
+<li><a href="../sandbox/clients/">샌드박스 클라이언트</a>: Unix 로컬, Docker, 호스티드 공급자 및 마운트 전략을 선택합니다.</li>
+<li><a href="../sandbox/memory/">에이전트 메모리</a>: 이전 샌드박스 실행에서 얻은 지식을 보존하고 재사용합니다.</li>
 </ul>
-<p>셸 액세스를 가끔 사용하는 도구 중 하나로만 활용한다면 <a href="../tools/">도구 가이드</a>의 호스티드 셸부터 시작하세요. 작업 공간 격리, 샌드박스 클라이언트 선택 또는 샌드박스 세션 재개 동작이 설계의 일부라면 샌드박스 에이전트를 사용하세요.</p>
+<p>셸 액세스를 가끔 사용하는 도구 중 하나로만 활용한다면 <a href="../tools/">도구 가이드</a>의 호스티드 셸부터 시작하세요. 워크스페이스 격리, 샌드박스 클라이언트 선택 또는 샌드박스 세션 재개 동작이 설계의 일부라면 샌드박스 에이전트를 사용하세요.</p>
 
 
 
