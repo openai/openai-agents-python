@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import httpx2
 import pytest
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, omit
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, Timeout, omit
 from openai._models import add_request_id
 from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
@@ -44,6 +44,7 @@ from agents import (
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIProvider,
+    RunConfig,
     Runner,
     __version__,
     function_tool,
@@ -1807,3 +1808,57 @@ async def test_request_is_counted_when_provider_omits_usage(monkeypatch) -> None
     assert resp.usage.input_tokens == 0
     assert resp.usage.output_tokens == 0
     assert resp.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_provider_native_extra_args_do_not_break_run() -> None:
+    """Provider-only extra_args must not abort a Chat Completions run.
+
+    The trace config is built from ModelSettings on every call, even with
+    tracing disabled, so values meant only for the provider (here the
+    documented per-request ``timeout``) must never be serialized for tracing.
+    """
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_minimal_chat_completion("hello").model_dump())
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
+        model = OpenAIChatCompletionsModel(
+            model="gpt-4",
+            openai_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+        )
+        agent = Agent(
+            name="test",
+            model=model,
+            model_settings=ModelSettings(
+                temperature=0.5,
+                extra_args={"timeout": Timeout(30.0)},
+            ),
+        )
+        result = await Runner.run(agent, "hi", run_config=RunConfig(tracing_disabled=True))
+
+    assert result.final_output == "hello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_non_serializable_request_extras_excluded_from_trace_config() -> None:
+    """extra_body/extra_query are provider-only, like extra_args."""
+
+    class _NotSerializable:
+        pass
+
+    settings = ModelSettings(
+        temperature=0.5,
+        extra_args={"timeout": Timeout(30.0)},
+        extra_body=cast(Any, {"marker": _NotSerializable()}),
+        extra_query=cast(Any, {"marker": _NotSerializable()}),
+    )
+
+    traceable = settings.to_traceable_dict()
+
+    assert traceable["temperature"] == 0.5
+    assert "extra_args" not in traceable
+    assert "extra_body" not in traceable
+    assert "extra_query" not in traceable

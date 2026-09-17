@@ -293,8 +293,12 @@ class ModelSettings:
 
     def to_traceable_dict(self) -> dict[str, Any]:
         """Serialize settings for tracing without provider-specific request extras."""
-        payload = self.to_json_dict()
-        return {key: payload[key] for key in _TRACEABLE_MODEL_SETTING_FIELDS if key in payload}
+        return cast(
+            dict[str, Any],
+            TypeAdapter(ModelSettings).dump_python(
+                self, mode="json", include=set(_TRACEABLE_MODEL_SETTING_FIELDS)
+            ),
+        )
 
 
 def _coerce_model_settings(
