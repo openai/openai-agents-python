@@ -316,6 +316,31 @@ def test_non_decorator_function_tools_have_no_wrapped_callable() -> None:
         assert inspect.unwrap(cast(Callable[..., Any], non_decorator_tool)) is non_decorator_tool
 
 
+def test_function_tool_rejects_non_positional_context_parameter() -> None:
+    def keyword_only_context(*, ctx: RunContextWrapper[Any], value: int) -> int:
+        return value
+
+    def variadic_context(*ctx: ToolContext[Any]) -> int:
+        return len(ctx)
+
+    def variadic_keyword_context(**ctx: ToolContext[Any]) -> int:
+        return len(ctx)
+
+    for func in (keyword_only_context, variadic_context, variadic_keyword_context):
+        with pytest.raises(UserError, match="must be the first positional parameter"):
+            function_tool(func)
+
+
+@pytest.mark.asyncio
+async def test_function_tool_accepts_positional_only_context_parameter() -> None:
+    def positional_only_context(ctx: ToolContext[Any], /, value: int) -> int:
+        return value
+
+    tool = function_tool(positional_only_context)
+
+    assert await tool.on_invoke_tool(ctx_wrapper(), '{"value": 4}') == 4
+
+
 def test_replacing_invoker_removes_wrapped_callable() -> None:
     def original(value: int) -> int:
         return value
