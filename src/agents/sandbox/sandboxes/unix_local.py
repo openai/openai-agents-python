@@ -164,6 +164,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     Unix-only session implementation that runs commands on the host and uses the host filesystem
     as the workspace (rooted at `self.state.manifest.root`).
 
+    On Linux, commands run without OS-level confinement added by this backend. On macOS,
+    commands use sandbox-exec filesystem restrictions, which do not provide network isolation.
+    Workspace paths and SDK file API guards do not confine arbitrary Linux shell commands.
+    Use this backend for trusted local execution or within externally provided isolation.
+
     User-scoped listing and writing require sudo access to a system python3 and its standard
     library. These operations run a trusted file worker in Python isolated mode, independently
     of the application's interpreter or virtual environment.
@@ -1183,6 +1188,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
 
 class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | None]):
+    """Create local host sessions for trusted development or externally isolated execution.
+
+    Linux sessions add no OS-level command confinement. macOS sessions apply filesystem
+    restrictions through sandbox-exec, but do not provide network isolation. Separate
+    workspaces and host environment filtering do not establish an OS isolation boundary.
+    For untrusted commands, including commands influenced by untrusted inputs, use an
+    appropriately configured Docker or hosted backend, or provide external isolation.
+    """
+
     backend_id = "unix_local"
     supports_default_options = True
     _instrumentation: Instrumentation
@@ -1225,7 +1239,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         manifest = manifest if manifest is not None else Manifest()
         _assert_unix_local_host_path_grants_unsupported(manifest)
         self._validate_manifest_for_create(manifest)
-        # For local execution, runner-created sessions should always get an isolated temp root
+        # For local execution, runner-created sessions should always get a dedicated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
         if manifest.root == _DEFAULT_MANIFEST_ROOT:
