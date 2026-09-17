@@ -284,6 +284,22 @@ def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
     assert seen_deadlines[0] is not None
 
 
+@patch("httpx2.Client")
+def test_batch_trace_processor_timed_shutdown_retries_final_drain(mock_client) -> None:
+    transient = MagicMock(status_code=503, headers={})
+    success = MagicMock(status_code=200, headers={})
+    mock_client.return_value.post.side_effect = [transient, success]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.001)
+    processor = BatchTraceProcessor(exporter=exporter)
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=1.0)
+
+    assert mock_client.return_value.post.call_count == 2
+    exporter.close()
+
+
 def test_batch_trace_processor_survives_exporter_exception():
     """A failing exporter must not kill the background worker thread.
 
@@ -705,14 +721,14 @@ def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_clie
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
-    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+    with patch("agents.tracing.processors.time.sleep") as sleep_for_retry:
         exporter._export_with_deadline(
             [get_span(mock_processor())], deadline=time.monotonic() + 0.01
         )
 
     assert mock_client.return_value.post.call_count == 1
-    wait_for_retry.assert_called_once()
-    assert wait_for_retry.call_args.args[0] <= 0.1
+    sleep_for_retry.assert_called_once()
+    assert sleep_for_retry.call_args.args[0] <= 0.1
 
     exporter.close()
 

@@ -191,10 +191,7 @@ class BackendSpanExporter(TracingExporter):
                     # A rate limit, request timeout, or conflict is transient: retry it
                     # like a server error, waiting at least the advertised Retry-After,
                     # unless the server says outright not to retry.
-                    if (
-                        response.status_code in self._RETRYABLE_CLIENT_STATUS_CODES
-                        and allows_retry
-                    ):
+                    if response.status_code in self._RETRYABLE_CLIENT_STATUS_CODES and allows_retry:
                         retry_after = self._retry_after_seconds(response)
                         logger.warning(
                             "[non-fatal] Tracing: client error %s, retrying.",
@@ -293,15 +290,16 @@ class BackendSpanExporter(TracingExporter):
             return False
 
         wait_for = sleep_time if remaining is None else min(sleep_time, remaining)
-        if self._shutdown_event.wait(wait_for):
+        if deadline is None and self._shutdown_event.wait(wait_for):
             logger.warning(
                 "[non-fatal] Tracing: shutdown requested during retry backoff, giving up."
             )
             return False
+        if deadline is not None:
+            # The final drain runs after shutdown is requested; its deadline bounds retries.
+            time.sleep(wait_for)
 
-        if remaining is not None and (
-            sleep_time >= remaining or time.monotonic() >= deadline
-        ):
+        if remaining is not None and (sleep_time >= remaining or time.monotonic() >= deadline):
             logger.warning(
                 "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
             )
