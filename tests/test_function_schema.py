@@ -131,6 +131,44 @@ def test_to_call_args_does_not_shadow_pydantic_model_fields_set():
     assert result == "hello:42"
 
 
+def test_param_named_model_dump_surfaces_pydantic_error():
+    """Protected-namespace collisions are rejected by Pydantic itself with an error that
+    already names the conflicting field, so that error is left untouched."""
+
+    def func(model_dump: str, query: str) -> str:
+        return f"{model_dump}:{query}"
+
+    with pytest.raises(Exception, match=r"model_dump"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_param_named_model_post_init_raises_user_error():
+    """A field named ``model_post_init`` becomes the model's post-init hook, so without the
+    guard the schema builds but every argument validation fails with an unrelated TypeError."""
+
+    def func(model_post_init: str) -> str:
+        return model_post_init
+
+    with pytest.raises(UserError, match=r"`model_post_init`"):
+        function_schema(func, use_docstring_info=False)
+
+
+def test_non_reserved_pydantic_member_param_names_still_work():
+    """Names Pydantic accepts as fields (with a shadow warning) must keep working."""
+
+    def func(model_copy: str, model_json_schema: str) -> str:
+        return f"{model_copy}:{model_json_schema}"
+
+    with pytest.warns(UserWarning):
+        func_schema = function_schema(func, use_docstring_info=False)
+    parsed = func_schema.params_pydantic_model.model_validate(
+        {"model_copy": "a", "model_json_schema": "b"}
+    )
+
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    assert func(*args, **kwargs_dict) == "a:b"
+
+
 def varargs_function(x: int, *numbers: float, flag: bool = False, **kwargs: Any):
     return x, numbers, flag, kwargs
 
@@ -1432,3 +1470,24 @@ def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
     args, kwargs_dict = fs.to_call_args(parsed)
 
     assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
+
+
+def test_param_named_dunder_doc_raises_user_error():
+    """``create_model`` consumes ``__doc__`` as its own keyword, so the parameter never
+    becomes a field. That has to surface as a UserError rather than a malformed model."""
+
+    def func(__doc__: str) -> str:
+        return __doc__
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(func, use_docstring_info=False)
+    assert "__doc__" in str(exc_info.value)
+
+
+def test_param_named_dunder_module_raises_user_error():
+    def func(__module__: str) -> str:
+        return __module__
+
+    with pytest.raises(UserError) as exc_info:
+        function_schema(func, use_docstring_info=False)
+    assert "__module__" in str(exc_info.value)

@@ -4,7 +4,7 @@ import contextlib
 import inspect
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
@@ -325,6 +325,26 @@ def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | 
     return None
 
 
+# Parameter names that register on the generated arguments model without any error but cannot
+# be invoked correctly. A field named ``model_post_init`` becomes the model's post-init hook, so
+# Pydantic calls the argument value after validation and every tool invocation fails with an
+# unrelated ``TypeError``. Names that ``create_model`` silently consumes as its own keyword
+# arguments are caught after construction instead, by checking ``model_fields``. Names Pydantic
+# itself rejects (protected-namespace collisions, ``model_config``) already raise a construction
+# error that identifies the conflicting name, so those are left to Pydantic.
+_PYDANTIC_RESERVED_PARAM_NAMES = frozenset({"model_post_init"})
+
+
+def _unsupported_pydantic_param_names_error(func_name: str, names: Sequence[str]) -> UserError:
+    formatted = ", ".join(f"`{name}`" for name in names)
+    noun = "a parameter name" if len(names) == 1 else "parameter names"
+    return UserError(
+        f"Function {func_name} has {noun} that Pydantic reserves on the generated "
+        f"arguments model: {formatted}. Rename the parameter, or wrap the function "
+        "and forward the value from a differently named parameter."
+    )
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -518,7 +538,19 @@ def function_schema(
                 )
 
     # 3. Dynamically build a Pydantic model
+    reserved_params = sorted(_PYDANTIC_RESERVED_PARAM_NAMES.intersection(fields))
+    if reserved_params:
+        raise _unsupported_pydantic_param_names_error(func_name, reserved_params)
+
     dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+
+    # ``create_model`` consumes some names as its own keyword arguments (``__doc__`` and
+    # ``__module__`` among them), so construction succeeds but the parameter silently never
+    # becomes a field. Verify every requested field survived rather than enumerating the
+    # control keywords, so this keeps holding if Pydantic adds more.
+    swallowed_params = sorted(name for name in fields if name not in dynamic_model.model_fields)
+    if swallowed_params:
+        raise _unsupported_pydantic_param_names_error(func_name, swallowed_params)
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()
