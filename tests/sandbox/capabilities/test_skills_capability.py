@@ -553,6 +553,55 @@ class TestSkillsInstructions:
         assert "loaded on demand instead of being present up front" in instructions
 
     @pytest.mark.asyncio
+    async def test_instructions_render_a_folded_description_on_one_line(
+        self, tmp_path: Path
+    ) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: discovered-skill\ndescription: >\n"
+            "  Use for GitHub issue triage.\n  Triggers: /triage, bug report\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+
+        instructions = await capability.instructions(_source_granted_manifest(source=src_root))
+
+        assert instructions is not None
+        assert (
+            "- discovered-skill: Use for GitHub issue triage. Triggers: /triage, bug report "
+            "(file: .agents/dynamic-skill)"
+        ) in instructions
+
+    @pytest.mark.asyncio
+    async def test_instructions_render_a_literal_description_on_one_line(
+        self, tmp_path: Path
+    ) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: discovered-skill\ndescription: |\n"
+            "  first line\n  second line\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+
+        capability = Skills(
+            lazy_from=LocalDirLazySkillSource(source=LocalDir(src=src_root)),
+        )
+
+        instructions = await capability.instructions(_source_granted_manifest(source=src_root))
+
+        assert instructions is not None
+        assert (
+            "- discovered-skill: first line second line (file: .agents/dynamic-skill)"
+        ) in instructions
+
+    @pytest.mark.asyncio
     async def test_lazy_local_dir_metadata_skips_symlinked_skill_directory(
         self, tmp_path: Path
     ) -> None:
