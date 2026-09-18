@@ -18,7 +18,11 @@ from openai.types.responses.response_reasoning_item_param import (
     Summary,
 )
 from sqlalchemy import event, insert, select, text, update
+from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects.mysql.mariadb import MariaDBDialect
+from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.schema import CreateColumn
 from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
@@ -106,6 +110,27 @@ async def test_sqlalchemy_session_direct_ops(agent: Agent):
     await session.clear_session()
     retrieved_after_clear = await session.get_items()
     assert len(retrieved_after_clear) == 0
+
+
+@pytest.mark.parametrize(
+    ("dialect", "expected_type"),
+    [
+        pytest.param(mysql.dialect(), "LONGTEXT", id="mysql"),
+        pytest.param(MariaDBDialect(), "LONGTEXT", id="mariadb"),
+        pytest.param(postgresql.dialect(), "TEXT", id="postgresql"),
+        pytest.param(sqlite.dialect(), "TEXT", id="sqlite"),
+    ],
+)
+async def test_message_data_column_type(dialect: Dialect, expected_type: str):
+    """MySQL needs large text storage; other dialects retain the existing TEXT column."""
+    session = SQLAlchemySession.from_url("message_column", url=DB_URL)
+    try:
+        column = session._messages.c.message_data
+        assert str(CreateColumn(column).compile(dialect=dialect)) == (
+            f"message_data {expected_type} NOT NULL"
+        )
+    finally:
+        await session.engine.dispose()
 
 
 async def test_sqlalchemy_session_defaults_to_escaped_non_ascii_storage():

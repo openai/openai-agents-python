@@ -48,6 +48,7 @@ from sqlalchemy import (
     text as sql_text,
     update,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -64,7 +65,12 @@ _T = TypeVar("_T")
 
 
 class SQLAlchemySession(SessionABC):
-    """SQLAlchemy implementation of [`Session`][agents.memory.session.Session]."""
+    """SQLAlchemy implementation of [`Session`][agents.memory.session.Session].
+
+    Newly created MySQL and MariaDB message tables use LONGTEXT for serialized items.
+    Existing tables are not migrated; applications must widen their message_data column
+    to store items larger than the existing column's limit.
+    """
 
     _table_init_locks: ClassVar[dict[tuple[str, str, str], threading.Lock]] = {}
     _table_init_locks_guard: ClassVar[threading.Lock] = threading.Lock()
@@ -215,7 +221,11 @@ class SQLAlchemySession(SessionABC):
                 ForeignKey(f"{sessions_table}.session_id", ondelete="CASCADE"),
                 nullable=False,
             ),
-            Column("message_data", Text, nullable=False),
+            Column(
+                "message_data",
+                Text().with_variant(LONGTEXT(), "mysql", "mariadb"),
+                nullable=False,
+            ),
             Column(
                 "created_at",
                 TIMESTAMP(timezone=False),
