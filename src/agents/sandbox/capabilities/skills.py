@@ -395,21 +395,86 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
     if end_index is None:
         return {}
 
+    frontmatter_lines = lines[1:end_index]
     metadata: dict[str, str] = {}
-    for line in lines[1:end_index]:
+    index = 0
+    while index < len(frontmatter_lines):
+        line = frontmatter_lines[index]
         stripped = line.strip()
-        if stripped == "" or stripped.startswith("#") or ":" not in stripped:
+        if (
+            stripped == ""
+            or stripped.startswith("#")
+            or ":" not in stripped
+            or line[:1].isspace()
+        ):
+            index += 1
             continue
-        key, value = stripped.split(":", 1)
+
+        key, value = line.split(":", 1)
         parsed_key = key.strip()
         parsed_value = value.strip()
-        if (
-            len(parsed_value) >= 2
-            and parsed_value[0] == parsed_value[-1]
-            and parsed_value[0] in {"'", '"'}
-        ):
-            parsed_value = parsed_value[1:-1]
+        if not parsed_key:
+            index += 1
+            continue
+
+        continuation_lines: list[str] = []
+        next_index = index + 1
+        while next_index < len(frontmatter_lines):
+            next_line = frontmatter_lines[next_index]
+            if next_line.strip() and not next_line[:1].isspace():
+                break
+            continuation_lines.append(next_line)
+            next_index += 1
+
+        if parsed_value in {">", "|"}:
+            content_indents = [
+                len(continuation) - len(continuation.lstrip())
+                for continuation in continuation_lines
+                if continuation.strip()
+            ]
+            content_indent = min(content_indents, default=0)
+            block_lines = [
+                continuation[content_indent:] if continuation.strip() else ""
+                for continuation in continuation_lines
+            ]
+            while block_lines and block_lines[-1] == "":
+                block_lines.pop()
+
+            if parsed_value == "|":
+                parsed_value = "\n".join(block_lines)
+            else:
+                folded_parts: list[str] = []
+                blank_lines = 0
+                for block_line in block_lines:
+                    if block_line == "":
+                        blank_lines += 1
+                        continue
+                    if folded_parts:
+                        folded_parts.append("\n" * blank_lines if blank_lines else " ")
+                    folded_parts.append(block_line)
+                    blank_lines = 0
+                parsed_value = "".join(folded_parts)
+
+            if block_lines:
+                parsed_value += "\n"
+        else:
+            wrapped_lines = [
+                continuation.strip()
+                for continuation in continuation_lines
+                if continuation.strip() and not continuation.lstrip().startswith("#")
+            ]
+            if wrapped_lines:
+                parsed_value = " ".join([parsed_value, *wrapped_lines]).strip()
+            if (
+                len(parsed_value) >= 2
+                and parsed_value[0] == parsed_value[-1]
+                and parsed_value[0] in {"'", '"'}
+            ):
+                parsed_value = parsed_value[1:-1]
+
         metadata[parsed_key] = parsed_value
+        index = next_index
+
     return metadata
 
 
