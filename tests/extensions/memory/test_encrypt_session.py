@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("cryptography")  # Skip tests if cryptography is not installed
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from agents import (
     Agent,
@@ -462,9 +462,14 @@ async def test_clear_revokes_encrypted_deferred_compaction(
 
         paused = False
 
-        async def get_items(self, limit=None):
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             # Preserve the public Session call shape without opting into run context.
-            items = await super().get_items(limit)
+            items = await super().get_items(limit, wrapper=wrapper)
             if not self.paused and any(
                 item.get("type") == "function_call_output" for item in items
             ):
@@ -769,6 +774,85 @@ async def test_encrypted_session_pop_item(encryption_key: str, underlying_sessio
     underlying_session.close()
 
 
+@pytest.mark.parametrize("expired", [False, True])
+async def test_encrypted_pop_wrong_key_preserves_recoverable_history(
+    underlying_session: SQLiteSession, set_fernet_time, expired: bool
+):
+    set_fernet_time(1_000)
+    correct = EncryptedSession("test_session", underlying_session, "correct-key", ttl=10)
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key", ttl=10)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First"},
+        {"role": "assistant", "content": "Second"},
+    ]
+    try:
+        await correct.add_items(items)
+        ciphertext = await underlying_session.get_items()
+        if expired:
+            set_fernet_time(1_020)
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == ciphertext
+        recovery = EncryptedSession("test_session", underlying_session, "correct-key", ttl=60)
+        assert await recovery.get_items() == items
+        assert await recovery.pop_item() == items[-1]
+        assert await recovery.get_items() == items[:-1]
+    finally:
+        underlying_session.close()
+
+
+async def test_encrypted_pop_rechecks_authentication_after_expired_tail(
+    underlying_session: SQLiteSession, set_fernet_time
+):
+    set_fernet_time(1_000)
+    correct = EncryptedSession("test_session", underlying_session, "correct-key", ttl=10)
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key", ttl=10)
+    item: TResponseInputItem = {"role": "user", "content": "Recoverable history"}
+    try:
+        await correct.add_items([item])
+        ciphertext = await underlying_session.get_items()
+        await wrong.add_items([{"role": "assistant", "content": "Expired tail"}])
+        set_fernet_time(1_020)
+
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == ciphertext
+        recovery = EncryptedSession("test_session", underlying_session, "correct-key", ttl=60)
+        assert await recovery.get_items() == [item]
+    finally:
+        underlying_session.close()
+
+
+async def test_encrypted_pop_restores_wrong_key_envelope_under_interleaved_append(
+    underlying_session: SQLiteSession,
+):
+    """Test that popping an unauthenticated item immediately restores it without loss."""
+    correct = EncryptedSession("test_session", underlying_session, "correct-key")
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key")
+    try:
+        await correct.add_items([{"role": "user", "content": "saved"}])
+        original_ciphertext = await underlying_session.get_items()
+
+        # Wrong-key pop raises InvalidToken and immediately restores the popped item
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == original_ciphertext
+
+        # An interleaved append from another writer occurs
+        await correct.add_items([{"role": "assistant", "content": "interleaved"}])
+
+        # Verify all items remain intact and readable with the correct key
+        items = await correct.get_items()
+        assert [i.get("content") for i in items] == ["saved", "interleaved"]
+        assert await correct.pop_item() == {"role": "assistant", "content": "interleaved"}
+        assert await correct.pop_item() == {"role": "user", "content": "saved"}
+    finally:
+        underlying_session.close()
+
+
 async def test_encrypted_session_clear(encryption_key: str, underlying_session: SQLiteSession):
     """Test clear_session functionality."""
     session = EncryptedSession(
@@ -793,8 +877,12 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
         def __init__(self) -> None:
             self.session_id = "test_session"
             self.session_settings = None
-            self.items: list[TResponseInputItem] = []
-            self.wrappers: list[RunContextWrapper[Any] | None] = []
+            self.items: dict[str, list[TResponseInputItem]] = {}
+
+        def history(self, wrapper: RunContextWrapper[Any] | None) -> list[TResponseInputItem]:
+            if wrapper is None:
+                raise ValueError("Tenant context is required.")
+            return self.items.setdefault(wrapper.context["tenant"], [])
 
         async def get_items(
             self,
@@ -802,8 +890,8 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> list[TResponseInputItem]:
-            self.wrappers.append(wrapper)
-            return list(self.items if limit is None else self.items[-limit:])
+            items = self.history(wrapper)
+            return list(items if limit is None else items[-limit:])
 
         async def add_items(
             self,
@@ -811,24 +899,22 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> None:
-            self.wrappers.append(wrapper)
-            self.items.extend(items)
+            self.history(wrapper).extend(items)
 
         async def pop_item(
             self,
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> TResponseInputItem | None:
-            self.wrappers.append(wrapper)
-            return self.items.pop() if self.items else None
+            items = self.history(wrapper)
+            return items.pop() if items else None
 
         async def clear_session(
             self,
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> None:
-            self.wrappers.append(wrapper)
-            self.items.clear()
+            self.history(wrapper).clear()
 
     underlying = ContextAwareUnderlying()
     session = EncryptedSession(
@@ -837,13 +923,20 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
         encryption_key=encryption_key,
     )
     wrapper = RunContextWrapper(context={"tenant": "a"})
+    other_wrapper = RunContextWrapper(context={"tenant": "b"})
 
     await session.add_items([{"role": "user", "content": "hello"}], wrapper=wrapper)
+    await session.add_items([{"role": "user", "content": "other tenant"}], wrapper=other_wrapper)
     assert await session.get_items(wrapper=wrapper) == [{"role": "user", "content": "hello"}]
     assert await session.pop_item(wrapper=wrapper) == {"role": "user", "content": "hello"}
+    assert await session.pop_item(wrapper=wrapper) is None
+    await session.add_items([{"role": "user", "content": "clear me"}], wrapper=wrapper)
     await session.clear_session(wrapper=wrapper)
 
-    assert underlying.wrappers == [wrapper, wrapper, wrapper, wrapper]
+    assert await session.get_items(wrapper=wrapper) == []
+    assert await session.get_items(wrapper=other_wrapper) == [
+        {"role": "user", "content": "other tenant"}
+    ]
 
 
 async def test_encrypted_session_ttl_expiration(
