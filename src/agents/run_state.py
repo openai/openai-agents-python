@@ -36,7 +36,7 @@ from openai.types.responses.response_output_item import (
     ProgramOutput,
 )
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
-from typing_extensions import TypedDict, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
@@ -109,6 +109,7 @@ from .logger import (
 from .run_context import RunContextWrapper
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
+    ReasoningItemIdPolicy,
     digest_input_item,
     ensure_nested_history_run_item_occurrence_key,
     nested_history_run_item_occurrence_key,
@@ -167,13 +168,55 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
+class _FoldedToolOutputs(TypedDict):
+    """Outputs the commit boundary folded into the held batch, with the turn they belong to.
+
+    A handoff filter's authority over session history covers one turn, and a crashed
+    resume can be serialized and retried, so ownership must ride the record rather
+    than live process state: while ``turn`` is still the current turn, the batch's
+    copies of these outputs are not pairing evidence and the resolved session view
+    decides what lands. Once the turn advances the marker expires and the outputs are
+    carried prior-turn history, which a later turn's filter is not entitled to remove.
+    """
+
+    turn: int
+    call_ids: list[str]
+
+
 class _PendingSessionWrite(TypedDict):
-    """One canonical resumed-output append awaiting acknowledgement."""
+    """One canonical resumed-output append awaiting acknowledgement.
+
+    ``held`` marks a batch the interruption park withheld because the agent's output
+    guardrails had not approved the turn yet. A held batch was never offered to the
+    Session, so ``before`` stays ``None`` until a gate-legal exit starts settling it;
+    from that point it is an ordinary pending write and the digest reconciliation
+    recovers a half-acknowledged append. Absent or ``False`` keeps the released
+    meaning: an append already approved for eager settlement on resume entry.
+
+    ``response_id`` records the model response the withheld batch belongs to, and
+    ``store`` the store setting that response was produced under, so the settle runs
+    the same compaction bookkeeping the ordinary persistence path would have run for
+    it instead of appending behind its back.
+
+    ``reasoning_item_id_policy`` records how the batch's items were converted, so a
+    detached re-park folds new items under the same conversion: a Conversations-origin
+    batch preserves server reasoning ids even when the resuming run's own policy would
+    omit them, and an id stripped at registration cannot be restored at the settle.
+
+    ``folded_tool_outputs`` records which of the batch's outputs the commit boundary
+    folded and on which turn, so the filter contract survives a serialized retry of
+    the crashed turn; see ``_FoldedToolOutputs``.
+    """
 
     session_id: str
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    held: NotRequired[bool]
+    response_id: NotRequired[str | None]
+    store: NotRequired[bool | None]
+    reasoning_item_id_policy: NotRequired[ReasoningItemIdPolicy | None]
+    folded_tool_outputs: NotRequired[_FoldedToolOutputs]
 
 
 def _default_run_state_validation_error(
@@ -190,10 +233,11 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
+_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.18"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -228,6 +272,12 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
+    ),
+    "1.18": (
+        "Persists the interrupted turn's withheld Session write, including the response it "
+        "belongs to, the conversion policy its items were registered under, and the "
+        "fold ownership of its outputs, so an approval resume can settle it under the "
+        "output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4372,11 +4422,68 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
+        # 1.17 defines this object as exactly four keys and its readers are already on
+        # main, so writing the held variant under that label would emit checkpoints
+        # those readers reject. The held keys are therefore gated to the version that
+        # introduced them, and a 1.17 payload keeps the four keys it defined and
+        # settles eagerly as it always did.
+        held_keys_allowed = (schema_major, schema_minor) >= tuple(
+            int(part)
+            for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        )
+        base_keys = {"session_id", "items", "before", "persisted_count"}
+        held_keys = (
+            {"held", "response_id", "store", "reasoning_item_id_policy", "folded_tool_outputs"}
+            if held_keys_allowed
+            else set()
+        )
         if (
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) != {"session_id", "items", "before", "persisted_count"}
+            or set(pending_write) - held_keys != base_keys
+            or ("held" in pending_write and type(pending_write["held"]) is not bool)
+            or (pending_write.get("held") is True and pending_write.get("before") is not None)
+            or (
+                "response_id" in pending_write
+                and not isinstance(pending_write["response_id"], str | type(None))
+            )
+            or (
+                "store" in pending_write
+                and pending_write["store"] is not None
+                and type(pending_write["store"]) is not bool
+            )
+            or (
+                "reasoning_item_id_policy" in pending_write
+                and pending_write["reasoning_item_id_policy"] not in (None, "preserve", "omit")
+            )
+            or (
+                "folded_tool_outputs" in pending_write
+                and (
+                    not isinstance(pending_write["folded_tool_outputs"], dict)
+                    or set(pending_write["folded_tool_outputs"]) != {"turn", "call_ids"}
+                    or type(pending_write["folded_tool_outputs"]["turn"]) is not int
+                    or pending_write["folded_tool_outputs"]["turn"] < 0
+                    or not isinstance(pending_write["folded_tool_outputs"]["call_ids"], list)
+                    or not pending_write["folded_tool_outputs"]["call_ids"]
+                    or not all(
+                        isinstance(call_id, str)
+                        for call_id in pending_write["folded_tool_outputs"]["call_ids"]
+                    )
+                )
+            )
+            # These keys describe the withheld batch, so they are meaningless on an
+            # ordinary pending write and are refused there rather than restored as
+            # state nothing consumes.
+            or (
+                not pending_write.get("held")
+                and (
+                    "response_id" in pending_write
+                    or "store" in pending_write
+                    or "reasoning_item_id_policy" in pending_write
+                    or "folded_tool_outputs" in pending_write
+                )
+            )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
             or not pending_write["items"]
