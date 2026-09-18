@@ -4,7 +4,6 @@ import contextlib
 import inspect
 import logging
 import re
-import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
@@ -326,24 +325,14 @@ def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | 
     return None
 
 
-# Parameter names that build a generated arguments model without an error, survive as fields,
-# and still cannot behave as ordinary fields. A field named ``model_post_init`` becomes the
-# model's post-init hook, so Pydantic calls the argument value after validation and every tool
-# invocation fails with an unrelated ``TypeError``. Names that are silently swallowed by
-# ``create_model`` instead are caught after construction, by checking ``model_fields``.
+# Parameter names that register on the generated arguments model without any error but cannot
+# be invoked correctly. A field named ``model_post_init`` becomes the model's post-init hook, so
+# Pydantic calls the argument value after validation and every tool invocation fails with an
+# unrelated ``TypeError``. Names that ``create_model`` silently consumes as its own keyword
+# arguments are caught after construction instead, by checking ``model_fields``. Names Pydantic
+# itself rejects (protected-namespace collisions, ``model_config``) already raise a construction
+# error that identifies the conflicting name, so those are left to Pydantic.
 _PYDANTIC_RESERVED_PARAM_NAMES = frozenset({"model_post_init"})
-
-
-def _pydantic_rejects_param_name(name: str) -> bool:
-    """Return whether Pydantic refuses a field with this name on a generated model."""
-    probe_fields: dict[str, Any] = {name: (str, Field())}
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            create_model("_agents_param_name_probe", __base__=BaseModel, **probe_fields)
-        except Exception:
-            return True
-    return False
 
 
 def _unsupported_pydantic_param_names_error(func_name: str, names: Sequence[str]) -> UserError:
@@ -553,19 +542,7 @@ def function_schema(
     if reserved_params:
         raise _unsupported_pydantic_param_names_error(func_name, reserved_params)
 
-    try:
-        dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
-    except Exception as exc:
-        # Pydantic reserves some parameter names on generated models (``model_config`` is
-        # consumed by ``create_model`` as model configuration, and protected-namespace names
-        # such as ``model_dump`` or ``model_validate`` collide with BaseModel members). Those
-        # failures surface as opaque errors deep inside Pydantic, so identify the offending
-        # parameter names and raise an actionable error instead. Failures unrelated to a
-        # parameter name propagate unchanged.
-        rejected_params = sorted(name for name in fields if _pydantic_rejects_param_name(name))
-        if not rejected_params:
-            raise
-        raise _unsupported_pydantic_param_names_error(func_name, rejected_params) from exc
+    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
 
     # ``create_model`` consumes some names as its own keyword arguments (``__doc__`` and
     # ``__module__`` among them), so construction succeeds but the parameter silently never

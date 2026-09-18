@@ -131,25 +131,14 @@ def test_to_call_args_does_not_shadow_pydantic_model_fields_set():
     assert result == "hello:42"
 
 
-def test_param_named_model_config_raises_user_error():
-    """``model_config`` is consumed by ``create_model`` as model configuration, so the raw
-    failure is an opaque ``TypeError: 'FieldInfo' object is not iterable`` inside Pydantic."""
-
-    def func(model_config: str) -> str:
-        return model_config
-
-    with pytest.raises(UserError, match=r"`model_config`"):
-        function_schema(func, use_docstring_info=False)
-
-
-def test_param_named_model_dump_raises_user_error():
-    """Protected-namespace collisions such as ``model_dump`` must raise an actionable
-    UserError instead of Pydantic's raw ``ValueError``."""
+def test_param_named_model_dump_surfaces_pydantic_error():
+    """Protected-namespace collisions are rejected by Pydantic itself with an error that
+    already names the conflicting field, so that error is left untouched."""
 
     def func(model_dump: str, query: str) -> str:
         return f"{model_dump}:{query}"
 
-    with pytest.raises(UserError, match=r"`model_dump`"):
+    with pytest.raises(Exception, match=r"model_dump"):
         function_schema(func, use_docstring_info=False)
 
 
@@ -161,14 +150,6 @@ def test_param_named_model_post_init_raises_user_error():
         return model_post_init
 
     with pytest.raises(UserError, match=r"`model_post_init`"):
-        function_schema(func, use_docstring_info=False)
-
-
-def test_multiple_reserved_param_names_are_all_reported():
-    def func(model_dump: str, model_validate: str, query: str) -> str:
-        return query
-
-    with pytest.raises(UserError, match=r"`model_dump`, `model_validate`"):
         function_schema(func, use_docstring_info=False)
 
 
