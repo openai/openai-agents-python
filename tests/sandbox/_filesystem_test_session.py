@@ -21,7 +21,11 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSessionState,
 )
 from agents.sandbox.session import SandboxSession
-from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.base_sandbox_session import (
+    _EXISTING_TARGET_EXIT_CODE,
+    _TARGET_EXISTS_SCRIPT,
+    BaseSandboxSession,
+)
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase, SnapshotSpec
 from agents.sandbox.types import ExecResult, Permissions, User
@@ -56,6 +60,19 @@ class FilesystemTestSandboxSession(BaseSandboxSession):
             path = Path(command_parts[2])
             exists = path.is_dir() if command_parts[1] == "-d" else path.is_file()
             return ExecResult(stdout=b"", stderr=b"", exit_code=0 if exists else 1)
+        # The exclusive-create probe is a bare existence test dispatched as `sh -c`. It has
+        # to see a dangling symlink as present, so it uses lexists rather than exists.
+        if (
+            len(command_parts) == 5
+            and command_parts[:2] == ("sh", "-c")
+            and command_parts[2] == _TARGET_EXISTS_SCRIPT
+        ):
+            present = os.path.lexists(command_parts[4])
+            return ExecResult(
+                stdout=b"",
+                stderr=b"",
+                exit_code=_EXISTING_TARGET_EXIT_CODE if present else 0,
+            )
         raise AssertionError(f"Unexpected filesystem test command: {command_parts!r}")
 
     @staticmethod
