@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import shutil
 import signal
 import tarfile
 import threading
@@ -610,3 +612,65 @@ async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     # the workspace root are only released once nothing is still writing to them.
     assert events == ["extract-start", "extract-end"]
     assert not buf.closed
+
+
+@pytest.mark.asyncio
+async def test_client_delete_keeps_workspace_removal_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The event loop must keep running while `delete()` removes the workspace root.
+
+    The removal walks the whole workspace tree, so running it inline starves every other
+    task on the loop for its full duration. `rm(recursive=True)`, `persist_workspace`, and
+    `hydrate_workspace` already hand that work to `run_blocking_workspace_io`.
+
+    The handshake below measures the removal itself rather than the whole `delete()` call,
+    so an `await` elsewhere in the method, such as the ephemeral unmount loop, cannot
+    satisfy it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "payload.txt").write_text("payload", encoding="utf-8")
+
+    client = UnixLocalSandboxClient()
+    session = await client.resume(
+        UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+            workspace_root_owned=True,
+        )
+    )
+
+    real_rmtree = shutil.rmtree
+    removal_started = threading.Event()
+    loop_advanced = threading.Event()
+    loop_advanced_during_removal: list[bool] = []
+
+    def _slow_rmtree(path: object, *args: object, **kwargs: object) -> None:
+        removal_started.set()
+        # The observer can only answer while the removal is in flight if the loop is
+        # still free. An inline removal holds the loop here until this call returns.
+        loop_advanced_during_removal.append(loop_advanced.wait(timeout=5.0))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(unix_local_module.shutil, "rmtree", _slow_rmtree)
+
+    async def _observe_loop() -> None:
+        while not removal_started.is_set():
+            await asyncio.sleep(0)
+        loop_advanced.set()
+
+    observer = asyncio.create_task(_observe_loop())
+    try:
+        returned = await client.delete(session)
+    finally:
+        observer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await observer
+
+    assert removal_started.is_set()
+    assert loop_advanced_during_removal == [True]
+    # The removal still targets the manifest root, and `delete()` still hands the same
+    # session back to the caller.
+    assert not workspace.exists()
+    assert returned is session
