@@ -149,19 +149,12 @@ class CodexExec:
             process.kill()
             raise RuntimeError("Codex subprocess has no stdin")
 
-        process.stdin.write(args.input.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-
         if process.stdout is None:
             process.kill()
             raise RuntimeError("Codex subprocess has no stdout")
         stdout = process.stdout
 
         cancel_task: asyncio.Task[None] | None = None
-        if args.signal is not None:
-            # Mirror AbortSignal semantics by terminating the subprocess.
-            cancel_task = asyncio.create_task(_watch_signal(args.signal, process))
 
         async def _read_stdout_line() -> bytes:
             if args.idle_timeout_seconds is None:
@@ -190,6 +183,15 @@ class CodexExec:
                     await read_task
 
         try:
+            # Prompt delivery can fail or be cancelled before stdout iteration starts.
+            process.stdin.write(args.input.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+
+            if args.signal is not None:
+                # Mirror AbortSignal semantics by terminating the subprocess.
+                cancel_task = asyncio.create_task(_watch_signal(args.signal, process))
+
             while True:
                 line = await _read_stdout_line()
                 if not line:
