@@ -15,6 +15,9 @@ dependencies = [
     "websockets>=15.0, <17",
     "mcp>=1.19.0, <3; python_version >= '3.10'",
     # Security floors for transitive runtime dependencies.
+    # cryptography enters the base graph via mcp -> pyjwt[crypto] (unpinned),
+    # so pin a safe floor (46.0.7 fixes the 9.8-critical GHSA-p423-j2cm-9vmq).
+    "cryptography>=46.0.7,<51",
     "httpx2>=2.12.0",
     "pyjwt>=2.13.0",
     "python-multipart>=0.0.31",
@@ -50,7 +53,7 @@ any-llm = [
 ]
 realtime = ["websockets>=15.0, <17"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
-encrypt = ["cryptography>=45.0,<51"]
+encrypt = ["cryptography>=46.0.7,<51"]
 redis = ["redis>=7"]
 dapr = [
     "dapr>=1.16.0",
@@ -120,7 +123,7 @@ dev = [
   "eval-type-backport>=0.2.2",
   "fastapi >= 0.110.0, <1",
   "aiosqlite>=0.21.0",
-  "cryptography>=45.0,<51",
+  "cryptography>=46.0.7,<51",
   "fakeredis>=2.31.3",
   "dapr>=1.14.0",
   "aiohttp>=3.14.3,<4",
