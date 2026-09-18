@@ -8,7 +8,9 @@ from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -17,7 +19,9 @@ from openai.types.responses.response_reasoning_item_param import (
     ResponseReasoningItemParam,
     Summary,
 )
-from sqlalchemy import event, insert, select, text, update
+from sqlalchemy import create_mock_engine, event, insert, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
@@ -33,6 +37,60 @@ pytestmark = pytest.mark.asyncio
 
 # Use in-memory SQLite for tests
 DB_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@pytest.mark.parametrize("dialect_url", ["mysql://", "mariadb://"])
+async def test_schema_create_all_compiles_for_mysql_family(dialect_url: str):
+    """MySQL-family schema creation includes both tables and the session-time index."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+    tables = (session._sessions, session._messages)
+    statements: list[str] = []
+
+    def record(statement: Any, *args: Any, **kwargs: Any) -> None:
+        statements.append(str(statement.compile(dialect=engine.dialect)))
+
+    engine = create_mock_engine(dialect_url, record)
+
+    try:
+        session._metadata.create_all(engine)
+        for table in tables:
+            # CHARACTER SET must be emitted with the collation: a column given
+            # only a collation inherits the database character set, and the
+            # server rejects utf8mb4_bin against a non-utf8mb4 set with
+            # ERROR 1253, failing create_all() on e.g. a latin1 MySQL 5.7.
+            assert (
+                table.c.session_id.type.compile(dialect=engine.dialect)
+                == "VARCHAR(190) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+            )
+    finally:
+        await session.engine.dispose()
+
+    assert any("CREATE TABLE agent_sessions" in statement for statement in statements)
+    messages_ddl = next(
+        statement for statement in statements if "CREATE TABLE agent_messages" in statement
+    )
+    assert (
+        "FOREIGN KEY(session_id) REFERENCES agent_sessions (session_id) ON DELETE CASCADE"
+        in messages_ddl
+    )
+    assert any(
+        "CREATE INDEX idx_agent_messages_session_time "
+        "ON agent_messages (session_id, created_at)" in statement
+        for statement in statements
+    )
+
+
+async def test_schema_keeps_unbounded_session_ids_for_sqlite_and_postgresql():
+    """SQLite and PostgreSQL retain the pre-existing unbounded string type."""
+    session = SQLAlchemySession.from_url("schema_compile", url=DB_URL)
+
+    try:
+        for table in (session._sessions, session._messages):
+            session_id_type = table.c.session_id.type
+            assert session_id_type.compile(dialect=postgresql.dialect()) == "VARCHAR"
+            assert session_id_type.compile(dialect=sqlite.dialect()) == "VARCHAR"
+    finally:
+        await session.engine.dispose()
 
 
 def _make_message_item(item_id: str, text_value: str) -> TResponseInputItem:
@@ -201,6 +259,331 @@ async def test_session_isolation(agent: Agent):
     result = await Runner.run(agent, "What animal did I say I like?", session=session1)
     assert "cats" in result.final_output.lower()
     assert "dogs" not in result.final_output.lower()
+
+
+async def test_session_ids_are_case_sensitive():
+    """Session IDs that differ only by case retain separate histories."""
+    engine = create_async_engine(DB_URL)
+    upper = SQLAlchemySession("Foo", engine=engine, create_tables=True)
+    lower = SQLAlchemySession("foo", engine=engine, create_tables=True)
+
+    try:
+        await upper.add_items([{"role": "user", "content": "upper"}])
+        await lower.add_items([{"role": "user", "content": "lower"}])
+
+        assert await upper.get_items() == [{"role": "user", "content": "upper"}]
+        assert await lower.get_items() == [{"role": "user", "content": "lower"}]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+@pytest.mark.parametrize("create_tables", [True, False])
+async def test_constructor_does_not_impose_a_session_id_length_bound(
+    dialect_name: str, create_tables: bool
+):
+    """The constructor leaves the actual schema authoritative for session ID length."""
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name=dialect_name)
+    long_id = "a" * 191
+
+    session = SQLAlchemySession(long_id, engine=engine, create_tables=create_tables)
+
+    assert session.session_id == long_id
+
+
+class _ScalarResult:
+    def __init__(self, value: str | None) -> None:
+        self._value = value
+
+    def scalar_one_or_none(self) -> str | None:
+        return self._value
+
+
+@pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+async def test_validate_session_id_collation_rejects_pad_space(
+    dialect_name: str,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name=dialect_name, is_mariadb=dialect_name == "mariadb")
+    session = SQLAlchemySession(
+        "tenant ",
+        engine=engine,
+        create_tables=True,
+        sessions_table="custom_sessions",
+    )
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")])
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"session_id 'tenant ' ends with a space, which is not distinct under the "
+            r"column's PAD SPACE collation 'utf8mb4_bin'; two sessions would silently "
+            r"share one history"
+        ),
+    ):
+        await session._validate_session_id_collation(conn)
+
+    expected_calls = 1 if dialect_name == "mariadb" else 2
+    assert conn.execute.await_count == expected_calls
+    assert conn.execute.await_args_list[0].args[1] == {"table_name": "custom_sessions"}
+    if dialect_name == "mysql":
+        assert conn.execute.await_args_list[1].args[1] == {"collation": "utf8mb4_bin"}
+
+
+async def test_validate_session_id_collation_rejects_pad_space_on_mysql_57() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(
+        name="mysql",
+        is_mariadb=False,
+        _extract_error_code=lambda exc: exc.args[0].args[0],
+    )
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(
+        side_effect=[
+            _ScalarResult("utf8mb4_bin"),
+            OperationalError(
+                "SELECT PAD_ATTRIBUTE",
+                {},
+                Exception(Exception(1054, "Unknown column PAD_ATTRIBUTE")),
+            ),
+            _ScalarResult("5.7.44"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._validate_session_id_collation(conn)
+
+    assert conn.execute.await_count == 3
+
+
+async def test_validate_session_id_collation_allows_mariadb_nopad() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=True)
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value=_ScalarResult("utf8mb4_nopad_bin"))
+
+    await session._validate_session_id_collation(conn)
+
+    assert conn.execute.await_count == 1
+
+
+async def test_validate_session_id_collation_allows_no_pad() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql")
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_0900_bin"), _ScalarResult("NO PAD")]
+    )
+
+    await session._validate_session_id_collation(conn)
+
+
+@pytest.mark.parametrize("pad_attribute", [None, "UNKNOWN"])
+async def test_validate_session_id_collation_rejects_unknown_pad_attribute(
+    pad_attribute: str | None,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql")
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_0900_bin"), _ScalarResult(pad_attribute)]
+    )
+
+    with pytest.raises(RuntimeError, match="could not inspect collation padding"):
+        await session._validate_session_id_collation(conn)
+
+
+@pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
+async def test_validate_session_id_collation_skips_non_mysql_dialects(
+    dialect_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name=dialect_name)
+    monkeypatch.setattr(SQLAlchemySession, "_configure_sqlite_engine", MagicMock())
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    await session._validate_session_id_collation(conn)
+
+    conn.execute.assert_not_awaited()
+
+
+async def test_create_tables_false_skips_session_id_collation_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SQLAlchemySession.from_url("tenant ", url=DB_URL, create_tables=False)
+    validate = AsyncMock()
+    monkeypatch.setattr(session, "_validate_session_id_collation", validate)
+
+    try:
+        await session._ensure_tables()
+    finally:
+        await session.engine.dispose()
+
+    validate.assert_not_awaited()
+
+
+async def test_existing_mysql_schema_validates_trailing_space_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+    validate = AsyncMock()
+    monkeypatch.setattr(session, "_validate_session_id_collation", validate)
+
+    await session._ensure_tables()
+
+    validate.assert_awaited_once_with(conn)
+
+
+async def test_existing_mysql_schema_retries_failed_pad_attribute_inspection() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    failed_conn = MagicMock()
+    failed_conn.execute = AsyncMock(
+        side_effect=[
+            _ScalarResult("utf8mb4_bin"),
+            SQLAlchemyError("PAD_ATTRIBUTE query failed"),
+            _ScalarResult("8.0.36"),
+        ]
+    )
+    retry_conn = MagicMock()
+    retry_conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")]
+    )
+    connection_contexts = []
+    for conn in (failed_conn, retry_conn):
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=conn)
+        connection_context.__aexit__ = AsyncMock(return_value=None)
+        connection_contexts.append(connection_context)
+    engine.connect.side_effect = connection_contexts
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(SQLAlchemyError, match="PAD_ATTRIBUTE query failed"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert engine.connect.call_count == 2
+
+
+async def test_existing_mysql_schema_rejects_unknown_collation() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value=_ScalarResult(None))
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(RuntimeError, match="could not inspect session_id collation"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+
+async def test_existing_mysql_schema_retries_failed_collation_inspection() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    failed_conn = MagicMock()
+    failed_conn.execute = AsyncMock(side_effect=SQLAlchemyError("metadata query failed"))
+    retry_conn = MagicMock()
+    retry_conn.execute = AsyncMock(
+        side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")]
+    )
+    connection_contexts = []
+    for conn in (failed_conn, retry_conn):
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=conn)
+        connection_context.__aexit__ = AsyncMock(return_value=None)
+        connection_contexts.append(connection_context)
+    engine.connect.side_effect = connection_contexts
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    with pytest.raises(SQLAlchemyError, match="metadata query failed"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert engine.connect.call_count == 2
+
+
+async def test_existing_schema_validation_cannot_be_skipped_during_connect() -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=[_ScalarResult("utf8mb4_bin"), _ScalarResult("PAD SPACE")])
+    connection_context = MagicMock()
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant ", engine=engine, create_tables=False)
+
+    async def enter_with_mutated_id() -> MagicMock:
+        session.session_id = "tenant"
+        return conn
+
+    connection_context.__aenter__ = AsyncMock(side_effect=enter_with_mutated_id)
+
+    with pytest.raises(ValueError, match="PAD SPACE collation"):
+        await session._ensure_tables()
+    assert session._session_id_collation_validated is False
+
+
+async def test_collation_validation_cache_does_not_hide_mutated_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock(spec=AsyncEngine)
+    engine.dialect = SimpleNamespace(name="mysql", is_mariadb=False)
+    conn = MagicMock()
+    conn.run_sync = AsyncMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=conn)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine.begin.return_value = connection_context
+    engine.connect.return_value = connection_context
+    session = SQLAlchemySession("tenant", engine=engine, create_tables=True)
+    validate = AsyncMock()
+    monkeypatch.setattr(session, "_validate_session_id_collation", validate)
+
+    await session._ensure_tables()
+    session.session_id = "tenant "
+    await session._ensure_tables()
+
+    validate.assert_awaited_once_with(conn)
+
+
+async def test_session_ids_keep_trailing_spaces_on_sqlite():
+    """SQLite stores trailing-space IDs as distinct values."""
+    engine = create_async_engine(DB_URL)
+    bare = SQLAlchemySession("tenant", engine=engine, create_tables=True)
+    padded = SQLAlchemySession("tenant ", engine=engine, create_tables=True)
+
+    try:
+        await bare.add_items([{"role": "user", "content": "bare"}])
+        await padded.add_items([{"role": "user", "content": "padded"}])
+
+        assert await bare.get_items() == [{"role": "user", "content": "bare"}]
+        assert await padded.get_items() == [{"role": "user", "content": "padded"}]
+    finally:
+        await engine.dispose()
 
 
 async def test_get_items_with_limit(agent: Agent):
