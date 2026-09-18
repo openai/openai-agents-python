@@ -12,8 +12,15 @@ from typing import cast
 
 import pytest
 
+from agents.editor import ApplyPatchOperation
 from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.sandbox.apply_patch import WorkspaceEditor
+from agents.sandbox.errors import (
+    ApplyPatchFileNotFoundError,
+    InvalidManifestPathError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -565,6 +572,300 @@ class TestUnixLocalUserScopedFilesystem:
         assert session.exec_commands[0][4:6] == ("sh", "-lc")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
+
+
+class TestUnixLocalRmSymlinks:
+    @pytest.mark.asyncio
+    async def test_apply_patch_delete_file_removes_symlink_not_its_target(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("keep", encoding="utf-8")
+        link = workspace / "alias"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(type="delete_file", path="alias")
+        )
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_apply_patch_move_from_symlink_removes_link_not_its_target(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("old\n", encoding="utf-8")
+        link = workspace / "alias"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="alias",
+                diff="@@\n-old\n+new\n",
+                move_to="moved.txt",
+            )
+        )
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "old\n"
+        assert (workspace / "moved.txt").read_text(encoding="utf-8") == "new\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", ["missing.txt", "/etc/hostname"])
+    async def test_apply_patch_delete_file_removes_dangling_and_outward_symlinks(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        link = workspace / "alias"
+        link.symlink_to(target)
+        session = _RecordingUnixLocalSession(workspace)
+
+        result = await WorkspaceEditor(session).apply_patch(
+            ApplyPatchOperation(type="delete_file", path="alias")
+        )
+
+        assert result == "Done!"
+        assert not link.is_symlink()
+        assert not link.exists()
+
+    @pytest.mark.asyncio
+    async def test_apply_patch_delete_file_reports_a_missing_entry(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(ApplyPatchFileNotFoundError):
+            await WorkspaceEditor(session).apply_patch(
+                ApplyPatchOperation(type="delete_file", path="nothing-here")
+            )
+
+    @pytest.mark.asyncio
+    async def test_rm_accepts_a_symlinked_grant_root_alias(self, tmp_path: Path) -> None:
+        """A grant configured through a symlink is addressed by its resolved form, like root."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "scratch.txt").write_text("scratch", encoding="utf-8")
+        shared_link = tmp_path / "shared-link"
+        shared_link.symlink_to(shared)
+        session = UnixLocalSandboxSession(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(
+                    root=str(workspace),
+                    extra_path_grants=(SandboxPathGrant(path=str(shared_link)),),
+                ),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+
+        await session.rm(str(shared_link / "scratch.txt"))
+        assert not (shared / "scratch.txt").exists()
+
+        await session.rm(str(shared_link), recursive=True)
+        assert not shared.exists()
+
+    @pytest.mark.asyncio
+    async def test_rm_removes_file_symlink_not_its_target(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("keep", encoding="utf-8")
+        link = workspace / "linkfile"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("linkfile")
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("recursive", [False, True])
+    async def test_rm_removes_directory_symlink_not_its_target(
+        self,
+        tmp_path: Path,
+        recursive: bool,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target_dir = workspace / "realdir" / "inner"
+        target_dir.mkdir(parents=True)
+        data = target_dir / "data.txt"
+        data.write_text("keep", encoding="utf-8")
+        link = workspace / "linkdir"
+        link.symlink_to("realdir")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("linkdir", recursive=recursive)
+
+        assert not link.is_symlink()
+        assert data.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_rm_removes_symlink_pointing_outside_the_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        link = workspace / "escape"
+        link.symlink_to(outside)
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("escape")
+
+        assert not link.is_symlink()
+        assert outside.read_text(encoding="utf-8") == "secret"
+
+    @pytest.mark.asyncio
+    async def test_rm_removes_dangling_symlink(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        link = workspace / "dangling"
+        link.symlink_to(tmp_path / "missing")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("dangling")
+
+        assert not link.is_symlink()
+
+    @pytest.mark.asyncio
+    async def test_rm_still_rejects_entries_reached_through_an_escaping_symlink(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        victim = outside_dir / "victim.txt"
+        victim.write_text("secret", encoding="utf-8")
+        (workspace / "escape_dir").symlink_to(outside_dir)
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(InvalidManifestPathError):
+            await session.rm("escape_dir/victim.txt")
+
+        assert victim.read_text(encoding="utf-8") == "secret"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_path", ["C:\\outside\\file", "/outside/file", "../file"])
+    async def test_rm_rejects_absolute_and_escaping_raw_paths_before_splitting_the_leaf(
+        self,
+        tmp_path: Path,
+        raw_path: str,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # A workspace entry literally named like the raw path must not be what gets removed.
+        decoy = workspace / raw_path.split("/")[-1]
+        decoy.write_text("keep", encoding="utf-8")
+        session = _RecordingUnixLocalSession(workspace)
+
+        with pytest.raises(InvalidManifestPathError):
+            await session.rm(raw_path)
+
+        assert decoy.read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.asyncio
+    async def test_rm_applies_the_most_specific_grant_to_the_leaf(self, tmp_path: Path) -> None:
+        """A link into a writable grant must not let rm delete a nested read-only grant root."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        shared = tmp_path / "shared"
+        protected = shared / "protected"
+        protected.mkdir(parents=True)
+        (protected / "keep.txt").write_text("keep", encoding="utf-8")
+        (workspace / "tmp-link").symlink_to(shared)
+        session = UnixLocalSandboxSession(
+            state=UnixLocalSandboxSessionState(
+                manifest=Manifest(
+                    root=str(workspace),
+                    extra_path_grants=(
+                        SandboxPathGrant(path=str(shared)),
+                        SandboxPathGrant(path=str(protected), read_only=True),
+                    ),
+                ),
+                snapshot=NoopSnapshot(id="noop"),
+            )
+        )
+
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await session.rm("tmp-link/protected", recursive=True)
+
+        assert (protected / "keep.txt").read_text(encoding="utf-8") == "keep"
+        (shared / "scratch.txt").write_text("scratch", encoding="utf-8")
+        await session.rm("tmp-link/scratch.txt")
+        assert not (shared / "scratch.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_rm_accepts_paths_resolved_through_a_symlinked_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Manifest.root may be a symlink; ls() reports resolved paths that rm() must accept."""
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        (real_root / "via-real.txt").write_text("x", encoding="utf-8")
+        (real_root / "via-link.txt").write_text("x", encoding="utf-8")
+        session = _RecordingUnixLocalSession(root_link)
+
+        await session.rm(str(real_root / "via-real.txt"))
+        await session.rm(str(root_link / "via-link.txt"))
+
+        assert not (real_root / "via-real.txt").exists()
+        assert not (real_root / "via-link.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_rm_validates_the_symlinked_root_alias_itself(self, tmp_path: Path) -> None:
+        """Naming the root through its alias must not be misread as removing the alias link."""
+        real_root = tmp_path / "ws"
+        real_root.mkdir()
+        root_link = tmp_path / "ws-link"
+        root_link.symlink_to(real_root)
+        (tmp_path / "dummy").mkdir()
+        # A noncanonical spelling of the root alias must be recognized as the root too.
+        session = _RecordingUnixLocalSession(tmp_path / "dummy" / ".." / "ws-link")
+
+        assert session._rm_target_path(".") == real_root
+        assert session._rm_target_path(str(root_link)) == real_root
+        # The configured (noncanonical) spelling itself must also name the root.
+        assert session._rm_target_path(str(tmp_path / "dummy" / ".." / "ws-link")) == real_root
+
+    @pytest.mark.asyncio
+    async def test_rm_as_user_checks_the_symlink_entry_and_keeps_its_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        target = workspace / "plain.txt"
+        target.write_text("keep", encoding="utf-8")
+        link = workspace / "linkfile"
+        link.symlink_to("plain.txt")
+        session = _RecordingUnixLocalSession(workspace)
+
+        await session.rm("linkfile", user=User(name="sandbox-user"))
+
+        assert not link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "keep"
+        assert len(session.exec_commands) == 1
+        assert session.exec_commands[0][-2:] == (str(link), "0")
 
 
 @pytest.mark.asyncio
