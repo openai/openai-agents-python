@@ -679,6 +679,48 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_event_raises_builtin_timeout_error_on_real_clock() -> None:
+    """The asyncio timeout inside _wait_for_event must surface as the builtin TimeoutError.
+
+    On Python 3.10 asyncio.wait_for raises asyncio.TimeoutError, a different class from
+    the builtin; the callers only catch the builtin. This test uses the real clock so the
+    asyncio timeout path runs, unlike the deadline test that patches monotonic.
+    """
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+
+    with pytest.raises(TimeoutError, match="Timeout waiting for event"):
+        await _wait_for_event(queue, ["session.created"], timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_real_clock_session_creation_timeout_is_wrapped(monkeypatch: pytest.MonkeyPatch):
+    """A session.created that never arrives is reported as STTWebsocketConnectionError
+    when the timeout comes from asyncio.wait_for rather than the patched deadline clock.
+    """
+    monkeypatch.setattr("agents.voice.models.openai_stt.SESSION_CREATION_TIMEOUT", 0.01)
+    mock_ws = create_mock_websocket([])
+
+    with patch("websockets.connect", return_value=mock_ws):
+        audio_input = await StreamedAudioInputFactory.get(count=2)
+        session = OpenAISTTTranscriptionSession(
+            input=audio_input,
+            client=create_mock_openai_client(),
+            model="whisper-1",
+            settings=STTModelSettings(),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+        with pytest.raises(STTWebsocketConnectionError) as exc_info:
+            async for _ in session.transcribe_turns():
+                pass
+
+        assert "Timeout waiting for transcription_session.created event" in str(exc_info.value)
+
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_session_error_event(monkeypatch: pytest.MonkeyPatch):
     """
     If the session receives an event with "type": "error", it should emit preceding transcripts,
