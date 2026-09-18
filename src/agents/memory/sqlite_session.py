@@ -58,6 +58,7 @@ class SQLiteSession(SessionABC):
         self.messages_table = messages_table
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
+        self._connection_owners: dict[sqlite3.Connection, threading.Thread] = {}
         self._quarantined_connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self._closed = False
@@ -152,6 +153,7 @@ class SQLiteSession(SessionABC):
 
         with self._connections_lock:
             self._connections.discard(conn)
+            self._connection_owners.pop(conn, None)
             if close_failed:
                 self._quarantined_connections.add(conn)
             else:
@@ -178,11 +180,27 @@ class SQLiteSession(SessionABC):
                 self._configure_connection(connection)
                 self._local.connection = connection
                 with self._connections_lock:
+                    self._close_connections_from_exited_threads()
                     self._connections.add(connection)
+                    self._connection_owners[connection] = threading.current_thread()
             assert isinstance(self._local.connection, sqlite3.Connection), (
                 f"Expected sqlite3.Connection, got {type(self._local.connection)}"
             )
             return self._local.connection
+
+    def _close_connections_from_exited_threads(self) -> None:
+        """Close tracked connections whose owning worker thread has exited."""
+        # Callers hold _connections_lock. A thread-local connection is unreachable once
+        # its thread is gone, so this registry is the only thing keeping it open.
+        for conn, owner in list(self._connection_owners.items()):
+            if owner.is_alive():
+                continue
+            del self._connection_owners[conn]
+            self._connections.discard(conn)
+            try:
+                conn.close()
+            except Exception:
+                self._quarantined_connections.add(conn)
 
     @staticmethod
     def _configure_connection(conn: sqlite3.Connection) -> None:
@@ -454,6 +472,7 @@ class SQLiteSession(SessionABC):
                 del self._local.connection
 
             with self._connections_lock:
+                self._connection_owners.clear()
                 has_unclosed_connections = bool(self._quarantined_connections)
             if not has_unclosed_connections and self._lock_path is not None:
                 with self._connections_lock:
