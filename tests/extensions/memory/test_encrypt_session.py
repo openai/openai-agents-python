@@ -825,6 +825,34 @@ async def test_encrypted_pop_rechecks_authentication_after_expired_tail(
         underlying_session.close()
 
 
+async def test_encrypted_pop_restores_wrong_key_envelope_under_interleaved_append(
+    underlying_session: SQLiteSession,
+):
+    """Test that popping an unauthenticated item immediately restores it without loss."""
+    correct = EncryptedSession("test_session", underlying_session, "correct-key")
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key")
+    try:
+        await correct.add_items([{"role": "user", "content": "saved"}])
+        original_ciphertext = await underlying_session.get_items()
+
+        # Wrong-key pop raises InvalidToken and immediately restores the popped item
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == original_ciphertext
+
+        # An interleaved append from another writer occurs
+        await correct.add_items([{"role": "assistant", "content": "interleaved"}])
+
+        # Verify all items remain intact and readable with the correct key
+        items = await correct.get_items()
+        assert [i.get("content") for i in items] == ["saved", "interleaved"]
+        assert await correct.pop_item() == {"role": "assistant", "content": "interleaved"}
+        assert await correct.pop_item() == {"role": "user", "content": "saved"}
+    finally:
+        underlying_session.close()
+
+
 async def test_encrypted_session_clear(encryption_key: str, underlying_session: SQLiteSession):
     """Test clear_session functionality."""
     session = EncryptedSession(

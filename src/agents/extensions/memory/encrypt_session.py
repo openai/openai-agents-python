@@ -204,16 +204,31 @@ class EncryptedSession(SessionABC):
         token = self.cipher.encrypt(_to_json_bytes(payload)).decode("utf-8")
         return {"__enc__": 1, "v": self._ver, "kid": self._kid, "payload": token}
 
+    def _unwrap_envelope(self, item: EncryptedEnvelope) -> tuple[TResponseInputItem | None, bool]:
+        """Unwrap an encrypted envelope.
+
+        Returns (item, is_authentic):
+        - If valid and unexpired: (item, True)
+        - If authentic but expired: (None, True)
+        - If unauthenticated / wrong key / malformed: (None, False)
+        """
+        try:
+            token = item["payload"].encode("utf-8")
+            self.cipher.extract_timestamp(token)
+        except (InvalidToken, KeyError):
+            return None, False
+
+        try:
+            plaintext = self.cipher.decrypt(token, ttl=self.ttl)
+            return cast(TResponseInputItem, _from_json_bytes(plaintext)), True
+        except (InvalidToken, KeyError):
+            return None, True
+
     def _unwrap(self, item: TResponseInputItem | EncryptedEnvelope) -> TResponseInputItem | None:
         if not _is_encrypted_envelope(item):
             return cast(TResponseInputItem, item)
-
-        try:
-            token = item["payload"].encode("utf-8")
-            plaintext = self.cipher.decrypt(token, ttl=self.ttl)
-            return cast(TResponseInputItem, _from_json_bytes(plaintext))
-        except (InvalidToken, KeyError):
-            return None
+        item_val, _ = self._unwrap_envelope(item)
+        return item_val
 
     def _unwrap_valid_items(
         self, encrypted_items: list[TResponseInputItem]
@@ -284,35 +299,33 @@ class EncryptedSession(SessionABC):
     ) -> TResponseInputItem | None:
         """Remove the latest readable item, skipping authenticated expired items.
 
-        Raises ``InvalidToken`` before deleting an encrypted item that cannot be
-        authenticated with this session's key. Authentication does not apply TTL,
-        so an expired token encrypted with a different key is also preserved.
-
-        The authentication read and underlying pop are separate operations.
-        Callers must serialize this operation with other mutations of the same
-        underlying history, including mutations through other session instances.
+        Raises ``InvalidToken`` if an encrypted item cannot be authenticated with
+        this session's key, restoring the item to the underlying session so that
+        recoverable ciphertext is preserved.
         """
-        # ponytail: verify signature before pop to avoid deleting ciphertext on bad key
+        # ponytail: pop directly to eliminate TOCTOU; restore on bad key
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
         while True:
-            latest = await _call_session_method(
-                self.underlying_session.get_items,
-                1,
-                wrapper=wrapper,
-            )
-            if not latest:
-                return None
-            candidate = latest[-1]
-            if _is_encrypted_envelope(candidate):
-                self.cipher.extract_timestamp(candidate["payload"].encode("utf-8"))
-
             enc = await _call_session_method(
                 self.underlying_session.pop_item,
                 wrapper=wrapper,
             )
             if not enc:
                 return None
-            item = self._unwrap(enc)
+            if not _is_encrypted_envelope(enc):
+                return cast(TResponseInputItem, enc)
+
+            item, is_authentic = self._unwrap_envelope(enc)
+            if not is_authentic:
+                await _call_session_method(
+                    self.underlying_session.add_items,
+                    [enc],
+                    wrapper=wrapper,
+                )
+                raise InvalidToken(
+                    "Cannot authenticate encrypted item with the configured session key."
+                )
+
             if item is not None:
                 return item
 
