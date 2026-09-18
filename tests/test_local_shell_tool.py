@@ -347,3 +347,85 @@ async def test_run_state_preserves_official_local_shell_original_input(
 
     restored_state = await RunState.from_json(agent, serialized)
     assert restored_state.to_json()["original_input"] == [original_input]
+
+
+@pytest.mark.asyncio
+async def test_runner_surfaces_local_shell_executor_error_to_model() -> None:
+    def failing_executor(request: LocalShellCommandRequest) -> str:
+        raise FileNotFoundError(2, "No such file or directory", "missing-bin")
+
+    tool = LocalShellTool(executor=failing_executor)
+
+    model = ScriptedModel()
+    agent = Agent(name="shell-agent", model=model, tools=[tool])
+
+    local_shell_call = LocalShellCall(
+        id="lsh_test",
+        action=LocalShellCallAction(
+            command=["missing-bin", "--version"],
+            env={},
+            type="exec",
+            timeout_ms=1000,
+            working_directory="/tmp",
+        ),
+        call_id="call_local_shell",
+        status="completed",
+        type="local_shell_call",
+    )
+
+    model.extend(
+        [
+            [get_text_message("running shell"), local_shell_call],
+            [get_text_message("shell complete")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="please run shell")
+
+    assert result.final_output == "shell complete"
+    local_shell_output = result.new_items[2]
+    assert isinstance(local_shell_output, ToolCallOutputItem)
+    assert isinstance(local_shell_output.raw_item, dict)
+    assert local_shell_output.raw_item.get("type") == "local_shell_call_output"
+    assert local_shell_output.raw_item.get("call_id") == "call_local_shell"
+    assert "missing-bin" in local_shell_output.output
+
+
+@pytest.mark.asyncio
+async def test_local_shell_action_surfaces_async_executor_error() -> None:
+    async def failing_executor(request: LocalShellCommandRequest) -> str:
+        raise PermissionError("sandbox denied exec")
+
+    tool = LocalShellTool(executor=failing_executor)
+    tool_call = LocalShellCall(
+        id="lsh_123",
+        action=LocalShellCallAction(
+            command=["ls"],
+            env={},
+            type="exec",
+            timeout_ms=5000,
+            working_directory="/tmp",
+        ),
+        call_id="call_456",
+        status="completed",
+        type="local_shell_call",
+    )
+
+    tool_run = ToolRunLocalShellCall(tool_call=tool_call, local_shell_tool=tool)
+    agent = Agent(name="test_agent", tools=[tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    output_item = await LocalShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(output_item, ToolCallOutputItem)
+    assert "sandbox denied exec" in output_item.output
+    raw = cast(dict[str, Any], output_item.raw_item)
+    assert raw["type"] == "local_shell_call_output"
+    assert raw["call_id"] == "call_456"
+    assert raw["output"] == output_item.output

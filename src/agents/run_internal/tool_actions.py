@@ -420,8 +420,14 @@ class LocalShellAction:
             ctx_wrapper=context_wrapper,
             data=call.tool_call,
         )
-        output = call.local_shell_tool.executor(request)
-        result = await output if inspect.isawaitable(output) else output
+        try:
+            output = call.local_shell_tool.executor(request)
+            result = await output if inspect.isawaitable(output) else output
+        except Exception as exc:
+            # Match the hosted shell/custom/apply_patch executors: surface the
+            # failure to the model so the run can continue instead of aborting.
+            result = format_shell_error(exc)
+            log_tool_action_error("Local shell executor failed", exc)
 
         raw_payload: dict[str, Any] = {
             "type": "local_shell_call_output",
