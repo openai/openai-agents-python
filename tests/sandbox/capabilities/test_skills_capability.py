@@ -552,6 +552,57 @@ class TestSkillsInstructions:
         assert "Call `load_skill` with a single skill name from the list" in instructions
         assert "loaded on demand instead of being present up front" in instructions
 
+    @pytest.mark.parametrize(
+        ("description_frontmatter", "expected_description"),
+        [
+            (
+                "description: >\\n"
+                "  Use for GitHub issue triage.\\n"
+                "  Triggers: /triage, bug report\\n",
+                "Use for GitHub issue triage. Triggers: /triage, bug report\\n",
+            ),
+            (
+                "description: |\\n"
+                "  Use for GitHub issue triage.\\n"
+                "  Triggers: /triage, bug report\\n",
+                "Use for GitHub issue triage.\\nTriggers: /triage, bug report\\n",
+            ),
+            (
+                "description: Use for GitHub issue\\n"
+                "  triage, not for PR review.\\n",
+                "Use for GitHub issue triage, not for PR review.",
+            ),
+        ],
+    )
+    def test_lazy_local_dir_metadata_parses_multiline_descriptions(
+        self,
+        tmp_path: Path,
+        description_frontmatter: str,
+        expected_description: str,
+    ) -> None:
+        src_root = tmp_path / "skills"
+        skill_dir = src_root / "dynamic-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\\n"
+            "name: discovered-skill\\n"
+            f"{description_frontmatter}"
+            "---\\n"
+            "# Skill\\n",
+            encoding="utf-8",
+        )
+        source = LocalDirLazySkillSource(source=LocalDir(src=src_root))
+        grants = _source_granted_manifest(source=src_root).extra_path_grants
+
+        metadata = source.list_skill_metadata(
+            skills_path=".agents",
+            source_grants=grants,
+        )
+
+        assert len(metadata) == 1
+        assert metadata[0].name == "discovered-skill"
+        assert metadata[0].description == expected_description
+
     @pytest.mark.asyncio
     async def test_lazy_local_dir_metadata_skips_symlinked_skill_directory(
         self, tmp_path: Path
