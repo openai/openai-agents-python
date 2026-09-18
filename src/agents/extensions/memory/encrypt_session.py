@@ -282,8 +282,30 @@ class EncryptedSession(SessionABC):
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> TResponseInputItem | None:
+        """Remove the latest readable item, skipping authenticated expired items.
+
+        Raises ``InvalidToken`` before deleting an encrypted item that cannot be
+        authenticated with this session's key. Authentication does not apply TTL,
+        so an expired token encrypted with a different key is also preserved.
+
+        The authentication read and underlying pop are separate operations.
+        Callers must serialize this operation with other mutations of the same
+        underlying history, including mutations through other session instances.
+        """
+        # ponytail: verify signature before pop to avoid deleting ciphertext on bad key
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
         while True:
+            latest = await _call_session_method(
+                self.underlying_session.get_items,
+                1,
+                wrapper=wrapper,
+            )
+            if not latest:
+                return None
+            candidate = latest[-1]
+            if _is_encrypted_envelope(candidate):
+                self.cipher.extract_timestamp(candidate["payload"].encode("utf-8"))
+
             enc = await _call_session_method(
                 self.underlying_session.pop_item,
                 wrapper=wrapper,
