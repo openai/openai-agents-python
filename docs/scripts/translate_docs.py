@@ -769,15 +769,19 @@ def rewrite_relative_links(
         return prefix + translated_markdown
 
     in_fence = False
-    fence_marker = ""
+    fence_char = ""
+    fence_length = 0
     for index, source_line in enumerate(source_lines):
         stripped = source_line.lstrip()
-        if not in_fence and (stripped.startswith("```") or stripped.startswith("~~~")):
+        fence = re.match(r"(`{3,}|~{3,})", stripped)
+        if not in_fence and fence is not None:
             in_fence = True
-            fence_marker = stripped[:3]
+            fence_char = fence.group(1)[0]
+            fence_length = len(fence.group(1))
             continue
         if in_fence:
-            if stripped.startswith(fence_marker):
+            closing_fence = re.match(rf"({re.escape(fence_char)}+)", stripped)
+            if closing_fence is not None and len(closing_fence.group(1)) >= fence_length:
                 in_fence = False
             continue
 

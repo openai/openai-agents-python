@@ -168,6 +168,21 @@ def test_relative_link_rewrite_preserves_search_exclusion(translate_docs: Module
     assert result == translate_docs.SEARCH_EXCLUSION + "See [ガイド](../ref/guide.md)\n"
 
 
+def test_relative_link_rewrite_respects_long_fence_lengths(translate_docs: ModuleType) -> None:
+    source = "````md\n```\n[inside](ref/inside.md)\n````\n[after](ref/after.md)\n"
+    translated = "````md\n```\n[inside](ref/inside.md)\n````\n[after](ref/after.md)\n"
+
+    result = translate_docs.rewrite_relative_links(
+        source,
+        translated,
+        source_path="docs/agents.md",
+        target_path="docs/ja/agents.md",
+    )
+
+    assert "[inside](ref/inside.md)" in result
+    assert "[after](../ref/after.md)" in result
+
+
 def test_ref_pages_are_skipped_with_windows_separators(
     translate_docs: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
