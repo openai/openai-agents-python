@@ -1,7 +1,8 @@
 """Run two trusted agents in separate working directories of one live sandbox.
 
 Run-scoped working directories make relative paths consistent; they are not confinement.
-Use separate sandbox sessions for untrusted agents or workloads that need compute isolation.
+Untrusted workloads need a backend and configuration that provide the required isolation.
+Separate Unix-local sessions alone do not provide OS confinement on Linux.
 """
 
 from __future__ import annotations

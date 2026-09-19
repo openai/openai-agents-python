@@ -36,6 +36,7 @@ from agents import (
     handoff,
     tool_namespace,
 )
+from agents._function_tool_arguments import FunctionToolApproval
 from agents._public_agent import set_public_agent
 from agents.computer import Computer, Environment
 from agents.exceptions import ModelBehaviorError, UserError
@@ -1468,8 +1469,13 @@ async def test_resume_honors_permanent_namespaced_function_approval_with_new_cal
     pending: list[ToolApprovalItem] = []
     rejections: list[str | None] = []
 
-    async def _needs_approval_checker(_run: ToolRunFunction) -> bool:
-        return True
+    async def _needs_approval_checker(_run: ToolRunFunction) -> FunctionToolApproval:
+        return FunctionToolApproval(
+            "require_approval",
+            _run.function_tool,
+            _run.function_tool.on_invoke_tool,
+            _run.tool_call.arguments,
+        )
 
     async def _record_rejection(
         call_id: str | None,
@@ -1528,7 +1534,7 @@ async def test_resume_skips_needs_approval_checker_when_status_resolved() -> Non
     ]
     checker_calls: list[str] = []
 
-    async def _needs_approval_checker(run: ToolRunFunction) -> bool:
+    async def _needs_approval_checker(run: ToolRunFunction) -> FunctionToolApproval:
         checker_calls.append(run.tool_call.call_id)
         raise AssertionError("checker must not run for resolved approvals")
 
@@ -1577,8 +1583,13 @@ async def test_function_resume_reuses_falsy_pending_item() -> None:
     run = ToolRunFunction(tool_call=tool_call, function_tool=approve_me)
     pending: list[ToolApprovalItem] = []
 
-    async def _needs_approval_checker(_run: ToolRunFunction) -> bool:
-        return True
+    async def _needs_approval_checker(_run: ToolRunFunction) -> FunctionToolApproval:
+        return FunctionToolApproval(
+            "require_approval",
+            _run.function_tool,
+            _run.function_tool.on_invoke_tool,
+            _run.tool_call.arguments,
+        )
 
     async def _record_rejection(
         _call_id: str | None,
@@ -1619,10 +1630,15 @@ async def test_resume_rechecks_rejection_after_function_approval_checker() -> No
     checker_started = asyncio.Event()
     release_checker = asyncio.Event()
 
-    async def _needs_approval_checker(_run: ToolRunFunction) -> bool:
+    async def _needs_approval_checker(_run: ToolRunFunction) -> FunctionToolApproval:
         checker_started.set()
         await release_checker.wait()
-        return True
+        return FunctionToolApproval(
+            "require_approval",
+            _run.function_tool,
+            _run.function_tool.on_invoke_tool,
+            _run.tool_call.arguments,
+        )
 
     pending: list[ToolApprovalItem] = []
     rejections: list[str | None] = []

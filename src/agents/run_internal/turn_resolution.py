@@ -31,6 +31,7 @@ from openai.types.responses.response_output_item import (
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from .. import _debug
+from .._function_tool_arguments import FunctionToolApproval
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
 from .._tool_identity import (
     FunctionToolLookupKey,
@@ -1253,10 +1254,16 @@ async def resolve_interrupted_turn(
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
 
-    async def _function_requires_approval(run: ToolRunFunction) -> bool:
+    async def _function_requires_approval(run: ToolRunFunction) -> FunctionToolApproval:
         call_id = run.tool_call.call_id
+        pending = FunctionToolApproval(
+            "require_approval",
+            run.function_tool,
+            run.function_tool.on_invoke_tool,
+            run.tool_call.arguments,
+        )
         if call_id and call_id in approval_items_by_call_id:
-            return True
+            return pending
 
         try:
             return await function_needs_approval(
@@ -1267,7 +1274,7 @@ async def resolve_interrupted_turn(
         except UserError:
             raise
         except Exception:
-            return True
+            return pending
 
     try:
         context_wrapper.turn_input = ItemHelpers.input_to_new_input_list(original_input)

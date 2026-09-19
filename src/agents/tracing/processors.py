@@ -96,16 +96,25 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
-        # Clear the cached property if it exists
-        if "api_key" in self.__dict__:
-            del self.__dict__["api_key"]
-
-        # Update the private attribute
         self._api_key = api_key
 
-    @cached_property
+    @property
     def api_key(self):
-        return self._api_key or os.environ.get("OPENAI_API_KEY")
+        # Keep a key from the environment once it is found, but do not remember a missing one, so a
+        # key that appears after an export without one, such as from a later `load_dotenv()`, is
+        # still used. A lookup that finds nothing writes nothing, so it cannot discard a key that
+        # `set_api_key()` stores while the lookup runs.
+        api_key = self._api_key
+        if not api_key:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                self._api_key = api_key
+        return api_key
+
+    @api_key.setter
+    def api_key(self, api_key: str | None):
+        # Assigning the attribute worked while it was a cached property, and callers rely on it.
+        self._api_key = api_key
 
     @cached_property
     def organization(self):
