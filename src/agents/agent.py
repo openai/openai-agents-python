@@ -714,6 +714,15 @@ class Agent(AgentBase, Generic[TContext]):
             resolved_run_config = run_config
             if resolved_run_config is None and isinstance(context, ToolContext):
                 resolved_run_config = context.run_config
+            from .run_internal.agent_as_tool_cache import resolve_nested_agent_tool_run_config
+
+            resolved_run_config = resolve_nested_agent_tool_run_config(
+                resolved_run_config=resolved_run_config,
+                session=session,
+                conversation_id=conversation_id,
+                agent_name=self.name,
+                tool_name=tool_name_resolved,
+            )
             tool_state_scope_id = get_agent_tool_state_scope(context)
             if isinstance(context, ToolContext):
                 # Use a fresh ToolContext to avoid sharing approval state with parent runs.
