@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
 
@@ -214,6 +215,62 @@ def test_rebase_relative_target_keeps_a_translated_sibling(
     )
 
 
+def test_rebase_relative_target_keeps_translatable_sibling_before_locale_exists(
+    translate_docs: ModuleType, tmp_path: Path
+) -> None:
+    english_dir = tmp_path / "docs"
+    locale_dir = tmp_path / "docs" / "ja"
+    _touch(english_dir / "agents.md")
+    _touch(english_dir / "tools.md")
+    locale_dir.mkdir(parents=True)
+
+    assert (
+        translate_docs.rebase_relative_target(
+            "tools.md",
+            source_page_dir=english_dir,
+            locale_page_dir=locale_dir,
+        )
+        == "tools.md"
+    )
+
+
+def test_rebase_relative_target_sibling_result_is_order_independent(
+    translate_docs: ModuleType, tmp_path: Path
+) -> None:
+    english_dir = tmp_path / "docs"
+    locale_dir = tmp_path / "docs" / "ja"
+    locale_sibling = locale_dir / "tools.md"
+    _touch(english_dir / "agents.md")
+    _touch(english_dir / "tools.md")
+    locale_dir.mkdir(parents=True)
+
+    def rebase() -> str:
+        return translate_docs.rebase_relative_target(
+            "tools.md",
+            source_page_dir=english_dir,
+            locale_page_dir=locale_dir,
+        )
+
+    before = rebase()
+    results: list[str] = []
+
+    def rebase_many() -> None:
+        for _ in range(32):
+            results.append(rebase())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rebase_future = executor.submit(rebase_many)
+        write_future = executor.submit(_touch, locale_sibling)
+        rebase_future.result()
+        write_future.result()
+
+    after = rebase()
+    assert before == "tools.md"
+    assert after == "tools.md"
+    assert results
+    assert set(results) == {"tools.md"}
+
+
 def test_rebase_relative_target_is_idempotent_and_keeps_fragments(
     translate_docs: ModuleType, tmp_path: Path
 ) -> None:
@@ -321,3 +378,30 @@ def test_rebase_relative_links_rewrites_targets_with_inline_code_labels(
 
     assert "[`agents.testing`](../ref/testing.md)" in result
     assert "[`OpenAIConversationsSession`](../ref/memory/openai_conversations_session.md)" in result
+
+
+def test_rebase_relative_links_preserves_literal_inline_code_markdown_examples(
+    translate_docs: ModuleType, tmp_path: Path
+) -> None:
+    english_dir = tmp_path / "docs"
+    locale_dir = tmp_path / "docs" / "ja"
+    _touch(english_dir / "ref" / "x.md")
+    _touch(english_dir / "ref" / "testing.md")
+    _touch(english_dir / "agents.md")
+    _touch(locale_dir / "agents.md")
+
+    markdown = (
+        "Document the syntax with `[API](ref/x.md)` and `` `[API](ref/x.md)` ``.\n"
+        "Keep a real link with a code label: [`agents.testing`](ref/testing.md).\n"
+    )
+
+    result = translate_docs.rebase_relative_links(
+        markdown,
+        source_page_dir=english_dir,
+        locale_page_dir=locale_dir,
+    )
+
+    assert "`[API](ref/x.md)`" in result
+    assert "`` `[API](ref/x.md)` ``" in result
+    assert "`[API](../ref/x.md)`" not in result
+    assert "[`agents.testing`](../ref/testing.md)" in result

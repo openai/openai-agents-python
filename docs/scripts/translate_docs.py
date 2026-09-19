@@ -744,13 +744,22 @@ def _split_target_fragment(target: str) -> tuple[str, str]:
     return path, f"#{fragment}"
 
 
+def _is_translatable_source_page(english_dest: Path, source_page_dir: str | Path) -> bool:
+    """Return whether translate_single_source_file would emit a locale copy."""
+    if english_dest.suffix.lower() != ".md":
+        return False
+    relative = Path(os.path.relpath(english_dest, Path(source_page_dir).resolve())).as_posix()
+    return "ref/" not in relative.replace("\\", "/")
+
+
 def rebase_relative_target(
     target: str, *, source_page_dir: str | Path, locale_page_dir: str | Path
 ) -> str:
     """Rewrite a relative link so it still resolves under docs/{ja,ko,zh}/.
 
     Locale pages sit one directory deeper than the English source. Sibling
-    translated pages keep their original relative target. Links that only
+    pages that the translator would emit keep their original relative target,
+    whether or not the locale file has been written yet. Links that only
     exist on the English side, such as API reference pages and shared assets,
     are resolved against the English page directory and re-relativized from
     the locale page directory.
@@ -764,12 +773,8 @@ def rebase_relative_target(
     if not path_part:
         return target
 
-    locale_dest = (Path(locale_page_dir) / path_part).resolve()
-    if locale_dest.exists():
-        return target
-
     english_dest = (Path(source_page_dir) / path_part).resolve()
-    if not english_dest.exists():
+    if not english_dest.exists() or _is_translatable_source_page(english_dest, source_page_dir):
         return target
 
     rebased = Path(os.path.relpath(english_dest, Path(locale_page_dir).resolve())).as_posix()
@@ -789,10 +794,18 @@ def _unprotected_spans(markdown: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _span_contained_in_ranges(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(range_start <= start and end <= range_end for range_start, range_end in ranges)
+
+
 def _rebase_links_in_span(
     span: str, *, source_page_dir: str | Path, locale_page_dir: str | Path
 ) -> str:
+    inline_ranges = inline_code_ranges(span)
+
     def replace(match: re.Match[str]) -> str:
+        if _span_contained_in_ranges(match.start(), match.end(), inline_ranges):
+            return match.group(0)
         original = match.group("target")
         rebased = rebase_relative_target(
             original, source_page_dir=source_page_dir, locale_page_dir=locale_page_dir
