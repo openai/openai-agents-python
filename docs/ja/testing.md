@@ -570,6 +570,6 @@ Responses API または Chat Completions のリクエストシリアライズ、
 
 ## API リファレンス {#api-reference}
 
-- [`agents.testing`](ref/testing.md)
-- [`agents.realtime.testing`](ref/realtime/testing.md)
-- [`agents.voice.testing`](ref/voice/testing.md)
+- [`agents.testing`](../ref/testing.md)
+- [`agents.realtime.testing`](../ref/realtime/testing.md)
+- [`agents.voice.testing`](../ref/voice/testing.md)

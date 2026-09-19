@@ -300,7 +300,7 @@ result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
 print(result.final_output)
 ```
 
-有关完整的回调接口，请参阅[生命周期 API 参考](ref/lifecycle.md)。
+有关完整的回调接口，请参阅[生命周期 API 参考](../ref/lifecycle.md)。
 
 ## 安全防护措施 {#guardrails}
 

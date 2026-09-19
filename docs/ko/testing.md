@@ -570,6 +570,6 @@ WebSocket 연결을 열지 않고 `RealtimeSession` 동작 또는 `RealtimeAgent
 
 ## API 레퍼런스 {#api-reference}
 
-- [`agents.testing`](ref/testing.md)
-- [`agents.realtime.testing`](ref/realtime/testing.md)
-- [`agents.voice.testing`](ref/voice/testing.md)
+- [`agents.testing`](../ref/testing.md)
+- [`agents.realtime.testing`](../ref/realtime/testing.md)
+- [`agents.voice.testing`](../ref/voice/testing.md)
