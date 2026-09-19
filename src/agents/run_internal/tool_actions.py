@@ -573,8 +573,15 @@ class ShellAction:
                     if max_output_length is not None:
                         normalized = truncate_shell_outputs(normalized, max_output_length)
                     output_text = render_shell_outputs(normalized)
-                    if max_output_length is not None:
-                        output_text = output_text[:max_output_length]
+                    if max_output_length == 0:
+                        # ``truncate_shell_outputs`` already emptied every stream for a zero
+                        # budget, but ``render_shell_outputs`` substitutes a "(no output)"
+                        # placeholder for an empty command, so collapse it back to an empty
+                        # string. For a positive budget the payload was already bounded, and
+                        # re-slicing the rendered text (which adds decoration such as the
+                        # ``$ <command>`` prefix) would chop real output that fit within the
+                        # budget, so it is left intact.
+                        output_text = ""
                     shell_output_payload = [serialize_shell_output(entry) for entry in normalized]
                     provider_meta = dict(result.provider_data or {})
                 else:
