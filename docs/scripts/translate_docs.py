@@ -681,6 +681,9 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
         )
 
     translated_text = preserve_heading_anchors(content, translated_text, name=target_path)
+    translated_text = rewrite_relative_links(
+        content, translated_text, source_path=file_path, target_path=target_path
+    )
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text
     # Save the combined translated content
@@ -730,11 +733,76 @@ def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
         with open(target_path, encoding="utf-8", newline="") as f:
             translated_text = f.read()
         updated_text = preserve_heading_anchors(content, translated_text, name=target_path)
+        updated_text = rewrite_relative_links(
+            content, updated_text, source_path=file_path, target_path=target_path
+        )
         if updated_text == translated_text:
             continue
         print(f"Refreshing heading anchors in {target_path}")
         with open(target_path, "w", encoding="utf-8", newline="") as f:
             f.write(updated_text)
+
+
+_MARKDOWN_LINK_RE = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
+
+
+def rewrite_relative_links(
+    source_markdown: str, translated_markdown: str, *, source_path: str, target_path: str
+) -> str:
+    """Rewrite relative Markdown destinations for a translated page's location.
+
+    Translated pages live below ``docs/<language>/`` while their English source
+    lives directly below ``docs/``.  A destination copied from the source page
+    therefore needs to be resolved from the source directory and re-relativized
+    from the translated page directory.  Fenced code and external destinations
+    are left untouched.
+    """
+    source_dir_path = os.path.dirname(source_path)
+    target_dir_path = os.path.dirname(target_path)
+    prefix = ""
+    if translated_markdown.startswith(SEARCH_EXCLUSION):
+        prefix = SEARCH_EXCLUSION
+        translated_markdown = translated_markdown[len(prefix) :]
+    source_lines = source_markdown.splitlines()
+    translated_lines = translated_markdown.splitlines(keepends=True)
+    if len(source_lines) != len(translated_lines):
+        return prefix + translated_markdown
+
+    in_fence = False
+    fence_char = ""
+    fence_length = 0
+    for index, source_line in enumerate(source_lines):
+        stripped = source_line.lstrip()
+        fence = re.match(r"(`{3,}|~{3,})", stripped)
+        if not in_fence and fence is not None:
+            in_fence = True
+            fence_char = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            continue
+        if in_fence:
+            closing_fence = re.match(rf"({re.escape(fence_char)}+)", stripped)
+            if closing_fence is not None and len(closing_fence.group(1)) >= fence_length:
+                in_fence = False
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            destination = match.group(2)
+            suffix = ""
+            if "#" in destination:
+                destination, anchor = destination.split("#", 1)
+                suffix = f"#{anchor}"
+            if (
+                not destination
+                or destination.startswith(("#", "/", "//"))
+                or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", destination)
+            ):
+                return match.group(0)
+            resolved = os.path.normpath(os.path.join(source_dir_path, destination))
+            rewritten = os.path.relpath(resolved, target_dir_path).replace(os.sep, "/")
+            return f"{match.group(1)}{rewritten}{suffix}{match.group(3)}"
+
+        translated_lines[index] = _MARKDOWN_LINK_RE.sub(replace, translated_lines[index])
+    return prefix + "".join(translated_lines)
 
 
 def translate_single_source_file(
