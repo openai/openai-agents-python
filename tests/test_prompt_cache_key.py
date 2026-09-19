@@ -267,3 +267,103 @@ async def test_run_state_preserves_generated_prompt_cache_key_on_resume() -> Non
     assert first_key is not None
     assert restored_state._generated_prompt_cache_key == first_key
     assert _sent_prompt_cache_key(model) == first_key
+
+
+@pytest.mark.asyncio
+async def test_as_tool_nested_runs_share_stable_prompt_cache_key_without_session() -> None:
+    """Consecutive identical as_tool() calls must share a cache key like a normal runner."""
+    from agents.tool_context import ToolContext
+
+    nested_model = PromptCacheScriptedModel()
+    nested_model.enqueue([get_text_message("n1")])
+    nested_model.enqueue([get_text_message("n2")])
+    nested = Agent(name="nested-worker", model=nested_model, instructions="stable instructions")
+    tool = nested.as_tool(tool_name="run_nested", tool_description="Run nested worker")
+
+    await tool.on_invoke_tool(
+        ToolContext(context=None, tool_name="run_nested", tool_call_id="c1", tool_arguments="{}"),
+        '{"input":"first"}',
+    )
+    await tool.on_invoke_tool(
+        ToolContext(context=None, tool_name="run_nested", tool_call_id="c2", tool_arguments="{}"),
+        '{"input":"second"}',
+    )
+
+    first_key = _sent_prompt_cache_key(nested_model, first_turn=True)
+    second_key = _sent_prompt_cache_key(nested_model)
+    assert first_key is not None
+    assert second_key == first_key
+    assert first_key.startswith("agents-sdk:group:")
+
+
+@pytest.mark.asyncio
+async def test_as_tool_nested_run_namespaces_parent_group_id() -> None:
+    """Nested as_tool() must not share the parent's raw group_id cache partition."""
+    from agents.tool_context import ToolContext
+
+    nested_model = PromptCacheScriptedModel()
+    nested_model.enqueue([get_text_message("n1")])
+    nested = Agent(name="nested-worker", model=nested_model)
+    tool = nested.as_tool(tool_name="run_nested", tool_description="Run nested worker")
+
+    parent_rc = RunConfig(group_id="parent-thread")
+    await tool.on_invoke_tool(
+        ToolContext(
+            context=None,
+            tool_name="run_nested",
+            tool_call_id="c1",
+            tool_arguments="{}",
+            run_config=parent_rc,
+        ),
+        '{"input":"first"}',
+    )
+
+    key = _sent_prompt_cache_key(nested_model)
+    assert key is not None
+    assert key.startswith("agents-sdk:group:")
+    # Hash of namespaced group, not the bare parent group value alone.
+    direct_model = PromptCacheScriptedModel()
+    direct_model.enqueue([get_text_message("d")])
+    await Runner.run(
+        Agent(name="direct", model=direct_model),
+        "hi",
+        run_config=RunConfig(group_id="parent-thread"),
+    )
+    parent_key = _sent_prompt_cache_key(direct_model)
+    assert key != parent_key
+
+
+@pytest.mark.asyncio
+async def test_as_tool_with_session_matches_normal_runner_prompt_cache_key() -> None:
+    """With a session, as_tool() must use the same session cache key as Runner.run()."""
+    from agents.tool_context import ToolContext
+
+    session = SimpleListSession(session_id="shared-session")
+    nested_model = PromptCacheScriptedModel()
+    nested_model.enqueue([get_text_message("n1")])
+    nested_model.enqueue([get_text_message("n2")])
+    nested = Agent(name="nested-worker", model=nested_model)
+    tool = nested.as_tool(
+        tool_name="run_nested",
+        tool_description="Run nested worker",
+        session=session,
+    )
+
+    await tool.on_invoke_tool(
+        ToolContext(context=None, tool_name="run_nested", tool_call_id="c1", tool_arguments="{}"),
+        '{"input":"first"}',
+    )
+    await tool.on_invoke_tool(
+        ToolContext(context=None, tool_name="run_nested", tool_call_id="c2", tool_arguments="{}"),
+        '{"input":"second"}',
+    )
+
+    as_tool_key = _sent_prompt_cache_key(nested_model, first_turn=True)
+    assert as_tool_key == _sent_prompt_cache_key(nested_model)
+    assert as_tool_key is not None
+    assert as_tool_key.startswith("agents-sdk:session:")
+
+    direct_model = PromptCacheScriptedModel()
+    direct_model.enqueue([get_text_message("d")])
+    await Runner.run(Agent(name="direct", model=direct_model), "hi", session=session)
+    assert _sent_prompt_cache_key(direct_model) == as_tool_key
