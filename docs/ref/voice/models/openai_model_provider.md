@@ -1,3 +1,3 @@
 # `OpenAI Model Provider`
 
-::: agents.voice.models.openai_model_provider
+See [`OpenAIVoiceModelProvider`](openai_provider.md).
