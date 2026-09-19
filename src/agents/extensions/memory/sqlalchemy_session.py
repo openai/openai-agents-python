@@ -309,54 +309,51 @@ class SQLAlchemySession(SessionABC):
         """Reject trailing-space IDs only when the actual MySQL collation pads spaces."""
         if self._engine.dialect.name not in {"mysql", "mariadb"}:
             return
-        try:
-            collation_result = await conn.execute(
-                sql_text(
-                    "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name "
-                    "AND COLUMN_NAME = 'session_id'"
-                ),
-                {"table_name": self._sessions.name},
-            )
-            collation = collation_result.scalar_one_or_none()
-            if not collation:
-                raise RuntimeError("could not inspect session_id collation")
+        collation_result = await conn.execute(
+            sql_text(
+                "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name "
+                "AND COLUMN_NAME = 'session_id'"
+            ),
+            {"table_name": self._sessions.name},
+        )
+        collation = collation_result.scalar_one_or_none()
+        if not collation:
+            raise RuntimeError("could not inspect session_id collation")
 
-            pad_attribute: str | None
-            if getattr(self._engine.dialect, "is_mariadb", False):
-                pad_attribute = "NO PAD" if "_nopad_" in collation.casefold() else "PAD SPACE"
-            else:
-                try:
-                    pad_result = await conn.execute(
-                        sql_text(
-                            "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
-                            "WHERE COLLATION_NAME = :collation"
-                        ),
-                        {"collation": collation},
-                    )
-                    pad_attribute = pad_result.scalar_one_or_none()
-                except SQLAlchemyError as exc:
-                    extract_error_code = getattr(self._engine.dialect, "_extract_error_code", None)
-                    error_code = (
-                        extract_error_code(getattr(exc, "orig", exc))
-                        if callable(extract_error_code)
-                        else None
-                    )
-                    if error_code != 1054:
-                        raise
-                    version_result = await conn.execute(sql_text("SELECT VERSION()"))
-                    version = version_result.scalar_one_or_none()
-                    pad_attribute = (
-                        "PAD SPACE"
-                        if version
-                        and version.partition(".")[0].isdigit()
-                        and int(version.partition(".")[0]) < 8
-                        else None
-                    )
-            if pad_attribute not in {"PAD SPACE", "NO PAD"}:
-                raise RuntimeError("could not inspect collation padding")
-        except SQLAlchemyError:
-            raise
+        pad_attribute: str | None
+        if getattr(self._engine.dialect, "is_mariadb", False):
+            pad_attribute = "NO PAD" if "_nopad_" in collation.casefold() else "PAD SPACE"
+        else:
+            try:
+                pad_result = await conn.execute(
+                    sql_text(
+                        "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
+                        "WHERE COLLATION_NAME = :collation"
+                    ),
+                    {"collation": collation},
+                )
+                pad_attribute = pad_result.scalar_one_or_none()
+            except SQLAlchemyError as exc:
+                extract_error_code = getattr(self._engine.dialect, "_extract_error_code", None)
+                error_code = (
+                    extract_error_code(getattr(exc, "orig", exc))
+                    if callable(extract_error_code)
+                    else None
+                )
+                if error_code != 1054:
+                    raise
+                version_result = await conn.execute(sql_text("SELECT VERSION()"))
+                version = version_result.scalar_one_or_none()
+                pad_attribute = (
+                    "PAD SPACE"
+                    if version
+                    and version.partition(".")[0].isdigit()
+                    and int(version.partition(".")[0]) < 8
+                    else None
+                )
+        if pad_attribute not in {"PAD SPACE", "NO PAD"}:
+            raise RuntimeError("could not inspect collation padding")
 
         if pad_attribute == "PAD SPACE":
             raise ValueError(
