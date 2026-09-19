@@ -454,6 +454,6 @@ if __name__ == "__main__":
 
 - [`Session`][agents.memory.Session] - プロトコルインターフェース
 - [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
-- [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 実装
+- [`OpenAIConversationsSession`](../ref/memory/openai_conversations_session.md) - OpenAI Conversations API 実装
 - [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy ベースの実装
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - TTL 付き暗号化セッションラッパー

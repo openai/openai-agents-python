@@ -14,7 +14,7 @@ search:
 
 <div class="sandbox-harness-image" markdown="1">
 
-![コンピューティング環境を備えたサンドボックスエージェントハーネス](../assets/images/harness_with_compute.png)
+![コンピューティング環境を備えたサンドボックスエージェントハーネス](../../assets/images/harness_with_compute.png)
 
 </div>
 

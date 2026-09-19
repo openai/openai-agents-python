@@ -681,6 +681,11 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
         )
 
     translated_text = preserve_heading_anchors(content, translated_text, name=target_path)
+    translated_text = rebase_relative_links(
+        translated_text,
+        source_page_dir=os.path.dirname(file_path),
+        locale_page_dir=os.path.dirname(target_path),
+    )
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text
     # Save the combined translated content
@@ -719,10 +724,112 @@ def should_translate_based_on_translation(file_path: str) -> bool:
     return ja_timestamp < en_timestamp
 
 
+SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+INLINE_LINK_RE = re.compile(
+    r"""
+    (?P<prefix>!?\[(?:[^\]]|\\.)*\]\(\s*)
+    (?P<open><)?
+    (?P<target>(?(open)[^>\n]+|[^\s)]+))
+    (?(open)>)
+    (?P<suffix>\s*(?:(?:"[^"]*"|'[^']*'|\([^)]*\))\s*)?\))
+    """,
+    re.VERBOSE,
+)
+
+
+def _split_target_fragment(target: str) -> tuple[str, str]:
+    if "#" not in target:
+        return target, ""
+    path, fragment = target.split("#", 1)
+    return path, f"#{fragment}"
+
+
+def rebase_relative_target(
+    target: str, *, source_page_dir: str | Path, locale_page_dir: str | Path
+) -> str:
+    """Rewrite a relative link so it still resolves under docs/{ja,ko,zh}/.
+
+    Locale pages sit one directory deeper than the English source. Sibling
+    translated pages keep their original relative target. Links that only
+    exist on the English side, such as API reference pages and shared assets,
+    are resolved against the English page directory and re-relativized from
+    the locale page directory.
+    """
+    if not target or target.startswith(("#", "/")):
+        return target
+    if SCHEME_RE.match(target):
+        return target
+
+    path_part, fragment = _split_target_fragment(target)
+    if not path_part:
+        return target
+
+    locale_dest = (Path(locale_page_dir) / path_part).resolve()
+    if locale_dest.exists():
+        return target
+
+    english_dest = (Path(source_page_dir) / path_part).resolve()
+    if not english_dest.exists():
+        return target
+
+    rebased = Path(os.path.relpath(english_dest, Path(locale_page_dir).resolve())).as_posix()
+    return rebased + fragment
+
+
+def _unprotected_spans(markdown: str) -> list[tuple[int, int]]:
+    """Return ranges outside fenced code so inline-code link labels still match."""
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in fenced_code_ranges(markdown):
+        if cursor < start:
+            spans.append((cursor, start))
+        cursor = end
+    if cursor < len(markdown):
+        spans.append((cursor, len(markdown)))
+    return spans
+
+
+def _rebase_links_in_span(
+    span: str, *, source_page_dir: str | Path, locale_page_dir: str | Path
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        original = match.group("target")
+        rebased = rebase_relative_target(
+            original, source_page_dir=source_page_dir, locale_page_dir=locale_page_dir
+        )
+        if rebased == original:
+            return match.group(0)
+        opener = match.group("open") or ""
+        closer = ">" if opener else ""
+        return f"{match.group('prefix')}{opener}{rebased}{closer}{match.group('suffix')}"
+
+    return INLINE_LINK_RE.sub(replace, span)
+
+
+def rebase_relative_links(
+    markdown: str, *, source_page_dir: str | Path, locale_page_dir: str | Path
+) -> str:
+    parts: list[str] = []
+    last = 0
+    for start, end in _unprotected_spans(markdown):
+        parts.append(markdown[last:start])
+        parts.append(
+            _rebase_links_in_span(
+                markdown[start:end],
+                source_page_dir=source_page_dir,
+                locale_page_dir=locale_page_dir,
+            )
+        )
+        last = end
+    parts.append(markdown[last:])
+    return "".join(parts)
+
+
 def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
-    """Re-apply the English heading ids to existing translations without retranslating."""
+    """Re-apply English heading ids and locale-relative links without retranslating."""
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
+    source_page_dir = os.path.dirname(file_path)
     for lang_code in languages:
         target_path = os.path.join(source_dir, lang_code, relative_path)
         if not os.path.exists(target_path):
@@ -730,11 +837,48 @@ def refresh_heading_anchors(file_path: str, relative_path: str) -> None:
         with open(target_path, encoding="utf-8", newline="") as f:
             translated_text = f.read()
         updated_text = preserve_heading_anchors(content, translated_text, name=target_path)
-        if updated_text == translated_text:
+        rebased_text = rebase_relative_links(
+            updated_text,
+            source_page_dir=source_page_dir,
+            locale_page_dir=os.path.dirname(target_path),
+        )
+        if rebased_text == translated_text:
             continue
-        print(f"Refreshing heading anchors in {target_path}")
+        if updated_text != translated_text:
+            print(f"Refreshing heading anchors in {target_path}")
+        if rebased_text != updated_text:
+            print(f"Rebasing relative links in {target_path}")
         with open(target_path, "w", encoding="utf-8", newline="") as f:
-            f.write(updated_text)
+            f.write(rebased_text)
+
+
+def refresh_orphan_locale_relative_links() -> None:
+    """Rebase links in locale pages that no longer have an English counterpart."""
+    for lang_code in languages:
+        locale_root = os.path.join(source_dir, lang_code)
+        if not os.path.isdir(locale_root):
+            continue
+        for root, _, file_names in os.walk(locale_root):
+            for file_name in file_names:
+                if not file_name.endswith(".md"):
+                    continue
+                locale_path = os.path.join(root, file_name)
+                relative_path = os.path.relpath(locale_path, locale_root)
+                english_path = os.path.join(source_dir, relative_path)
+                if os.path.exists(english_path):
+                    continue
+                with open(locale_path, encoding="utf-8", newline="") as f:
+                    translated_text = f.read()
+                rebased_text = rebase_relative_links(
+                    translated_text,
+                    source_page_dir=os.path.dirname(english_path),
+                    locale_page_dir=os.path.dirname(locale_path),
+                )
+                if rebased_text == translated_text:
+                    continue
+                print(f"Rebasing relative links in {locale_path}")
+                with open(locale_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(rebased_text)
 
 
 def translate_single_source_file(
@@ -859,6 +1003,7 @@ def main():
                             future.result()
                         futures.clear()
 
+        refresh_orphan_locale_relative_links()
         print("Translation completed.")
 
 

@@ -300,7 +300,7 @@ result = await Runner.run(agent, "Explain quines", hooks=LoggingHooks())
 print(result.final_output)
 ```
 
-コールバックの全機能については、[Lifecycle API リファレンス](ref/lifecycle.md)を参照してください。
+コールバックの全機能については、[Lifecycle API リファレンス](../ref/lifecycle.md)を参照してください。
 
 ## ガードレール {#guardrails}
 
