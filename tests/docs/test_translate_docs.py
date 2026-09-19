@@ -129,6 +129,45 @@ def test_a_heading_with_its_own_attribute_list_is_not_rewritten(translate_docs: 
     assert translate_docs.preserve_heading_anchors(source, translated) == translated
 
 
+def test_relative_links_are_rebased_for_translated_pages(translate_docs: ModuleType) -> None:
+    source = (
+        "See [lifecycle](ref/lifecycle.md) and [anchor](ref/testing.md#cases).\n"
+        "![image](assets/images/harness.png)\n"
+        "```md\n[leave](ref/inside.md)\n```\n"
+        "[external](https://example.com) [local](#section)\n"
+    )
+    translated = (
+        "See [ライフサイクル](ref/lifecycle.md) and [アンカー](ref/testing.md#cases).\n"
+        "![画像](assets/images/harness.png)\n"
+        "```md\n[leave](ref/inside.md)\n```\n"
+        "[external](https://example.com) [local](#section)\n"
+    )
+
+    result = translate_docs.rewrite_relative_links(
+        source,
+        translated,
+        source_path="docs/agents.md",
+        target_path="docs/ja/agents.md",
+    )
+
+    assert "[ライフサイクル](../ref/lifecycle.md)" in result
+    assert "[アンカー](../ref/testing.md#cases)" in result
+    assert "![画像](../assets/images/harness.png)" in result
+    assert "[leave](ref/inside.md)" in result
+    assert "[external](https://example.com) [local](#section)" in result
+
+
+def test_relative_link_rewrite_preserves_search_exclusion(translate_docs: ModuleType) -> None:
+    result = translate_docs.rewrite_relative_links(
+        "See [guide](ref/guide.md)\n",
+        translate_docs.SEARCH_EXCLUSION + "See [ガイド](ref/guide.md)\n",
+        source_path="docs/index.md",
+        target_path="docs/ko/index.md",
+    )
+
+    assert result == translate_docs.SEARCH_EXCLUSION + "See [ガイド](../ref/guide.md)\n"
+
+
 def test_ref_pages_are_skipped_with_windows_separators(
     translate_docs: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
