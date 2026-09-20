@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import os
+import posixpath
 import re
 import socket
 import tarfile
@@ -15,7 +16,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Final, Literal, cast
 
 import docker.errors  # type: ignore[import-untyped]
@@ -1856,16 +1857,22 @@ def _build_docker_volume_mounts(
     return mounts
 
 
+def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:
+    """Compare Linux mount paths lexically, including leading-slash aliases."""
+    # POSIX normpath preserves exactly two leading slashes, but Linux treats them as one.
+    return PurePosixPath(posixpath.normpath(re.sub(r"^/+", "/", sandbox_path_str(path))))
+
+
 def _validate_docker_path_grants(manifest: Manifest) -> None:
-    root = coerce_posix_path(manifest.root)
+    root = _docker_mount_path_identity(manifest.root)
     seen_targets: set[str] = set()
     explicit_targets: set[str] = set()
     volume_targets = {
-        coerce_posix_path(mount_path).as_posix()
+        _docker_mount_path_identity(mount_path).as_posix()
         for _artifact, mount_path in _docker_volume_mounts_for_manifest(manifest)
     }
     for grant in manifest.extra_path_grants:
-        target = coerce_posix_path(grant.path)
+        target = _docker_mount_path_identity(grant.path)
         target_str = target.as_posix()
         if target_str in seen_targets and (
             grant.host_path is not None or target_str in explicit_targets

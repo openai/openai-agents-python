@@ -20,7 +20,7 @@ from typing_extensions import assert_never
 from .._config_coercion import coerce_pydantic_config
 from ..util._asyncio_tasks import gather_with_cancel
 from ._mount_security import redact_mount_validation_error_data_sync
-from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
+from .entries import BaseEntry, Dir, LocalDir, LocalFile, Mount, resolve_workspace_path
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
@@ -603,4 +603,14 @@ def _coerce_manifest(value: Manifest | dict[str, Any], *, parameter_name: str) -
                 f"{parameter_name}.extra_path_grants must be configured on a trusted "
                 "Manifest instance, not in a dictionary"
             )
-    return coerce_pydantic_config(value, Manifest, parameter_name=parameter_name)
+    manifest = coerce_pydantic_config(value, Manifest, parameter_name=parameter_name)
+    if isinstance(value, dict):
+        for _, entry in manifest.iter_entries():
+            if isinstance(entry, LocalFile) or (
+                isinstance(entry, LocalDir) and entry.src is not None
+            ):
+                raise TypeError(
+                    f"{parameter_name} local host sources must be configured on a trusted "
+                    "Manifest instance, not in a dictionary"
+                )
+    return manifest

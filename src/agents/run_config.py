@@ -232,7 +232,11 @@ class SandboxRunConfig:
     """Explicit sandbox session state to resume from when not using `RunState` payloads."""
 
     manifest: Manifest | None = None
-    """Optional sandbox manifest override for fresh session creation."""
+    """Optional sandbox manifest override for fresh session creation.
+
+    Dictionary inputs cannot authorize local host sources or extra path grants. Configure
+    these on a trusted `Manifest` instance after validating the host paths in application code.
+    """
 
     snapshot: SnapshotSpec | SnapshotBase | None = None
     """Optional sandbox snapshot used for fresh session creation."""
