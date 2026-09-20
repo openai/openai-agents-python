@@ -5176,8 +5176,8 @@
 </span><span id="__span-0-542"><a id="__codelineno-0-542" name="__codelineno-0-542"></a>
 </span><span id="__span-0-543"><a id="__codelineno-0-543" name="__codelineno-0-543"></a>    <span class="n">max_size</span><span class="p">:</span> <span class="n">NotRequired</span><span class="p">[</span><span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span>
 </span><span id="__span-0-544"><a id="__codelineno-0-544" name="__codelineno-0-544"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Maximum size in bytes of an incoming websocket message.</span>
-</span><span id="__span-0-545"><a id="__codelineno-0-545" name="__codelineno-0-545"></a><span class="sd">    Defaults to None (no limit). Set an explicit byte limit to bound memory usage for</span>
-</span><span id="__span-0-546"><a id="__codelineno-0-546" name="__codelineno-0-546"></a><span class="sd">    long-lived connections behind proxies or in memory-constrained containers.&quot;&quot;&quot;</span>
+</span><span id="__span-0-545"><a id="__codelineno-0-545" name="__codelineno-0-545"></a><span class="sd">    Defaults to 8 MiB (8 * 1024 * 1024 bytes). Messages above the limit close the connection.</span>
+</span><span id="__span-0-546"><a id="__codelineno-0-546" name="__codelineno-0-546"></a><span class="sd">    Set a different byte limit to match application needs, or None to disable the limit.&quot;&quot;&quot;</span>
 </span></code></pre></div></td></tr></table></div>
               </details>
 
@@ -5284,8 +5284,8 @@ Set to None to disable ping timeout and keep an open connection (ignore network 
     <div class="doc doc-contents ">
 
         <p>Maximum size in bytes of an incoming websocket message.
-Defaults to None (no limit). Set an explicit byte limit to bound memory usage for
-long-lived connections behind proxies or in memory-constrained containers.</p>
+Defaults to 8 MiB (8 * 1024 * 1024 bytes). Messages above the limit close the connection.
+Set a different byte limit to match application needs, or None to disable the limit.</p>
 
     </div>
 
@@ -6781,7 +6781,7 @@ long-lived connections behind proxies or in memory-constrained containers.</p>
 </span><span id="__span-0-680"><a id="__codelineno-0-680" name="__codelineno-0-680"></a>        <span class="n">connect_kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
 </span><span id="__span-0-681"><a id="__codelineno-0-681" name="__codelineno-0-681"></a>            <span class="s2">&quot;user_agent_header&quot;</span><span class="p">:</span> <span class="n">_USER_AGENT</span><span class="p">,</span>
 </span><span id="__span-0-682"><a id="__codelineno-0-682" name="__codelineno-0-682"></a>            <span class="s2">&quot;additional_headers&quot;</span><span class="p">:</span> <span class="n">headers</span><span class="p">,</span>
-</span><span id="__span-0-683"><a id="__codelineno-0-683" name="__codelineno-0-683"></a>            <span class="s2">&quot;max_size&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># Allow any size of message</span>
+</span><span id="__span-0-683"><a id="__codelineno-0-683" name="__codelineno-0-683"></a>            <span class="s2">&quot;max_size&quot;</span><span class="p">:</span> <span class="mi">8</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">,</span>
 </span><span id="__span-0-684"><a id="__codelineno-0-684" name="__codelineno-0-684"></a>        <span class="p">}</span>
 </span><span id="__span-0-685"><a id="__codelineno-0-685" name="__codelineno-0-685"></a>
 </span><span id="__span-0-686"><a id="__codelineno-0-686" name="__codelineno-0-686"></a>        <span class="k">if</span> <span class="n">transport_config</span><span class="p">:</span>

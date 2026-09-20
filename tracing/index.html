@@ -1540,6 +1540,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Custom tracing processors">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#redaction-before-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction before export
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5119,6 +5136,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Custom tracing processors">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#redaction-before-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction before export
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5408,6 +5442,11 @@
 <li><a class="autorefs autorefs-internal" title="add_trace_processor" href="../ref/tracing/#agents.tracing.add_trace_processor"><code>add_trace_processor()</code></a> lets you add an <strong>additional</strong> trace processor that will receive traces and spans as they are ready. This lets you do your own processing in addition to sending traces to OpenAI's backend.</li>
 <li><a class="autorefs autorefs-internal" title="set_trace_processors" href="../ref/tracing/#agents.tracing.set_trace_processors"><code>set_trace_processors()</code></a> lets you <strong>replace</strong> the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a <code>TracingProcessor</code> that does so.</li>
 </ol>
+<h3 id="redaction-before-export">Redaction before export</h3>
+<p>Trace processors are independent observers. The default provider catches a processor's callback exceptions and continues calling the other registered processors. A redaction processor registered before an exporter therefore does not prevent that exporter from receiving data if redaction fails. Adding a processor with <code>add_trace_processor()</code> also leaves the default OpenAI exporter registered.</p>
+<p>When export depends on successful redaction, keep redaction and delivery inside the same application-owned exporter. Use <code>set_trace_processors()</code> to replace the default processors with a <code>BatchTraceProcessor</code> configured with that exporter. The exporter should copy the serialized payloads, redact the copies, and pass only the redacted results to the destination. If serialization, copying, or redaction fails, discard the batch before invoking the destination. Log a fixed failure message without the payload, exception text, or traceback.</p>
+<p>The <a href="https://github.com/openai/openai-agents-python/blob/main/examples/basic/trace_redaction.py">trace redaction example</a> demonstrates this composition using existing tracing APIs. The example prints only event categories and trace/span linkage IDs to the local console; it makes no API calls. Its allowlist omits names, metadata, errors, and span data. Caller-supplied IDs must contain no sensitive information, or the application must map those IDs to safe values. This diagnostic output is not the OpenAI tracing ingest schema; an application sending data to a backend must supply a redaction policy and destination compatible with that backend.</p>
+<p>The redactor and destination are trusted application code. They must not independently log or send the original data. The batch processor can invoke the exporter during background export, explicit flush, or shutdown, so callbacks must be safe to use from those execution contexts. A failed batch is dropped; subsequent batches can still be exported. Replacement affects future processor callbacks and does not erase data already buffered by a previously registered processor. Configure the replacement before creating traces or running agents.</p>
 <h2 id="tracing-with-non-openai-models">Tracing with non-OpenAI models</h2>
 <p>When using non-OpenAI models, you can provide an OpenAI API key to the tracing exporter to enable free tracing in the OpenAI Traces dashboard without disabling tracing. See the <a href="../models/#third-party-adapters">Third-party adapters</a> section in the Models guide for adapter selection and setup caveats.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>

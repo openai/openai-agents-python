@@ -1259,6 +1259,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Long-running approvals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#keep-approval-state-on-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keep approval state on the server
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serialization-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Serialization options
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5080,6 +5108,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Long-running approvals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#keep-approval-state-on-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keep approval state on the server
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serialization-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Serialization options
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5378,7 +5434,7 @@
 <li><strong>Streaming approvals</strong>: <code>examples/agent_patterns/human_in_the_loop_stream.py</code> shows how to drain <code>stream_events()</code> and then approve pending tool calls before resuming with <code>Runner.run_streamed(agent, state)</code>.</li>
 <li><strong>Custom rejection text</strong>: <code>examples/agent_patterns/human_in_the_loop_custom_rejection.py</code> shows how to combine run-level <code>tool_error_formatter</code> with per-call <code>rejection_message</code> overrides when approvals are rejected.</li>
 <li><strong>Agent as tool approvals</strong>: <code>Agent.as_tool(..., needs_approval=...)</code> applies the same interruption flow when delegated agent tasks need review. Nested interruptions still surface on the outer run, so resume the original top-level agent rather than the nested one.</li>
-<li><strong>Local shell and apply_patch tools</strong>: <code>ShellTool</code> and <code>ApplyPatchTool</code> also support <code>needs_approval</code>. Use <code>state.approve(interruption, always_approve=True)</code> or <code>state.reject(..., always_reject=True)</code> to cache the decision for future calls to that tool during the rest of the run. For automatic decisions, provide <code>on_approval</code> (see <code>examples/tools/shell.py</code>); for manual decisions, handle interruptions (see <code>examples/tools/shell_human_in_the_loop.py</code>). Hosted shell environments do not support <code>needs_approval</code> or <code>on_approval</code>; see the <a href="../tools/">tools guide</a>.</li>
+<li><strong>Local shell and apply_patch tools</strong>: <code>ShellTool</code> and <code>ApplyPatchTool</code> also support <code>needs_approval</code>. Use <code>state.approve(interruption, always_approve=True)</code> or <code>state.reject(..., always_reject=True)</code> to cache the decision for future calls to that tool during the rest of the run. To resolve approval inside a callback, provide <code>on_approval</code>; <code>examples/tools/shell.py</code> demonstrates an interactive callback that prompts the operator by default. For an automatic policy that rejects every shell call, set <code>needs_approval=True</code> and <code>on_approval=lambda _context, _item: {"approve": False, "reason": "Disabled by policy"}</code> on <code>ShellTool</code>. To let the application review a paused run instead, handle interruptions (see <code>examples/tools/shell_human_in_the_loop.py</code>). Hosted shell environments do not support <code>needs_approval</code> or <code>on_approval</code>; see the <a href="../tools/">tools guide</a>.</li>
 <li><strong>Local MCP servers</strong>: Use <code>require_approval</code> on <code>MCPServerStdio</code> / <code>MCPServerSse</code> / <code>MCPServerStreamableHttp</code> to gate MCP tool calls (see <code>examples/mcp/get_all_mcp_tools_example/main.py</code> and <code>examples/mcp/tool_filter_example/main.py</code>).</li>
 <li><strong>Hosted MCP servers</strong>: Set <code>tool_config={"require_approval": "always"}</code> on <code>HostedMCPTool</code> to force HITL, optionally providing <code>on_approval_request</code> to auto-approve or reject (see <code>examples/hosted_mcp/human_in_the_loop.py</code> and <code>examples/hosted_mcp/on_approval.py</code>). Use <code>"never"</code> for trusted servers (<code>examples/hosted_mcp/simple.py</code>).</li>
 <li><strong>Sessions and memory</strong>: Pass a session to <code>Runner.run</code> so approvals and conversation history survive multiple turns. SQLite and OpenAI Conversations session variants are in <code>examples/memory/memory_session_hitl_example.py</code> and <code>examples/memory/openai_session_hitl_example.py</code>.</li>
@@ -5386,6 +5442,19 @@
 </ul>
 <h2 id="long-running-approvals">Long-running approvals</h2>
 <p><code>RunState</code> is designed to be durable. Use <code>state.to_json()</code> or <code>state.to_string()</code> to store pending work in a database or queue and recreate it later with <code>RunState.from_json(...)</code> or <code>RunState.from_string(...)</code>.</p>
+<h3 id="keep-approval-state-on-the-server">Keep approval state on the server</h3>
+<p>Serialized <code>RunState</code> contains execution state, including approval decisions, pending tool calls, and tool arguments. The SDK restores this state; <code>RunState.from_json()</code> and <code>RunState.from_string()</code> do not authenticate the snapshot or the person submitting it. Only deserialize snapshots from trusted storage, or snapshots whose complete integrity and ownership the application has verified. A schema check or a tool-call fingerprint does not authenticate a snapshot.</p>
+<p>For browser or mobile approval interfaces, keep the complete snapshot in application-controlled server storage. Send the reviewer only the tool details that the reviewer is authorized to see and opaque identifiers for the pending decisions. Treat tool names and arguments as untrusted display content and escape them when rendering HTML.</p>
+<p>When a decision arrives, the server must:</p>
+<ol>
+<li>Authenticate the reviewer using the application's session or authentication middleware. Do not take the reviewer's identity from the approval request body.</li>
+<li>Authorize that reviewer to act on the stored run and the selected pending calls. Possession of a run ID or decision ID is not authorization.</li>
+<li>Validate the submitted decision identifiers and boolean decisions against the pending requests stored on the server. Load the server-owned snapshot and obtain the pending items with <code>state.get_interruptions()</code>; do not accept replacement tool calls, arguments, approval records, or serialized state from the client.</li>
+<li>Apply <code>state.approve(...)</code> or <code>state.reject(...)</code> to those server-owned items, then resume the run. Coordinate consumption of each pending request with storage so concurrent or replayed submissions cannot resume the same snapshot twice. In shared storage, use an atomic owner-checked transition before starting resumed execution.</li>
+</ol>
+<p>The <a href="https://github.com/openai/openai-agents-python/blob/main/examples/agent_patterns/human_in_the_loop_server.py">server-side approval example</a> demonstrates this pattern with a CLI client simulation and a store confined to one event loop in one process. It requires one decision for every pending call in a batch. The example consumes a request before deserialization and resumed execution, so failures and cancellations also consume the request. A production application must provide authentication, request protections, storage retention, and recovery that reconciles tool side effects before retrying; this example is not a deployable HTTP service.</p>
+<p>Replacing <code>context</code> with <code>context_override</code>, setting <code>strict_context=True</code>, or removing only the serialized approval records does not make an untrusted snapshot safe. Other fields still control resumed execution. If an application transports the complete snapshot through a client, the application must verify its integrity, bind it to the authorized user and run, and prevent replay before deserialization. Such verification does not encrypt the snapshot or hide its contents from the client.</p>
+<h3 id="serialization-options">Serialization options</h3>
 <p>Useful serialization options:</p>
 <ul>
 <li><code>context_serializer</code>: Customize how non-mapping context objects are serialized.</li>

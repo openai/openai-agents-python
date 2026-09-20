@@ -5322,6 +5322,22 @@
       class-attribute
       instance-attribute
   " href="../ref/handoffs/#agents.handoffs.Handoff.nest_handoff_history"><code>Handoff.nest_handoff_history</code></a>. If you just need to change the wrapper text for generated summary segments, call <a class="autorefs autorefs-internal" title="set_conversation_history_wrappers" href="../ref/handoffs/#agents.handoffs.set_conversation_history_wrappers"><code>set_conversation_history_wrappers</code></a> before running your agents. Call <a class="autorefs autorefs-internal" title="reset_conversation_history_wrappers" href="../ref/handoffs/#agents.handoffs.reset_conversation_history_wrappers"><code>reset_conversation_history_wrappers</code></a> before a later run when you need to restore the default wrappers.</p>
+<p>Nested handoff history changes how the transcript is represented; it does not redact sensitive data. Tool-call arguments and tool outputs can remain in the generated assistant summary even when the corresponding structured tool items are no longer forwarded separately. Treat the receiving agent and its model provider as recipients of the forwarded history.</p>
+<p>For client-managed history, use an explicit <a class="autorefs autorefs-internal" title="input_filter
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../ref/handoffs/#agents.handoffs.Handoff.input_filter"><code>input_filter</code></a> or <a class="autorefs autorefs-internal" title="handoff_input_filter
+
+
+  
+      class-attribute
+      instance-attribute
+  " href="../ref/run/#agents.run.RunConfig.handoff_input_filter"><code>RunConfig.handoff_input_filter</code></a> to select or redact the content that the receiving agent may see. If a custom filter also calls <code>nest_handoff_history</code>, sanitize <code>input_history</code>, <code>pre_handoff_items</code>, and <code>new_items</code> before that call. The helper builds nested history from those three fields and ignores any existing <code>input_items</code> override. Filtering only <code>input_items</code> can therefore leave excluded tool content in the generated summary.</p>
+<p>If the filter must preserve the original <code>new_items</code> for session history, the filter can instead call <code>nest_handoff_history</code> and sanitize the returned <code>input_history</code> before returning the nested result. Clearing or replacing only <code>input_items</code> after nesting does not remove content already included in <code>input_history</code>.</p>
+<p>Server-managed conversations (<code>conversation_id</code>, <code>previous_response_id</code>, or <code>auto_previous_response_id</code>) do not support handoff input filters; use a separate run with explicitly selected input when the receiving agent must not inherit that server-managed history. Do not reuse the original <code>conversation_id</code> or <code>previous_response_id</code> in that separate run.</p>
 <p>If both the handoff and the active <a class="autorefs autorefs-internal" title="handoff_input_filter
 
 
@@ -5353,6 +5369,7 @@
 <ol>
 <li>This will automatically remove all tool-related items from the history when <code>FAQ agent</code> is called.</li>
 </ol>
+<p><code>remove_all_tools</code> removes structured tool items. It does not redact tool arguments or results already copied into ordinary messages or nested-history summaries. Use a custom input filter to remove or redact those message contents when needed.</p>
 <h2 id="recommended-prompts">Recommended prompts</h2>
 <p>To make sure that LLMs understand handoffs properly, we recommend including information about handoffs in your agents. We have a suggested prefix in <a class="autorefs autorefs-internal" title="RECOMMENDED_PROMPT_PREFIX
 

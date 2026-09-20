@@ -3428,7 +3428,21 @@ not be resumed concurrently against the same Session.</p>
 <span class="normal"><a href="#__codelineno-0-2355">2355</a></span>
 <span class="normal"><a href="#__codelineno-0-2356">2356</a></span>
 <span class="normal"><a href="#__codelineno-0-2357">2357</a></span>
-<span class="normal"><a href="#__codelineno-0-2358">2358</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-763"><a id="__codelineno-0-763" name="__codelineno-0-763"></a><span class="nd">@dataclass</span>
+<span class="normal"><a href="#__codelineno-0-2358">2358</a></span>
+<span class="normal"><a href="#__codelineno-0-2359">2359</a></span>
+<span class="normal"><a href="#__codelineno-0-2360">2360</a></span>
+<span class="normal"><a href="#__codelineno-0-2361">2361</a></span>
+<span class="normal"><a href="#__codelineno-0-2362">2362</a></span>
+<span class="normal"><a href="#__codelineno-0-2363">2363</a></span>
+<span class="normal"><a href="#__codelineno-0-2364">2364</a></span>
+<span class="normal"><a href="#__codelineno-0-2365">2365</a></span>
+<span class="normal"><a href="#__codelineno-0-2366">2366</a></span>
+<span class="normal"><a href="#__codelineno-0-2367">2367</a></span>
+<span class="normal"><a href="#__codelineno-0-2368">2368</a></span>
+<span class="normal"><a href="#__codelineno-0-2369">2369</a></span>
+<span class="normal"><a href="#__codelineno-0-2370">2370</a></span>
+<span class="normal"><a href="#__codelineno-0-2371">2371</a></span>
+<span class="normal"><a href="#__codelineno-0-2372">2372</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-763"><a id="__codelineno-0-763" name="__codelineno-0-763"></a><span class="nd">@dataclass</span>
 </span><span id="__span-0-764"><a id="__codelineno-0-764" name="__codelineno-0-764"></a><span class="k">class</span><span class="w"> </span><span class="nc">RunState</span><span class="p">(</span><span class="n">Generic</span><span class="p">[</span><span class="n">TContext</span><span class="p">,</span> <span class="n">TAgent</span><span class="p">]):</span>
 </span><span id="__span-0-765"><a id="__codelineno-0-765" name="__codelineno-0-765"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Serializable snapshot of an agent run, including context, usage, and interruptions.</span>
 </span><span id="__span-0-766"><a id="__codelineno-0-766" name="__codelineno-0-766"></a>
@@ -4870,160 +4884,174 @@ not be resumed concurrently against the same Session.</p>
 </span><span id="__span-0-2202"><a id="__codelineno-0-2202" name="__codelineno-0-2202"></a><span class="sd">        This method is used to deserialize a run state from a string that was serialized using</span>
 </span><span id="__span-0-2203"><a id="__codelineno-0-2203" name="__codelineno-0-2203"></a><span class="sd">        the `to_string()` method.</span>
 </span><span id="__span-0-2204"><a id="__codelineno-0-2204" name="__codelineno-0-2204"></a>
-</span><span id="__span-0-2205"><a id="__codelineno-0-2205" name="__codelineno-0-2205"></a><span class="sd">        Args:</span>
-</span><span id="__span-0-2206"><a id="__codelineno-0-2206" name="__codelineno-0-2206"></a><span class="sd">            initial_agent: The initial agent (used to build agent map for resolution).</span>
-</span><span id="__span-0-2207"><a id="__codelineno-0-2207" name="__codelineno-0-2207"></a><span class="sd">            state_string: The JSON string to deserialize.</span>
-</span><span id="__span-0-2208"><a id="__codelineno-0-2208" name="__codelineno-0-2208"></a><span class="sd">            context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
-</span><span id="__span-0-2209"><a id="__codelineno-0-2209" name="__codelineno-0-2209"></a><span class="sd">                serialized context.</span>
-</span><span id="__span-0-2210"><a id="__codelineno-0-2210" name="__codelineno-0-2210"></a><span class="sd">            context_deserializer: Optional function to rebuild non-mapping context values.</span>
-</span><span id="__span-0-2211"><a id="__codelineno-0-2211" name="__codelineno-0-2211"></a><span class="sd">            strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
-</span><span id="__span-0-2212"><a id="__codelineno-0-2212" name="__codelineno-0-2212"></a>
-</span><span id="__span-0-2213"><a id="__codelineno-0-2213" name="__codelineno-0-2213"></a><span class="sd">        Returns:</span>
-</span><span id="__span-0-2214"><a id="__codelineno-0-2214" name="__codelineno-0-2214"></a><span class="sd">            A reconstructed RunState instance.</span>
-</span><span id="__span-0-2215"><a id="__codelineno-0-2215" name="__codelineno-0-2215"></a>
-</span><span id="__span-0-2216"><a id="__codelineno-0-2216" name="__codelineno-0-2216"></a><span class="sd">        Raises:</span>
-</span><span id="__span-0-2217"><a id="__codelineno-0-2217" name="__codelineno-0-2217"></a><span class="sd">            UserError: If the string is invalid JSON or has incompatible schema version.</span>
-</span><span id="__span-0-2218"><a id="__codelineno-0-2218" name="__codelineno-0-2218"></a><span class="sd">        &quot;&quot;&quot;</span>
-</span><span id="__span-0-2219"><a id="__codelineno-0-2219" name="__codelineno-0-2219"></a>        <span class="n">parse_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2220"><a id="__codelineno-0-2220" name="__codelineno-0-2220"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2221"><a id="__codelineno-0-2221" name="__codelineno-0-2221"></a>            <span class="n">state_json</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">state_string</span><span class="p">)</span>
-</span><span id="__span-0-2222"><a id="__codelineno-0-2222" name="__codelineno-0-2222"></a>        <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2223"><a id="__codelineno-0-2223" name="__codelineno-0-2223"></a>            <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2224"><a id="__codelineno-0-2224" name="__codelineno-0-2224"></a>            <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2225"><a id="__codelineno-0-2225" name="__codelineno-0-2225"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
-</span><span id="__span-0-2226"><a id="__codelineno-0-2226" name="__codelineno-0-2226"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2227"><a id="__codelineno-0-2227" name="__codelineno-0-2227"></a>            <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2228"><a id="__codelineno-0-2228" name="__codelineno-0-2228"></a>            <span class="n">prepared_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2229"><a id="__codelineno-0-2229" name="__codelineno-0-2229"></a>            <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">prepared_error</span><span class="p">)</span> <span class="ow">in</span> <span class="p">{</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">KeyboardInterrupt</span><span class="p">,</span> <span class="ne">SystemExit</span><span class="p">}:</span>
-</span><span id="__span-0-2230"><a id="__codelineno-0-2230" name="__codelineno-0-2230"></a>                <span class="n">parse_error</span> <span class="o">=</span> <span class="n">prepared_error</span>
-</span><span id="__span-0-2231"><a id="__codelineno-0-2231" name="__codelineno-0-2231"></a>            <span class="k">else</span><span class="p">:</span>
-</span><span id="__span-0-2232"><a id="__codelineno-0-2232" name="__codelineno-0-2232"></a>                <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
-</span><span id="__span-0-2233"><a id="__codelineno-0-2233" name="__codelineno-0-2233"></a>
-</span><span id="__span-0-2234"><a id="__codelineno-0-2234" name="__codelineno-0-2234"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2235"><a id="__codelineno-0-2235" name="__codelineno-0-2235"></a>        <span class="k">if</span> <span class="n">parse_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2236"><a id="__codelineno-0-2236" name="__codelineno-0-2236"></a>            <span class="n">_mark_error_data_redacted</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
-</span><span id="__span-0-2237"><a id="__codelineno-0-2237" name="__codelineno-0-2237"></a>            <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2238"><a id="__codelineno-0-2238" name="__codelineno-0-2238"></a>            <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2239"><a id="__codelineno-0-2239" name="__codelineno-0-2239"></a>            <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2240"><a id="__codelineno-0-2240" name="__codelineno-0-2240"></a>            <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
-</span><span id="__span-0-2241"><a id="__codelineno-0-2241" name="__codelineno-0-2241"></a>
-</span><span id="__span-0-2242"><a id="__codelineno-0-2242" name="__codelineno-0-2242"></a>        <span class="n">safe_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2243"><a id="__codelineno-0-2243" name="__codelineno-0-2243"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2244"><a id="__codelineno-0-2244" name="__codelineno-0-2244"></a>            <span class="k">return</span> <span class="k">await</span> <span class="n">RunState</span><span class="o">.</span><span class="n">from_json</span><span class="p">(</span>
-</span><span id="__span-0-2245"><a id="__codelineno-0-2245" name="__codelineno-0-2245"></a>                <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
-</span><span id="__span-0-2246"><a id="__codelineno-0-2246" name="__codelineno-0-2246"></a>                <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2247"><a id="__codelineno-0-2247" name="__codelineno-0-2247"></a>                <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
-</span><span id="__span-0-2248"><a id="__codelineno-0-2248" name="__codelineno-0-2248"></a>                <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
-</span><span id="__span-0-2249"><a id="__codelineno-0-2249" name="__codelineno-0-2249"></a>                <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
-</span><span id="__span-0-2250"><a id="__codelineno-0-2250" name="__codelineno-0-2250"></a>            <span class="p">)</span>
-</span><span id="__span-0-2251"><a id="__codelineno-0-2251" name="__codelineno-0-2251"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2252"><a id="__codelineno-0-2252" name="__codelineno-0-2252"></a>            <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_known_run_state_error_message</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2253"><a id="__codelineno-0-2253" name="__codelineno-0-2253"></a>            <span class="n">safe_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
-</span><span id="__span-0-2254"><a id="__codelineno-0-2254" name="__codelineno-0-2254"></a>                <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2255"><a id="__codelineno-0-2255" name="__codelineno-0-2255"></a>                <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
-</span><span id="__span-0-2256"><a id="__codelineno-0-2256" name="__codelineno-0-2256"></a>            <span class="p">)</span>
-</span><span id="__span-0-2257"><a id="__codelineno-0-2257" name="__codelineno-0-2257"></a>
-</span><span id="__span-0-2258"><a id="__codelineno-0-2258" name="__codelineno-0-2258"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2259"><a id="__codelineno-0-2259" name="__codelineno-0-2259"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2260"><a id="__codelineno-0-2260" name="__codelineno-0-2260"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2261"><a id="__codelineno-0-2261" name="__codelineno-0-2261"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2262"><a id="__codelineno-0-2262" name="__codelineno-0-2262"></a>        <span class="k">assert</span> <span class="n">safe_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-</span><span id="__span-0-2263"><a id="__codelineno-0-2263" name="__codelineno-0-2263"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">safe_error</span><span class="p">)</span>
+</span><span id="__span-0-2205"><a id="__codelineno-0-2205" name="__codelineno-0-2205"></a><span class="sd">        Only deserialize state from trusted storage or after the application verifies the</span>
+</span><span id="__span-0-2206"><a id="__codelineno-0-2206" name="__codelineno-0-2206"></a><span class="sd">        integrity and ownership of the complete snapshot. Serialized state includes tool</span>
+</span><span id="__span-0-2207"><a id="__codelineno-0-2207" name="__codelineno-0-2207"></a><span class="sd">        approvals and pending tool calls; this method does not authenticate that state.</span>
+</span><span id="__span-0-2208"><a id="__codelineno-0-2208" name="__codelineno-0-2208"></a><span class="sd">        Do not pass client-supplied state directly to this method. Keep the snapshot on the</span>
+</span><span id="__span-0-2209"><a id="__codelineno-0-2209" name="__codelineno-0-2209"></a><span class="sd">        server and apply authorized approval decisions to that server-owned state instead.</span>
+</span><span id="__span-0-2210"><a id="__codelineno-0-2210" name="__codelineno-0-2210"></a><span class="sd">        Neither `context_override` nor `strict_context` verifies snapshot integrity.</span>
+</span><span id="__span-0-2211"><a id="__codelineno-0-2211" name="__codelineno-0-2211"></a>
+</span><span id="__span-0-2212"><a id="__codelineno-0-2212" name="__codelineno-0-2212"></a><span class="sd">        Args:</span>
+</span><span id="__span-0-2213"><a id="__codelineno-0-2213" name="__codelineno-0-2213"></a><span class="sd">            initial_agent: The initial agent (used to build agent map for resolution).</span>
+</span><span id="__span-0-2214"><a id="__codelineno-0-2214" name="__codelineno-0-2214"></a><span class="sd">            state_string: The JSON string to deserialize.</span>
+</span><span id="__span-0-2215"><a id="__codelineno-0-2215" name="__codelineno-0-2215"></a><span class="sd">            context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
+</span><span id="__span-0-2216"><a id="__codelineno-0-2216" name="__codelineno-0-2216"></a><span class="sd">                serialized context.</span>
+</span><span id="__span-0-2217"><a id="__codelineno-0-2217" name="__codelineno-0-2217"></a><span class="sd">            context_deserializer: Optional function to rebuild non-mapping context values.</span>
+</span><span id="__span-0-2218"><a id="__codelineno-0-2218" name="__codelineno-0-2218"></a><span class="sd">            strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
+</span><span id="__span-0-2219"><a id="__codelineno-0-2219" name="__codelineno-0-2219"></a>
+</span><span id="__span-0-2220"><a id="__codelineno-0-2220" name="__codelineno-0-2220"></a><span class="sd">        Returns:</span>
+</span><span id="__span-0-2221"><a id="__codelineno-0-2221" name="__codelineno-0-2221"></a><span class="sd">            A reconstructed RunState instance.</span>
+</span><span id="__span-0-2222"><a id="__codelineno-0-2222" name="__codelineno-0-2222"></a>
+</span><span id="__span-0-2223"><a id="__codelineno-0-2223" name="__codelineno-0-2223"></a><span class="sd">        Raises:</span>
+</span><span id="__span-0-2224"><a id="__codelineno-0-2224" name="__codelineno-0-2224"></a><span class="sd">            UserError: If the string is invalid JSON or has incompatible schema version.</span>
+</span><span id="__span-0-2225"><a id="__codelineno-0-2225" name="__codelineno-0-2225"></a><span class="sd">        &quot;&quot;&quot;</span>
+</span><span id="__span-0-2226"><a id="__codelineno-0-2226" name="__codelineno-0-2226"></a>        <span class="n">parse_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2227"><a id="__codelineno-0-2227" name="__codelineno-0-2227"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2228"><a id="__codelineno-0-2228" name="__codelineno-0-2228"></a>            <span class="n">state_json</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">state_string</span><span class="p">)</span>
+</span><span id="__span-0-2229"><a id="__codelineno-0-2229" name="__codelineno-0-2229"></a>        <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2230"><a id="__codelineno-0-2230" name="__codelineno-0-2230"></a>            <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2231"><a id="__codelineno-0-2231" name="__codelineno-0-2231"></a>            <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2232"><a id="__codelineno-0-2232" name="__codelineno-0-2232"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
+</span><span id="__span-0-2233"><a id="__codelineno-0-2233" name="__codelineno-0-2233"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2234"><a id="__codelineno-0-2234" name="__codelineno-0-2234"></a>            <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2235"><a id="__codelineno-0-2235" name="__codelineno-0-2235"></a>            <span class="n">prepared_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2236"><a id="__codelineno-0-2236" name="__codelineno-0-2236"></a>            <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">prepared_error</span><span class="p">)</span> <span class="ow">in</span> <span class="p">{</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">KeyboardInterrupt</span><span class="p">,</span> <span class="ne">SystemExit</span><span class="p">}:</span>
+</span><span id="__span-0-2237"><a id="__codelineno-0-2237" name="__codelineno-0-2237"></a>                <span class="n">parse_error</span> <span class="o">=</span> <span class="n">prepared_error</span>
+</span><span id="__span-0-2238"><a id="__codelineno-0-2238" name="__codelineno-0-2238"></a>            <span class="k">else</span><span class="p">:</span>
+</span><span id="__span-0-2239"><a id="__codelineno-0-2239" name="__codelineno-0-2239"></a>                <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
+</span><span id="__span-0-2240"><a id="__codelineno-0-2240" name="__codelineno-0-2240"></a>
+</span><span id="__span-0-2241"><a id="__codelineno-0-2241" name="__codelineno-0-2241"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2242"><a id="__codelineno-0-2242" name="__codelineno-0-2242"></a>        <span class="k">if</span> <span class="n">parse_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2243"><a id="__codelineno-0-2243" name="__codelineno-0-2243"></a>            <span class="n">_mark_error_data_redacted</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
+</span><span id="__span-0-2244"><a id="__codelineno-0-2244" name="__codelineno-0-2244"></a>            <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2245"><a id="__codelineno-0-2245" name="__codelineno-0-2245"></a>            <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2246"><a id="__codelineno-0-2246" name="__codelineno-0-2246"></a>            <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2247"><a id="__codelineno-0-2247" name="__codelineno-0-2247"></a>            <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
+</span><span id="__span-0-2248"><a id="__codelineno-0-2248" name="__codelineno-0-2248"></a>
+</span><span id="__span-0-2249"><a id="__codelineno-0-2249" name="__codelineno-0-2249"></a>        <span class="n">safe_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2250"><a id="__codelineno-0-2250" name="__codelineno-0-2250"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2251"><a id="__codelineno-0-2251" name="__codelineno-0-2251"></a>            <span class="k">return</span> <span class="k">await</span> <span class="n">RunState</span><span class="o">.</span><span class="n">from_json</span><span class="p">(</span>
+</span><span id="__span-0-2252"><a id="__codelineno-0-2252" name="__codelineno-0-2252"></a>                <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
+</span><span id="__span-0-2253"><a id="__codelineno-0-2253" name="__codelineno-0-2253"></a>                <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2254"><a id="__codelineno-0-2254" name="__codelineno-0-2254"></a>                <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
+</span><span id="__span-0-2255"><a id="__codelineno-0-2255" name="__codelineno-0-2255"></a>                <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
+</span><span id="__span-0-2256"><a id="__codelineno-0-2256" name="__codelineno-0-2256"></a>                <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
+</span><span id="__span-0-2257"><a id="__codelineno-0-2257" name="__codelineno-0-2257"></a>            <span class="p">)</span>
+</span><span id="__span-0-2258"><a id="__codelineno-0-2258" name="__codelineno-0-2258"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2259"><a id="__codelineno-0-2259" name="__codelineno-0-2259"></a>            <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_known_run_state_error_message</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2260"><a id="__codelineno-0-2260" name="__codelineno-0-2260"></a>            <span class="n">safe_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
+</span><span id="__span-0-2261"><a id="__codelineno-0-2261" name="__codelineno-0-2261"></a>                <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2262"><a id="__codelineno-0-2262" name="__codelineno-0-2262"></a>                <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
+</span><span id="__span-0-2263"><a id="__codelineno-0-2263" name="__codelineno-0-2263"></a>            <span class="p">)</span>
 </span><span id="__span-0-2264"><a id="__codelineno-0-2264" name="__codelineno-0-2264"></a>
-</span><span id="__span-0-2265"><a id="__codelineno-0-2265" name="__codelineno-0-2265"></a>    <span class="nd">@staticmethod</span>
-</span><span id="__span-0-2266"><a id="__codelineno-0-2266" name="__codelineno-0-2266"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">from_json</span><span class="p">(</span>
-</span><span id="__span-0-2267"><a id="__codelineno-0-2267" name="__codelineno-0-2267"></a>        <span class="n">initial_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2268"><a id="__codelineno-0-2268" name="__codelineno-0-2268"></a>        <span class="n">state_json</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2269"><a id="__codelineno-0-2269" name="__codelineno-0-2269"></a>        <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2270"><a id="__codelineno-0-2270" name="__codelineno-0-2270"></a>        <span class="n">context_override</span><span class="p">:</span> <span class="n">ContextOverride</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2271"><a id="__codelineno-0-2271" name="__codelineno-0-2271"></a>        <span class="n">context_deserializer</span><span class="p">:</span> <span class="n">ContextDeserializer</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2272"><a id="__codelineno-0-2272" name="__codelineno-0-2272"></a>        <span class="n">strict_context</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-0-2273"><a id="__codelineno-0-2273" name="__codelineno-0-2273"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunState</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">]]:</span>
-</span><span id="__span-0-2274"><a id="__codelineno-0-2274" name="__codelineno-0-2274"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Deserializes a run state from a JSON dictionary.</span>
-</span><span id="__span-0-2275"><a id="__codelineno-0-2275" name="__codelineno-0-2275"></a>
-</span><span id="__span-0-2276"><a id="__codelineno-0-2276" name="__codelineno-0-2276"></a><span class="sd">        This method is used to deserialize a run state from a dict that was created using</span>
-</span><span id="__span-0-2277"><a id="__codelineno-0-2277" name="__codelineno-0-2277"></a><span class="sd">        the `to_json()` method.</span>
-</span><span id="__span-0-2278"><a id="__codelineno-0-2278" name="__codelineno-0-2278"></a>
-</span><span id="__span-0-2279"><a id="__codelineno-0-2279" name="__codelineno-0-2279"></a><span class="sd">        Args:</span>
-</span><span id="__span-0-2280"><a id="__codelineno-0-2280" name="__codelineno-0-2280"></a><span class="sd">            initial_agent: The initial agent (used to build agent map for resolution).</span>
-</span><span id="__span-0-2281"><a id="__codelineno-0-2281" name="__codelineno-0-2281"></a><span class="sd">            state_json: The JSON dictionary to deserialize.</span>
-</span><span id="__span-0-2282"><a id="__codelineno-0-2282" name="__codelineno-0-2282"></a><span class="sd">            context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
-</span><span id="__span-0-2283"><a id="__codelineno-0-2283" name="__codelineno-0-2283"></a><span class="sd">                serialized context.</span>
-</span><span id="__span-0-2284"><a id="__codelineno-0-2284" name="__codelineno-0-2284"></a><span class="sd">            context_deserializer: Optional function to rebuild non-mapping context values.</span>
-</span><span id="__span-0-2285"><a id="__codelineno-0-2285" name="__codelineno-0-2285"></a><span class="sd">            strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
-</span><span id="__span-0-2286"><a id="__codelineno-0-2286" name="__codelineno-0-2286"></a>
-</span><span id="__span-0-2287"><a id="__codelineno-0-2287" name="__codelineno-0-2287"></a><span class="sd">        Returns:</span>
-</span><span id="__span-0-2288"><a id="__codelineno-0-2288" name="__codelineno-0-2288"></a><span class="sd">            A reconstructed RunState instance.</span>
-</span><span id="__span-0-2289"><a id="__codelineno-0-2289" name="__codelineno-0-2289"></a>
-</span><span id="__span-0-2290"><a id="__codelineno-0-2290" name="__codelineno-0-2290"></a><span class="sd">        Raises:</span>
-</span><span id="__span-0-2291"><a id="__codelineno-0-2291" name="__codelineno-0-2291"></a><span class="sd">            UserError: If the dict has incompatible schema version.</span>
-</span><span id="__span-0-2292"><a id="__codelineno-0-2292" name="__codelineno-0-2292"></a><span class="sd">        &quot;&quot;&quot;</span>
-</span><span id="__span-0-2293"><a id="__codelineno-0-2293" name="__codelineno-0-2293"></a>        <span class="n">restore_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2294"><a id="__codelineno-0-2294" name="__codelineno-0-2294"></a>        <span class="n">trusted_validation_errors</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="ne">BaseException</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2295"><a id="__codelineno-0-2295" name="__codelineno-0-2295"></a>
-</span><span id="__span-0-2296"><a id="__codelineno-0-2296" name="__codelineno-0-2296"></a>        <span class="k">def</span><span class="w"> </span><span class="nf">validation_error_factory</span><span class="p">(</span>
-</span><span id="__span-0-2297"><a id="__codelineno-0-2297" name="__codelineno-0-2297"></a>            <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-2298"><a id="__codelineno-0-2298" name="__codelineno-0-2298"></a>            <span class="n">error_type</span><span class="p">:</span> <span class="n">RunStateValidationErrorType</span><span class="p">,</span>
-</span><span id="__span-0-2299"><a id="__codelineno-0-2299" name="__codelineno-0-2299"></a>        <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunStateValidationError</span><span class="p">:</span>
-</span><span id="__span-0-2300"><a id="__codelineno-0-2300" name="__codelineno-0-2300"></a>            <span class="n">error</span> <span class="o">=</span> <span class="n">error_type</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
-</span><span id="__span-0-2301"><a id="__codelineno-0-2301" name="__codelineno-0-2301"></a>            <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">error</span><span class="p">,</span> <span class="n">message</span><span class="p">))</span>
-</span><span id="__span-0-2302"><a id="__codelineno-0-2302" name="__codelineno-0-2302"></a>            <span class="k">return</span> <span class="n">error</span>
+</span><span id="__span-0-2265"><a id="__codelineno-0-2265" name="__codelineno-0-2265"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2266"><a id="__codelineno-0-2266" name="__codelineno-0-2266"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2267"><a id="__codelineno-0-2267" name="__codelineno-0-2267"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2268"><a id="__codelineno-0-2268" name="__codelineno-0-2268"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2269"><a id="__codelineno-0-2269" name="__codelineno-0-2269"></a>        <span class="k">assert</span> <span class="n">safe_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2270"><a id="__codelineno-0-2270" name="__codelineno-0-2270"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">safe_error</span><span class="p">)</span>
+</span><span id="__span-0-2271"><a id="__codelineno-0-2271" name="__codelineno-0-2271"></a>
+</span><span id="__span-0-2272"><a id="__codelineno-0-2272" name="__codelineno-0-2272"></a>    <span class="nd">@staticmethod</span>
+</span><span id="__span-0-2273"><a id="__codelineno-0-2273" name="__codelineno-0-2273"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">from_json</span><span class="p">(</span>
+</span><span id="__span-0-2274"><a id="__codelineno-0-2274" name="__codelineno-0-2274"></a>        <span class="n">initial_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2275"><a id="__codelineno-0-2275" name="__codelineno-0-2275"></a>        <span class="n">state_json</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2276"><a id="__codelineno-0-2276" name="__codelineno-0-2276"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2277"><a id="__codelineno-0-2277" name="__codelineno-0-2277"></a>        <span class="n">context_override</span><span class="p">:</span> <span class="n">ContextOverride</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2278"><a id="__codelineno-0-2278" name="__codelineno-0-2278"></a>        <span class="n">context_deserializer</span><span class="p">:</span> <span class="n">ContextDeserializer</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2279"><a id="__codelineno-0-2279" name="__codelineno-0-2279"></a>        <span class="n">strict_context</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-0-2280"><a id="__codelineno-0-2280" name="__codelineno-0-2280"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunState</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">]]:</span>
+</span><span id="__span-0-2281"><a id="__codelineno-0-2281" name="__codelineno-0-2281"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;Deserializes a run state from a JSON dictionary.</span>
+</span><span id="__span-0-2282"><a id="__codelineno-0-2282" name="__codelineno-0-2282"></a>
+</span><span id="__span-0-2283"><a id="__codelineno-0-2283" name="__codelineno-0-2283"></a><span class="sd">        This method is used to deserialize a run state from a dict that was created using</span>
+</span><span id="__span-0-2284"><a id="__codelineno-0-2284" name="__codelineno-0-2284"></a><span class="sd">        the `to_json()` method.</span>
+</span><span id="__span-0-2285"><a id="__codelineno-0-2285" name="__codelineno-0-2285"></a>
+</span><span id="__span-0-2286"><a id="__codelineno-0-2286" name="__codelineno-0-2286"></a><span class="sd">        Only deserialize state from trusted storage or after the application verifies the</span>
+</span><span id="__span-0-2287"><a id="__codelineno-0-2287" name="__codelineno-0-2287"></a><span class="sd">        integrity and ownership of the complete snapshot. Serialized state includes tool</span>
+</span><span id="__span-0-2288"><a id="__codelineno-0-2288" name="__codelineno-0-2288"></a><span class="sd">        approvals and pending tool calls; this method does not authenticate that state.</span>
+</span><span id="__span-0-2289"><a id="__codelineno-0-2289" name="__codelineno-0-2289"></a><span class="sd">        Do not pass client-supplied state directly to this method. Keep the snapshot on the</span>
+</span><span id="__span-0-2290"><a id="__codelineno-0-2290" name="__codelineno-0-2290"></a><span class="sd">        server and apply authorized approval decisions to that server-owned state instead.</span>
+</span><span id="__span-0-2291"><a id="__codelineno-0-2291" name="__codelineno-0-2291"></a><span class="sd">        Neither `context_override` nor `strict_context` verifies snapshot integrity.</span>
+</span><span id="__span-0-2292"><a id="__codelineno-0-2292" name="__codelineno-0-2292"></a>
+</span><span id="__span-0-2293"><a id="__codelineno-0-2293" name="__codelineno-0-2293"></a><span class="sd">        Args:</span>
+</span><span id="__span-0-2294"><a id="__codelineno-0-2294" name="__codelineno-0-2294"></a><span class="sd">            initial_agent: The initial agent (used to build agent map for resolution).</span>
+</span><span id="__span-0-2295"><a id="__codelineno-0-2295" name="__codelineno-0-2295"></a><span class="sd">            state_json: The JSON dictionary to deserialize.</span>
+</span><span id="__span-0-2296"><a id="__codelineno-0-2296" name="__codelineno-0-2296"></a><span class="sd">            context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
+</span><span id="__span-0-2297"><a id="__codelineno-0-2297" name="__codelineno-0-2297"></a><span class="sd">                serialized context.</span>
+</span><span id="__span-0-2298"><a id="__codelineno-0-2298" name="__codelineno-0-2298"></a><span class="sd">            context_deserializer: Optional function to rebuild non-mapping context values.</span>
+</span><span id="__span-0-2299"><a id="__codelineno-0-2299" name="__codelineno-0-2299"></a><span class="sd">            strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
+</span><span id="__span-0-2300"><a id="__codelineno-0-2300" name="__codelineno-0-2300"></a>
+</span><span id="__span-0-2301"><a id="__codelineno-0-2301" name="__codelineno-0-2301"></a><span class="sd">        Returns:</span>
+</span><span id="__span-0-2302"><a id="__codelineno-0-2302" name="__codelineno-0-2302"></a><span class="sd">            A reconstructed RunState instance.</span>
 </span><span id="__span-0-2303"><a id="__codelineno-0-2303" name="__codelineno-0-2303"></a>
-</span><span id="__span-0-2304"><a id="__codelineno-0-2304" name="__codelineno-0-2304"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2305"><a id="__codelineno-0-2305" name="__codelineno-0-2305"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
-</span><span id="__span-0-2306"><a id="__codelineno-0-2306" name="__codelineno-0-2306"></a>                <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2307"><a id="__codelineno-0-2307" name="__codelineno-0-2307"></a>                <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span><span class="s2">&quot;Run state JSON must be an object&quot;</span><span class="p">,</span> <span class="n">UserError</span><span class="p">)</span>
-</span><span id="__span-0-2308"><a id="__codelineno-0-2308" name="__codelineno-0-2308"></a>
-</span><span id="__span-0-2309"><a id="__codelineno-0-2309" name="__codelineno-0-2309"></a>            <span class="n">_validate_run_state_json_value</span><span class="p">(</span><span class="n">state_json</span><span class="p">)</span>
-</span><span id="__span-0-2310"><a id="__codelineno-0-2310" name="__codelineno-0-2310"></a>
-</span><span id="__span-0-2311"><a id="__codelineno-0-2311" name="__codelineno-0-2311"></a>            <span class="n">_validate_run_state_schema_version</span><span class="p">(</span>
-</span><span id="__span-0-2312"><a id="__codelineno-0-2312" name="__codelineno-0-2312"></a>                <span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2313"><a id="__codelineno-0-2313" name="__codelineno-0-2313"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
-</span><span id="__span-0-2314"><a id="__codelineno-0-2314" name="__codelineno-0-2314"></a>            <span class="p">)</span>
-</span><span id="__span-0-2315"><a id="__codelineno-0-2315" name="__codelineno-0-2315"></a>
-</span><span id="__span-0-2316"><a id="__codelineno-0-2316" name="__codelineno-0-2316"></a>            <span class="kn">from</span><span class="w"> </span><span class="nn">.sandbox._mount_security</span><span class="w"> </span><span class="kn">import</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span>
+</span><span id="__span-0-2304"><a id="__codelineno-0-2304" name="__codelineno-0-2304"></a><span class="sd">        Raises:</span>
+</span><span id="__span-0-2305"><a id="__codelineno-0-2305" name="__codelineno-0-2305"></a><span class="sd">            UserError: If the dict has incompatible schema version.</span>
+</span><span id="__span-0-2306"><a id="__codelineno-0-2306" name="__codelineno-0-2306"></a><span class="sd">        &quot;&quot;&quot;</span>
+</span><span id="__span-0-2307"><a id="__codelineno-0-2307" name="__codelineno-0-2307"></a>        <span class="n">restore_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2308"><a id="__codelineno-0-2308" name="__codelineno-0-2308"></a>        <span class="n">trusted_validation_errors</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="ne">BaseException</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2309"><a id="__codelineno-0-2309" name="__codelineno-0-2309"></a>
+</span><span id="__span-0-2310"><a id="__codelineno-0-2310" name="__codelineno-0-2310"></a>        <span class="k">def</span><span class="w"> </span><span class="nf">validation_error_factory</span><span class="p">(</span>
+</span><span id="__span-0-2311"><a id="__codelineno-0-2311" name="__codelineno-0-2311"></a>            <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-2312"><a id="__codelineno-0-2312" name="__codelineno-0-2312"></a>            <span class="n">error_type</span><span class="p">:</span> <span class="n">RunStateValidationErrorType</span><span class="p">,</span>
+</span><span id="__span-0-2313"><a id="__codelineno-0-2313" name="__codelineno-0-2313"></a>        <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunStateValidationError</span><span class="p">:</span>
+</span><span id="__span-0-2314"><a id="__codelineno-0-2314" name="__codelineno-0-2314"></a>            <span class="n">error</span> <span class="o">=</span> <span class="n">error_type</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
+</span><span id="__span-0-2315"><a id="__codelineno-0-2315" name="__codelineno-0-2315"></a>            <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">error</span><span class="p">,</span> <span class="n">message</span><span class="p">))</span>
+</span><span id="__span-0-2316"><a id="__codelineno-0-2316" name="__codelineno-0-2316"></a>            <span class="k">return</span> <span class="n">error</span>
 </span><span id="__span-0-2317"><a id="__codelineno-0-2317" name="__codelineno-0-2317"></a>
-</span><span id="__span-0-2318"><a id="__codelineno-0-2318" name="__codelineno-0-2318"></a>            <span class="k">if</span> <span class="s2">&quot;sandbox&quot;</span> <span class="ow">in</span> <span class="n">state_json</span><span class="p">:</span>
-</span><span id="__span-0-2319"><a id="__codelineno-0-2319" name="__codelineno-0-2319"></a>                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span> <span class="n">Mapping</span><span class="p">):</span>
-</span><span id="__span-0-2320"><a id="__codelineno-0-2320" name="__codelineno-0-2320"></a>                    <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
-</span><span id="__span-0-2321"><a id="__codelineno-0-2321" name="__codelineno-0-2321"></a>                    <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span>
-</span><span id="__span-0-2322"><a id="__codelineno-0-2322" name="__codelineno-0-2322"></a>                        <span class="s2">&quot;RunState sandbox resume state has an invalid envelope&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2323"><a id="__codelineno-0-2323" name="__codelineno-0-2323"></a>                        <span class="ne">ValueError</span><span class="p">,</span>
-</span><span id="__span-0-2324"><a id="__codelineno-0-2324" name="__codelineno-0-2324"></a>                    <span class="p">)</span>
-</span><span id="__span-0-2325"><a id="__codelineno-0-2325" name="__codelineno-0-2325"></a>                <span class="n">sanitized_sandbox</span><span class="p">,</span> <span class="n">_redacted</span> <span class="o">=</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span><span class="p">(</span>
-</span><span id="__span-0-2326"><a id="__codelineno-0-2326" name="__codelineno-0-2326"></a>                    <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span>
-</span><span id="__span-0-2327"><a id="__codelineno-0-2327" name="__codelineno-0-2327"></a>                    <span class="n">validation_error_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">message</span><span class="p">:</span> <span class="n">cast</span><span class="p">(</span>
-</span><span id="__span-0-2328"><a id="__codelineno-0-2328" name="__codelineno-0-2328"></a>                        <span class="ne">ValueError</span><span class="p">,</span>
-</span><span id="__span-0-2329"><a id="__codelineno-0-2329" name="__codelineno-0-2329"></a>                        <span class="n">validation_error_factory</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">),</span>
-</span><span id="__span-0-2330"><a id="__codelineno-0-2330" name="__codelineno-0-2330"></a>                    <span class="p">),</span>
-</span><span id="__span-0-2331"><a id="__codelineno-0-2331" name="__codelineno-0-2331"></a>                <span class="p">)</span>
-</span><span id="__span-0-2332"><a id="__codelineno-0-2332" name="__codelineno-0-2332"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">sanitized_sandbox</span>
-</span><span id="__span-0-2333"><a id="__codelineno-0-2333" name="__codelineno-0-2333"></a>
-</span><span id="__span-0-2334"><a id="__codelineno-0-2334" name="__codelineno-0-2334"></a>            <span class="k">return</span> <span class="k">await</span> <span class="n">_build_run_state_from_json</span><span class="p">(</span>
-</span><span id="__span-0-2335"><a id="__codelineno-0-2335" name="__codelineno-0-2335"></a>                <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
-</span><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a>                <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>                <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
-</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>                <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
-</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>                <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
-</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
-</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>            <span class="p">)</span>
-</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a>            <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_trusted_run_state_validation_message</span><span class="p">(</span>
-</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>                <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>                <span class="n">trusted_validation_errors</span><span class="p">,</span>
-</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>            <span class="p">)</span>
-</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>            <span class="n">restore_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
-</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a>                <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>                <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
-</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a>            <span class="p">)</span>
-</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a>            <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
-</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>
-</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2354"><a id="__codelineno-0-2354" name="__codelineno-0-2354"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2355"><a id="__codelineno-0-2355" name="__codelineno-0-2355"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>        <span class="k">assert</span> <span class="n">restore_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">restore_error</span><span class="p">)</span>
+</span><span id="__span-0-2318"><a id="__codelineno-0-2318" name="__codelineno-0-2318"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2319"><a id="__codelineno-0-2319" name="__codelineno-0-2319"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+</span><span id="__span-0-2320"><a id="__codelineno-0-2320" name="__codelineno-0-2320"></a>                <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2321"><a id="__codelineno-0-2321" name="__codelineno-0-2321"></a>                <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span><span class="s2">&quot;Run state JSON must be an object&quot;</span><span class="p">,</span> <span class="n">UserError</span><span class="p">)</span>
+</span><span id="__span-0-2322"><a id="__codelineno-0-2322" name="__codelineno-0-2322"></a>
+</span><span id="__span-0-2323"><a id="__codelineno-0-2323" name="__codelineno-0-2323"></a>            <span class="n">_validate_run_state_json_value</span><span class="p">(</span><span class="n">state_json</span><span class="p">)</span>
+</span><span id="__span-0-2324"><a id="__codelineno-0-2324" name="__codelineno-0-2324"></a>
+</span><span id="__span-0-2325"><a id="__codelineno-0-2325" name="__codelineno-0-2325"></a>            <span class="n">_validate_run_state_schema_version</span><span class="p">(</span>
+</span><span id="__span-0-2326"><a id="__codelineno-0-2326" name="__codelineno-0-2326"></a>                <span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2327"><a id="__codelineno-0-2327" name="__codelineno-0-2327"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
+</span><span id="__span-0-2328"><a id="__codelineno-0-2328" name="__codelineno-0-2328"></a>            <span class="p">)</span>
+</span><span id="__span-0-2329"><a id="__codelineno-0-2329" name="__codelineno-0-2329"></a>
+</span><span id="__span-0-2330"><a id="__codelineno-0-2330" name="__codelineno-0-2330"></a>            <span class="kn">from</span><span class="w"> </span><span class="nn">.sandbox._mount_security</span><span class="w"> </span><span class="kn">import</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span>
+</span><span id="__span-0-2331"><a id="__codelineno-0-2331" name="__codelineno-0-2331"></a>
+</span><span id="__span-0-2332"><a id="__codelineno-0-2332" name="__codelineno-0-2332"></a>            <span class="k">if</span> <span class="s2">&quot;sandbox&quot;</span> <span class="ow">in</span> <span class="n">state_json</span><span class="p">:</span>
+</span><span id="__span-0-2333"><a id="__codelineno-0-2333" name="__codelineno-0-2333"></a>                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span> <span class="n">Mapping</span><span class="p">):</span>
+</span><span id="__span-0-2334"><a id="__codelineno-0-2334" name="__codelineno-0-2334"></a>                    <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+</span><span id="__span-0-2335"><a id="__codelineno-0-2335" name="__codelineno-0-2335"></a>                    <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span>
+</span><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a>                        <span class="s2">&quot;RunState sandbox resume state has an invalid envelope&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>                        <span class="ne">ValueError</span><span class="p">,</span>
+</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>                    <span class="p">)</span>
+</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>                <span class="n">sanitized_sandbox</span><span class="p">,</span> <span class="n">_redacted</span> <span class="o">=</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span><span class="p">(</span>
+</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a>                    <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span>
+</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>                    <span class="n">validation_error_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">message</span><span class="p">:</span> <span class="n">cast</span><span class="p">(</span>
+</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a>                        <span class="ne">ValueError</span><span class="p">,</span>
+</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a>                        <span class="n">validation_error_factory</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">),</span>
+</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>                    <span class="p">),</span>
+</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>                <span class="p">)</span>
+</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">sanitized_sandbox</span>
+</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>
+</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a>            <span class="k">return</span> <span class="k">await</span> <span class="n">_build_run_state_from_json</span><span class="p">(</span>
+</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>                <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
+</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a>                <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a>                <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
+</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>                <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
+</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>                <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
+</span><span id="__span-0-2354"><a id="__codelineno-0-2354" name="__codelineno-0-2354"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
+</span><span id="__span-0-2355"><a id="__codelineno-0-2355" name="__codelineno-0-2355"></a>            <span class="p">)</span>
+</span><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a>        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>            <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_trusted_run_state_validation_message</span><span class="p">(</span>
+</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>                <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2359"><a id="__codelineno-0-2359" name="__codelineno-0-2359"></a>                <span class="n">trusted_validation_errors</span><span class="p">,</span>
+</span><span id="__span-0-2360"><a id="__codelineno-0-2360" name="__codelineno-0-2360"></a>            <span class="p">)</span>
+</span><span id="__span-0-2361"><a id="__codelineno-0-2361" name="__codelineno-0-2361"></a>            <span class="n">restore_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
+</span><span id="__span-0-2362"><a id="__codelineno-0-2362" name="__codelineno-0-2362"></a>                <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2363"><a id="__codelineno-0-2363" name="__codelineno-0-2363"></a>                <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
+</span><span id="__span-0-2364"><a id="__codelineno-0-2364" name="__codelineno-0-2364"></a>            <span class="p">)</span>
+</span><span id="__span-0-2365"><a id="__codelineno-0-2365" name="__codelineno-0-2365"></a>            <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-0-2366"><a id="__codelineno-0-2366" name="__codelineno-0-2366"></a>
+</span><span id="__span-0-2367"><a id="__codelineno-0-2367" name="__codelineno-0-2367"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2368"><a id="__codelineno-0-2368" name="__codelineno-0-2368"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2369"><a id="__codelineno-0-2369" name="__codelineno-0-2369"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2370"><a id="__codelineno-0-2370" name="__codelineno-0-2370"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2371"><a id="__codelineno-0-2371" name="__codelineno-0-2371"></a>        <span class="k">assert</span> <span class="n">restore_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2372"><a id="__codelineno-0-2372" name="__codelineno-0-2372"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">restore_error</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
               </details>
 
@@ -6347,6 +6375,12 @@ resume the run later.</p>
         <p>Deserializes a run state from a JSON string.</p>
 <p>This method is used to deserialize a run state from a string that was serialized using
 the <code>to_string()</code> method.</p>
+<p>Only deserialize state from trusted storage or after the application verifies the
+integrity and ownership of the complete snapshot. Serialized state includes tool
+approvals and pending tool calls; this method does not authenticate that state.
+Do not pass client-supplied state directly to this method. Keep the snapshot on the
+server and apply authorized approval decisions to that server-owned state instead.
+Neither <code>context_override</code> nor <code>strict_context</code> verifies snapshot integrity.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -6580,7 +6614,14 @@ serialized context.</p>
 <span class="normal"><a href="#__codelineno-0-2260">2260</a></span>
 <span class="normal"><a href="#__codelineno-0-2261">2261</a></span>
 <span class="normal"><a href="#__codelineno-0-2262">2262</a></span>
-<span class="normal"><a href="#__codelineno-0-2263">2263</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2191"><a id="__codelineno-0-2191" name="__codelineno-0-2191"></a><span class="nd">@staticmethod</span>
+<span class="normal"><a href="#__codelineno-0-2263">2263</a></span>
+<span class="normal"><a href="#__codelineno-0-2264">2264</a></span>
+<span class="normal"><a href="#__codelineno-0-2265">2265</a></span>
+<span class="normal"><a href="#__codelineno-0-2266">2266</a></span>
+<span class="normal"><a href="#__codelineno-0-2267">2267</a></span>
+<span class="normal"><a href="#__codelineno-0-2268">2268</a></span>
+<span class="normal"><a href="#__codelineno-0-2269">2269</a></span>
+<span class="normal"><a href="#__codelineno-0-2270">2270</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2191"><a id="__codelineno-0-2191" name="__codelineno-0-2191"></a><span class="nd">@staticmethod</span>
 </span><span id="__span-0-2192"><a id="__codelineno-0-2192" name="__codelineno-0-2192"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">from_string</span><span class="p">(</span>
 </span><span id="__span-0-2193"><a id="__codelineno-0-2193" name="__codelineno-0-2193"></a>    <span class="n">initial_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
 </span><span id="__span-0-2194"><a id="__codelineno-0-2194" name="__codelineno-0-2194"></a>    <span class="n">state_string</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
@@ -6594,65 +6635,72 @@ serialized context.</p>
 </span><span id="__span-0-2202"><a id="__codelineno-0-2202" name="__codelineno-0-2202"></a><span class="sd">    This method is used to deserialize a run state from a string that was serialized using</span>
 </span><span id="__span-0-2203"><a id="__codelineno-0-2203" name="__codelineno-0-2203"></a><span class="sd">    the `to_string()` method.</span>
 </span><span id="__span-0-2204"><a id="__codelineno-0-2204" name="__codelineno-0-2204"></a>
-</span><span id="__span-0-2205"><a id="__codelineno-0-2205" name="__codelineno-0-2205"></a><span class="sd">    Args:</span>
-</span><span id="__span-0-2206"><a id="__codelineno-0-2206" name="__codelineno-0-2206"></a><span class="sd">        initial_agent: The initial agent (used to build agent map for resolution).</span>
-</span><span id="__span-0-2207"><a id="__codelineno-0-2207" name="__codelineno-0-2207"></a><span class="sd">        state_string: The JSON string to deserialize.</span>
-</span><span id="__span-0-2208"><a id="__codelineno-0-2208" name="__codelineno-0-2208"></a><span class="sd">        context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
-</span><span id="__span-0-2209"><a id="__codelineno-0-2209" name="__codelineno-0-2209"></a><span class="sd">            serialized context.</span>
-</span><span id="__span-0-2210"><a id="__codelineno-0-2210" name="__codelineno-0-2210"></a><span class="sd">        context_deserializer: Optional function to rebuild non-mapping context values.</span>
-</span><span id="__span-0-2211"><a id="__codelineno-0-2211" name="__codelineno-0-2211"></a><span class="sd">        strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
-</span><span id="__span-0-2212"><a id="__codelineno-0-2212" name="__codelineno-0-2212"></a>
-</span><span id="__span-0-2213"><a id="__codelineno-0-2213" name="__codelineno-0-2213"></a><span class="sd">    Returns:</span>
-</span><span id="__span-0-2214"><a id="__codelineno-0-2214" name="__codelineno-0-2214"></a><span class="sd">        A reconstructed RunState instance.</span>
-</span><span id="__span-0-2215"><a id="__codelineno-0-2215" name="__codelineno-0-2215"></a>
-</span><span id="__span-0-2216"><a id="__codelineno-0-2216" name="__codelineno-0-2216"></a><span class="sd">    Raises:</span>
-</span><span id="__span-0-2217"><a id="__codelineno-0-2217" name="__codelineno-0-2217"></a><span class="sd">        UserError: If the string is invalid JSON or has incompatible schema version.</span>
-</span><span id="__span-0-2218"><a id="__codelineno-0-2218" name="__codelineno-0-2218"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-2219"><a id="__codelineno-0-2219" name="__codelineno-0-2219"></a>    <span class="n">parse_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2220"><a id="__codelineno-0-2220" name="__codelineno-0-2220"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2221"><a id="__codelineno-0-2221" name="__codelineno-0-2221"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">state_string</span><span class="p">)</span>
-</span><span id="__span-0-2222"><a id="__codelineno-0-2222" name="__codelineno-0-2222"></a>    <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2223"><a id="__codelineno-0-2223" name="__codelineno-0-2223"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2224"><a id="__codelineno-0-2224" name="__codelineno-0-2224"></a>        <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2225"><a id="__codelineno-0-2225" name="__codelineno-0-2225"></a>        <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
-</span><span id="__span-0-2226"><a id="__codelineno-0-2226" name="__codelineno-0-2226"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2227"><a id="__codelineno-0-2227" name="__codelineno-0-2227"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2228"><a id="__codelineno-0-2228" name="__codelineno-0-2228"></a>        <span class="n">prepared_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2229"><a id="__codelineno-0-2229" name="__codelineno-0-2229"></a>        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">prepared_error</span><span class="p">)</span> <span class="ow">in</span> <span class="p">{</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">KeyboardInterrupt</span><span class="p">,</span> <span class="ne">SystemExit</span><span class="p">}:</span>
-</span><span id="__span-0-2230"><a id="__codelineno-0-2230" name="__codelineno-0-2230"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">prepared_error</span>
-</span><span id="__span-0-2231"><a id="__codelineno-0-2231" name="__codelineno-0-2231"></a>        <span class="k">else</span><span class="p">:</span>
-</span><span id="__span-0-2232"><a id="__codelineno-0-2232" name="__codelineno-0-2232"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
-</span><span id="__span-0-2233"><a id="__codelineno-0-2233" name="__codelineno-0-2233"></a>
-</span><span id="__span-0-2234"><a id="__codelineno-0-2234" name="__codelineno-0-2234"></a>    <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
-</span><span id="__span-0-2235"><a id="__codelineno-0-2235" name="__codelineno-0-2235"></a>    <span class="k">if</span> <span class="n">parse_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2236"><a id="__codelineno-0-2236" name="__codelineno-0-2236"></a>        <span class="n">_mark_error_data_redacted</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
-</span><span id="__span-0-2237"><a id="__codelineno-0-2237" name="__codelineno-0-2237"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2238"><a id="__codelineno-0-2238" name="__codelineno-0-2238"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2239"><a id="__codelineno-0-2239" name="__codelineno-0-2239"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2240"><a id="__codelineno-0-2240" name="__codelineno-0-2240"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
-</span><span id="__span-0-2241"><a id="__codelineno-0-2241" name="__codelineno-0-2241"></a>
-</span><span id="__span-0-2242"><a id="__codelineno-0-2242" name="__codelineno-0-2242"></a>    <span class="n">safe_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2243"><a id="__codelineno-0-2243" name="__codelineno-0-2243"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2244"><a id="__codelineno-0-2244" name="__codelineno-0-2244"></a>        <span class="k">return</span> <span class="k">await</span> <span class="n">RunState</span><span class="o">.</span><span class="n">from_json</span><span class="p">(</span>
-</span><span id="__span-0-2245"><a id="__codelineno-0-2245" name="__codelineno-0-2245"></a>            <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
-</span><span id="__span-0-2246"><a id="__codelineno-0-2246" name="__codelineno-0-2246"></a>            <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2247"><a id="__codelineno-0-2247" name="__codelineno-0-2247"></a>            <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
-</span><span id="__span-0-2248"><a id="__codelineno-0-2248" name="__codelineno-0-2248"></a>            <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
-</span><span id="__span-0-2249"><a id="__codelineno-0-2249" name="__codelineno-0-2249"></a>            <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
-</span><span id="__span-0-2250"><a id="__codelineno-0-2250" name="__codelineno-0-2250"></a>        <span class="p">)</span>
-</span><span id="__span-0-2251"><a id="__codelineno-0-2251" name="__codelineno-0-2251"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2252"><a id="__codelineno-0-2252" name="__codelineno-0-2252"></a>        <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_known_run_state_error_message</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
-</span><span id="__span-0-2253"><a id="__codelineno-0-2253" name="__codelineno-0-2253"></a>        <span class="n">safe_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
-</span><span id="__span-0-2254"><a id="__codelineno-0-2254" name="__codelineno-0-2254"></a>            <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2255"><a id="__codelineno-0-2255" name="__codelineno-0-2255"></a>            <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
-</span><span id="__span-0-2256"><a id="__codelineno-0-2256" name="__codelineno-0-2256"></a>        <span class="p">)</span>
-</span><span id="__span-0-2257"><a id="__codelineno-0-2257" name="__codelineno-0-2257"></a>
-</span><span id="__span-0-2258"><a id="__codelineno-0-2258" name="__codelineno-0-2258"></a>    <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2259"><a id="__codelineno-0-2259" name="__codelineno-0-2259"></a>    <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2260"><a id="__codelineno-0-2260" name="__codelineno-0-2260"></a>    <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2261"><a id="__codelineno-0-2261" name="__codelineno-0-2261"></a>    <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2262"><a id="__codelineno-0-2262" name="__codelineno-0-2262"></a>    <span class="k">assert</span> <span class="n">safe_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-</span><span id="__span-0-2263"><a id="__codelineno-0-2263" name="__codelineno-0-2263"></a>    <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">safe_error</span><span class="p">)</span>
+</span><span id="__span-0-2205"><a id="__codelineno-0-2205" name="__codelineno-0-2205"></a><span class="sd">    Only deserialize state from trusted storage or after the application verifies the</span>
+</span><span id="__span-0-2206"><a id="__codelineno-0-2206" name="__codelineno-0-2206"></a><span class="sd">    integrity and ownership of the complete snapshot. Serialized state includes tool</span>
+</span><span id="__span-0-2207"><a id="__codelineno-0-2207" name="__codelineno-0-2207"></a><span class="sd">    approvals and pending tool calls; this method does not authenticate that state.</span>
+</span><span id="__span-0-2208"><a id="__codelineno-0-2208" name="__codelineno-0-2208"></a><span class="sd">    Do not pass client-supplied state directly to this method. Keep the snapshot on the</span>
+</span><span id="__span-0-2209"><a id="__codelineno-0-2209" name="__codelineno-0-2209"></a><span class="sd">    server and apply authorized approval decisions to that server-owned state instead.</span>
+</span><span id="__span-0-2210"><a id="__codelineno-0-2210" name="__codelineno-0-2210"></a><span class="sd">    Neither `context_override` nor `strict_context` verifies snapshot integrity.</span>
+</span><span id="__span-0-2211"><a id="__codelineno-0-2211" name="__codelineno-0-2211"></a>
+</span><span id="__span-0-2212"><a id="__codelineno-0-2212" name="__codelineno-0-2212"></a><span class="sd">    Args:</span>
+</span><span id="__span-0-2213"><a id="__codelineno-0-2213" name="__codelineno-0-2213"></a><span class="sd">        initial_agent: The initial agent (used to build agent map for resolution).</span>
+</span><span id="__span-0-2214"><a id="__codelineno-0-2214" name="__codelineno-0-2214"></a><span class="sd">        state_string: The JSON string to deserialize.</span>
+</span><span id="__span-0-2215"><a id="__codelineno-0-2215" name="__codelineno-0-2215"></a><span class="sd">        context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
+</span><span id="__span-0-2216"><a id="__codelineno-0-2216" name="__codelineno-0-2216"></a><span class="sd">            serialized context.</span>
+</span><span id="__span-0-2217"><a id="__codelineno-0-2217" name="__codelineno-0-2217"></a><span class="sd">        context_deserializer: Optional function to rebuild non-mapping context values.</span>
+</span><span id="__span-0-2218"><a id="__codelineno-0-2218" name="__codelineno-0-2218"></a><span class="sd">        strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
+</span><span id="__span-0-2219"><a id="__codelineno-0-2219" name="__codelineno-0-2219"></a>
+</span><span id="__span-0-2220"><a id="__codelineno-0-2220" name="__codelineno-0-2220"></a><span class="sd">    Returns:</span>
+</span><span id="__span-0-2221"><a id="__codelineno-0-2221" name="__codelineno-0-2221"></a><span class="sd">        A reconstructed RunState instance.</span>
+</span><span id="__span-0-2222"><a id="__codelineno-0-2222" name="__codelineno-0-2222"></a>
+</span><span id="__span-0-2223"><a id="__codelineno-0-2223" name="__codelineno-0-2223"></a><span class="sd">    Raises:</span>
+</span><span id="__span-0-2224"><a id="__codelineno-0-2224" name="__codelineno-0-2224"></a><span class="sd">        UserError: If the string is invalid JSON or has incompatible schema version.</span>
+</span><span id="__span-0-2225"><a id="__codelineno-0-2225" name="__codelineno-0-2225"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-2226"><a id="__codelineno-0-2226" name="__codelineno-0-2226"></a>    <span class="n">parse_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2227"><a id="__codelineno-0-2227" name="__codelineno-0-2227"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2228"><a id="__codelineno-0-2228" name="__codelineno-0-2228"></a>        <span class="n">state_json</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">state_string</span><span class="p">)</span>
+</span><span id="__span-0-2229"><a id="__codelineno-0-2229" name="__codelineno-0-2229"></a>    <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2230"><a id="__codelineno-0-2230" name="__codelineno-0-2230"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2231"><a id="__codelineno-0-2231" name="__codelineno-0-2231"></a>        <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2232"><a id="__codelineno-0-2232" name="__codelineno-0-2232"></a>        <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
+</span><span id="__span-0-2233"><a id="__codelineno-0-2233" name="__codelineno-0-2233"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2234"><a id="__codelineno-0-2234" name="__codelineno-0-2234"></a>        <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2235"><a id="__codelineno-0-2235" name="__codelineno-0-2235"></a>        <span class="n">prepared_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2236"><a id="__codelineno-0-2236" name="__codelineno-0-2236"></a>        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">prepared_error</span><span class="p">)</span> <span class="ow">in</span> <span class="p">{</span><span class="n">asyncio</span><span class="o">.</span><span class="n">CancelledError</span><span class="p">,</span> <span class="ne">KeyboardInterrupt</span><span class="p">,</span> <span class="ne">SystemExit</span><span class="p">}:</span>
+</span><span id="__span-0-2237"><a id="__codelineno-0-2237" name="__codelineno-0-2237"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">prepared_error</span>
+</span><span id="__span-0-2238"><a id="__codelineno-0-2238" name="__codelineno-0-2238"></a>        <span class="k">else</span><span class="p">:</span>
+</span><span id="__span-0-2239"><a id="__codelineno-0-2239" name="__codelineno-0-2239"></a>            <span class="n">parse_error</span> <span class="o">=</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Failed to parse run state JSON&quot;</span><span class="p">)</span>
+</span><span id="__span-0-2240"><a id="__codelineno-0-2240" name="__codelineno-0-2240"></a>
+</span><span id="__span-0-2241"><a id="__codelineno-0-2241" name="__codelineno-0-2241"></a>    <span class="n">state_string</span> <span class="o">=</span> <span class="s2">&quot;&lt;redacted&gt;&quot;</span>
+</span><span id="__span-0-2242"><a id="__codelineno-0-2242" name="__codelineno-0-2242"></a>    <span class="k">if</span> <span class="n">parse_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2243"><a id="__codelineno-0-2243" name="__codelineno-0-2243"></a>        <span class="n">_mark_error_data_redacted</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
+</span><span id="__span-0-2244"><a id="__codelineno-0-2244" name="__codelineno-0-2244"></a>        <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2245"><a id="__codelineno-0-2245" name="__codelineno-0-2245"></a>        <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2246"><a id="__codelineno-0-2246" name="__codelineno-0-2246"></a>        <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2247"><a id="__codelineno-0-2247" name="__codelineno-0-2247"></a>        <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">parse_error</span><span class="p">)</span>
+</span><span id="__span-0-2248"><a id="__codelineno-0-2248" name="__codelineno-0-2248"></a>
+</span><span id="__span-0-2249"><a id="__codelineno-0-2249" name="__codelineno-0-2249"></a>    <span class="n">safe_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2250"><a id="__codelineno-0-2250" name="__codelineno-0-2250"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2251"><a id="__codelineno-0-2251" name="__codelineno-0-2251"></a>        <span class="k">return</span> <span class="k">await</span> <span class="n">RunState</span><span class="o">.</span><span class="n">from_json</span><span class="p">(</span>
+</span><span id="__span-0-2252"><a id="__codelineno-0-2252" name="__codelineno-0-2252"></a>            <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
+</span><span id="__span-0-2253"><a id="__codelineno-0-2253" name="__codelineno-0-2253"></a>            <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2254"><a id="__codelineno-0-2254" name="__codelineno-0-2254"></a>            <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
+</span><span id="__span-0-2255"><a id="__codelineno-0-2255" name="__codelineno-0-2255"></a>            <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
+</span><span id="__span-0-2256"><a id="__codelineno-0-2256" name="__codelineno-0-2256"></a>            <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
+</span><span id="__span-0-2257"><a id="__codelineno-0-2257" name="__codelineno-0-2257"></a>        <span class="p">)</span>
+</span><span id="__span-0-2258"><a id="__codelineno-0-2258" name="__codelineno-0-2258"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2259"><a id="__codelineno-0-2259" name="__codelineno-0-2259"></a>        <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_known_run_state_error_message</span><span class="p">(</span><span class="n">error</span><span class="p">)</span>
+</span><span id="__span-0-2260"><a id="__codelineno-0-2260" name="__codelineno-0-2260"></a>        <span class="n">safe_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
+</span><span id="__span-0-2261"><a id="__codelineno-0-2261" name="__codelineno-0-2261"></a>            <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2262"><a id="__codelineno-0-2262" name="__codelineno-0-2262"></a>            <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
+</span><span id="__span-0-2263"><a id="__codelineno-0-2263" name="__codelineno-0-2263"></a>        <span class="p">)</span>
+</span><span id="__span-0-2264"><a id="__codelineno-0-2264" name="__codelineno-0-2264"></a>
+</span><span id="__span-0-2265"><a id="__codelineno-0-2265" name="__codelineno-0-2265"></a>    <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2266"><a id="__codelineno-0-2266" name="__codelineno-0-2266"></a>    <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2267"><a id="__codelineno-0-2267" name="__codelineno-0-2267"></a>    <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2268"><a id="__codelineno-0-2268" name="__codelineno-0-2268"></a>    <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2269"><a id="__codelineno-0-2269" name="__codelineno-0-2269"></a>    <span class="k">assert</span> <span class="n">safe_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2270"><a id="__codelineno-0-2270" name="__codelineno-0-2270"></a>    <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">safe_error</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -6702,6 +6750,12 @@ serialized context.</p>
         <p>Deserializes a run state from a JSON dictionary.</p>
 <p>This method is used to deserialize a run state from a dict that was created using
 the <code>to_json()</code> method.</p>
+<p>Only deserialize state from trusted storage or after the application verifies the
+integrity and ownership of the complete snapshot. Serialized state includes tool
+approvals and pending tool calls; this method does not authenticate that state.
+Do not pass client-supplied state directly to this method. Keep the snapshot on the
+server and apply authorized approval decisions to that server-owned state instead.
+Neither <code>context_override</code> nor <code>strict_context</code> verifies snapshot integrity.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -6863,14 +6917,7 @@ serialized context.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/agents/run_state.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2265">2265</a></span>
-<span class="normal"><a href="#__codelineno-0-2266">2266</a></span>
-<span class="normal"><a href="#__codelineno-0-2267">2267</a></span>
-<span class="normal"><a href="#__codelineno-0-2268">2268</a></span>
-<span class="normal"><a href="#__codelineno-0-2269">2269</a></span>
-<span class="normal"><a href="#__codelineno-0-2270">2270</a></span>
-<span class="normal"><a href="#__codelineno-0-2271">2271</a></span>
-<span class="normal"><a href="#__codelineno-0-2272">2272</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2272">2272</a></span>
 <span class="normal"><a href="#__codelineno-0-2273">2273</a></span>
 <span class="normal"><a href="#__codelineno-0-2274">2274</a></span>
 <span class="normal"><a href="#__codelineno-0-2275">2275</a></span>
@@ -6956,100 +7003,121 @@ serialized context.</p>
 <span class="normal"><a href="#__codelineno-0-2355">2355</a></span>
 <span class="normal"><a href="#__codelineno-0-2356">2356</a></span>
 <span class="normal"><a href="#__codelineno-0-2357">2357</a></span>
-<span class="normal"><a href="#__codelineno-0-2358">2358</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2265"><a id="__codelineno-0-2265" name="__codelineno-0-2265"></a><span class="nd">@staticmethod</span>
-</span><span id="__span-0-2266"><a id="__codelineno-0-2266" name="__codelineno-0-2266"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">from_json</span><span class="p">(</span>
-</span><span id="__span-0-2267"><a id="__codelineno-0-2267" name="__codelineno-0-2267"></a>    <span class="n">initial_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2268"><a id="__codelineno-0-2268" name="__codelineno-0-2268"></a>    <span class="n">state_json</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2269"><a id="__codelineno-0-2269" name="__codelineno-0-2269"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2270"><a id="__codelineno-0-2270" name="__codelineno-0-2270"></a>    <span class="n">context_override</span><span class="p">:</span> <span class="n">ContextOverride</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2271"><a id="__codelineno-0-2271" name="__codelineno-0-2271"></a>    <span class="n">context_deserializer</span><span class="p">:</span> <span class="n">ContextDeserializer</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2272"><a id="__codelineno-0-2272" name="__codelineno-0-2272"></a>    <span class="n">strict_context</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-0-2273"><a id="__codelineno-0-2273" name="__codelineno-0-2273"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunState</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">]]:</span>
-</span><span id="__span-0-2274"><a id="__codelineno-0-2274" name="__codelineno-0-2274"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Deserializes a run state from a JSON dictionary.</span>
-</span><span id="__span-0-2275"><a id="__codelineno-0-2275" name="__codelineno-0-2275"></a>
-</span><span id="__span-0-2276"><a id="__codelineno-0-2276" name="__codelineno-0-2276"></a><span class="sd">    This method is used to deserialize a run state from a dict that was created using</span>
-</span><span id="__span-0-2277"><a id="__codelineno-0-2277" name="__codelineno-0-2277"></a><span class="sd">    the `to_json()` method.</span>
-</span><span id="__span-0-2278"><a id="__codelineno-0-2278" name="__codelineno-0-2278"></a>
-</span><span id="__span-0-2279"><a id="__codelineno-0-2279" name="__codelineno-0-2279"></a><span class="sd">    Args:</span>
-</span><span id="__span-0-2280"><a id="__codelineno-0-2280" name="__codelineno-0-2280"></a><span class="sd">        initial_agent: The initial agent (used to build agent map for resolution).</span>
-</span><span id="__span-0-2281"><a id="__codelineno-0-2281" name="__codelineno-0-2281"></a><span class="sd">        state_json: The JSON dictionary to deserialize.</span>
-</span><span id="__span-0-2282"><a id="__codelineno-0-2282" name="__codelineno-0-2282"></a><span class="sd">        context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
-</span><span id="__span-0-2283"><a id="__codelineno-0-2283" name="__codelineno-0-2283"></a><span class="sd">            serialized context.</span>
-</span><span id="__span-0-2284"><a id="__codelineno-0-2284" name="__codelineno-0-2284"></a><span class="sd">        context_deserializer: Optional function to rebuild non-mapping context values.</span>
-</span><span id="__span-0-2285"><a id="__codelineno-0-2285" name="__codelineno-0-2285"></a><span class="sd">        strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
-</span><span id="__span-0-2286"><a id="__codelineno-0-2286" name="__codelineno-0-2286"></a>
-</span><span id="__span-0-2287"><a id="__codelineno-0-2287" name="__codelineno-0-2287"></a><span class="sd">    Returns:</span>
-</span><span id="__span-0-2288"><a id="__codelineno-0-2288" name="__codelineno-0-2288"></a><span class="sd">        A reconstructed RunState instance.</span>
-</span><span id="__span-0-2289"><a id="__codelineno-0-2289" name="__codelineno-0-2289"></a>
-</span><span id="__span-0-2290"><a id="__codelineno-0-2290" name="__codelineno-0-2290"></a><span class="sd">    Raises:</span>
-</span><span id="__span-0-2291"><a id="__codelineno-0-2291" name="__codelineno-0-2291"></a><span class="sd">        UserError: If the dict has incompatible schema version.</span>
-</span><span id="__span-0-2292"><a id="__codelineno-0-2292" name="__codelineno-0-2292"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-2293"><a id="__codelineno-0-2293" name="__codelineno-0-2293"></a>    <span class="n">restore_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2294"><a id="__codelineno-0-2294" name="__codelineno-0-2294"></a>    <span class="n">trusted_validation_errors</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="ne">BaseException</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2295"><a id="__codelineno-0-2295" name="__codelineno-0-2295"></a>
-</span><span id="__span-0-2296"><a id="__codelineno-0-2296" name="__codelineno-0-2296"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">validation_error_factory</span><span class="p">(</span>
-</span><span id="__span-0-2297"><a id="__codelineno-0-2297" name="__codelineno-0-2297"></a>        <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-2298"><a id="__codelineno-0-2298" name="__codelineno-0-2298"></a>        <span class="n">error_type</span><span class="p">:</span> <span class="n">RunStateValidationErrorType</span><span class="p">,</span>
-</span><span id="__span-0-2299"><a id="__codelineno-0-2299" name="__codelineno-0-2299"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunStateValidationError</span><span class="p">:</span>
-</span><span id="__span-0-2300"><a id="__codelineno-0-2300" name="__codelineno-0-2300"></a>        <span class="n">error</span> <span class="o">=</span> <span class="n">error_type</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
-</span><span id="__span-0-2301"><a id="__codelineno-0-2301" name="__codelineno-0-2301"></a>        <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">error</span><span class="p">,</span> <span class="n">message</span><span class="p">))</span>
-</span><span id="__span-0-2302"><a id="__codelineno-0-2302" name="__codelineno-0-2302"></a>        <span class="k">return</span> <span class="n">error</span>
+<span class="normal"><a href="#__codelineno-0-2358">2358</a></span>
+<span class="normal"><a href="#__codelineno-0-2359">2359</a></span>
+<span class="normal"><a href="#__codelineno-0-2360">2360</a></span>
+<span class="normal"><a href="#__codelineno-0-2361">2361</a></span>
+<span class="normal"><a href="#__codelineno-0-2362">2362</a></span>
+<span class="normal"><a href="#__codelineno-0-2363">2363</a></span>
+<span class="normal"><a href="#__codelineno-0-2364">2364</a></span>
+<span class="normal"><a href="#__codelineno-0-2365">2365</a></span>
+<span class="normal"><a href="#__codelineno-0-2366">2366</a></span>
+<span class="normal"><a href="#__codelineno-0-2367">2367</a></span>
+<span class="normal"><a href="#__codelineno-0-2368">2368</a></span>
+<span class="normal"><a href="#__codelineno-0-2369">2369</a></span>
+<span class="normal"><a href="#__codelineno-0-2370">2370</a></span>
+<span class="normal"><a href="#__codelineno-0-2371">2371</a></span>
+<span class="normal"><a href="#__codelineno-0-2372">2372</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2272"><a id="__codelineno-0-2272" name="__codelineno-0-2272"></a><span class="nd">@staticmethod</span>
+</span><span id="__span-0-2273"><a id="__codelineno-0-2273" name="__codelineno-0-2273"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">from_json</span><span class="p">(</span>
+</span><span id="__span-0-2274"><a id="__codelineno-0-2274" name="__codelineno-0-2274"></a>    <span class="n">initial_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2275"><a id="__codelineno-0-2275" name="__codelineno-0-2275"></a>    <span class="n">state_json</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2276"><a id="__codelineno-0-2276" name="__codelineno-0-2276"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2277"><a id="__codelineno-0-2277" name="__codelineno-0-2277"></a>    <span class="n">context_override</span><span class="p">:</span> <span class="n">ContextOverride</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2278"><a id="__codelineno-0-2278" name="__codelineno-0-2278"></a>    <span class="n">context_deserializer</span><span class="p">:</span> <span class="n">ContextDeserializer</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2279"><a id="__codelineno-0-2279" name="__codelineno-0-2279"></a>    <span class="n">strict_context</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-0-2280"><a id="__codelineno-0-2280" name="__codelineno-0-2280"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunState</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">]]:</span>
+</span><span id="__span-0-2281"><a id="__codelineno-0-2281" name="__codelineno-0-2281"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Deserializes a run state from a JSON dictionary.</span>
+</span><span id="__span-0-2282"><a id="__codelineno-0-2282" name="__codelineno-0-2282"></a>
+</span><span id="__span-0-2283"><a id="__codelineno-0-2283" name="__codelineno-0-2283"></a><span class="sd">    This method is used to deserialize a run state from a dict that was created using</span>
+</span><span id="__span-0-2284"><a id="__codelineno-0-2284" name="__codelineno-0-2284"></a><span class="sd">    the `to_json()` method.</span>
+</span><span id="__span-0-2285"><a id="__codelineno-0-2285" name="__codelineno-0-2285"></a>
+</span><span id="__span-0-2286"><a id="__codelineno-0-2286" name="__codelineno-0-2286"></a><span class="sd">    Only deserialize state from trusted storage or after the application verifies the</span>
+</span><span id="__span-0-2287"><a id="__codelineno-0-2287" name="__codelineno-0-2287"></a><span class="sd">    integrity and ownership of the complete snapshot. Serialized state includes tool</span>
+</span><span id="__span-0-2288"><a id="__codelineno-0-2288" name="__codelineno-0-2288"></a><span class="sd">    approvals and pending tool calls; this method does not authenticate that state.</span>
+</span><span id="__span-0-2289"><a id="__codelineno-0-2289" name="__codelineno-0-2289"></a><span class="sd">    Do not pass client-supplied state directly to this method. Keep the snapshot on the</span>
+</span><span id="__span-0-2290"><a id="__codelineno-0-2290" name="__codelineno-0-2290"></a><span class="sd">    server and apply authorized approval decisions to that server-owned state instead.</span>
+</span><span id="__span-0-2291"><a id="__codelineno-0-2291" name="__codelineno-0-2291"></a><span class="sd">    Neither `context_override` nor `strict_context` verifies snapshot integrity.</span>
+</span><span id="__span-0-2292"><a id="__codelineno-0-2292" name="__codelineno-0-2292"></a>
+</span><span id="__span-0-2293"><a id="__codelineno-0-2293" name="__codelineno-0-2293"></a><span class="sd">    Args:</span>
+</span><span id="__span-0-2294"><a id="__codelineno-0-2294" name="__codelineno-0-2294"></a><span class="sd">        initial_agent: The initial agent (used to build agent map for resolution).</span>
+</span><span id="__span-0-2295"><a id="__codelineno-0-2295" name="__codelineno-0-2295"></a><span class="sd">        state_json: The JSON dictionary to deserialize.</span>
+</span><span id="__span-0-2296"><a id="__codelineno-0-2296" name="__codelineno-0-2296"></a><span class="sd">        context_override: Optional context mapping or RunContextWrapper to use instead of the</span>
+</span><span id="__span-0-2297"><a id="__codelineno-0-2297" name="__codelineno-0-2297"></a><span class="sd">            serialized context.</span>
+</span><span id="__span-0-2298"><a id="__codelineno-0-2298" name="__codelineno-0-2298"></a><span class="sd">        context_deserializer: Optional function to rebuild non-mapping context values.</span>
+</span><span id="__span-0-2299"><a id="__codelineno-0-2299" name="__codelineno-0-2299"></a><span class="sd">        strict_context: When True, require a deserializer or override for non-mapping contexts.</span>
+</span><span id="__span-0-2300"><a id="__codelineno-0-2300" name="__codelineno-0-2300"></a>
+</span><span id="__span-0-2301"><a id="__codelineno-0-2301" name="__codelineno-0-2301"></a><span class="sd">    Returns:</span>
+</span><span id="__span-0-2302"><a id="__codelineno-0-2302" name="__codelineno-0-2302"></a><span class="sd">        A reconstructed RunState instance.</span>
 </span><span id="__span-0-2303"><a id="__codelineno-0-2303" name="__codelineno-0-2303"></a>
-</span><span id="__span-0-2304"><a id="__codelineno-0-2304" name="__codelineno-0-2304"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-2305"><a id="__codelineno-0-2305" name="__codelineno-0-2305"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
-</span><span id="__span-0-2306"><a id="__codelineno-0-2306" name="__codelineno-0-2306"></a>            <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2307"><a id="__codelineno-0-2307" name="__codelineno-0-2307"></a>            <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span><span class="s2">&quot;Run state JSON must be an object&quot;</span><span class="p">,</span> <span class="n">UserError</span><span class="p">)</span>
-</span><span id="__span-0-2308"><a id="__codelineno-0-2308" name="__codelineno-0-2308"></a>
-</span><span id="__span-0-2309"><a id="__codelineno-0-2309" name="__codelineno-0-2309"></a>        <span class="n">_validate_run_state_json_value</span><span class="p">(</span><span class="n">state_json</span><span class="p">)</span>
-</span><span id="__span-0-2310"><a id="__codelineno-0-2310" name="__codelineno-0-2310"></a>
-</span><span id="__span-0-2311"><a id="__codelineno-0-2311" name="__codelineno-0-2311"></a>        <span class="n">_validate_run_state_schema_version</span><span class="p">(</span>
-</span><span id="__span-0-2312"><a id="__codelineno-0-2312" name="__codelineno-0-2312"></a>            <span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2313"><a id="__codelineno-0-2313" name="__codelineno-0-2313"></a>            <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
-</span><span id="__span-0-2314"><a id="__codelineno-0-2314" name="__codelineno-0-2314"></a>        <span class="p">)</span>
-</span><span id="__span-0-2315"><a id="__codelineno-0-2315" name="__codelineno-0-2315"></a>
-</span><span id="__span-0-2316"><a id="__codelineno-0-2316" name="__codelineno-0-2316"></a>        <span class="kn">from</span><span class="w"> </span><span class="nn">.sandbox._mount_security</span><span class="w"> </span><span class="kn">import</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span>
+</span><span id="__span-0-2304"><a id="__codelineno-0-2304" name="__codelineno-0-2304"></a><span class="sd">    Raises:</span>
+</span><span id="__span-0-2305"><a id="__codelineno-0-2305" name="__codelineno-0-2305"></a><span class="sd">        UserError: If the dict has incompatible schema version.</span>
+</span><span id="__span-0-2306"><a id="__codelineno-0-2306" name="__codelineno-0-2306"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-2307"><a id="__codelineno-0-2307" name="__codelineno-0-2307"></a>    <span class="n">restore_error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2308"><a id="__codelineno-0-2308" name="__codelineno-0-2308"></a>    <span class="n">trusted_validation_errors</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="ne">BaseException</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2309"><a id="__codelineno-0-2309" name="__codelineno-0-2309"></a>
+</span><span id="__span-0-2310"><a id="__codelineno-0-2310" name="__codelineno-0-2310"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">validation_error_factory</span><span class="p">(</span>
+</span><span id="__span-0-2311"><a id="__codelineno-0-2311" name="__codelineno-0-2311"></a>        <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-2312"><a id="__codelineno-0-2312" name="__codelineno-0-2312"></a>        <span class="n">error_type</span><span class="p">:</span> <span class="n">RunStateValidationErrorType</span><span class="p">,</span>
+</span><span id="__span-0-2313"><a id="__codelineno-0-2313" name="__codelineno-0-2313"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RunStateValidationError</span><span class="p">:</span>
+</span><span id="__span-0-2314"><a id="__codelineno-0-2314" name="__codelineno-0-2314"></a>        <span class="n">error</span> <span class="o">=</span> <span class="n">error_type</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
+</span><span id="__span-0-2315"><a id="__codelineno-0-2315" name="__codelineno-0-2315"></a>        <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">error</span><span class="p">,</span> <span class="n">message</span><span class="p">))</span>
+</span><span id="__span-0-2316"><a id="__codelineno-0-2316" name="__codelineno-0-2316"></a>        <span class="k">return</span> <span class="n">error</span>
 </span><span id="__span-0-2317"><a id="__codelineno-0-2317" name="__codelineno-0-2317"></a>
-</span><span id="__span-0-2318"><a id="__codelineno-0-2318" name="__codelineno-0-2318"></a>        <span class="k">if</span> <span class="s2">&quot;sandbox&quot;</span> <span class="ow">in</span> <span class="n">state_json</span><span class="p">:</span>
-</span><span id="__span-0-2319"><a id="__codelineno-0-2319" name="__codelineno-0-2319"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span> <span class="n">Mapping</span><span class="p">):</span>
-</span><span id="__span-0-2320"><a id="__codelineno-0-2320" name="__codelineno-0-2320"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
-</span><span id="__span-0-2321"><a id="__codelineno-0-2321" name="__codelineno-0-2321"></a>                <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span>
-</span><span id="__span-0-2322"><a id="__codelineno-0-2322" name="__codelineno-0-2322"></a>                    <span class="s2">&quot;RunState sandbox resume state has an invalid envelope&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2323"><a id="__codelineno-0-2323" name="__codelineno-0-2323"></a>                    <span class="ne">ValueError</span><span class="p">,</span>
-</span><span id="__span-0-2324"><a id="__codelineno-0-2324" name="__codelineno-0-2324"></a>                <span class="p">)</span>
-</span><span id="__span-0-2325"><a id="__codelineno-0-2325" name="__codelineno-0-2325"></a>            <span class="n">sanitized_sandbox</span><span class="p">,</span> <span class="n">_redacted</span> <span class="o">=</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span><span class="p">(</span>
-</span><span id="__span-0-2326"><a id="__codelineno-0-2326" name="__codelineno-0-2326"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span>
-</span><span id="__span-0-2327"><a id="__codelineno-0-2327" name="__codelineno-0-2327"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">message</span><span class="p">:</span> <span class="n">cast</span><span class="p">(</span>
-</span><span id="__span-0-2328"><a id="__codelineno-0-2328" name="__codelineno-0-2328"></a>                    <span class="ne">ValueError</span><span class="p">,</span>
-</span><span id="__span-0-2329"><a id="__codelineno-0-2329" name="__codelineno-0-2329"></a>                    <span class="n">validation_error_factory</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">),</span>
-</span><span id="__span-0-2330"><a id="__codelineno-0-2330" name="__codelineno-0-2330"></a>                <span class="p">),</span>
-</span><span id="__span-0-2331"><a id="__codelineno-0-2331" name="__codelineno-0-2331"></a>            <span class="p">)</span>
-</span><span id="__span-0-2332"><a id="__codelineno-0-2332" name="__codelineno-0-2332"></a>            <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">sanitized_sandbox</span>
-</span><span id="__span-0-2333"><a id="__codelineno-0-2333" name="__codelineno-0-2333"></a>
-</span><span id="__span-0-2334"><a id="__codelineno-0-2334" name="__codelineno-0-2334"></a>        <span class="k">return</span> <span class="k">await</span> <span class="n">_build_run_state_from_json</span><span class="p">(</span>
-</span><span id="__span-0-2335"><a id="__codelineno-0-2335" name="__codelineno-0-2335"></a>            <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
-</span><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a>            <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
-</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>            <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
-</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>            <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
-</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>            <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
-</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a>            <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
-</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>        <span class="p">)</span>
-</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
-</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a>        <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_trusted_run_state_validation_message</span><span class="p">(</span>
-</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>            <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>            <span class="n">trusted_validation_errors</span><span class="p">,</span>
-</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>        <span class="p">)</span>
-</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>        <span class="n">restore_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
-</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a>            <span class="n">error</span><span class="p">,</span>
-</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>            <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
-</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a>        <span class="p">)</span>
-</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a>        <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
-</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>
-</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>    <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2354"><a id="__codelineno-0-2354" name="__codelineno-0-2354"></a>    <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2355"><a id="__codelineno-0-2355" name="__codelineno-0-2355"></a>    <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a>    <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>    <span class="k">assert</span> <span class="n">restore_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>    <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">restore_error</span><span class="p">)</span>
+</span><span id="__span-0-2318"><a id="__codelineno-0-2318" name="__codelineno-0-2318"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-2319"><a id="__codelineno-0-2319" name="__codelineno-0-2319"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+</span><span id="__span-0-2320"><a id="__codelineno-0-2320" name="__codelineno-0-2320"></a>            <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2321"><a id="__codelineno-0-2321" name="__codelineno-0-2321"></a>            <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span><span class="s2">&quot;Run state JSON must be an object&quot;</span><span class="p">,</span> <span class="n">UserError</span><span class="p">)</span>
+</span><span id="__span-0-2322"><a id="__codelineno-0-2322" name="__codelineno-0-2322"></a>
+</span><span id="__span-0-2323"><a id="__codelineno-0-2323" name="__codelineno-0-2323"></a>        <span class="n">_validate_run_state_json_value</span><span class="p">(</span><span class="n">state_json</span><span class="p">)</span>
+</span><span id="__span-0-2324"><a id="__codelineno-0-2324" name="__codelineno-0-2324"></a>
+</span><span id="__span-0-2325"><a id="__codelineno-0-2325" name="__codelineno-0-2325"></a>        <span class="n">_validate_run_state_schema_version</span><span class="p">(</span>
+</span><span id="__span-0-2326"><a id="__codelineno-0-2326" name="__codelineno-0-2326"></a>            <span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2327"><a id="__codelineno-0-2327" name="__codelineno-0-2327"></a>            <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
+</span><span id="__span-0-2328"><a id="__codelineno-0-2328" name="__codelineno-0-2328"></a>        <span class="p">)</span>
+</span><span id="__span-0-2329"><a id="__codelineno-0-2329" name="__codelineno-0-2329"></a>
+</span><span id="__span-0-2330"><a id="__codelineno-0-2330" name="__codelineno-0-2330"></a>        <span class="kn">from</span><span class="w"> </span><span class="nn">.sandbox._mount_security</span><span class="w"> </span><span class="kn">import</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span>
+</span><span id="__span-0-2331"><a id="__codelineno-0-2331" name="__codelineno-0-2331"></a>
+</span><span id="__span-0-2332"><a id="__codelineno-0-2332" name="__codelineno-0-2332"></a>        <span class="k">if</span> <span class="s2">&quot;sandbox&quot;</span> <span class="ow">in</span> <span class="n">state_json</span><span class="p">:</span>
+</span><span id="__span-0-2333"><a id="__codelineno-0-2333" name="__codelineno-0-2333"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span> <span class="n">Mapping</span><span class="p">):</span>
+</span><span id="__span-0-2334"><a id="__codelineno-0-2334" name="__codelineno-0-2334"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+</span><span id="__span-0-2335"><a id="__codelineno-0-2335" name="__codelineno-0-2335"></a>                <span class="k">raise</span> <span class="n">validation_error_factory</span><span class="p">(</span>
+</span><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a>                    <span class="s2">&quot;RunState sandbox resume state has an invalid envelope&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>                    <span class="ne">ValueError</span><span class="p">,</span>
+</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>                <span class="p">)</span>
+</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>            <span class="n">sanitized_sandbox</span><span class="p">,</span> <span class="n">_redacted</span> <span class="o">=</span> <span class="n">sanitize_run_state_sandbox_mount_authority</span><span class="p">(</span>
+</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a>                <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">],</span>
+</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>                <span class="n">validation_error_factory</span><span class="o">=</span><span class="k">lambda</span> <span class="n">message</span><span class="p">:</span> <span class="n">cast</span><span class="p">(</span>
+</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a>                    <span class="ne">ValueError</span><span class="p">,</span>
+</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a>                    <span class="n">validation_error_factory</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">),</span>
+</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>                <span class="p">),</span>
+</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>            <span class="p">)</span>
+</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>            <span class="n">state_json</span><span class="p">[</span><span class="s2">&quot;sandbox&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">sanitized_sandbox</span>
+</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>
+</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a>        <span class="k">return</span> <span class="k">await</span> <span class="n">_build_run_state_from_json</span><span class="p">(</span>
+</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>            <span class="n">initial_agent</span><span class="o">=</span><span class="n">initial_agent</span><span class="p">,</span>
+</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a>            <span class="n">state_json</span><span class="o">=</span><span class="n">state_json</span><span class="p">,</span>
+</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a>            <span class="n">context_override</span><span class="o">=</span><span class="n">context_override</span><span class="p">,</span>
+</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>            <span class="n">context_deserializer</span><span class="o">=</span><span class="n">context_deserializer</span><span class="p">,</span>
+</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>            <span class="n">strict_context</span><span class="o">=</span><span class="n">strict_context</span><span class="p">,</span>
+</span><span id="__span-0-2354"><a id="__codelineno-0-2354" name="__codelineno-0-2354"></a>            <span class="n">validation_error_factory</span><span class="o">=</span><span class="n">validation_error_factory</span><span class="p">,</span>
+</span><span id="__span-0-2355"><a id="__codelineno-0-2355" name="__codelineno-0-2355"></a>        <span class="p">)</span>
+</span><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a>    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>        <span class="n">trusted_error_message</span> <span class="o">=</span> <span class="n">_trusted_run_state_validation_message</span><span class="p">(</span>
+</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>            <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2359"><a id="__codelineno-0-2359" name="__codelineno-0-2359"></a>            <span class="n">trusted_validation_errors</span><span class="p">,</span>
+</span><span id="__span-0-2360"><a id="__codelineno-0-2360" name="__codelineno-0-2360"></a>        <span class="p">)</span>
+</span><span id="__span-0-2361"><a id="__codelineno-0-2361" name="__codelineno-0-2361"></a>        <span class="n">restore_error</span> <span class="o">=</span> <span class="n">_prepare_data_redacted_error</span><span class="p">(</span>
+</span><span id="__span-0-2362"><a id="__codelineno-0-2362" name="__codelineno-0-2362"></a>            <span class="n">error</span><span class="p">,</span>
+</span><span id="__span-0-2363"><a id="__codelineno-0-2363" name="__codelineno-0-2363"></a>            <span class="n">trusted_error_message</span><span class="o">=</span><span class="n">trusted_error_message</span><span class="p">,</span>
+</span><span id="__span-0-2364"><a id="__codelineno-0-2364" name="__codelineno-0-2364"></a>        <span class="p">)</span>
+</span><span id="__span-0-2365"><a id="__codelineno-0-2365" name="__codelineno-0-2365"></a>        <span class="n">trusted_validation_errors</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-0-2366"><a id="__codelineno-0-2366" name="__codelineno-0-2366"></a>
+</span><span id="__span-0-2367"><a id="__codelineno-0-2367" name="__codelineno-0-2367"></a>    <span class="n">state_json</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2368"><a id="__codelineno-0-2368" name="__codelineno-0-2368"></a>    <span class="n">initial_agent</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2369"><a id="__codelineno-0-2369" name="__codelineno-0-2369"></a>    <span class="n">context_override</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2370"><a id="__codelineno-0-2370" name="__codelineno-0-2370"></a>    <span class="n">context_deserializer</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2371"><a id="__codelineno-0-2371" name="__codelineno-0-2371"></a>    <span class="k">assert</span> <span class="n">restore_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2372"><a id="__codelineno-0-2372" name="__codelineno-0-2372"></a>    <span class="n">_raise_data_redacted_error</span><span class="p">(</span><span class="n">restore_error</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
