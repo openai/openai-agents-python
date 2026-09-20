@@ -1,9 +1,15 @@
+"""Demonstrate local skills with interactive approval for host shell commands.
+
+This example does not isolate commands from host files or the network. For an
+isolated skill example, see examples/tools/container_shell_inline_skill.py.
+"""
+
 import argparse
 import asyncio
 from pathlib import Path
 
 from agents import Agent, Runner, ShellTool, ShellToolLocalSkill, trace
-from examples.tools.shell import ShellExecutor
+from examples.tools.shell import ShellExecutor, on_shell_approval
 
 SKILL_NAME = "csv-workbench"
 SKILL_DIR = Path(__file__).resolve().parent / "skills" / SKILL_NAME
@@ -32,6 +38,8 @@ async def main(model: str) -> None:
                         "skills": [local_skill],
                     },
                     executor=ShellExecutor(),
+                    needs_approval=True,
+                    on_approval=on_shell_approval,
                 )
             ],
         )
@@ -56,6 +64,8 @@ async def main(model: str) -> None:
                         "type": "local",
                     },
                     executor=ShellExecutor(),
+                    needs_approval=True,
+                    on_approval=on_shell_approval,
                 )
             ],
         )
