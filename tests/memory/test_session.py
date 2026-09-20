@@ -295,6 +295,72 @@ def test_sqlite_session_reaps_connections_from_exited_worker_threads():
             session.close()
 
 
+def test_sqlite_session_closes_retired_connections_before_the_next_allocation(monkeypatch):
+    """Test that connections left by a burst of retired workers close before the next one opens."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "retired_workers.db"
+        session = SQLiteSession("retired_workers", db_path)
+        # Each worker holds at the barrier until all of them have registered a
+        # connection, so they retire together instead of one at a time.
+        registered = threading.Barrier(3)
+
+        def serve_one_turn(index: int) -> None:
+            async def turn() -> None:
+                await session.add_items([{"role": "user", "content": f"worker {index}"}])
+                await asyncio.to_thread(registered.wait)
+
+            # asyncio.run waits for its executor to shut down, so this worker has
+            # exited by the time the thread is joined.
+            asyncio.run(turn())
+
+        workers = [threading.Thread(target=serve_one_turn, args=(index,)) for index in range(3)]
+        try:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+
+            retired = list(session._connections)
+            assert len(retired) == 3
+
+            def still_open() -> int:
+                open_count = 0
+                for connection in retired:
+                    try:
+                        connection.execute("SELECT 1")
+                    except sqlite3.ProgrammingError:
+                        continue
+                    open_count += 1
+                return open_count
+
+            retired_open_at_allocation: list[int] = []
+            connect = sqlite3.connect
+
+            def recording_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+                retired_open_at_allocation.append(still_open())
+                return connect(*args, **kwargs)
+
+            with monkeypatch.context() as allocation:
+                allocation.setattr(sqlite3, "connect", recording_connect)
+                asyncio.run(session.add_items([{"role": "user", "content": "after they retired"}]))
+
+            # The replacement connection must not be allocated while the retired ones
+            # still hold their descriptors.
+            assert retired_open_at_allocation == [0]
+            assert len(session._connections) == 1
+
+            # The workers write concurrently, so only the final turn has a fixed position.
+            contents = [item["content"] for item in asyncio.run(session.get_items())]
+            assert sorted(contents[:-1]) == ["worker 0", "worker 1", "worker 2"]
+            assert contents[-1] == "after they retired"
+        finally:
+            registered.abort()
+            for worker in workers:
+                worker.join(timeout=5)
+            session.close()
+
+
 @pytest.mark.asyncio
 async def test_sqlite_session_keeps_connections_of_live_worker_threads():
     """Test that connections owned by running worker threads are never closed."""

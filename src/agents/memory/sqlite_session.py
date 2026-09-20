@@ -173,6 +173,10 @@ class SQLiteSession(SessionABC):
         else:
             # Use thread-local connections for file databases
             if not hasattr(self._local, "connection"):
+                # Release retired workers' connections before opening the replacement, so a
+                # burst of exits cannot exhaust the descriptors this allocation needs.
+                with self._connections_lock:
+                    self._close_connections_from_exited_threads()
                 connection = sqlite3.connect(
                     str(self.db_path),
                     check_same_thread=False,
@@ -180,7 +184,6 @@ class SQLiteSession(SessionABC):
                 self._configure_connection(connection)
                 self._local.connection = connection
                 with self._connections_lock:
-                    self._close_connections_from_exited_threads()
                     self._connections.add(connection)
                     self._connection_owners[connection] = threading.current_thread()
             assert isinstance(self._local.connection, sqlite3.Connection), (
@@ -190,17 +193,18 @@ class SQLiteSession(SessionABC):
 
     def _close_connections_from_exited_threads(self) -> None:
         """Close tracked connections whose owning worker thread has exited."""
-        # Callers hold _connections_lock. A thread-local connection is unreachable once
-        # its thread is gone, so this registry is the only thing keeping it open.
+        # Callers hold _connections_lock. A worker's thread-local connection is
+        # unreachable once its thread is gone, so this registry is the only reference.
         for conn, owner in list(self._connection_owners.items()):
             if owner.is_alive():
                 continue
-            del self._connection_owners[conn]
-            self._connections.discard(conn)
             try:
                 conn.close()
             except Exception:
                 self._quarantined_connections.add(conn)
+            # Evicted after the close, so an interrupt cannot drop an open connection.
+            del self._connection_owners[conn]
+            self._connections.discard(conn)
 
     @staticmethod
     def _configure_connection(conn: sqlite3.Connection) -> None:
