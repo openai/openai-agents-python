@@ -341,6 +341,7 @@ async def test_resumed_committed_append_refreshes_compaction_input(
     finally:
         backend.close()
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
 async def test_pending_input_recovery_refreshes_compaction_generation(round_trip: bool) -> None:
@@ -379,6 +380,7 @@ async def test_pending_input_recovery_refreshes_compaction_generation(round_trip
         assert len(compaction_inputs) == 1
     finally:
         await backend.clear_session()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["input", "auto"])
