@@ -2202,6 +2202,13 @@ class RunState(Generic[TContext, TAgent]):
         This method is used to deserialize a run state from a string that was serialized using
         the `to_string()` method.
 
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
@@ -2275,6 +2282,13 @@ class RunState(Generic[TContext, TAgent]):
 
         This method is used to deserialize a run state from a dict that was created using
         the `to_json()` method.
+
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
