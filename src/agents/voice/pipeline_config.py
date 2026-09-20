@@ -18,7 +18,9 @@ class VoicePipelineConfig:
     """The voice model provider to use for the pipeline. Defaults to OpenAI."""
 
     tracing_disabled: bool = False
-    """Whether to disable tracing of the pipeline. Defaults to `False`."""
+    """Whether to disable tracing of the pipeline, including when a caller trace is active.
+    Defaults to `False`. The caller's trace and span remain active outside the pipeline.
+    """
 
     tracing: TracingConfig | None = None
     """Tracing configuration for this pipeline."""
