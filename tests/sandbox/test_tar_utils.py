@@ -345,6 +345,18 @@ def test_strip_tar_member_prefix_output_with_alias_link_is_refused_by_strict_hyd
             id="leaf is a symlink member",
         ),
         pytest.param(
+            (_file("workspace/a.txt", b"a"),),
+            "workspace/victim",
+            "/workspace/a.txt/",
+            id="trailing separator after a regular file (ENOTDIR on the source)",
+        ),
+        pytest.param(
+            (_dir("workspace/sub"),),
+            "workspace/victim",
+            "/workspace/sub/",
+            id="trailing separator after a directory",
+        ),
+        pytest.param(
             (_file("workspace/implied/deep/data.txt", b"d"),),
             "workspace/victim",
             "/workspace/implied/deep/data.txt",
@@ -404,6 +416,31 @@ def test_strip_tar_member_prefix_rebases_simple_targets_established_by_the_archi
         assert tar.getmember("other/victim").linkname == "../sub/deep/data.txt"
         assert tar.getmember("to_dir").linkname == "sub"
         validate_tarfile(tar, allow_external_symlink_targets=False)
+
+
+def test_strip_tar_member_prefix_rebases_links_to_the_workspace_root() -> None:
+    """The root needs no archive member to be established: hydration creates it. Only the
+    link's own parents have to be directory members for the climb to be exact."""
+    raw = _tar_bytes(
+        _dir("workspace"),
+        _dir("workspace/sub"),
+        _dir("workspace/sub/deep"),
+        _symlink("workspace/top", "/workspace"),
+        _symlink("workspace/top_slash", "/workspace/"),
+        _symlink("workspace/sub/deep/up", "/workspace"),
+        _symlink("workspace/implied/up", "/workspace"),
+    )
+
+    stripped = strip_tar_member_prefix(
+        io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
+    )
+
+    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
+        assert tar.getmember("top").linkname == "."
+        assert tar.getmember("top_slash").linkname == "."
+        assert tar.getmember("sub/deep/up").linkname == "../.."
+        # `implied/` is not a directory member, so the climb out of it proves nothing.
+        assert tar.getmember("implied/up").linkname == "/workspace"
 
 
 def test_strip_tar_member_prefix_leaves_link_under_unestablished_parent_absolute() -> None:

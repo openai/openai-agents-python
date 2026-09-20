@@ -238,8 +238,10 @@ def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | 
     """Return the root-relative components of a *simple* absolute target under `root`.
 
     Simple means every component after the root is a plain name: no ``.``, ``..``, or
-    empty segment. A leading ``//`` is collapsed to ``/`` and the whole separator run at
-    the root boundary is consumed (``/workspace//a.txt``). Targets outside the root, and
+    empty segment, and no trailing separator. A leading ``//`` is collapsed to ``/`` and
+    the whole separator run at the root boundary is consumed (``/workspace//a.txt``). The
+    root itself (``/workspace`` or ``/workspace/``) is the empty tuple. Targets outside
+    the root, and
     targets whose meaning depends on how a symlink component resolves (``alias/../x``),
     return ``None`` and are left absolute for the strict hydrate check to refuse.
     """
@@ -253,6 +255,10 @@ def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | 
     elif target.startswith(prefix + "/"):
         rest = target[len(prefix) :].lstrip("/")
     else:
+        return None
+    if rest.endswith("/"):
+        # `/workspace/a.txt/` fails with ENOTDIR when `a.txt` is a file; dropping the
+        # separator would turn it into a working link, so it is not a simple target.
         return None
     parts = tuple(part for part in rest.split("/") if part)
     if any(part in (".", "..") for part in parts):
@@ -295,13 +301,15 @@ def _archive_establishes(
     result depend on another link, which is exactly what this rewrite refuses to model.
     """
 
-    if not parts:
-        return False
     link_parents = PurePosixPath(link_name).parent.parts
     for depth in range(1, len(link_parents) + 1):
         parent = members.get("/".join(link_parents[:depth]))
         if parent is None or not parent.isdir():
             return False
+    if not parts:
+        # The target is the workspace root, which hydration itself establishes; only the
+        # climb out of the link's own parents had to be proven.
+        return True
     for depth in range(1, len(parts)):
         intermediate = members.get("/".join(parts[:depth]))
         if intermediate is None or not intermediate.isdir():
