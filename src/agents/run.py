@@ -1447,40 +1447,50 @@ class AgentRunner:
                         if run_state._current_step is None:
                             run_state._current_step = NextStepRunAgain()
 
-                        pending_input = run_state.pending_input
-                        if pending_input:
-                            pending_guardrails = current_agent.input_guardrails + (
-                                run_config.input_guardrails or []
-                            )
-                            try:
-                                await run_input_guardrails(
-                                    current_agent,
-                                    pending_guardrails,
-                                    pending_input,
-                                    context_wrapper,
-                                    input_guardrail_results,
+                        if run_state._pending_input:
+                            while True:
+                                pending_input = run_state.pending_input
+                                if not pending_input:
+                                    break
+                                pending_guardrails = current_agent.input_guardrails + (
+                                    run_config.input_guardrails or []
                                 )
-                            finally:
-                                run_state._input_guardrail_results = list(input_guardrail_results)
+                                try:
+                                    await run_input_guardrails(
+                                        current_agent,
+                                        pending_guardrails,
+                                        pending_input,
+                                        context_wrapper,
+                                        input_guardrail_results,
+                                    )
+                                finally:
+                                    run_state._input_guardrail_results = list(
+                                        input_guardrail_results
+                                    )
 
-                            admission_items = await admit_pending_input(
-                                run_state=run_state,
-                                agent=current_agent,
-                                session=session,
-                                server_conversation_tracker=server_conversation_tracker,
-                                store=store_setting,
-                                wrapper=context_wrapper,
-                            )
-                            generated_items.extend(admission_items)
-                            session_items.extend(admission_items)
-                            if pending_server_items is not None:
-                                pending_server_items.extend(admission_items)
-                            pending_input_admission_items = [
-                                item for item in admission_items if isinstance(item, InputItem)
-                            ]
-                            if not run_state._pending_input:
-                                run_state._generated_items = list(generated_items)
-                                run_state._session_items = list(session_items)
+                                admission_items = await admit_pending_input(
+                                    run_state=run_state,
+                                    agent=current_agent,
+                                    session=session,
+                                    server_conversation_tracker=server_conversation_tracker,
+                                    store=store_setting,
+                                    wrapper=context_wrapper,
+                                )
+                                generated_items.extend(admission_items)
+                                session_items.extend(admission_items)
+                                if pending_server_items is not None:
+                                    pending_server_items.extend(admission_items)
+                                pending_input_admission_items.extend(
+                                    item for item in admission_items if isinstance(item, InputItem)
+                                )
+                                if not run_state._pending_input:
+                                    run_state._generated_items = list(generated_items)
+                                    run_state._session_items = list(session_items)
+                                if (
+                                    server_conversation_tracker is not None
+                                    or not run_state._pending_input
+                                ):
+                                    break
                     all_tools = await get_all_tools(execution_agent, context_wrapper)
                     all_tools = await initialize_computer_tools(
                         tools=all_tools, context_wrapper=context_wrapper
