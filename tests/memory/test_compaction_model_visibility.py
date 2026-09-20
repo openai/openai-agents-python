@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.responses import ResponseReasoningItem
 
 from agents import Agent, ModelSettings, RunConfig, Runner, RunState, handoff
 from agents.handoffs import HandoffInputData
@@ -30,7 +31,7 @@ LOCAL_OUTPUT = "synthetic-local-only-result"
 
 async def run(
     agent: Agent[Any],
-    prompt: str | RunState[Any],
+    prompt: str | list[TResponseInputItem] | RunState[Any],
     session: Session,
     streamed: bool,
     config: RunConfig | None = None,
@@ -329,7 +330,7 @@ async def test_resumed_tool_output_stays_local_when_filtered(streamed: bool) -> 
     state = interrupted.to_state()
     state.approve(interrupted.interruptions[0])
     serialized = state.to_json()
-    assert "_session_compaction_model_items" not in str(serialized)
+    assert "_session_compaction_model_exchange" not in str(serialized)
     restored = await RunState.from_json(agent, serialized)
     session.should_trigger_compaction = lambda _: True
     resumed = await run(agent, restored, session, streamed)
@@ -668,5 +669,172 @@ async def test_expired_read_overhead_does_not_authorize_hidden_history(
         client.responses.compact.assert_awaited_once()
         assert LOCAL_OUTPUT in str(client.responses.compact.call_args.kwargs["input"])
         assert await backend.get_items(limit=100) == []
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("mode", ["input", "previous_response_id"])
+async def test_automatic_compaction_applies_current_reasoning_id_policy(
+    streamed: bool, mode: Literal["input", "previous_response_id"]
+) -> None:
+    backend = SQLiteSession("reasoning-policy")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        backend,
+        client=client,
+        compaction_mode=mode,
+        should_trigger_compaction=lambda _: False,
+    )
+    model = ScriptedModel(
+        steps=[
+            [
+                ResponseReasoningItem(id="rs_stored", type="reasoning", summary=[]),
+                get_text_message("old"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="worker", model=model)
+    try:
+        await run(agent, "before policy", session, streamed)
+        stored_reasoning = next(
+            item for item in await backend.get_items() if item.get("type") == "reasoning"
+        )
+        assert stored_reasoning.get("id") == "rs_stored"
+        decisions: list[list[TResponseInputItem]] = []
+
+        def approve(context: dict[str, Any]) -> bool:
+            decisions.append(context["session_items"])
+            return True
+
+        session.should_trigger_compaction = approve
+        await run(
+            agent, "adopt policy", session, streamed, RunConfig(reasoning_item_id_policy="omit")
+        )
+        sent_reasoning = next(
+            item for item in model.calls[1].input if item.get("type") == "reasoning"
+        )
+        assert "id" not in sent_reasoning
+        assert len(decisions) == 2
+        approved_reasoning = next(item for item in decisions[-1] if item.get("type") == "reasoning")
+        assert approved_reasoning == sent_reasoning
+        client.responses.compact.assert_awaited_once()
+        if mode == "input":
+            compact_reasoning = next(
+                item
+                for item in client.responses.compact.call_args.kwargs["input"]
+                if item.get("type") == "reasoning"
+            )
+            assert compact_reasoning == sent_reasoning
+        assert await backend.get_items() == []
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("omit_policy", [False, True])
+async def test_reasoning_policy_does_not_authorize_other_input_changes(omit_policy: bool) -> None:
+    reasoning: TResponseInputItem = {
+        "type": "reasoning",
+        "id": "rs_stored",
+        "summary": [],
+        "encrypted_content": "synthetic-content",
+    }
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = OpenAIResponsesCompactionSession(
+        "reasoning-filter",
+        SimpleListSession(history=[reasoning]),
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+
+    def change_reasoning(data: CallModelData[Any]) -> ModelInputData:
+        items = [dict(item) for item in data.model_data.input]
+        if omit_policy:
+            items[0]["encrypted_content"] = "different-content"
+        else:
+            items[0].pop("id")
+        return ModelInputData(
+            input=cast(list[TResponseInputItem], items), instructions=data.model_data.instructions
+        )
+
+    model = ScriptedModel(steps=[[get_text_message("done")]])
+    await run(
+        Agent(name="worker", model=model),
+        "filtered",
+        session,
+        False,
+        RunConfig(
+            reasoning_item_id_policy="omit" if omit_policy else None,
+            call_model_input_filter=change_reasoning,
+        ),
+    )
+    assert "id" not in model.calls[0].input[0]
+    client.responses.compact.assert_not_awaited()
+    assert (await session.get_items())[0] == reasoning
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("restore_history_id", [False, True])
+async def test_omit_policy_preserves_model_visible_reasoning_ids(
+    streamed: bool, restore_history_id: bool
+) -> None:
+    backend = SQLiteSession("reasoning-caller-input")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    decisions: list[list[TResponseInputItem]] = []
+
+    def approve(context: dict[str, Any]) -> bool:
+        decisions.append(context["session_items"])
+        return True
+
+    session = OpenAIResponsesCompactionSession(
+        backend.session_id,
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=approve,
+    )
+
+    def restore_id(data: CallModelData[Any]) -> ModelInputData:
+        items = [dict(item) for item in data.model_data.input]
+        items[0]["id"] = "rs_stored"
+        return ModelInputData(
+            input=cast(list[TResponseInputItem], items), instructions=data.model_data.instructions
+        )
+
+    model = ScriptedModel(steps=[[get_text_message("done")]])
+    try:
+        await session.add_items([{"type": "reasoning", "id": "rs_stored", "summary": []}])
+        await run(
+            Agent(name="worker", model=model),
+            [
+                {"type": "reasoning", "id": "rs_caller", "summary": []},
+                {"role": "user", "content": "continue"},
+            ],
+            session,
+            streamed,
+            RunConfig(
+                reasoning_item_id_policy="omit",
+                session_input_callback=lambda history, new: history + new,
+                call_model_input_filter=restore_id if restore_history_id else None,
+            ),
+        )
+        sent_reasoning = [item for item in model.calls[0].input if item.get("type") == "reasoning"]
+        assert sent_reasoning[0].get("id") == ("rs_stored" if restore_history_id else None)
+        assert sent_reasoning[1].get("id") == "rs_caller"
+        client.responses.compact.assert_awaited_once()
+        compact_reasoning = [
+            item
+            for item in client.responses.compact.call_args.kwargs["input"]
+            if item.get("type") == "reasoning"
+        ]
+        assert compact_reasoning == sent_reasoning
+        assert [item for item in decisions[-1] if item.get("type") == "reasoning"] == sent_reasoning
+        assert await backend.get_items() == []
     finally:
         backend.close()

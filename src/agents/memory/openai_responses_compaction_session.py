@@ -10,7 +10,12 @@ from openai import AsyncOpenAI
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
-from ..run_internal.items import digest_input_item, normalize_input_items_for_api
+from ..run_internal.items import (
+    ReasoningItemIdPolicy,
+    apply_reasoning_item_id_policy,
+    digest_input_item,
+    normalize_input_items_for_api,
+)
 from ..usage import _response_usage_to_usage
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import (
@@ -90,7 +95,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     model exchange, preserving item order and each occurrence of repeated items. If a bounded read
     cannot establish coverage, the full history is retained. If that read changes the
     history snapshot, the decision hook is called again with the complete snapshot.
-    Item matching respects the wrapped store's declared ID-matching policy. Explicit manual
+    Item matching respects the wrapped store's declared ID-matching policy and the
+    current run's reasoning-ID policy. Explicit manual
     ``run_compaction()`` calls still compact the stored history and should be used
     only when that history may be sent.
     """
@@ -289,7 +295,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         if is_automatic:
-            model_items: tuple[str, ...] = getattr(wrapper, "_session_compaction_model_items", ())
+            model_exchange: tuple[tuple[str, ...], ReasoningItemIdPolicy | None] = getattr(
+                wrapper, "_session_compaction_model_exchange", ((), None)
+            )
+            model_items, reasoning_item_id_policy = model_exchange
             # Read one occurrence beyond what the model saw. If more history exists,
             # coverage fails without loading the entire backend. Do this only after
             # the decision hook approves, and bypass any cached partial snapshot.
@@ -301,21 +310,41 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             ) = await self._ensure_compaction_candidates(read_items, limit=len(model_items) + 1)
             # Consume model occurrences in order, allowing additional model-only items
             # between stored items while rejecting reordered or missing occurrences.
+            # Replay may omit an old reasoning ID, but new caller input and filters can
+            # retain it. Select only the representation present in the actual exchange.
             remaining = iter(model_items)
             covered = complete
+            matched_items: list[TResponseInputItem] = []
             for item in session_items:
                 digest = digest_input_item(
                     item, ignore_ids_for_matching=self._ignore_ids_for_matching
                 )
-                if digest is None or digest not in remaining:
+                normalized_item = apply_reasoning_item_id_policy([item], reasoning_item_id_policy)[
+                    0
+                ]
+                normalized_digest = digest_input_item(
+                    normalized_item, ignore_ids_for_matching=self._ignore_ids_for_matching
+                )
+                matched_digest = next(
+                    (
+                        candidate
+                        for candidate in remaining
+                        if candidate in (digest, normalized_digest)
+                    ),
+                    None,
+                )
+                if matched_digest is None:
                     covered = False
                     break
+                matched_items.append(item if matched_digest == digest else normalized_item)
             if not covered:
                 logger.warning(
                     "Skipped automatic compaction because complete stored history could not "
                     "be matched to the latest model exchange. Session history was retained."
                 )
                 return
+            session_items = matched_items
+            compaction_candidate_items = select_compaction_candidate_items(session_items)
             # A bounded reload may include history omitted from the hook's initial
             # cached/default-limited view. Require approval of the actual snapshot.
             if session_items != approved_session_items and not self.should_trigger_compaction(

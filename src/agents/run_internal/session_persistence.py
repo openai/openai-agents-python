@@ -99,7 +99,7 @@ def prepare_compaction_model_input(
     if session is None or not is_openai_responses_compaction_aware_session(session):
         return None
     # A failed request must not reuse evidence from an earlier model exchange.
-    wrapper._session_compaction_model_items = ()  # type: ignore[attr-defined]
+    wrapper._session_compaction_model_exchange = ((), None)  # type: ignore[attr-defined]
     ignore_ids = _ignore_ids_for_matching(session)
     return tuple(
         digest
@@ -122,10 +122,15 @@ def record_compaction_model_response(
         response.to_input_items(), reasoning_item_id_policy
     )
     ignore_ids = _ignore_ids_for_matching(session)
-    wrapper._session_compaction_model_items = input_digests + tuple(  # type: ignore[attr-defined]
+    response_digests = tuple(
         digest
         for item in response_items
         if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
+    # Keep the resolved replay policy bound to the same successful exchange.
+    wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+        input_digests + response_digests,
+        reasoning_item_id_policy,
     )
 
 
