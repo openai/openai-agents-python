@@ -90,6 +90,38 @@ __all__ = [
 _SESSION_LIMIT_UNSET = object()
 
 
+def prepare_compaction_model_input(
+    session: Session | None,
+    wrapper: RunContextWrapper[Any],
+    input_items: list[TResponseInputItem],
+) -> frozenset[str] | None:
+    """Snapshot the model input without retaining mutable or plaintext history."""
+    if session is None or not is_openai_responses_compaction_aware_session(session):
+        return None
+    # A failed request must not reuse evidence from an earlier model exchange.
+    wrapper._session_compaction_model_items = frozenset()  # type: ignore[attr-defined]
+    return frozenset(
+        digest for item in input_items if (digest := digest_input_item(item)) is not None
+    )
+
+
+def record_compaction_model_response(
+    wrapper: RunContextWrapper[Any],
+    input_digests: frozenset[str] | None,
+    response: ModelResponse,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> None:
+    """Authorize automatic compaction only from the latest successful model exchange."""
+    if input_digests is None:
+        return
+    response_items = apply_reasoning_item_id_policy(
+        response.to_input_items(), reasoning_item_id_policy
+    )
+    wrapper._session_compaction_model_items = input_digests | frozenset(  # type: ignore[attr-defined]
+        digest for item in response_items if (digest := digest_input_item(item)) is not None
+    )
+
+
 async def admit_pending_input(
     *,
     run_state: RunState[Any],
@@ -752,11 +784,17 @@ async def save_result_to_session(
         }
         if store is not None:
             compaction_args["store"] = store
-        await _call_session_method(
-            session.run_compaction,
-            compaction_args,
-            wrapper=compaction_wrapper,
-        )
+        if compaction_wrapper is not None:
+            compaction_wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
+        try:
+            await _call_session_method(
+                session.run_compaction,
+                compaction_args,
+                wrapper=compaction_wrapper,
+            )
+        finally:
+            if compaction_wrapper is not None:
+                compaction_wrapper._session_compaction_is_automatic = False  # type: ignore[attr-defined]
 
     return saved_run_items_count
 

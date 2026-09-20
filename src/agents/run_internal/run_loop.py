@@ -176,8 +176,10 @@ from .session_persistence import (
     admit_pending_input,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
+    prepare_compaction_model_input,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    record_compaction_model_response,
     resume_pending_session_write,
     resumed_turn_items,
     rewind_session_items,
@@ -2252,6 +2254,9 @@ async def run_single_turn_streamed(
 
     stream_failed_retry_attempts: list[int] = [0]
 
+    compaction_input_digests = prepare_compaction_model_input(
+        session, context_wrapper, filtered.input
+    )
     retry_stream = stream_response_with_retry(
         get_stream=lambda: model.stream_response(
             filtered.instructions,
@@ -2338,6 +2343,9 @@ async def run_single_turn_streamed(
     if final_response is None:
         raise ModelBehaviorError("Model did not produce a final response!")
 
+    record_compaction_model_response(
+        context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
+    )
     context_wrapper.usage.add(final_response.usage)
 
     if server_conversation_tracker is not None:
@@ -2498,6 +2506,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
     response_accepted = False
@@ -2557,6 +2566,7 @@ async def get_new_response(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -2634,6 +2644,9 @@ async def get_new_response(
             )
             server_conversation_tracker.rewind_input(filtered.input)
 
+    compaction_input_digests = prepare_compaction_model_input(
+        session, context_wrapper, filtered.input
+    )
     with model_run_context(tool_use_tracker):
         new_response = await get_response_with_retry(
             get_response=lambda: model.get_response(
@@ -2668,6 +2681,12 @@ async def get_new_response(
         server_conversation_tracker.mark_input_as_accepted(filtered.input)
         server_conversation_tracker.track_server_items(new_response)
 
+    record_compaction_model_response(
+        context_wrapper,
+        compaction_input_digests,
+        new_response,
+        reasoning_item_id_policy,
+    )
     context_wrapper.usage.add(new_response.usage)
 
     if not defer_llm_end_hooks:

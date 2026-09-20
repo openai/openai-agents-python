@@ -179,8 +179,8 @@ class EncryptedSession(SessionABC):
         await session._run_compaction(
             args,
             wrapper=wrapper,
-            read_items=lambda: _call_session_method(
-                self.get_items, wrapper=_get_session_wrapper(self, wrapper)
+            read_items=lambda limit: _call_session_method(
+                self.get_items, limit, wrapper=_get_session_wrapper(self, wrapper)
             ),
             prepare_items=self._encrypt_items,
         )
@@ -196,8 +196,8 @@ class EncryptedSession(SessionABC):
         await session._defer_compaction(
             response_id,
             store,
-            read_items=lambda: _call_session_method(
-                self.get_items, wrapper=_get_session_wrapper(self, wrapper)
+            read_items=lambda limit: _call_session_method(
+                self.get_items, limit, wrapper=_get_session_wrapper(self, wrapper)
             ),
         )
 
