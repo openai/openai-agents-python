@@ -341,6 +341,10 @@ class RealtimeSession(RealtimeModelListener):
             finally:
                 self._event_iterator_waiters -= 1
             if event is _REALTIME_SESSION_CLOSED_SENTINEL:
+                # asyncio.Queue does not reserve an item for the getter it wakes, so an
+                # iterator that was not waiting can take a sentinel meant for one that
+                # was. Hand it on so every consumer still parked on the queue ends too.
+                self._event_queue.put_nowait(_REALTIME_SESSION_CLOSED_SENTINEL)
                 return
             yield cast(RealtimeSessionEvent, event)
 

@@ -383,6 +383,57 @@ async def test_iteration_drains_queued_events_then_ends_after_failed_close():
 
 
 @pytest.mark.asyncio
+async def test_close_failure_releases_waiter_when_another_iterator_takes_the_sentinel():
+    busy_consumer_may_continue = asyncio.Event()
+
+    class FailingCloseModel(_DummyModel):
+        async def close(self):
+            # Resume the busy consumer before the wake-up sentinel is queued, so it is
+            # scheduled ahead of the parked consumer and reaches the queue first.
+            busy_consumer_may_continue.set()
+            raise RuntimeError("close failed")
+
+    session = RealtimeSession(FailingCloseModel(), RealtimeAgent(name="agent"), None)
+    queued = RealtimeError(info=session._event_info, error={"message": "queued before close"})
+    assert session._put_event_nowait(queued)
+
+    busy_consumer_events: list[Any] = []
+
+    async def busy_consumer() -> list[Any]:
+        async for event in session:
+            busy_consumer_events.append(event)
+            await busy_consumer_may_continue.wait()
+        return busy_consumer_events
+
+    async def parked_consumer() -> list[Any]:
+        return [event async for event in session]
+
+    busy = asyncio.ensure_future(busy_consumer())
+    await asyncio.sleep(0.01)
+    assert busy_consumer_events == [queued]
+    assert session._event_iterator_waiters == 0
+
+    parked = asyncio.ensure_future(parked_consumer())
+    await asyncio.sleep(0.01)
+    assert session._event_iterator_waiters == 1
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await session.close()
+
+    # Only the parked consumer was counted as a waiter, so one sentinel was queued, and
+    # the busy consumer took it. asyncio.Queue does not reserve an item for the getter
+    # it wakes, so the parked consumer ends only if the sentinel is handed on.
+    done, pending = await asyncio.wait({busy, parked}, timeout=0.5)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+    assert done == {busy, parked}
+    assert parked.result() == []
+    assert not session._closed
+
+
+@pytest.mark.asyncio
 async def test_cancelling_one_close_waiter_does_not_cancel_cleanup():
     class BlockingCloseModel(_DummyModel):
         def __init__(self) -> None:
