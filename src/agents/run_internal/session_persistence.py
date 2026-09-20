@@ -94,20 +94,18 @@ def prepare_compaction_model_input(
     session: Session | None,
     wrapper: RunContextWrapper[Any],
     input_items: list[TResponseInputItem],
-) -> frozenset[str] | None:
+) -> tuple[str, ...] | None:
     """Snapshot the model input without retaining mutable or plaintext history."""
     if session is None or not is_openai_responses_compaction_aware_session(session):
         return None
     # A failed request must not reuse evidence from an earlier model exchange.
-    wrapper._session_compaction_model_items = frozenset()  # type: ignore[attr-defined]
-    return frozenset(
-        digest for item in input_items if (digest := digest_input_item(item)) is not None
-    )
+    wrapper._session_compaction_model_items = ()  # type: ignore[attr-defined]
+    return tuple(digest for item in input_items if (digest := digest_input_item(item)) is not None)
 
 
 def record_compaction_model_response(
     wrapper: RunContextWrapper[Any],
-    input_digests: frozenset[str] | None,
+    input_digests: tuple[str, ...] | None,
     response: ModelResponse,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
 ) -> None:
@@ -117,7 +115,7 @@ def record_compaction_model_response(
     response_items = apply_reasoning_item_id_policy(
         response.to_input_items(), reasoning_item_id_policy
     )
-    wrapper._session_compaction_model_items = input_digests | frozenset(  # type: ignore[attr-defined]
+    wrapper._session_compaction_model_items = input_digests + tuple(  # type: ignore[attr-defined]
         digest for item in response_items if (digest := digest_input_item(item)) is not None
     )
 

@@ -189,7 +189,7 @@ async def test_runner_encrypts_items_around_compaction(
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("mode", ["input", "previous_response_id"])
-async def test_runner_compacts_encrypted_history(
+async def test_encrypted_compaction_retains_unproven_history_until_manual_compaction(
     streamed: bool,
     mode: OpenAIResponsesCompactionMode,
     encryption_key: str,
@@ -233,6 +233,12 @@ async def test_runner_compacts_encrypted_history(
         set_fernet_time(1_020)
         await session.add_items([{"role": "user", "content": "retained history"}])
         await _run_encrypted_session(agent, "private input", session, streamed)
+        # The bounded raw window includes an expired envelope, so it cannot prove
+        # that all retained history was checked. Explicit manual compaction can
+        # still read and compact the complete logical view.
+        client.responses.compact.assert_not_awaited()
+        assert len(await backend.get_items()) == 4
+        await session.run_compaction({"force": True})
 
         expected = [
             {"role": "user", "content": "retained history"},

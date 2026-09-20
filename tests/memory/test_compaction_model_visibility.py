@@ -288,3 +288,89 @@ async def test_backend_read_limit_cannot_hide_retained_history_from_compaction(
         assert await session.get_items(limit=100) == []
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("encrypted", [False, True])
+async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
+    approve: bool, encrypted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    backend = SQLiteSession("bounded", session_settings={"limit": 1})
+    session: SessionABC = OpenAIResponsesCompactionSession(
+        "bounded",
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: approve,
+    )
+    clock = [1000]
+    if encrypted:
+        pytest.importorskip("cryptography")
+        from agents.extensions.memory.encrypt_session import EncryptedSession
+
+        monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+        session = EncryptedSession("bounded", session, encryption_key="synthetic-test-key", ttl=10)
+    try:
+        await session.add_items(
+            [{"role": "user", "content": f"retained-{index}"} for index in range(100)]
+        )
+        if encrypted:
+            clock[0] += 11
+            await session.add_items([{"role": "user", "content": "fresh tail"}])
+        read = AsyncMock(wraps=backend.get_items)
+        backend.get_items = read  # type: ignore[method-assign]
+        model = ScriptedModel(steps=[[get_text_message("ok")], [get_text_message("done")]])
+        agent = Agent(name="worker", model=model)
+        for prompt in ("first", "second"):
+            read.reset_mock()
+            await run(agent, prompt, session, False)
+            # One stored input, one new prompt, one response, and one lookahead item.
+            limits = [
+                call.kwargs.get("limit", call.args[0] if call.args else None)
+                for call in read.call_args_list
+            ]
+            assert all(limit is None or limit <= 4 for limit in limits)
+            if not approve:
+                assert all(limit is None or limit == 1 for limit in limits)
+            client.responses.compact.assert_not_awaited()
+        assert len(await backend.get_items(limit=1000)) == (105 if encrypted else 104)
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("mode", ["input", "previous_response_id"])
+async def test_automatic_compaction_preserves_filtered_duplicate_occurrences(
+    streamed: bool, mode: Literal["input", "previous_response_id"]
+) -> None:
+    duplicate: TResponseInputItem = {"role": "user", "content": "repeated request"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = OpenAIResponsesCompactionSession(
+        "duplicates",
+        SimpleListSession(history=[duplicate, duplicate]),
+        client=client,
+        compaction_mode=mode,
+        should_trigger_compaction=lambda _: True,
+    )
+    model = ScriptedModel(steps=[[get_text_message("ok")], [get_text_message("done")]])
+    agent = Agent(name="worker", model=model)
+    await run(
+        agent,
+        "filtered",
+        session,
+        streamed,
+        RunConfig(session_input_callback=lambda history, new: history[1:] + new),
+    )
+    assert model.calls[0].input.count(duplicate) == 1
+    client.responses.compact.assert_not_awaited()
+    assert (await session.get_items()).count(duplicate) == 2
+
+    await run(agent, "complete", session, streamed)
+    assert model.calls[1].input.count(duplicate) == 2
+    client.responses.compact.assert_awaited_once()
+    if mode == "input":
+        assert client.responses.compact.call_args.kwargs["input"].count(duplicate) == 2
+    assert await session.get_items() == []

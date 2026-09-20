@@ -179,9 +179,7 @@ class EncryptedSession(SessionABC):
         await session._run_compaction(
             args,
             wrapper=wrapper,
-            read_items=lambda limit: _call_session_method(
-                self.get_items, limit, wrapper=_get_session_wrapper(self, wrapper)
-            ),
+            read_items=lambda limit: self._read_compaction_items(limit, wrapper=wrapper),
             prepare_items=self._encrypt_items,
         )
 
@@ -196,10 +194,31 @@ class EncryptedSession(SessionABC):
         await session._defer_compaction(
             response_id,
             store,
-            read_items=lambda limit: _call_session_method(
-                self.get_items, limit, wrapper=_get_session_wrapper(self, wrapper)
+            read_items=lambda limit: self._read_compaction_items(limit, wrapper=wrapper),
+        )
+
+    async def _read_compaction_items(
+        self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None
+    ) -> tuple[list[TResponseInputItem], bool]:
+        if limit is None:
+            items = await _call_session_method(
+                self.get_items, wrapper=_get_session_wrapper(self, wrapper)
+            )
+            return items, False
+        # Bound raw reads too: get_items() can expand its window to skip expired
+        # envelopes. A full window cannot prove complete coverage, even if some
+        # of its entries expire, so leave that history untouched.
+        items = cast(
+            list[TResponseInputItem],
+            await _call_session_method(
+                self.underlying_session.get_items,
+                limit,
+                wrapper=_get_session_wrapper(self.underlying_session, wrapper),
             ),
         )
+        if len(items) >= limit:
+            return [], False
+        return self._unwrap_valid_items(items), True
 
     @property
     def session_settings(self) -> SessionSettings | None:

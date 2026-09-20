@@ -1765,8 +1765,8 @@ class TestOpenAIResponsesCompactionSession:
         model = ScriptedModel()
         model.extend(
             [
-                [get_function_tool_call("do_thing")],
-                [get_function_tool_call("do_thing")],
+                [get_function_tool_call("do_thing", call_id="call-first")],
+                [get_function_tool_call("do_thing", call_id="call-second")],
                 [get_text_message("ok")],
             ]
         )

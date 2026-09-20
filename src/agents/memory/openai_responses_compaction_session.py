@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -86,10 +87,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     OpenAIConversationsSession) and automatically calls the OpenAI responses.compact
     API after each turn when the decision hook returns True.
 
-    Automatic compaction is skipped when stored history contains items outside the
-    latest successful model exchange, including history omitted by input filters.
-    The full history is retained. Explicit manual ``run_compaction()`` calls still
-    compact the stored history and should be used only when that history may be sent.
+    Automatic compaction requires coverage of stored history by the latest successful
+    model exchange, including each occurrence of repeated items. If a bounded read
+    cannot establish coverage, the full history is retained. Explicit manual
+    ``run_compaction()`` calls still compact the stored history and should be used
+    only when that history may be sent.
     """
 
     def __init__(
@@ -194,7 +196,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         args: OpenAIResponsesCompactionArgs | None,
         *,
         wrapper: RunContextWrapper[Any] | None,
-        read_items: Callable[[int | None], Awaitable[list[TResponseInputItem]]] | None = None,
+        read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
+        | None = None,
         prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
     ) -> None:
         # Keep one wrapper mutation boundary from the snapshot through replacement.
@@ -227,7 +230,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         args: OpenAIResponsesCompactionArgs | None,
         *,
         wrapper: RunContextWrapper[Any] | None,
-        read_items: Callable[[int | None], Awaitable[list[TResponseInputItem]]] | None = None,
+        read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
+        | None = None,
         prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
     ) -> None:
         if args and args.get("response_id"):
@@ -256,8 +260,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         is_automatic = wrapper is not None and getattr(
             wrapper, "_session_compaction_is_automatic", False
         )
-        compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
-            read_items, full_history=is_automatic
+        compaction_candidate_items, session_items, _ = await self._ensure_compaction_candidates(
+            read_items
         )
 
         force = args.get("force", False) if args else False
@@ -279,16 +283,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         if is_automatic:
-            model_items: frozenset[str] = getattr(
-                wrapper, "_session_compaction_model_items", frozenset()
+            model_items: tuple[str, ...] = getattr(wrapper, "_session_compaction_model_items", ())
+            # Read one occurrence beyond what the model saw. If more history exists,
+            # coverage fails without loading the entire backend. Do this only after
+            # the decision hook approves, and bypass any cached partial snapshot.
+            _, session_items, complete = await self._ensure_compaction_candidates(
+                read_items, limit=len(model_items) + 1
             )
-            if any(
-                (digest := digest_input_item(item)) is None or digest not in model_items
-                for item in session_items
-            ):
+            remaining = Counter(model_items)
+            covered = complete
+            for item in session_items:
+                digest = digest_input_item(item)
+                if digest is None or remaining[digest] == 0:
+                    covered = False
+                    break
+                remaining[digest] -= 1
+            if not covered:
                 logger.warning(
-                    "Skipped automatic compaction because stored history contains items "
-                    "outside the latest model exchange. Session history was retained."
+                    "Skipped automatic compaction because complete stored history could not "
+                    "be matched to the latest model exchange. Session history was retained."
                 )
                 return
 
@@ -479,12 +492,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         response_id: str,
         store: bool | None = None,
         *,
-        read_items: Callable[[int | None], Awaitable[list[TResponseInputItem]]] | None = None,
+        read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
+        | None = None,
     ) -> None:
         async with self._mutation_lock:
             if self._deferred_response_id is not None:
                 return
-            compaction_candidate_items, session_items = await self._ensure_compaction_candidates(
+            compaction_candidate_items, session_items, _ = await self._ensure_compaction_candidates(
                 read_items
             )
             resolved_mode = self._resolve_compaction_mode_for_response(
@@ -586,25 +600,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def _ensure_compaction_candidates(
         self,
-        read_items: Callable[[int | None], Awaitable[list[TResponseInputItem]]] | None = None,
+        read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
+        | None = None,
         *,
-        full_history: bool = False,
-    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem]]:
-        """Lazy-load candidates, or read complete history for automatic coverage checks."""
-        if read_items is not None or full_history:
-            # Automatic replacement clears the entire backend, so coverage must bypass
-            # default read limits and any previously cached partial history. The outer
-            # view also applies decryption and TTL expiration to the logical items.
-            items = (
-                await read_items(_ALL_SESSION_ITEMS_LIMIT if full_history else None)
-                if read_items is not None
-                else await self._get_all_underlying_session_items()
-            )
+        limit: int | None = None,
+    ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], bool]:
+        """Lazy-load candidates, or read a bounded snapshot for automatic coverage checks."""
+        if read_items is not None or limit is not None:
+            # An explicit limit bypasses the cache and backend default read limit.
+            # The outer view applies decryption and TTL expiration to logical items.
+            if read_items is not None:
+                items, complete = await read_items(limit)
+            else:
+                items = await self.underlying_session.get_items(limit=limit)
+                complete = limit is not None and len(items) < limit
             history = _normalize_compaction_session_items(items)
-            return select_compaction_candidate_items(history), history
+            return select_compaction_candidate_items(history), history, complete
 
         if self._compaction_candidate_items is not None and self._session_items is not None:
-            return (self._compaction_candidate_items[:], self._session_items[:])
+            return (self._compaction_candidate_items[:], self._session_items[:], False)
 
         history = _normalize_compaction_session_items(await self.underlying_session.get_items())
         candidates = select_compaction_candidate_items(history)
@@ -616,7 +630,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             len(history),
             len(candidates),
         )
-        return (candidates[:], history[:])
+        return (candidates[:], history[:], False)
 
 
 def _strip_orphaned_assistant_ids(
