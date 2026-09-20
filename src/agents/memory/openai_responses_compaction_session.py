@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -88,7 +87,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     API after each turn when the decision hook returns True.
 
     Automatic compaction requires coverage of stored history by the latest successful
-    model exchange, including each occurrence of repeated items. If a bounded read
+    model exchange, preserving item order and each occurrence of repeated items. If a bounded read
     cannot establish coverage, the full history is retained. If that read changes the
     history snapshot, the decision hook is called again with the complete snapshot.
     Item matching respects the wrapped store's declared ID-matching policy. Explicit manual
@@ -300,16 +299,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 session_items,
                 complete,
             ) = await self._ensure_compaction_candidates(read_items, limit=len(model_items) + 1)
-            remaining = Counter(model_items)
+            # Consume model occurrences in order, allowing additional model-only items
+            # between stored items while rejecting reordered or missing occurrences.
+            remaining = iter(model_items)
             covered = complete
             for item in session_items:
                 digest = digest_input_item(
                     item, ignore_ids_for_matching=self._ignore_ids_for_matching
                 )
-                if digest is None or remaining[digest] == 0:
+                if digest is None or digest not in remaining:
                     covered = False
                     break
-                remaining[digest] -= 1
             if not covered:
                 logger.warning(
                     "Skipped automatic compaction because complete stored history could not "

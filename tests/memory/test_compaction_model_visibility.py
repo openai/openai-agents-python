@@ -490,3 +490,57 @@ async def test_automatic_compaction_preserves_filtered_duplicate_occurrences(
     if mode == "input":
         assert client.responses.compact.call_args.kwargs["input"].count(duplicate) == 2
     assert await session.get_items() == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("mode", ["input", "previous_response_id"])
+@pytest.mark.parametrize("filter_kind", ["model", "session"])
+async def test_automatic_compaction_preserves_reordered_history(
+    streamed: bool, mode: Literal["input", "previous_response_id"], filter_kind: str
+) -> None:
+    first: TResponseInputItem = {"role": "user", "content": "first stored request"}
+    second: TResponseInputItem = {"role": "user", "content": "second stored request"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = OpenAIResponsesCompactionSession(
+        "ordered",
+        SimpleListSession(history=[first, second]),
+        client=client,
+        compaction_mode=mode,
+        should_trigger_compaction=lambda _: True,
+    )
+    model = ScriptedModel(steps=[[get_text_message("ok")], [get_text_message("done")]])
+    agent = Agent(name="worker", model=model)
+
+    def reorder(data: CallModelData[Any]) -> ModelInputData:
+        items = data.model_data.input
+        return ModelInputData(
+            input=[items[1], items[0], *items[2:]], instructions=data.model_data.instructions
+        )
+
+    config = (
+        RunConfig(call_model_input_filter=reorder)
+        if filter_kind == "model"
+        else RunConfig(session_input_callback=lambda history, new: [*reversed(history), *new])
+    )
+    await run(agent, "reordered", session, streamed, config)
+    assert model.calls[0].input[:2] == [second, first]
+    client.responses.compact.assert_not_awaited()
+    assert (await session.get_items())[:2] == [first, second]
+
+    model_only: TResponseInputItem = {"role": "user", "content": "model-only context"}
+
+    def add_context(data: CallModelData[Any]) -> ModelInputData:
+        items = data.model_data.input
+        return ModelInputData(
+            input=[items[0], model_only, *items[1:]], instructions=data.model_data.instructions
+        )
+
+    await run(agent, "ordered", session, streamed, RunConfig(call_model_input_filter=add_context))
+    assert model.calls[1].input[:3] == [first, model_only, second]
+    client.responses.compact.assert_awaited_once()
+    if mode == "input":
+        compact_input = client.responses.compact.call_args.kwargs["input"]
+        assert compact_input[:2] == [first, second]
+        assert model_only not in compact_input
+    assert await session.get_items() == []
