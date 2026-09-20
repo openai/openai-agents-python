@@ -5771,7 +5771,7 @@
 
 <h1 id="sessions">Sessions</h1>
 <p>The Agents SDK provides built-in session memory to automatically maintain conversation history across multiple agent runs, eliminating the need to manually handle <code>.to_input_list()</code> between turns.</p>
-<p>Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.</p>
+<p>Sessions store conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.</p>
 <p>Use sessions when you want the SDK to manage client-side memory for you. In the same run, a session cannot be combined with the run-level continuation options <code>conversation_id</code>, <code>previous_response_id</code>, or <code>auto_previous_response_id</code>. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.</p>
 <h2 id="quick-start">Quick start</h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
@@ -5899,7 +5899,7 @@
 <p>If your session implementation exposes default session settings, each non-<code>None</code> value in <code>RunConfig.session_settings</code> overrides the corresponding default for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.</p>
 <h2 id="memory-operations">Memory operations</h2>
 <h3 id="basic-operations">Basic operations</h3>
-<p>Sessions supports several operations for managing conversation history:</p>
+<p>Sessions support several operations for managing conversation history:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">session</span> <span class="o">=</span> <span class="n">SQLiteSession</span><span class="p">(</span><span class="s2">&quot;user_123&quot;</span><span class="p">,</span> <span class="s2">&quot;conversations.db&quot;</span><span class="p">)</span>
