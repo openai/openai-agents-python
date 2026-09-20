@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,15 +16,20 @@ from cryptography.fernet import Fernet
 
 from agents import (
     Agent,
+    RunConfig,
     RunContextWrapper,
     Runner,
+    RunState,
     SessionSettings,
     SQLiteSession,
     TResponseInputItem,
 )
+from agents.decorators import tool
 from agents.extensions.memory.encrypt_session import EncryptedSession
-from agents.testing import ScriptedModel
-from tests.test_responses import get_text_message
+from agents.memory import OpenAIResponsesCompactionSession
+from agents.memory.openai_responses_compaction_session import OpenAIResponsesCompactionMode
+from agents.testing import ModelStep, ScriptedModel
+from tests.test_responses import get_function_tool_call, get_text_message
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -124,6 +133,615 @@ async def test_encrypted_session_with_runner(
     assert any("Golden Gate Bridge" in str(item.get("content", "")) for item in last_input)
 
     underlying_session.close()
+
+
+async def _run_encrypted_session(
+    agent: Agent[Any], value: str | RunState[Any], session: EncryptedSession, streamed: bool
+):
+    config = RunConfig(tracing_disabled=True)
+    if not streamed:
+        return await Runner.run(agent, value, session=session, run_config=config)
+    result = Runner.run_streamed(agent, value, session=session, run_config=config)
+    async for _ in result.stream_events():
+        pass
+    return result
+
+
+def _decrypt_stored_items(
+    session: EncryptedSession, stored: list[TResponseInputItem]
+) -> list[dict[str, Any]]:
+    # Inspect the storage envelope and decrypt directly, independently of Session.get_items.
+    envelopes = cast(list[dict[str, Any]], stored)
+    assert all(set(item) == {"__enc__", "v", "kid", "payload"} for item in envelopes)
+    assert all(item["__enc__"] == 1 for item in envelopes)
+    return [json.loads(session.cipher.decrypt(item["payload"].encode())) for item in envelopes]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_encrypts_items_around_compaction(
+    streamed: bool, encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("encrypted-compaction", tmp_path / "history.db")
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id, backend, should_trigger_compaction=lambda _: False
+        ),
+        encryption_key,
+    )
+    output = get_text_message("private assistant answer")
+    model = ScriptedModel([[output], [get_text_message("followup answer")]])
+    agent = Agent(name="test", model=model)
+    expected = [
+        {"role": "user", "content": "private user input"},
+        output.model_dump(exclude_unset=True),
+    ]
+    try:
+        result = await _run_encrypted_session(agent, "private user input", session, streamed)
+        assert result.final_output == "private assistant answer"
+        assert _decrypt_stored_items(session, await backend.get_items()) == expected
+
+        await _run_encrypted_session(agent, "followup", session, streamed)
+        assert model.calls[-1].input == expected + [{"role": "user", "content": "followup"}]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("mode", ["input", "previous_response_id"])
+async def test_runner_compacts_encrypted_history(
+    streamed: bool,
+    mode: OpenAIResponsesCompactionMode,
+    encryption_key: str,
+    tmp_path: Path,
+    set_fernet_time: Any,
+) -> None:
+    backend = SQLiteSession("encrypted-active-compaction", tmp_path / "history.db")
+    compacted = {"type": "compaction", "id": "cmp-1", "encrypted_content": "summary"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+    decisions: list[dict[str, Any]] = []
+
+    def should_compact(context: dict[str, Any]) -> bool:
+        decisions.append(context)
+        return True
+
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id,
+            backend,
+            client=client,
+            compaction_mode=mode,
+            should_trigger_compaction=should_compact,
+        ),
+        encryption_key,
+        ttl=10,
+    )
+    output = get_text_message("private answer")
+    next_output = get_text_message("next answer")
+    model = ScriptedModel(
+        [
+            ModelStep(output=[output], response_id="resp-1"),
+            ModelStep(output=[next_output], response_id="resp-2"),
+        ]
+    )
+    agent = Agent(name="test", model=model)
+    try:
+        set_fernet_time(1_000)
+        await session.add_items([{"role": "assistant", "content": "expired private history"}])
+        set_fernet_time(1_020)
+        await session.add_items([{"role": "user", "content": "retained history"}])
+        await _run_encrypted_session(agent, "private input", session, streamed)
+
+        expected = [
+            {"role": "user", "content": "retained history"},
+            {"role": "user", "content": "private input"},
+            output.model_dump(exclude_unset=True),
+        ]
+        if mode == "input":
+            client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=expected)
+        else:
+            client.responses.compact.assert_awaited_once_with(
+                model="gpt-4.1", previous_response_id="resp-1"
+            )
+        assert decisions[0]["session_items"] == expected
+        assert decisions[0]["compaction_candidate_items"] == [expected[-1]]
+        assert _decrypt_stored_items(session, await backend.get_items()) == [compacted]
+        assert await session.get_items() == [compacted]
+
+        await _run_encrypted_session(agent, "next", session, streamed)
+        assert model.calls[1].input == [compacted, {"role": "user", "content": "next"}]
+        assert decisions[1]["session_items"] == [
+            compacted,
+            {"role": "user", "content": "next"},
+            next_output.model_dump(exclude_unset=True),
+        ]
+        assert decisions[1]["compaction_candidate_items"] == [
+            next_output.model_dump(exclude_unset=True)
+        ]
+        assert _decrypt_stored_items(session, await backend.get_items()) == [compacted]
+
+        # Expiration changes the logical snapshot without changing the mutation generation.
+        set_fernet_time(1_040)
+        await session.run_compaction({"compaction_mode": "input", "force": True})
+        client.responses.compact.assert_awaited_with(model="gpt-4.1", input=[])
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_decrypts_existing_compaction_history_with_ttl_and_limit(
+    streamed: bool, encryption_key: str, tmp_path: Path, set_fernet_time: Any
+) -> None:
+    backend = SQLiteSession("encrypted-history", tmp_path / "history.db")
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id, backend, should_trigger_compaction=lambda _: False
+        ),
+        encryption_key,
+        ttl=10,
+    )
+    expected_history = [{"role": "user", "content": "retained history"}]
+    try:
+        set_fernet_time(1_000)
+        await session.add_items([{"role": "assistant", "content": "expired history"}])
+        expired = (await backend.get_items())[0]
+        set_fernet_time(1_020)
+        await session.add_items(cast(list[TResponseInputItem], expected_history))
+        # An expired tail forces EncryptedSession to expand its one-item retrieval window.
+        await backend.add_items([expired])
+        session.session_settings = SessionSettings(limit=1)
+        model = ScriptedModel([[get_text_message("answer")]])
+
+        await _run_encrypted_session(Agent(name="test", model=model), "next", session, streamed)
+
+        assert model.calls[0].input == expected_history + [{"role": "user", "content": "next"}]
+    finally:
+        backend.close()
+
+
+async def test_runner_defers_compaction_using_decrypted_candidates(
+    encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("encrypted-deferred", tmp_path / "history.db")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    decisions: list[dict[str, Any]] = []
+
+    def should_compact(context: dict[str, Any]) -> bool:
+        decisions.append(context)
+        return context["response_id"] == "resp-tool" and any(
+            item.get("type") == "function_call_output"
+            for item in context["compaction_candidate_items"]
+        )
+
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id,
+            backend,
+            client=client,
+            compaction_mode="input",
+            should_trigger_compaction=should_compact,
+        ),
+        encryption_key,
+    )
+
+    @tool
+    async def lookup() -> str:
+        return "private lookup result"
+
+    call = get_function_tool_call("lookup", "{}", call_id="lookup-1")
+    output = get_text_message("private answer")
+    model = ScriptedModel(
+        [
+            ModelStep(output=[call], response_id="resp-tool"),
+            ModelStep(output=[output], response_id="resp-final"),
+        ]
+    )
+    try:
+        await _run_encrypted_session(
+            Agent(name="test", model=model, tools=[lookup]), "private request", session, False
+        )
+        expected = [
+            {"role": "user", "content": "private request"},
+            call.model_dump(exclude_unset=True),
+            {
+                "type": "function_call_output",
+                "call_id": "lookup-1",
+                "output": "private lookup result",
+            },
+        ]
+        assert any(context["compaction_candidate_items"] == expected[1:] for context in decisions)
+        client.responses.compact.assert_awaited_once_with(
+            model="gpt-4.1", input=expected + [output.model_dump(exclude_unset=True)]
+        )
+        assert await backend.get_items() == []
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["failure", "cancellation"])
+async def test_encrypted_compaction_restores_original_tokens_before_concurrent_append(
+    cancel: bool, encryption_key: str, tmp_path: Path, set_fernet_time: Any
+) -> None:
+    replacement_written = asyncio.Event()
+    release_replacement = asyncio.Event()
+    append_started = asyncio.Event()
+
+    class PausingSQLiteSession(SQLiteSession):
+        """Control a committed replacement failure at the real storage boundary."""
+
+        fail_replacement = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            await super().add_items(items)
+            if self.fail_replacement:
+                self.fail_replacement = False
+                replacement_written.set()
+                await release_replacement.wait()
+                raise RuntimeError("replacement acknowledgement lost")
+
+    backend = PausingSQLiteSession("encrypted-rollback", tmp_path / "history.db")
+    compacted = {"type": "compaction", "id": "cmp-1", "encrypted_content": "summary"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(backend.session_id, backend, client=client),
+        encryption_key,
+        ttl=10,
+    )
+    tasks: list[asyncio.Task[Any]] = []
+    valid = {"role": "user", "content": "valid history"}
+    survivor = {"role": "user", "content": "concurrent survivor"}
+
+    async def append() -> None:
+        append_started.set()
+        await session.add_items([cast(TResponseInputItem, survivor)])
+
+    try:
+        set_fernet_time(1_000)
+        await session.add_items([{"role": "user", "content": "expired history"}])
+        set_fernet_time(1_020)
+        await session.add_items([cast(TResponseInputItem, valid)])
+        original_tokens = await backend.get_items()
+        backend.fail_replacement = True
+        compaction = asyncio.create_task(session.run_compaction({"force": True}))
+        tasks.append(compaction)
+        await asyncio.wait_for(replacement_written.wait(), timeout=2)
+        assert _decrypt_stored_items(session, await backend.get_items()) == [compacted]
+        writer = asyncio.create_task(append())
+        tasks.append(writer)
+        await asyncio.wait_for(append_started.wait(), timeout=2)
+        assert not writer.done()
+
+        if cancel:
+            compaction.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(compaction, timeout=2)
+        else:
+            release_replacement.set()
+            with pytest.raises(RuntimeError, match="replacement acknowledgement lost"):
+                await asyncio.wait_for(compaction, timeout=2)
+        await asyncio.wait_for(writer, timeout=2)
+
+        stored = await backend.get_items()
+        assert stored[:-1] == original_tokens
+        assert _decrypt_stored_items(session, stored[-1:]) == [survivor]
+        assert await session.get_items() == [valid, survivor]
+        await session.run_compaction({"force": True})
+        client.responses.compact.assert_awaited_with(model="gpt-4.1", input=[valid, survivor])
+        assert _decrypt_stored_items(session, await backend.get_items()) == [compacted]
+    finally:
+        release_replacement.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        backend.close()
+
+
+async def test_clear_revokes_encrypted_deferred_compaction(
+    encryption_key: str, tmp_path: Path
+) -> None:
+    snapshot_read, release_snapshot, model_waiting, release_model = (
+        asyncio.Event() for _ in range(4)
+    )
+    clear_started, backend_clear_started = asyncio.Event(), asyncio.Event()
+
+    class ObservedSQLiteSession(SQLiteSession):
+        async def clear_session(self) -> None:
+            backend_clear_started.set()
+            await super().clear_session()
+
+    class PausingEncryptedSession(EncryptedSession):
+        """Suspend a logical tool-output snapshot before its policy decision."""
+
+        paused = False
+
+        async def get_items(self, limit=None):
+            # Preserve the public Session call shape without opting into run context.
+            items = await super().get_items(limit)
+            if not self.paused and any(
+                item.get("type") == "function_call_output" for item in items
+            ):
+                self.paused = True
+                snapshot_read.set()
+                await release_snapshot.wait()
+            return items
+
+    backend = ObservedSQLiteSession("encrypted-deferred-clear", tmp_path / "history.db")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = PausingEncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id,
+            backend,
+            client=client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda context: context["response_id"] == "resp-tool",
+        ),
+        encryption_key,
+    )
+
+    @tool
+    async def lookup() -> str:
+        return "private tool output"
+
+    async def held_model(_) -> ModelStep:
+        model_waiting.set()
+        await release_model.wait()
+        return ModelStep(output=[get_text_message("answer-A")], response_id="resp-a")
+
+    async def clear() -> None:
+        clear_started.set()
+        await session.clear_session()
+
+    agent_a = Agent(
+        name="A",
+        tools=[lookup],
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[get_function_tool_call("lookup", "{}", call_id="lookup-a")],
+                    response_id="resp-tool",
+                ),
+                ModelStep.respond(held_model),
+            ]
+        ),
+    )
+    task_a = asyncio.create_task(_run_encrypted_session(agent_a, "input-A", session, False))
+    tasks: list[asyncio.Task[Any]] = [task_a]
+    try:
+        await asyncio.wait_for(snapshot_read.wait(), timeout=2)
+        clearing = asyncio.create_task(clear())
+        tasks.append(clearing)
+        await asyncio.wait_for(clear_started.wait(), timeout=2)
+        clear_entered_before_snapshot_settled = backend_clear_started.is_set()
+        if clear_entered_before_snapshot_settled:
+            # Force the stale-publication interleaving if clear can pass the snapshot.
+            await asyncio.wait_for(clearing, timeout=2)
+        release_snapshot.set()
+        await asyncio.wait_for(model_waiting.wait(), timeout=2)
+        await asyncio.wait_for(clearing, timeout=2)
+
+        output_b = get_text_message("answer-B")
+        agent_b = Agent(
+            name="B", model=ScriptedModel([ModelStep(output=[output_b], response_id="resp-b")])
+        )
+        await _run_encrypted_session(agent_b, "input-B", session, False)
+
+        client.responses.compact.assert_not_awaited()
+        assert not clear_entered_before_snapshot_settled
+        assert _decrypt_stored_items(session, await backend.get_items()) == [
+            {"role": "user", "content": "input-B"},
+            output_b.model_dump(exclude_unset=True),
+        ]
+    finally:
+        release_snapshot.set()
+        release_model.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        backend.close()
+
+
+async def test_encrypted_session_preserves_optional_compaction_delegation(
+    encryption_key: str, tmp_path: Path
+) -> None:
+    calls: list[Any] = []
+
+    class CustomCompactionSession(SQLiteSession):
+        async def run_compaction(self, args=None) -> None:
+            calls.append(args)
+
+    backend = CustomCompactionSession("encrypted-custom-compaction", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key)
+
+    @tool
+    async def lookup() -> str:
+        return "private lookup result"
+
+    model = ScriptedModel(
+        [
+            ModelStep(
+                output=[get_function_tool_call("lookup", "{}", call_id="lookup-custom")],
+                response_id="resp-tool",
+            ),
+            ModelStep(output=[get_text_message("private answer")], response_id="resp-final"),
+        ]
+    )
+    try:
+        result = await _run_encrypted_session(
+            Agent(name="test", model=model, tools=[lookup]), "private input", session, False
+        )
+        assert result.final_output == "private answer"
+        assert not hasattr(session, "_defer_compaction")
+        assert [args["response_id"] for args in calls] == ["resp-final"]
+        assert len(_decrypt_stored_items(session, await backend.get_items())) == 4
+    finally:
+        backend.close()
+
+
+async def test_compaction_wrapping_encrypted_storage(encryption_key: str, tmp_path: Path) -> None:
+    backend = SQLiteSession("inner-encryption", tmp_path / "history.db")
+    encrypted = EncryptedSession(backend.session_id, backend, encryption_key)
+    compacted = {"type": "compaction", "id": "cmp-1", "encrypted_content": "summary"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+    session = OpenAIResponsesCompactionSession(backend.session_id, encrypted, client=client)
+    try:
+        await session.add_items([{"role": "user", "content": "private history"}])
+        await session.run_compaction({"force": True})
+        client.responses.compact.assert_awaited_once_with(
+            model="gpt-4.1", input=[{"role": "user", "content": "private history"}]
+        )
+        assert _decrypt_stored_items(encrypted, await backend.get_items()) == [compacted]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_recovers_encrypted_resumed_append(
+    streamed: bool, encryption_key: str, tmp_path: Path
+) -> None:
+    class LostAckSQLiteSession(SQLiteSession):
+        """Fail after a real committed batch to exercise public Runner recovery."""
+
+        fail_after_commit = False
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            await super().add_items(items)
+            if self.fail_after_commit:
+                self.fail_after_commit = False
+                raise RuntimeError("append acknowledgement lost")
+
+    backend = LostAckSQLiteSession("encrypted-resume", tmp_path / "history.db")
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id, backend, should_trigger_compaction=lambda _: False
+        ),
+        encryption_key,
+    )
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    async def record() -> str:
+        effects.append("recorded")
+        return "private tool receipt"
+
+    call = get_function_tool_call("record", "{}", call_id="record-1")
+    output = get_text_message("private final answer")
+    model = ScriptedModel([[call], [output]])
+    agent = Agent(name="test", model=model, tools=[record])
+    try:
+        paused = await _run_encrypted_session(agent, "private request", session, streamed)
+        state = paused.to_state()
+        state.approve(state.get_interruptions()[0])
+        backend.fail_after_commit = True
+        with pytest.raises(RuntimeError, match="append acknowledgement lost"):
+            await _run_encrypted_session(agent, state, session, streamed)
+        assert effects == ["recorded"]
+        assert len(model.calls) == 1
+        state = await RunState.from_json(agent, state.to_json())
+
+        result = await _run_encrypted_session(agent, state, session, streamed)
+
+        assert result.final_output == "private final answer"
+        assert effects == ["recorded"]
+        assert "pending_session_write" not in result.to_state().to_json()
+        assert _decrypt_stored_items(session, await backend.get_items()) == [
+            {"role": "user", "content": "private request"},
+            call.model_dump(exclude_unset=True),
+            {
+                "type": "function_call_output",
+                "call_id": "record-1",
+                "output": "private tool receipt",
+            },
+            output.model_dump(exclude_unset=True),
+        ]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize(
+    "pause_before_append", [False, True], ids=["after-append", "before-append"]
+)
+async def test_encrypted_runner_skips_compaction_after_interleaved_outer_write(
+    pause_before_append: bool, encryption_key: str, tmp_path: Path
+) -> None:
+    paused = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingEncryptedSession(EncryptedSession):
+        """Suspend at the outer public append boundary while another Runner completes."""
+
+        async def add_items(
+            self,
+            items: list[TResponseInputItem],
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> None:
+            is_run_a_output = "answer-A" in json.dumps(items)
+            if is_run_a_output and pause_before_append:
+                paused.set()
+                await release.wait()
+            await super().add_items(items, wrapper=wrapper)
+            if is_run_a_output and not pause_before_append:
+                paused.set()
+                await release.wait()
+
+    backend = SQLiteSession("encrypted-concurrent", tmp_path / "history.db")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = PausingEncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id,
+            backend,
+            client=client,
+            should_trigger_compaction=lambda context: context["response_id"] == "resp-a",
+        ),
+        encryption_key,
+    )
+    output_a = get_text_message("answer-A")
+    output_b = get_text_message("answer-B")
+    agent_a = Agent(
+        name="A", model=ScriptedModel([ModelStep(output=[output_a], response_id="resp-a")])
+    )
+    agent_b = Agent(
+        name="B", model=ScriptedModel([ModelStep(output=[output_b], response_id="resp-b")])
+    )
+    run_a = asyncio.create_task(_run_encrypted_session(agent_a, "input-A", session, False))
+    try:
+        await asyncio.wait_for(paused.wait(), timeout=2)
+        result_b = await asyncio.wait_for(
+            _run_encrypted_session(agent_b, "input-B", session, False), timeout=2
+        )
+        assert result_b.final_output == "answer-B"
+        release.set()
+        result_a = await asyncio.wait_for(run_a, timeout=2)
+        assert result_a.final_output == "answer-A"
+        client.responses.compact.assert_not_awaited()
+        expected = [
+            {"role": "user", "content": "input-A"},
+            {"role": "user", "content": "input-B"},
+            output_b.model_dump(exclude_unset=True),
+        ]
+        expected.insert(3 if pause_before_append else 1, output_a.model_dump(exclude_unset=True))
+        assert _decrypt_stored_items(session, await backend.get_items()) == expected
+    finally:
+        release.set()
+        if not run_a.done():
+            run_a.cancel()
+        await asyncio.gather(run_a, return_exceptions=True)
+        backend.close()
 
 
 async def test_encrypted_session_pop_item(encryption_key: str, underlying_session: SQLiteSession):

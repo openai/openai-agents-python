@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+DETECTOR = ROOT / ".github/scripts/detect-changes.sh"
+ZERO_SHA = "0" * 40
+MISSING_SHA = "1" * 40
+# Git for Windows can take longer to start on a busy CI worker.
+SUBPROCESS_TIMEOUT_SECONDS = 60
+
+
+def _environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("OPENAI_API_KEY", "BASE_SHA", "HEAD_SHA", "GITHUB_OUTPUT"):
+        env.pop(key, None)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ALLOW_PROTOCOL"] = "file"
+    return env
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_environment(),
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    ).stdout.strip()
+
+
+def _commit(repo: Path, *paths: str) -> str:
+    for name in paths:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Changed content.\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "--allow-empty", "-m", "Record test changes")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def change_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+    _git(repo, "config", "user.name", "Change detection test")
+    _git(repo, "config", "user.email", "change-test@example.invalid")
+    return repo, _commit(repo)
+
+
+def _detect(
+    repo: Path,
+    mode: str,
+    base: str,
+    head: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+    bash_args: list[str] | None = None,
+) -> bool:
+    if os.name == "nt":
+        # Resolve Git for Windows' Bash instead of the system WSL launcher.
+        git_exec_path = Path(_git(repo, "--exec-path"))
+        bash = str(git_exec_path.parents[2] / "bin/bash.exe")
+    else:
+        bash = shutil.which("bash")
+        assert bash is not None
+    output = repo.parent / "github-output"
+    output.write_text("", encoding="utf-8")
+    env = _environment()
+    env.update(extra_env or {})
+    env["GITHUB_OUTPUT"] = output.as_posix()
+    result = subprocess.run(
+        [bash, *(bash_args or [DETECTOR.as_posix(), mode, base, head])],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    value = output.read_text(encoding="utf-8")
+    assert value in ("run=true\n", "run=false\n"), (value, result.stderr)
+    return value == "run=true\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "code", "docs", "docs_only"),
+    [
+        ("src/agents/run.py", True, False, False),
+        ("tests/test_release_provenance.py", True, False, False),
+        ("integration_tests/test_contract.py", True, False, False),
+        ("examples/basic.py", True, False, False),
+        (".github/scripts/detect-changes.sh", True, False, False),
+        (".github/scripts/check_optional_truthiness.py", True, False, False),
+        (".github/scripts/run_serial_tests.py", True, False, False),
+        (".github/scripts/run-asyncio-teardown-stability.sh", True, False, False),
+        (".github/scripts/verify_release.py", True, False, False),
+        (".github/scripts/run_integration_tests.py", True, False, False),
+        (".github/scripts/run_examples.sh", True, False, False),
+        (".github/scripts/update_released_api_contract.py", True, False, False),
+        (".github/scripts/run_repo_skill_tests.py", True, False, False),
+        (".github/workflows/tests.yml", True, False, False),
+        (".github/workflows/docs.yml", True, True, False),
+        (".github/workflows/publish.yml", True, False, False),
+        (".github/workflows/repo-skills.yml", True, False, False),
+        ("pyproject.toml", True, False, False),
+        ("uv.lock", True, True, False),
+        ("Makefile", True, False, False),
+        ("pyrightconfig.json", True, False, False),
+        (".agents/skills/code-change-verification/SKILL.md", True, False, False),
+        (".agents/skills/examples-run-analysis/SKILL.md", True, False, False),
+        ("docs/scripts/generate_ref_files.py", True, True, True),
+        ("docs/index.md", False, True, True),
+        ("docs/日本語 guide.md", False, True, True),
+        pytest.param(
+            "docs/line\nbreak.md",
+            False,
+            True,
+            True,
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows forbids newlines in paths."),
+        ),
+        ("mkdocs.yml", False, True, True),
+        ("mkdocs-yml", False, False, False),
+        ("README.md", False, False, False),
+        ("AGENTS.md", False, False, False),
+        (".github/RELEASING.md", False, False, False),
+    ],
+)
+def test_changed_paths_select_owning_checks(
+    change_repo: tuple[Path, str], path: str, code: bool, docs: bool, docs_only: bool
+) -> None:
+    repo, base = change_repo
+    head = _commit(repo, path)
+
+    for mode, expected in (
+        ("code", code),
+        ("docs", docs),
+        ("docs-only", docs_only),
+        ("docs-deploy", docs),
+    ):
+        assert _detect(repo, mode, base, head) is expected, mode
+
+
+def test_mixed_push_builds_docs_and_checks_code_without_deploying(
+    change_repo: tuple[Path, str],
+) -> None:
+    repo, base = change_repo
+    _commit(repo, "src/agents/run.py")
+    head = _commit(repo, "docs/index.md")
+
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+    assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
+
+
+@pytest.mark.parametrize(
+    ("missing", "docs_only"), [("base", False), ("base", True), ("head", True)]
+)
+def test_shallow_checkout_fetches_missing_event_commit(
+    change_repo: tuple[Path, str], tmp_path: Path, missing: str, docs_only: bool
+) -> None:
+    repo, base = change_repo
+    if not docs_only:
+        _commit(repo, "src/agents/run.py")
+    head = _commit(repo, "docs/index.md")
+    clone = tmp_path / "checkout"
+    _git(tmp_path, "clone", "--depth=1", repo.as_uri(), str(clone))
+    if missing == "head":
+        # A detached event commit can be fetched even when absent from the local checkout.
+        head = _commit(repo, "docs/next.md")
+        base = _git(clone, "rev-parse", "HEAD")
+    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
+
+    assert _detect(clone, "docs-only", base, head) is docs_only
+    assert _detect(clone, "docs-deploy", base, head) is docs_only
+    _git(clone, "cat-file", "-e", f"{base}^{{commit}}")
+    _git(clone, "cat-file", "-e", f"{head}^{{commit}}")
+
+
+def test_force_push_fetches_before_commit_outside_current_history(
+    change_repo: tuple[Path, str], tmp_path: Path
+) -> None:
+    repo, initial = change_repo
+    base = _commit(repo, "docs/old.md")
+    _git(repo, "reset", "--hard", initial)
+    head = _commit(repo, "docs/new.md")
+    clone = tmp_path / "checkout"
+    _git(tmp_path, "clone", "--depth=1", repo.as_uri(), str(clone))
+
+    assert _detect(clone, "docs-only", base, head)
+    _git(clone, "cat-file", "-e", f"{base}^{{commit}}")
+
+
+@pytest.mark.parametrize("base_kind", ["unavailable", "new-branch", "missing-input"])
+def test_unknown_base_requires_checks_and_denies_deployment(
+    change_repo: tuple[Path, str], base_kind: str
+) -> None:
+    repo, _ = change_repo
+    head = _commit(repo, "docs/index.md")
+    base = {"unavailable": MISSING_SHA, "new-branch": ZERO_SHA, "missing-input": ""}[base_kind]
+
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+    assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
+
+
+def test_unknown_head_requires_checks_and_denies_deployment(
+    change_repo: tuple[Path, str],
+) -> None:
+    repo, base = change_repo
+
+    assert _detect(repo, "code", base, MISSING_SHA)
+    assert _detect(repo, "docs", base, MISSING_SHA)
+    assert not _detect(repo, "docs-only", base, MISSING_SHA)
+    assert not _detect(repo, "docs-only", base, "")
+    assert not _detect(repo, "docs-deploy", base, MISSING_SHA)
+    assert not _detect(repo, "docs-deploy", base, "")
+
+
+def test_failed_diff_cannot_skip_checks_or_authorize_deployment(
+    change_repo: tuple[Path, str], tmp_path: Path
+) -> None:
+    repo, base = change_repo
+    head = _commit(repo, "docs/index.md")
+    git = shutil.which("git")
+    assert git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "git"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = diff ]; then\n'
+        "  printf 'docs/index.md\\0'\n"
+        "  exit 128\n"
+        "fi\n"
+        f'exec {shlex.quote(Path(git).as_posix())} "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    shim.chmod(0o755)
+    # Set the shim's precedence after Git Bash's wrapper initializes PATH.
+    bash_args = [
+        "-c",
+        'export PATH="$(cd "$1" && pwd):$PATH"; shift; exec "$@"',
+        "bash",
+        bin_dir.as_posix(),
+        DETECTOR.as_posix(),
+    ]
+    for mode, expected in (
+        ("code", True),
+        ("docs", True),
+        ("docs-only", False),
+        ("docs-deploy", False),
+    ):
+        assert _detect(repo, mode, base, head, bash_args=[*bash_args, mode, base, head]) is expected
+
+
+def test_empty_diff_does_not_run_checks_or_deploy(change_repo: tuple[Path, str]) -> None:
+    repo, base = change_repo
+
+    for mode in ("code", "docs", "docs-only", "docs-deploy"):
+        assert not _detect(repo, mode, base, base)
+
+
+def test_rename_into_docs_still_counts_removed_code(change_repo: tuple[Path, str]) -> None:
+    repo, _ = change_repo
+    base = _commit(repo, "src/old.py")
+    (repo / "docs").mkdir()
+    _git(repo, "mv", "src/old.py", "docs/new.md")
+    head = _commit(repo)
+
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+    assert not _detect(repo, "docs-only", base, head)
+    assert not _detect(repo, "docs-deploy", base, head)
+
+
+def test_code_mode_retains_merge_base_and_head_fallback(change_repo: tuple[Path, str]) -> None:
+    repo, base = change_repo
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    _commit(repo, "src/agents/run.py")
+
+    assert _detect(repo, "code", "", "")
+
+
+def test_custom_pattern_mode_is_preserved(change_repo: tuple[Path, str]) -> None:
+    repo, base = change_repo
+    head = _commit(repo, "README.md")
+
+    assert _detect(repo, r"^README\.md$", base, head)
+    assert not _detect(repo, r"^other/", base, head)
+
+
+def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Path, str]) -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert workflow["on"] == {
+        "push": {
+            "branches": ["main"],
+            "paths": ["docs/**", "mkdocs.yml", "uv.lock", ".github/workflows/docs.yml"],
+        }
+    }
+    steps = workflow["jobs"]["build_docs"]["steps"]
+    detection = next(step for step in steps if step.get("id") == "docs-deploy")
+    assert detection["env"] == {
+        "BASE_SHA": "${{ github.event.before }}",
+        "HEAD_SHA": "${{ github.sha }}",
+    }
+    for step in steps[steps.index(detection) + 1 :]:
+        assert step["if"] == "steps.docs-deploy.outputs.run == 'true'"
+
+    repo, base = change_repo
+    script = repo / DETECTOR.relative_to(ROOT)
+    script.parent.mkdir(parents=True)
+    shutil.copy2(DETECTOR, script)
+    base = _commit(repo)
+    head = _commit(repo, "docs/index.md")
+    bash_args = ["-euo", "pipefail", "-c", detection["run"]]
+    assert _detect(
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+    )
+    head = _commit(repo, "src/agents/run.py")
+    assert not _detect(
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+    )
+    head = _commit(repo, "uv.lock")
+    assert _detect(
+        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+    )
+
+
+@pytest.mark.parametrize("deployment_input", ["uv.lock", ".github/workflows/docs.yml"])
+@pytest.mark.parametrize(
+    "mixed_paths",
+    [
+        (),
+        (".github/workflows/docs.yml", "tests/test_change_detection.py"),
+        ("docs/index.md", "src/agents/run.py"),
+    ],
+)
+def test_deployment_input_changes_build_and_deploy_docs(
+    change_repo: tuple[Path, str], deployment_input: str, mixed_paths: tuple[str, ...]
+) -> None:
+    repo, base = change_repo
+    head = _commit(repo, deployment_input, *mixed_paths)
+
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+    assert _detect(repo, "docs-deploy", base, head)
+    assert not _detect(repo, "docs-only", base, head)
+
+
+def test_docs_build_and_publish_have_separate_permissions() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert workflow["permissions"] == {}
+    assert workflow["concurrency"] == {
+        "group": "docs-deploy",
+        "cancel-in-progress": "false",
+        "queue": "max",
+    }
+    build = workflow["jobs"]["build_docs"]
+    deploy = workflow["jobs"]["deploy_docs"]
+    assert build["permissions"] == {"contents": "read"}
+    checkout = build["steps"][0]
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert deploy["permissions"] == {"contents": "write"}
+    assert deploy["needs"] == "build_docs"
+    assert deploy["if"] == "needs.build_docs.outputs.deploy == 'true'"
+    assert build["outputs"]["deploy"] == "${{ steps.docs-deploy.outputs.run }}"
+    upload = next(step for step in build["steps"] if step["name"] == "Upload site")
+    download = next(step for step in deploy["steps"] if step["name"] == "Download site")
+    assert upload["with"]["name"] == download["with"]["name"]
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert "run-id" not in download["with"]
+    assert "github-token" not in download["with"]
+    assert [step["name"] for step in deploy["steps"]] == [
+        "Checkout published branch",
+        "Download site",
+        "Publish static files",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="Publishing uses rsync on Ubuntu")
+def test_docs_publish_static_artifact_to_existing_branch(tmp_path: Path) -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    publish = next(
+        step
+        for step in workflow["jobs"]["deploy_docs"]["steps"]
+        if step["name"] == "Publish static files"
+    )
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(remote, "init", "--bare", "--initial-branch=gh-pages")
+    published = tmp_path / "published"
+    _git(tmp_path, "clone", remote.as_posix(), published.as_posix())
+    _git(published, "config", "user.name", "Docs test")
+    _git(published, "config", "user.email", "docs@example.invalid")
+    initial = _commit(published, "old.html")
+    _git(published, "push", "origin", "HEAD:gh-pages")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<h1>Updated documentation</h1>", encoding="utf-8")
+    (site / ".well-known").mkdir()
+    (site / ".well-known" / "example.txt").write_text("static metadata", encoding="utf-8")
+    # Build output is data and must never replace the publisher's Git configuration.
+    (site / ".git").mkdir()
+    (site / ".git" / "config").write_text("artifact metadata", encoding="utf-8")
+    config = (published / ".git" / "config").read_bytes()
+    env = _environment()
+    env["GITHUB_SHA"] = "2" * 40
+    for _ in range(2):
+        subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", publish["run"]],
+            cwd=tmp_path,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    assert _git(remote, "rev-list", "--count", f"{initial}..gh-pages") == "1"
+    assert _git(remote, "show", "gh-pages:index.html") == "<h1>Updated documentation</h1>"
+    assert _git(remote, "show", "gh-pages:.well-known/example.txt") == "static metadata"
+    assert (
+        _git(remote, "ls-tree", "--name-only", "gh-pages") == ".nojekyll\n.well-known\nindex.html"
+    )
+    # The publisher updates only its author fields; the remote remains the local fixture.
+    assert b"artifact metadata" not in (published / ".git" / "config").read_bytes()
+    assert remote.as_posix().encode() in config
+    assert _git(published, "remote", "get-url", "origin") == remote.as_posix()

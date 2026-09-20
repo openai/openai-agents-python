@@ -6,7 +6,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
 # griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
@@ -433,6 +433,13 @@ def function_schema(
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
 
+        value_ann = ann
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            field_info = _extract_field_info_from_metadata(param_metadata.get(name, ()))
+            if field_info is not None and field_info.metadata:
+                # Constraints apply to each value, not the collected container or its defaults.
+                value_ann = Annotated[(ann, *cast(Any, field_info).metadata)]
+
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
@@ -440,7 +447,7 @@ def function_schema(
                 # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[ann]  # type: ignore
+                    ann = list[value_ann]  # type: ignore
                 # tuple[()] parameterizes an empty tuple and reports no args, while a bare
                 # typing.Tuple is unparameterized and carries no element type to reject.
                 elif hasattr(ann, "__args__"):
@@ -453,7 +460,7 @@ def function_schema(
                     ann = list[Any]
             else:
                 # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                ann = list[value_ann]  # type: ignore
 
             # Default factory to empty list
             fields[name] = (
@@ -467,7 +474,7 @@ def function_schema(
             # annotation as the value type -- mirroring the variadic-positional handling above,
             # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
             # set to ``Any`` above, yielding ``dict[str, Any]``.
-            ann = dict[str, ann]  # type: ignore
+            ann = dict[str, value_ann]  # type: ignore
 
             fields[name] = (
                 ann,

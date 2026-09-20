@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -288,7 +291,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd").model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a || exit\npwd",)
         assert session.calls[0].kwargs["user"] == User(name="sandbox-user")
         session.assert_complete()
 
@@ -353,7 +356,7 @@ class TestShellCapability:
             ).model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/src/project && pwd",)
+        assert session.calls[0].args == ("cd /workspace/src/project || exit\npwd",)
         assert session.calls[0].kwargs["timeout"] == 10.0
         assert session.calls[0].kwargs["shell"] == ["/bin/bash", "-c"]
         assert (
@@ -361,8 +364,8 @@ class TestShellCapability:
             "Wall time: 0.1250 seconds\n"
             "Process exited with code 7\n"
             "Output:\n"
-            "stdout: cd /workspace/src/project && pwd\n"
-            "stderr: cd /workspace/src/project && pwd"
+            "stdout: cd /workspace/src/project || exit\npwd\n"
+            "stderr: cd /workspace/src/project || exit\npwd"
         )
 
     @pytest.mark.asyncio
@@ -382,7 +385,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", workdir=workdir).model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a || exit\npwd",)
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_resolves_relative_workdir_from_workspace_scope(self) -> None:
@@ -397,7 +400,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", workdir="src/project").model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project || exit\npwd",)
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_normalizes_raw_backslashes_before_workspace_scope(
@@ -414,7 +417,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", workdir=r"src\project").model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a/src/project || exit\npwd",)
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_allows_split_path_grant_workdir(
@@ -454,7 +457,7 @@ class TestShellCapability:
             ).model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /mnt/shared-data && pwd",)
+        assert session.calls[0].args == ("cd /mnt/shared-data || exit\npwd",)
         assert session.calls[0].kwargs["timeout"] == 10.0
         assert session.calls[0].kwargs["shell"] == ["/bin/bash", "-c"]
         assert (
@@ -462,8 +465,8 @@ class TestShellCapability:
             "Wall time: 0.2500 seconds\n"
             "Process exited with code 7\n"
             "Output:\n"
-            "stdout: cd /mnt/shared-data && pwd\n"
-            "stderr: cd /mnt/shared-data && pwd"
+            "stdout: cd /mnt/shared-data || exit\npwd\n"
+            "stderr: cd /mnt/shared-data || exit\npwd"
         )
 
     @pytest.mark.asyncio
@@ -500,7 +503,7 @@ class TestShellCapability:
             ExecCommandArgs(cmd="pwd", yield_time_ms=0, tty=True).model_dump_json(),
         )
 
-        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a || exit\npwd",)
         assert session.calls[0].kwargs["yield_time_s"] == 0.0
         assert (
             output == "Chunk ID: abcdef\n"
@@ -602,8 +605,8 @@ class TestShellCapability:
         assert "Process exited with code 0" in output
         assert "Process running with session ID" not in output
         assert "fallback ok" in output
-        assert session.calls[0].args == ("cd /workspace/tasks/a && pwd",)
-        assert session.calls[1].args == ("cd /workspace/tasks/a && pwd",)
+        assert session.calls[0].args == ("cd /workspace/tasks/a || exit\npwd",)
+        assert session.calls[1].args == ("cd /workspace/tasks/a || exit\npwd",)
 
     @pytest.mark.asyncio
     async def test_exec_command_tool_does_not_fall_back_for_tty_sessions(self) -> None:
@@ -877,3 +880,52 @@ class TestShellCapability:
                 cast(ToolContext[object], None),
                 WriteStdinArgs(session_id=1337).model_dump_json(),
             )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires a POSIX shell")
+@pytest.mark.parametrize("directory_exists", [False, True], ids=["missing", "existing"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true; printf expected > marker",
+        "true\nprintf expected > marker",
+        "true & wait; printf expected > marker",
+    ],
+    ids=["semicolon", "newline", "background"],
+)
+@pytest.mark.asyncio
+async def test_exec_command_workdir_applies_to_entire_command_list(
+    tmp_path: Path, directory_exists: bool, command: str
+) -> None:
+    workdir = tmp_path / "project with spaces"
+    if directory_exists:
+        workdir.mkdir()
+
+    def execute(call: Any) -> ExecResult:
+        # Use a real shell to exercise command precedence without a live sandbox provider.
+        result = subprocess.run(
+            [*call.kwargs["shell"], call.args[0]],
+            cwd=tmp_path,
+            capture_output=True,
+            timeout=5,
+        )
+        return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode)
+
+    session = scripted_sandbox_session(
+        [{"method": "exec", "responder": execute}],
+        manifest=Manifest(root=str(tmp_path)),
+    )
+    tool = ExecCommandTool(session=session)
+    output = await tool.on_invoke_tool(
+        cast(ToolContext[object], None),
+        ExecCommandArgs(cmd=command, workdir=workdir.name, login=False).model_dump_json(),
+    )
+
+    assert not (tmp_path / "marker").exists()
+    if directory_exists:
+        assert (workdir / "marker").read_text() == "expected"
+        assert "Process exited with code 0" in output
+    else:
+        assert "Process exited with code 0" not in output
+        assert not (workdir / "marker").exists()
+    session.assert_complete()

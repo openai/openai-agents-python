@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -134,7 +135,7 @@ class AsyncSQLiteSession(SessionABC):
                     raise
                 assert connection is not None
                 try:
-                    await connection.execute("PRAGMA journal_mode=WAL")
+                    await self._configure_connection(connection)
                     await self._init_db_for_connection(connection)
                 except BaseException as initialization_error:
                     close_error = await self._close_owned_connection(connection)
@@ -146,6 +147,24 @@ class AsyncSQLiteSession(SessionABC):
                 self._connection = connection
 
         return self._connection
+
+    @staticmethod
+    async def _configure_connection(conn: aiosqlite.Connection) -> None:
+        """Enable WAL, retrying its transient initialization lock."""
+        async with conn.execute("PRAGMA busy_timeout") as cursor:
+            timeout_row = await cursor.fetchone()
+        timeout_seconds = (timeout_row[0] if timeout_row is not None else 0) / 1000
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            try:
+                async with conn.execute("PRAGMA journal_mode=WAL") as cursor:
+                    await cursor.fetchone()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(min(0.01, max(0, deadline - loop.time())))
 
     def _check_not_closed(self) -> None:
         """Raise if the session has already been closed."""

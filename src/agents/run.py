@@ -55,7 +55,6 @@ from .run_config import (
     ToolExecutionConfig,
     ToolNameCollisionPolicy as ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
-    _coerce_run_config,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -70,6 +69,7 @@ from .run_internal.agent_runner_helpers import (
     finalize_conversation_tracking,
     get_unsent_tool_call_ids_for_interrupted_state,
     input_guardrails_triggered,
+    reject_unrecoverable_terminal_state,
     resolve_processed_response,
     resolve_resumed_context,
     resolve_trace_settings,
@@ -107,6 +107,10 @@ from .run_internal.items import (
     copy_input_items,
     normalize_resumed_input,
     reconcile_nested_history_owned_input_after_rewrite,
+)
+from .run_internal.model_provider_lifecycle import (
+    _close_runner_owned_model_provider,
+    _normalize_run_config_for_runner,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
@@ -553,18 +557,25 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
+        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         try:
-            return await self._run_impl(starting_agent, input, **kwargs)
-        except BaseException as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _detach_data_redacted_error_traceback(error)
-            redacted_error = error
+            try:
+                return await self._run_impl(starting_agent, input, **kwargs)
+            except BaseException as error:
+                if not _is_error_data_redacted(error):
+                    raise
+                _detach_data_redacted_error_traceback(error)
+                redacted_error = error
+        finally:
+            if owns_model_provider:
+                await _close_runner_owned_model_provider(run_config.model_provider)
 
         self = cast(Any, None)
         starting_agent = cast(Any, None)
         input = cast(Any, None)
+        run_config = cast(Any, None)
         cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
         _detach_data_redacted_error_traceback(redacted_error)
@@ -586,7 +597,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config = cast(RunConfig, run_config)
 
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = (
@@ -635,6 +646,7 @@ class AgentRunner:
             )
             context = context_wrapper.context
 
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -1367,6 +1379,11 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                # The output, its guardrails, and its terminal hooks are all
+                                # complete, so from here until the turn is persisted this run owns
+                                # a result no resume can reproduce.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = True
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,
@@ -1377,6 +1394,10 @@ class AgentRunner:
                                     store=store_setting,
                                     wrapper=context_wrapper,
                                 )
+                                # The append and any post-append maintenance both succeeded,
+                                # so the turn is durable and the state is open again.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = False
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
@@ -1550,7 +1571,16 @@ class AgentRunner:
                             include_in_history=include_in_history,
                         )
                         if include_in_history and not handler_output_recorded:
+                            # Only reachable once the handler output cleared its guardrails and
+                            # ran its end hooks, so this append carries an accepted result like
+                            # any other terminal one. The callback itself stays unmarked because
+                            # finalize_max_turns_handler_output() also drives it from its
+                            # guardrail-error path, where no output was ever accepted.
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await _save_max_turns_handler_output([synthesized_item])
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
@@ -1994,6 +2024,8 @@ class AgentRunner:
                                 current_agent,
                                 run_config,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await save_final_turn_items_after_guardrails(
                                 session=session,
                                 run_state=run_state,
@@ -2004,6 +2036,8 @@ class AgentRunner:
                                 store=store_setting,
                                 wrapper=context_wrapper,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (
@@ -2347,7 +2381,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)
@@ -2565,8 +2599,8 @@ class AgentRunner:
             sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
-        streamed_result.run_loop_task = asyncio.create_task(
-            _await_data_redacted_error_boundary(
+        async def run_loop() -> None:
+            await _await_data_redacted_error_boundary(
                 lambda: start_streaming(
                     starting_input=input_for_result,
                     streamed_result=streamed_result,
@@ -2586,7 +2620,13 @@ class AgentRunner:
                     sandbox_runtime=sandbox_runtime,
                 )
             )
-        )
+
+        streamed_result.run_loop_task = asyncio.create_task(run_loop())
+        if owns_model_provider:
+            model_provider = run_config.model_provider
+            streamed_result._ensure_model_provider_cleanup_on_completion(
+                lambda: _close_runner_owned_model_provider(model_provider)
+            )
         if sandbox_runtime.enabled:
             streamed_result.ensure_sandbox_cleanup_on_completion()
         return streamed_result

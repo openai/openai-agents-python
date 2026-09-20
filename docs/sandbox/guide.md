@@ -18,7 +18,7 @@ You define the workspace around the data the agent needs. It can start from GitH
 
 - `SandboxAgent` defines the agent itself: the usual agent configuration plus sandbox-specific defaults like `default_manifest`, `base_instructions`, `run_as`, and capabilities such as filesystem tools, shell access, skills, memory, or compaction.
 - `Manifest` declares the desired starting contents and layout for a fresh sandbox workspace, including files, repos, mounts, and environment.
-- A sandbox session is the live isolated environment where commands run and files change.
+- A sandbox session is the live execution environment where commands run and files change. The isolation provided by a session depends on its backend and configuration.
 - [`SandboxRunConfig`][agents.run_config.SandboxRunConfig] decides how the run gets that sandbox session, for example by injecting one directly, reconnecting from serialized sandbox session state, or creating a fresh sandbox session through a sandbox client.
 - Saved sandbox state and snapshots let later runs reconnect to prior work or seed a fresh sandbox session from saved contents.
 
@@ -26,7 +26,7 @@ You define the workspace around the data the agent needs. It can start from GitH
 
 Throughout this page, "sandbox session" means the live execution environment managed by a sandbox client. It is different from the SDK's conversational [`Session`][agents.memory.session.Session] interfaces described in [Sessions](../sessions/index.md).
 
-The outer runtime still owns approvals, tracing, handoffs, and tracking the state needed to resume runs. The sandbox session owns commands, file changes, and environment isolation. That split is a core part of the model.
+The outer runtime still owns approvals, tracing, handoffs, and tracking the state needed to resume runs. The sandbox session manages commands and file changes through its backend. The backend determines which isolation controls apply; a session does not itself guarantee OS-level confinement.
 
 ### How the pieces fit together
 
@@ -63,14 +63,18 @@ Sandbox agents are a good fit for workspace-centric workflows, for example:
 - coding and debugging, for example orchestrating automated fixes for issue reports in a GitHub repo and running targeted tests
 - document processing and editing, for example extracting information from a user's financial documents and creating a completed tax-form draft
 - file-grounded review or analysis, for example checking onboarding packets, generated reports, or artifact bundles before answering
-- isolated multi-agent patterns, for example giving each reviewer or coding sub-agent its own workspace
+- multi-agent patterns with separate workspaces, for example giving each reviewer or coding sub-agent its own workspace
 - multi-step workspace tasks, for example fixing a bug in one run and adding a regression test later, or resuming from snapshot or sandbox session state
 
 If you do not need access to files or a stateful, mutable filesystem, keep using `Agent`. If shell access is just one occasional capability, add hosted shell; if the workspace boundary itself is part of the feature, use sandbox agents.
 
 ## Choose a sandbox client
 
-Start with `UnixLocalSandboxClient` for local development on macOS or Linux. On Windows, use `DockerSandboxClient` or a hosted provider instead. On any supported platform, move to `DockerSandboxClient` when you need container isolation or image parity, or to a hosted provider when you need provider-managed execution.
+Use `UnixLocalSandboxClient` for trusted local development on macOS or Linux, or within an externally isolated environment. On Linux, this backend runs commands as host processes without adding OS-level confinement. On macOS, it applies filesystem restrictions through `sandbox-exec`, but does not provide network isolation.
+
+By default, new Unix-local sessions receive separate temporary workspaces. If you configure sessions with the same custom `Manifest.root`, those sessions share the workspace. Separate sessions do not guarantee OS-level isolation.
+
+For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured `DockerSandboxClient` or hosted provider, or supply external isolation. On Windows, use Docker or a hosted provider. See [Unix-local execution limits](clients.md#decision-guide) before choosing a local backend.
 
 In most cases, the `SandboxAgent` definition stays the same while the sandbox client and its options change in [`SandboxRunConfig`][agents.run_config.SandboxRunConfig]. See [Sandbox clients](clients.md) for local, Docker, hosted, and remote-mount options.
 
@@ -253,6 +257,8 @@ manifest = Manifest(
 ```
 
 Set `host_path` when Docker should bind-mount a different absolute host path at the absolute POSIX `path` inside the container. `UnixLocalSandboxClient` supports only path-only grants, where both paths are the same, and rejects `host_path`. Use `read_only=True` for host data the sandbox should not modify, or use `LocalFile` or `LocalDir` when a copy is sufficient.
+
+Unix-local path grants govern which host sources may be copied into the workspace and which paths SDK file APIs may access. `read_only=True` prevents SDK file API writes to a granted path. On Linux, these settings do not constrain arbitrary shell commands: a command can access host paths allowed by the process's permissions and any external isolation, even when those paths have no grant. The macOS filesystem profile and Docker bind mounts apply their respective grant restrictions to commands.
 
 Treat manifests that contain `extra_path_grants` as trusted configuration. Do not load grants from model output or other untrusted payloads unless your application has already approved those host paths.
 
@@ -800,7 +806,7 @@ async with sandbox:
 
 Here the parent agent runs as `coordinator`, and the explorer tool-agent runs as `explorer` inside the same live sandbox session. The `pricing_packet/` entries are readable by `other` users, so the explorer can inspect them quickly, but it does not have write bits. The `work/` directory is only available to the coordinator's user/group, so the parent can write the final artifact while the explorer stays read-only.
 
-When a tool-agent needs real isolation instead, give it its own sandbox `RunConfig`:
+When a tool-agent needs its own container, give it a sandbox `RunConfig` that creates a Docker session:
 
 ```python
 from docker import from_env as docker_from_env
@@ -826,7 +832,7 @@ rollout_agent.as_tool(
 )
 ```
 
-Use a separate sandbox when the tool-agent should mutate freely, run untrusted commands, or use a different backend/image. See [examples/sandbox/sandbox_agents_as_tools.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py).
+Use a separate workspace when the tool-agent should edit files independently, or a separate session when it needs a different backend or image. For untrusted commands, choose a backend and configuration that provide the required isolation; a separate Unix-local session alone does not provide Linux OS confinement. See [examples/sandbox/sandbox_agents_as_tools.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/sandbox_agents_as_tools.py) for separate local workspaces.
 
 ### Combine with local tools and MCP
 
@@ -860,14 +866,14 @@ Once the single-agent pattern is clear, the next design question is where the sa
 Sandbox agents still compose with the rest of the SDK:
 
 - [Handoffs](../handoffs.md): hand document-heavy work from a non-sandbox intake agent into a sandbox reviewer.
-- [Agents as tools](../tools.md#agents-as-tools): expose multiple sandbox agents as tools, usually by passing `run_config=RunConfig(sandbox=SandboxRunConfig(...))` on each `Agent.as_tool(...)` call so each tool gets its own sandbox boundary.
+- [Agents as tools](../tools.md#agents-as-tools): expose multiple sandbox agents as tools, usually by passing `run_config=RunConfig(sandbox=SandboxRunConfig(...))` on each `Agent.as_tool(...)` call so each tool gets its own session. The backend and configuration determine the isolation provided by each session.
 - [MCP](../mcp.md) and normal function tools: sandbox capabilities can coexist with `mcp_servers` and ordinary Python tools.
 - [Running agents](../running_agents.md): sandbox runs still use the normal `Runner` APIs.
 
 Two patterns are especially common:
 
 - a non-sandbox agent hands off into a sandbox agent only for the part of the workflow that needs workspace isolation
-- an orchestrator exposes multiple sandbox agents as tools, usually with a separate sandbox `RunConfig` per `Agent.as_tool(...)` call so each tool gets its own isolated workspace
+- an orchestrator exposes multiple sandbox agents as tools, usually with a separate sandbox `RunConfig` per `Agent.as_tool(...)` call so each tool gets its own workspace
 
 ### Turns and sandbox runs
 

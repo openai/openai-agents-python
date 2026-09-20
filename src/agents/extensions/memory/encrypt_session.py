@@ -37,7 +37,13 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from typing_extensions import TypedDict
 
 from ...items import TResponseInputItem
-from ...memory.session import SessionABC, _call_session_method, _get_session_wrapper
+from ...memory.openai_responses_compaction_session import OpenAIResponsesCompactionSession
+from ...memory.session import (
+    OpenAIResponsesCompactionArgs,
+    SessionABC,
+    _call_session_method,
+    _get_session_wrapper,
+)
 from ...memory.session_settings import SessionSettings, resolve_session_limit
 from ...run_context import RunContextWrapper
 
@@ -134,8 +140,46 @@ class EncryptedSession(SessionABC):
         self._kid = "hkdf-v1"
         self._ver = 1
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
+        # Expose compaction only when the underlying session actually supports it.
+        if isinstance(self.underlying_session, OpenAIResponsesCompactionSession):
+            if name == "run_compaction":
+                return self._run_compaction
+            if name == "_defer_compaction":
+                return self._defer_encrypted_compaction
         return getattr(self.underlying_session, name)
+
+    async def _run_compaction(
+        self,
+        args: OpenAIResponsesCompactionArgs | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        session = cast(OpenAIResponsesCompactionSession, self.underlying_session)
+        await session._run_compaction(
+            args,
+            wrapper=wrapper,
+            read_items=lambda: _call_session_method(
+                self.get_items, wrapper=_get_session_wrapper(self, wrapper)
+            ),
+            prepare_items=self._encrypt_items,
+        )
+
+    async def _defer_encrypted_compaction(
+        self,
+        response_id: str,
+        store: bool | None = None,
+        *,
+        wrapper: RunContextWrapper[Any] | None = None,
+    ) -> None:
+        session = cast(OpenAIResponsesCompactionSession, self.underlying_session)
+        await session._defer_compaction(
+            response_id,
+            store,
+            read_items=lambda: _call_session_method(
+                self.get_items, wrapper=_get_session_wrapper(self, wrapper)
+            ),
+        )
 
     @property
     def session_settings(self) -> SessionSettings | None:
@@ -217,6 +261,9 @@ class EncryptedSession(SessionABC):
         )
         return self._unwrap_valid_items(encrypted_items)
 
+    def _encrypt_items(self, items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        return cast(list[TResponseInputItem], [self._wrap(item) for item in items])
+
     async def add_items(
         self,
         items: list[TResponseInputItem],
@@ -224,10 +271,9 @@ class EncryptedSession(SessionABC):
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
-        wrapped: list[EncryptedEnvelope] = [self._wrap(it) for it in items]
         await _call_session_method(
             self.underlying_session.add_items,
-            cast(list[TResponseInputItem], wrapped),
+            self._encrypt_items(items),
             wrapper=wrapper,
         )
 

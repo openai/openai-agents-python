@@ -39,13 +39,19 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
-from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
+from openai.types.responses.tool_param import (
+    CodeInterpreter,
+    ImageGeneration,
+    ImageGenerationInputImageMask as _ImageGenerationInputImageMask,
+    Mcp,
+)
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import (
     NotRequired,
     ParamSpec,
+    Required,
     Self,
     TypeAliasType,
     TypedDict,
@@ -53,6 +59,11 @@ from typing_extensions import (
 
 from . import _debug
 from ._config_coercion import coerce_pydantic_config
+from ._function_tool_arguments import (
+    PreparedFunctionArguments,
+    arguments_unchanged,
+    can_prepare_without_user_code,
+)
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -75,6 +86,8 @@ from .util._tool_errors import get_trace_tool_error
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from typing_extensions import dataclass_transform
+
     from .agent import Agent, AgentBase
     from .items import RunItem, ToolApprovalItem
 
@@ -490,7 +503,12 @@ class FunctionTool:
     and the tool call will need to be approved using RunState.approve() or rejected using
     RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
     function that takes (run_context, tool_parameters, call_id) and returns whether this
-    specific call needs approval."""
+    specific call needs approval. For decorated Python tools, callable policies receive raw
+    parsed arguments only when validation preserves their values, types, and dictionary order.
+    Defaults, transformations, or arguments that cannot be inspected require manual approval.
+    Application models, custom validators, and custom default factories require manual approval
+    before validation runs. Invalid arguments also require manual approval; validation errors
+    follow the tool's failure policy only after approval, without invoking its body."""
 
     # Keep timeout fields after needs_approval to preserve positional constructor compatibility.
     timeout_seconds: float | None = None
@@ -650,6 +668,10 @@ class _FailureHandlingFunctionToolInvoker:
             setattr(bound_invoker, _SYNC_FUNCTION_TOOL_MARKER, True)
         return bound_invoker
 
+    def prepare_arguments(self, input: str, tool_name: str) -> PreparedFunctionArguments | None:
+        prepare = getattr(self._invoke_tool_impl, "__agents_prepare_arguments__", None)
+        return prepare(input, tool_name) if prepare is not None else None
+
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
         try:
             return await self._invoke_tool_impl(ctx, input)
@@ -795,6 +817,16 @@ class FileSearchTool:
         return "file_search"
 
 
+class WebSearchToolImageSettings(TypedDict, total=False):
+    """Image result settings for `WebSearchTool` when `search_content_types` includes `"image"`."""
+
+    max_results: int
+    """The number of image results to return."""
+
+    caption: bool
+    """Whether to include a short caption with each image when one is available."""
+
+
 @dataclass
 class WebSearchTool:
     """A hosted tool that lets the LLM search the web. Currently only supported with OpenAI models,
@@ -817,6 +849,16 @@ class WebSearchTool:
     indexed-only behavior where supported.
     """
 
+    search_content_types: list[Literal["text", "image"]] | None = None
+    """The kinds of results the search may return.
+
+    When omitted, the API default (text only) is used. Include `"image"` to
+    receive image results. Use `image_settings` to customize those results.
+    """
+
+    image_settings: WebSearchToolImageSettings | None = None
+    """Settings for image results when `search_content_types` includes `"image"`."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -825,6 +867,8 @@ class WebSearchTool:
             filters: WebSearchToolFilters | dict[str, Any] | None = None,
             search_context_size: Literal["low", "medium", "high"] = "medium",
             external_web_access: bool | None = None,
+            search_content_types: list[Literal["text", "image"]] | None = None,
+            image_settings: WebSearchToolImageSettings | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
@@ -1136,12 +1180,71 @@ class CodeInterpreterTool:
         return "code_interpreter"
 
 
-@dataclass
+class ImageGenerationToolConfig(TypedDict, total=False):
+    """Responses image generation settings, including current model and quality options."""
+
+    type: Required[Literal["image_generation"]]
+    action: Literal["generate", "edit", "auto"]
+    background: Literal["transparent", "opaque", "auto"]
+    input_fidelity: Literal["high", "low"] | None
+    input_image_mask: _ImageGenerationInputImageMask
+    model: str
+    moderation: Literal["auto", "low"]
+    output_compression: int
+    output_format: Literal["png", "webp", "jpeg"]
+    partial_images: int
+    quality: Literal["low", "medium", "high", "xhigh", "max", "auto"]
+    size: str
+
+
+if not TYPE_CHECKING:
+    _image_generation_dataclass = dataclass
+else:
+    _ImageGenerationToolT = TypeVar("_ImageGenerationToolT")
+
+    @dataclass_transform()
+    def _image_generation_dataclass(
+        cls: type[_ImageGenerationToolT],
+    ) -> type[_ImageGenerationToolT]:
+        # Keep required fields from losing descriptor access typing in mypy.
+        return cls
+
+    class _ImageGenerationToolConfigField(Protocol):
+        """Describe widened reads and upstream-compatible assignments for type checkers."""
+
+        def __get__(
+            self,
+            instance: ImageGenerationTool | None,
+            owner: type[ImageGenerationTool] | None = None,
+        ) -> ImageGenerationToolConfig: ...
+
+        def __set__(
+            self, instance: ImageGenerationTool, value: ImageGenerationToolConfig | ImageGeneration
+        ) -> None: ...
+
+
+@_image_generation_dataclass
 class ImageGenerationTool:
     """A tool that allows the LLM to generate images."""
 
-    tool_config: ImageGeneration
-    """The tool config, which includes image generation settings."""
+    # Keep the public field first for static documentation and runtime schema generators.
+    if not TYPE_CHECKING:
+        tool_config: ImageGenerationToolConfig
+        """Responses API image generation settings, including `type="image_generation"`.
+
+        Accepts `ImageGenerationToolConfig`, the OpenAI SDK's typed config, or an inline
+        dictionary with known image options. Use `ImageGenerationToolConfig` to annotate
+        reusable configurations. Reads and indexed mutations use this widened type.
+        For example, set `model="gpt-image-2.5-sunburst"` or
+        `model="gpt-image-2.5-flare"` with `quality="xhigh"` or `quality="max"`.
+        Settings are forwarded unchanged; the API validates model-specific support.
+        """
+    else:
+        tool_config: _ImageGenerationToolConfigField
+
+    if TYPE_CHECKING:
+
+        def __init__(self, tool_config: ImageGenerationToolConfig | ImageGeneration) -> None: ...
 
     @property
     def name(self):
@@ -2612,17 +2715,18 @@ def function_tool(
             output_json_schema=output_json_schema,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
-            tool_name = ctx.tool_name
+        def _prepare_arguments(
+            input: str, tool_name: str, *, inspect_approval: bool = False
+        ) -> PreparedFunctionArguments:
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
-            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
-
+            # Keep mutable policy input separate from prepared execution values.
+            validation_input = copy.deepcopy(json_data) if inspect_approval else json_data
             base_message = f"Invalid JSON input for tool {tool_name}"
             validation_failed = False
             try:
                 parsed = (
-                    schema.params_pydantic_model(**json_data)
-                    if json_data
+                    schema.params_pydantic_model(**validation_input)
+                    if validation_input
                     else schema.params_pydantic_model()
                 )
             except ValidationError as e:
@@ -2634,6 +2738,24 @@ def function_tool(
                 raise ModelBehaviorError(base_message)
 
             args, kwargs_dict = schema.to_call_args(parsed)
+            return PreparedFunctionArguments(
+                owner=_prepare_arguments,
+                arguments=input,
+                args=args,
+                kwargs=kwargs_dict,
+                unchanged=inspect_approval and arguments_unchanged(parsed, json_data),
+            )
+
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+            tool_name = ctx.tool_name
+            prepared = ctx._function_tool_arguments
+            ctx._function_tool_arguments = None
+            if prepared is None:
+                prepared = _prepare_arguments(input, tool_name)
+            elif prepared.owner is not _prepare_arguments or prepared.arguments != input:
+                raise UserError("Prepared function arguments do not match this invocation.")
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
+            args, kwargs_dict = prepared.args, prepared.kwargs
 
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug("Tool call args: %s, kwargs: %s", args, kwargs_dict)
@@ -2668,6 +2790,21 @@ def function_tool(
 
             return result
 
+        def _prepare_for_approval(input: str, tool_name: str) -> PreparedFunctionArguments:
+            if not can_prepare_without_user_code(schema.params_pydantic_model):
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+            try:
+                return _prepare_arguments(input, tool_name, inspect_approval=True)
+            except Exception:
+                # Failed inspection cannot authorize the invocation's error handler.
+                # Revalidate through the ordinary invocation path after approval.
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+
+        cast(Any, _on_invoke_tool_impl).__agents_prepare_arguments__ = _prepare_for_approval
         setattr(
             _on_invoke_tool_impl,
             _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,

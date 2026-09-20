@@ -21,13 +21,14 @@ pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 import agents._debug as _debug
-from agents import Agent, Runner, TResponseInputItem, function_tool
+from agents import Agent, ApplyPatchTool, Runner, ShellTool, TResponseInputItem, function_tool
 from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.testing import ScriptedModel
 from agents.usage import Usage
 from tests.test_responses import get_text_message
+from tests.utils.hitl import RecordingEditor, make_apply_patch_dict, make_shell_call
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -131,7 +132,8 @@ def _create_owner_bearing_structure_tables(
 
 
 def _multiprocessing_context() -> Any:
-    method = "spawn" if sys.platform == "win32" else "forkserver"
+    # Spawn avoids the forkserver's Unix listener, which macOS sandboxes can deny.
+    method = "spawn" if sys.platform in {"win32", "darwin"} else "forkserver"
     return multiprocessing.get_context(method)
 
 
@@ -834,6 +836,148 @@ async def test_tool_usage_tracking(agent: Agent):
     assert "calculator" in tool_names
 
     session.close()
+
+
+@pytest.mark.parametrize(
+    "call,output,tool_name",
+    [
+        pytest.param(
+            make_shell_call("shell-1", status="completed"),
+            {
+                "type": "shell_call_output",
+                "call_id": "shell-1",
+                "output": [
+                    {"stdout": "test", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+                ],
+            },
+            "shell_call",
+            id="shell",
+        ),
+        pytest.param(
+            make_apply_patch_dict("patch-1"),
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "patch-1",
+                "status": "completed",
+                "output": "Updated test.md",
+            },
+            "apply_patch_call",
+            id="apply-patch",
+        ),
+    ],
+)
+async def test_tool_usage_tracks_shell_and_patch_calls(
+    call: TResponseInputItem, output: TResponseInputItem, tool_name: str
+) -> None:
+    """Store unnamed built-in calls with names and count calls, not their outputs."""
+    session = AdvancedSQLiteSession(session_id="builtin-tools", create_tables=True)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Update the file."},
+        call,
+        output,
+    ]
+    try:
+        await session.add_items(items)
+        assert await session.get_items() == items
+        assert await session.get_tool_usage() == [(tool_name, 1, 1)]
+        turns = await session.get_conversation_by_turns()
+        assert turns[1][1]["tool_name"] == tool_name
+    finally:
+        session.close()
+
+
+async def test_tool_usage_reads_legacy_shell_and_patch_names(tmp_path: Path) -> None:
+    """Read old NULL names without rewriting the stored metadata or mixing tools."""
+    db_path = tmp_path / "legacy-tools.db"
+    session = AdvancedSQLiteSession(session_id="legacy-tools", db_path=db_path, create_tables=True)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Update the file."},
+        cast(TResponseInputItem, make_shell_call("shell-1", status="completed")),
+        cast(TResponseInputItem, make_apply_patch_dict("patch-1")),
+    ]
+    try:
+        await session.add_items(items)
+    finally:
+        session.close()
+
+    # Earlier SDK versions stored these calls with NULL tool names.
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE message_structure SET tool_name = NULL "
+            "WHERE message_type IN ('shell_call', 'apply_patch_call')"
+        )
+        conn.commit()
+
+    reopened = AdvancedSQLiteSession(session_id="legacy-tools", db_path=db_path)
+    try:
+        assert sorted(await reopened.get_tool_usage()) == [
+            ("apply_patch_call", 1, 1),
+            ("shell_call", 1, 1),
+        ]
+        assert await reopened.get_items() == items
+        turns = await reopened.get_conversation_by_turns()
+        assert [item["tool_name"] for item in turns[1][1:]] == [None, None]
+        await reopened.add_items(
+            [
+                cast(TResponseInputItem, make_shell_call("shell-2", status="completed")),
+                cast(TResponseInputItem, make_apply_patch_dict("patch-2")),
+            ]
+        )
+        assert sorted(await reopened.get_tool_usage()) == [
+            ("apply_patch_call", 2, 1),
+            ("shell_call", 2, 1),
+        ]
+    finally:
+        reopened.close()
+
+
+async def test_tool_usage_tracks_runner_shell_and_patch_calls_by_branch() -> None:
+    """Count real Runner-persisted call/output pairs without crossing branches or turns."""
+    model = ScriptedModel(
+        steps=[
+            [make_shell_call("shell-1"), make_apply_patch_dict("patch-1")],
+            [get_text_message("Updated.")],
+            [make_shell_call("shell-2")],
+            [get_text_message("Checked.")],
+        ]
+    )
+    editor = RecordingEditor()
+    shell_executor = Mock(return_value="test")
+    agent = Agent(
+        name="coding",
+        model=model,
+        tools=[ShellTool(executor=shell_executor), ApplyPatchTool(editor=editor)],
+    )
+    session = AdvancedSQLiteSession(session_id="runner-tools", create_tables=True)
+    try:
+        result = await Runner.run(agent, "Update the file.", session=session)
+        assert result.final_output == "Updated."
+        assert shell_executor.call_count == 1
+        assert len(editor.operations) == 1
+        items = await session.get_items()
+        assert {item.get("type") for item in items} >= {
+            "shell_call",
+            "shell_call_output",
+            "apply_patch_call",
+            "apply_patch_call_output",
+        }
+        expected_main = [("apply_patch_call", 1, 1), ("shell_call", 1, 1)]
+        assert sorted(await session.get_tool_usage()) == expected_main
+
+        branch = await session.create_branch_from_turn(1, "alternative")
+        await Runner.run(agent, "Check the file.", session=session)
+        assert await session.get_tool_usage() == [("shell_call", 1, 1)]
+        assert await session.get_tool_usage(branch) == [("shell_call", 1, 1)]
+        await session.add_items(
+            [
+                {"role": "user", "content": "Check again."},
+                cast(TResponseInputItem, make_shell_call("shell-3", status="completed")),
+            ]
+        )
+        assert await session.get_tool_usage() == [("shell_call", 1, 1), ("shell_call", 1, 2)]
+        assert sorted(await session.get_tool_usage("main")) == expected_main
+    finally:
+        session.close()
 
 
 async def test_tool_usage_tracking_preserves_namespaces_and_tool_search(agent: Agent):
@@ -1954,6 +2098,45 @@ async def test_branch_error_handling():
     session.close()
 
 
+@pytest.mark.parametrize("force", [False, True])
+async def test_delete_branch_preserves_exact_branch_id(force: bool):
+    """Deleting a returned branch ID must leave a distinct whitespace-free ID intact."""
+    session = AdvancedSQLiteSession(session_id="exact_branch_deletion", create_tables=True)
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+    ]
+    survivor_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Keep this branch's history"},
+    ]
+    target_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Delete this branch's history"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+        await session.create_branch_from_turn(2, "draft")
+        await session.add_items(survivor_items)
+        await session.switch_to_branch("main")
+        target_id = await session.create_branch_from_turn(2, " draft ")
+        await session.add_items(target_items)
+        if not force:
+            await session.switch_to_branch("main")
+
+        await session.delete_branch(target_id, force=force)
+
+        assert await session.get_items(branch_id="draft") == main_items[:2] + survivor_items
+        assert await session.get_items(branch_id=target_id) == []
+        assert await session.get_items() == main_items
+        assert {branch["branch_id"] for branch in await session.list_branches()} == {
+            "main",
+            "draft",
+        }
+    finally:
+        session.close()
+
+
 async def test_branch_deletion_with_force():
     """Test branch deletion with force parameter."""
     session_id = "force_delete_test"
@@ -1991,6 +2174,37 @@ async def test_branch_deletion_with_force():
     assert branches_after[0]["branch_id"] == "main"
 
     session.close()
+
+
+async def test_failed_force_delete_keeps_current_branch():
+    """A force delete that raises must not move the session off its current branch."""
+    session = AdvancedSQLiteSession(session_id="failed_force_delete", create_tables=True)
+    main_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main question"},
+        {"role": "assistant", "content": "Main answer"},
+    ]
+    branch_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch question"},
+    ]
+
+    try:
+        await session.add_items(main_items)
+
+        # Branching from turn 1 copies no messages, so the new branch has no history yet.
+        branch_id = await session.create_branch_from_turn(1, "alternative_path")
+        assert session._current_branch_id == branch_id
+
+        with pytest.raises(ValueError, match="Branch 'alternative_path' does not exist"):
+            await session.delete_branch(branch_id, force=True)
+
+        assert session._current_branch_id == branch_id
+
+        # The next turn must stay on the branch instead of landing in main.
+        await session.add_items(branch_items)
+        assert await session.get_items() == branch_items
+        assert await session.get_items(branch_id="main") == main_items
+    finally:
+        session.close()
 
 
 async def test_get_items_with_parameters():
@@ -3438,6 +3652,46 @@ async def test_store_run_usage_survives_unrelated_branch_deletion(usage_data: Us
         turn_2_usage = await session.get_turn_usage(2)
         assert isinstance(turn_2_usage, dict)
         assert turn_2_usage["total_tokens"] == usage_data.total_tokens
+    finally:
+        session.close()
+
+
+async def test_store_run_usage_skips_when_current_branch_has_no_turn(usage_data: Usage):
+    """A branch without any turn rows has no turn to attribute a run's usage to, so
+    store_run_usage skips the write instead of recording a phantom turn 0.
+    """
+    session = AdvancedSQLiteSession(session_id="usage_no_turn_test", create_tables=True)
+
+    try:
+        # A fresh session has no turn on the current branch.
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert await session.get_turn_usage() == []
+
+        # A branch whose only turn was popped away has no turn either.
+        await session.add_items(
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        )
+        await session.pop_item()
+        await session.pop_item()
+        await session.store_run_usage(create_mock_run_result(usage_data))
+        assert await session.get_session_usage() is None
+        assert _count_rows(session, "turn_usage") == 0
+
+        # Once a real turn exists, usage is recorded against it.
+        await session.add_items([{"role": "user", "content": "u2"}])
+        second_usage = Usage(requests=2, input_tokens=20, output_tokens=5, total_tokens=25)
+        await session.store_run_usage(create_mock_run_result(second_usage))
+        session_usage = await session.get_session_usage()
+        assert session_usage is not None
+        assert session_usage["requests"] == 2
+        assert session_usage["total_turns"] == 1
+        turn_usage = await session.get_turn_usage()
+        assert isinstance(turn_usage, list)
+        assert [row["user_turn_number"] for row in turn_usage] == [1]
     finally:
         session.close()
 

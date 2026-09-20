@@ -98,9 +98,9 @@ When using `context="all_turns"`, preserve the conversation through `previous_re
 
 #### ComputerTool model selection
 
-If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. Explicit `gpt-5.5` requests use the GA built-in `computer` tool, while explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
+If an agent includes [`ComputerTool`][agents.tool.ComputerTool], the effective model on the actual Responses request determines which computer-tool payload the SDK sends. When the agent does not set `model`, normal SDK model-selection precedence applies. The built-in SDK default, currently [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna), supports the GA built-in `computer` tool. If `OPENAI_DEFAULT_MODEL` or `RunConfig.model` overrides that default, select a model that supports computer use. Set `model` on the agent when you want to choose a different capability and cost profile for the computer-use workload; for example, `model="gpt-5.6"` uses the alias that OpenAI routes to GPT-5.6 Sol. Explicit `computer-use-preview` requests keep the older `computer_use_preview` payload.
 
-Prompt-managed calls are the main exception. If a prompt template specifies the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make `model="gpt-5.5"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
+Prompt-managed calls are the main exception. If a prompt template specifies the model and the SDK omits `model` from the request, the SDK defaults to the preview-compatible computer payload so it does not guess which model the prompt pins. To keep the GA path in that flow, either make a supported GA model such as `model="gpt-5.6"` explicit on the request or force the GA selector with `ModelSettings(tool_choice="computer")` or `ModelSettings(tool_choice="computer_use")`.
 
 With a registered [`ComputerTool`][agents.tool.ComputerTool], `tool_choice="computer"`, `"computer_use"`, and `"computer_use_preview"` are normalized to the built-in selector that matches the effective request model. If no `ComputerTool` is registered, those strings continue to behave like ordinary function names.
 
@@ -644,6 +644,8 @@ If you use [`MultiProvider`][agents.MultiProvider], pass `openai_strict_feature_
 
 The OpenAI Chat Completions API can return audio output, but [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] does not currently convert audio output into Agents SDK run items. If a non-streaming message or streaming delta contains audio output, the adapter raises `AgentsException("Audio is not currently supported")` instead of returning a partial or empty result. Use [Realtime agents](../realtime/guide.md) or [Voice agents](../voice/quickstart.md) for SDK-managed audio workflows.
 
+If a streaming or non-streaming Chat Completions response ends with `finish_reason="length"` before producing assistant text, a tool call, or a refusal, the adapter raises [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]. The SDK treats this empty result as token- or reasoning-budget exhaustion, not as a content-policy refusal, so model-refusal handlers do not run for it.
+
 Some OpenAI-compatible Chat Completions providers stream tool-call deltas in chunks that are not reliable enough for incremental SDK processing. In that case, enable streamed tool-call buffering so the SDK emits tool calls only after the provider stream finishes:
 
 ```python
@@ -688,6 +690,8 @@ Any-LLM support is included on a best-effort, beta basis for cases where you nee
 Depending on the upstream provider path, Any-LLM may use the Responses API, Chat Completions-compatible APIs, or provider-specific compatibility layers.
 
 If you need Any-LLM, install `openai-agents[any-llm]`, then start from [`examples/model_providers/any_llm_auto.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_auto.py) or [`examples/model_providers/any_llm_provider.py`](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/any_llm_provider.py). You can use `any-llm/...` model names with [`MultiProvider`][agents.MultiProvider], instantiate `AnyLLMModel` directly, or use `AnyLLMProvider` at run scope. If you need to pin the model surface explicitly, pass `api="responses"` or `api="chat_completions"` when constructing `AnyLLMModel`.
+
+On the Any-LLM Chat Completions path, [`ModelSettings.extra_body`][agents.model_settings.ModelSettings.extra_body] remains a nested `extra_body` argument. The Agents SDK does not merge that mapping into Any-LLM's top-level call arguments, so keep provider-specific request-body fields inside the `extra_body` mapping.
 
 Any-LLM remains a third-party adapter layer, so provider dependencies and capability gaps are defined upstream by Any-LLM rather than by the SDK. Usage metrics are propagated automatically when the upstream provider returns them, but streamed Chat Completions backends may require `ModelSettings(include_usage=True)` before they emit usage chunks. Validate the exact provider backend you plan to deploy if you depend on structured outputs, tool calling, usage reporting, or Responses-specific behavior.
 

@@ -115,7 +115,7 @@ if __name__ == "__main__" and os.environ.get(BOOTSTRAPPED_ENV) != "1":
 
 sys.path.insert(0, str(ROOT))
 
-from integration_tests._contract_support import (  # noqa: E402
+from integration_tests._contract_surface import (  # noqa: E402
     SubmoduleExportPolicy,
     load_submodule_export_policy,
 )

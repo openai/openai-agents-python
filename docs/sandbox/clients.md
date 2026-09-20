@@ -12,11 +12,19 @@ Use this page to choose where sandbox work should run. In most cases, the `Sandb
 
 | Goal | Start with | Why |
 | --- | --- | --- |
-| Fastest local iteration on macOS or Linux | `UnixLocalSandboxClient` | No extra install, simple local filesystem development. |
+| Trusted local development on macOS or Linux | `UnixLocalSandboxClient` | No extra install; commands run as local host processes. |
 | Basic container isolation | `DockerSandboxClient` | Runs work inside Docker with a specific image. |
 | Hosted execution or production-style isolation | A hosted sandbox client | Moves the workspace boundary to a provider-managed environment. |
 
 </div>
+
+!!! warning "Unix-local execution limits"
+
+    `UnixLocalSandboxClient` runs commands as local host processes. On Linux, this backend adds no OS-level confinement: commands can access files and network resources permitted by the host process and any external isolation. A workspace directory, `HOME`, or `cwd` does not restrict that access.
+
+    On macOS, this backend uses `sandbox-exec` to apply filesystem restrictions. Those restrictions do not provide network isolation or the same boundary as a container.
+
+    Use Unix-local for trusted local development or within an externally isolated environment. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted sandbox, or provide external isolation. Review the selected environment's permissions, mounts, credentials, and network access for your workload.
 
 ## Local clients
 
@@ -26,14 +34,33 @@ For most users, start with one of these two sandbox clients:
 
 | Client | Install | Choose it when | Example |
 | --- | --- | --- | --- |
-| `UnixLocalSandboxClient` | none | Fastest local iteration on macOS or Linux. Good default for local development. | [Unix-local starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py) |
+| `UnixLocalSandboxClient` | none | Trusted local development on macOS or Linux, or execution within external isolation. | [Unix-local starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/unix_local_runner.py) |
 | `DockerSandboxClient` | `openai-agents[docker]` | You want container isolation or a specific image to reproduce a target environment locally. | [Docker starter](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docker/docker_runner.py) |
 
 </div>
 
-Unix-local is the easiest way to start developing against a local filesystem. Move to Docker or a hosted provider when you need stronger environment isolation or production-style parity.
+Unix-local provides a local workspace without requiring a container. Choose Docker or a hosted provider when you need an isolation boundary supplied by that backend or an image that matches another environment.
 
 `SandboxPathGrant.host_path` is Docker-only and maps a host path to a different POSIX path inside the container. Unix-local supports only same-path grants. See [Manifest path grants](guide.md#manifest) for details.
+
+### Limit host environment inheritance for Unix-local sessions
+
+By default, `UnixLocalSandboxClient` starts every command environment from the complete host process environment. Set `inherit_host_environment=False` to pass only a conservative allowlist of host variables instead:
+
+```python
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+client = UnixLocalSandboxClient(
+    inherit_host_environment=False,
+    host_environment_allowlist={"PATH", "LANG", "SSL_CERT_FILE"},
+)
+```
+
+When `inherit_host_environment=False` and `host_environment_allowlist` is omitted, the SDK allows `PATH`, `LANG`, `LC_ALL`, `LC_COLLATE`, `LC_CTYPE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`, `TZ`, `TERM`, `TMPDIR`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `UV_PYTHON`, `NO_COLOR`, `FORCE_COLOR`, and `CI`. Pass a custom collection to replace that default allowlist. A custom allowlist requires `inherit_host_environment=False`.
+
+Values from `Manifest.environment` are applied after host filtering and override inherited values. Unix-local commands always receive the workspace root as `HOME`. The inheritance policy belongs to the current client rather than serialized session state, so `create(...)` and `resume(...)` apply the policy of the client that performs that operation.
+
+This option filters inherited environment variables only; it does not add OS-level confinement. The Unix-local execution limits above still apply.
 
 To switch from Unix-local to Docker, keep the agent definition the same and change only the run config:
 
@@ -66,6 +93,22 @@ options = DockerSandboxClientOptions(
 ```
 
 The only supported explicit network mode is `"none"`; omit `network_mode` to preserve Docker's default behavior. A network-disabled sandbox cannot expose ports, so combining `network_mode="none"` with a non-empty `exposed_ports` tuple fails during option validation. The setting is stored in sandbox session state and reapplied if the SDK must create a replacement container while resuming that state.
+
+### Label Docker containers
+
+Set `labels` when an application needs to identify or manage the Docker containers created for sandbox sessions:
+
+```python
+options = DockerSandboxClientOptions(
+    image="python:3.14-slim",
+    labels={
+        "com.example.owner": "agents-sdk",
+        "com.example.environment": "development",
+    },
+)
+```
+
+The SDK passes these key-value pairs to Docker when it creates the container and stores them in [`DockerSandboxSessionState`][agents.sandbox.sandboxes.docker.DockerSandboxSessionState]. When a resumed session reconnects to an existing container, the SDK verifies that every persisted label still has the expected value and raises `ValueError` if the labels do not match. When the SDK creates a replacement container from the saved state, it reapplies the persisted labels.
 
 ## Mounts and remote storage
 

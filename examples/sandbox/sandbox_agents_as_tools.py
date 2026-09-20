@@ -1,9 +1,12 @@
 """
 Show how sandbox agents can be exposed as tools to a normal orchestrator.
 
-Each sandbox reviewer gets its own isolated workspace. The outer orchestrator
+Each sandbox reviewer gets its own workspace. The outer orchestrator
 does not inspect files directly. It calls the reviewers as tools and combines
 their outputs with a normal Python function tool.
+
+Separate Unix-local workspaces do not establish an OS isolation boundary. Use this example
+for trusted local development or within externally provided isolation.
 """
 
 import argparse
@@ -156,7 +159,7 @@ async def main(model: str, question: str) -> None:
         output_type=RolloutRiskReview,
     )
 
-    # Each sandbox-backed tool gets its own run configuration so the workspaces stay isolated.
+    # Each sandbox-backed tool gets its own run configuration and a separate workspace.
     pricing_run_config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
     rollout_run_config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
 

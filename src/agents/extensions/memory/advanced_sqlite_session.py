@@ -958,6 +958,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 "file_search_call",
                 "web_search_call",
                 "code_interpreter_call",
+                "shell_call",
+                "apply_patch_call",
                 "tool_search_call",
                 "tool_search_output",
             }:
@@ -1140,8 +1142,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         if not branch_id or not branch_id.strip():
             raise ValueError("Branch ID cannot be empty")
 
-        branch_id = branch_id.strip()
-
         # Protect main branch
         if branch_id == "main":
             raise ValueError("Cannot delete the 'main' branch")
@@ -1153,6 +1153,13 @@ class AdvancedSQLiteSession(SQLiteSession):
                     f"Cannot delete current branch '{branch_id}'. Use force=True or switch branches first"  # noqa: E501
                 )
             else:
+                # Confirm the branch is known before switching away from it; the delete
+                # below raises for an unknown branch, which would otherwise leave the
+                # session pointing at 'main'.
+                if not any(
+                    branch["branch_id"] == branch_id for branch in await self.list_branches()
+                ):
+                    raise ValueError(f"Branch '{branch_id}' does not exist")
                 # Switch to main before deleting
                 await self.switch_to_branch("main")
 
@@ -1678,12 +1685,17 @@ class AdvancedSQLiteSession(SQLiteSession):
                         """
                         SELECT tool_name, SUM(usage_count), user_turn_number
                         FROM (
-                            SELECT tool_name, 1 AS usage_count, user_turn_number
+                            SELECT COALESCE(
+                                tool_name,
+                                CASE WHEN message_type IN ('shell_call', 'apply_patch_call')
+                                    THEN message_type END
+                            ) AS tool_name, 1 AS usage_count, user_turn_number
                             FROM message_structure
                             WHERE session_id = ? AND branch_id = ? AND message_type IN (
                                 'tool_call', 'function_call', 'computer_call', 'file_search_call',
                                 'web_search_call', 'code_interpreter_call', 'tool_search_call',
-                                'custom_tool_call', 'mcp_call', 'mcp_approval_request'
+                                'custom_tool_call', 'mcp_call', 'mcp_approval_request',
+                                'shell_call', 'apply_patch_call'
                             )
 
                             UNION ALL
@@ -1895,15 +1907,23 @@ class AdvancedSQLiteSession(SQLiteSession):
             branch_id: The branch the turn was read from. Defaults to the current
                 branch when not provided.
             turn_anchor: The id of the turn's first ``message_structure`` row,
-                captured when the turn was read. When provided, the write is
-                skipped unless that exact row still exists for the given
-                branch/turn, so usage is never recorded against a turn that was
-                removed — even if a new turn reused the same numeric id. Because
-                the check is scoped to this branch/turn, unrelated removals (e.g.
-                delete_branch on another branch) do not drop this write.
+                captured when the turn was read. The write is skipped unless that
+                exact row still exists for the given branch/turn, so usage is
+                never recorded against a turn that was removed — even if a new
+                turn reused the same numeric id. Because the check is scoped to
+                this branch/turn, unrelated removals (e.g. delete_branch on
+                another branch) do not drop this write. ``None`` means the branch
+                had no turn when it was read, so there is nothing to attribute
+                the usage to and the write is skipped.
         """
 
         target_branch = branch_id if branch_id is not None else self._current_branch_id
+
+        if turn_anchor is None:
+            # ``_capture_current_turn`` returns no anchor only when the branch has no
+            # turn rows; recording usage would invent a phantom turn 0.
+            self._logger.debug("Skipping usage store: no current turn on branch %r", target_branch)
+            return
 
         def _update_sync():
             """Synchronous helper to update turn usage data."""

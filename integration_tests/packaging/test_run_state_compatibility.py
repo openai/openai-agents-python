@@ -6,7 +6,7 @@ import pytest
 
 from agents import Agent, RunState
 from agents.run_state import SUPPORTED_SCHEMA_VERSIONS
-from integration_tests._contract_support import (
+from integration_tests._contract_state import (
     _deserialize_common_sandbox_session_state,
     _redaction_observables,
     validate_historical_resume_behavior,

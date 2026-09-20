@@ -12,6 +12,7 @@ from typing import Any
 from openai.types.responses import ResponseComputerToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 
+from .._function_tool_arguments import FunctionToolApproval
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -69,6 +70,7 @@ class ToolRunHandoff:
 class ToolRunFunction:
     tool_call: ResponseFunctionToolCall
     function_tool: FunctionTool
+    _approval_evaluation: FunctionToolApproval | None = dataclasses.field(default=None, repr=False)
 
 
 @dataclass
