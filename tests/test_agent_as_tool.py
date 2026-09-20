@@ -1347,7 +1347,7 @@ async def test_agent_as_tool_rejects_invalid_builder_output() -> None:
     )
     result = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
 
-    assert "Agent tool called with invalid input" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -3781,7 +3781,7 @@ async def test_agent_as_tool_stream_backlog_overflow_stops_nested_run(
             assert len(errors) == 1
             assert isinstance(errors[0], UserError)
         else:
-            assert "on_stream_max_pending_events=2" in output
+            assert output == "An error occurred while running the tool. Please try again."
         assert "synthetic delta" not in output
 
     assert handler_cancelled.is_set()

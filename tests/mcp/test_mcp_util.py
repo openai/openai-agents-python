@@ -1110,7 +1110,7 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
 
     result = await function_tool.on_invoke_tool(tool_context, "{}")
     assert isinstance(result, str)
-    assert "tool execution was cancelled" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -1399,7 +1399,7 @@ async def test_mcp_default_tool_error_hides_url_credentials():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
 
     assert isinstance(result, str)
-    assert _SANITIZED_SERVER_NAME in result
+    assert result == "An error occurred while running the tool. Please try again."
     for secret in _SERVER_URL_SECRETS:
         assert secret not in result
 
@@ -1449,7 +1449,7 @@ async def test_mcp_tool_timeout_handling():
     # Verify that the result is an error message
     assert isinstance(result, str)
     assert "error" in result.lower() or "occurred" in result.lower()
-    assert "Timed out" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -1473,7 +1473,7 @@ async def test_mcp_tool_cancellation_returns_error_message():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
 
     assert isinstance(result, str)
-    assert "cancelled" in result.lower()
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio

@@ -82,9 +82,11 @@ from ..tool import (
     _consume_function_tool_default_failure,
     _invoke_function_tool_with_metadata,
     _is_programmatic_tool_call,
+    default_tool_error_function,
     get_function_tool_origin,
     maybe_invoke_function_tool_failure_error_function,
     resolve_computer,
+    resolve_function_tool_failure_error_function,
 )
 from ..tool_context import ToolContext
 from ..tool_guardrails import (
@@ -2094,9 +2096,14 @@ class _FunctionToolBatchExecutor:
                 tool_context
             ) and not _uses_programmatic_output_schema(func_tool, tool_call)
 
+            include_error_detail = (
+                self.config.trace_include_sensitive_data
+                and resolve_function_tool_failure_error_function(func_tool, tool_context)
+                is not default_tool_error_function
+            )
             trace_error = get_trace_tool_error(
-                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
-                error_message=str(e),
+                trace_include_sensitive_data=include_error_detail,
+                error_message=str(e) if include_error_detail else "",
             )
             _error_tracing.attach_error_to_current_span(
                 SpanError(

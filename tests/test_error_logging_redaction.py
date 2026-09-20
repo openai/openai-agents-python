@@ -2578,6 +2578,7 @@ async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction
     agent = Agent(name="A", model=model, output_type=_RequiredOutput)
 
     def invalid_fallback(_data: RunErrorHandlerInput[None]) -> dict[str, str]:
+        warnings.warn("Synthetic unrelated resource warning", ResourceWarning, stacklevel=2)
         return {"answer": fallback_secret}
 
     with warnings.catch_warnings(record=True) as caught_warnings:
@@ -2600,7 +2601,10 @@ async def test_invalid_final_output_handler_invalid_fallback_preserves_redaction
                 )
 
     error = exc_info.value
-    assert not caught_warnings
+    rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
+    assert not [warning for warning in caught_warnings if issubclass(warning.category, UserWarning)]
+    assert _MODEL_OUTPUT_SECRET not in rendered_warnings
+    assert fallback_secret not in rendered_warnings
     assert str(error) == "Error details are redacted."
     assert error.run_data is None
     assert error.__cause__ is None
@@ -2625,6 +2629,7 @@ async def test_invalid_final_output_handler_fallback_serialization_follows_redac
     agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
 
     def permissive_fallback(_data: RunErrorHandlerInput[None]) -> _PermissiveFallbackOutput:
+        warnings.warn("Synthetic unrelated resource warning", ResourceWarning, stacklevel=2)
         return _PermissiveFallbackOutput(
             payload=cast(Any, {"secret": fallback_secret}),
             count=1,
@@ -2651,7 +2656,12 @@ async def test_invalid_final_output_handler_fallback_serialization_follows_redac
 
     rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
     if redacted:
-        assert not caught_warnings
+        # Unrelated cleanup warnings must not mask checks for serialization or payload leaks.
+        assert not [
+            warning for warning in caught_warnings if issubclass(warning.category, UserWarning)
+        ]
+        assert _MODEL_OUTPUT_SECRET not in rendered_warnings
+        assert fallback_secret not in rendered_warnings
     else:
         assert fallback_secret in rendered_warnings
     assert actual_final_output == _PermissiveFallbackOutput(
@@ -2683,6 +2693,7 @@ async def test_empty_final_output_handler_fallback_serialization_follows_redacti
     agent = Agent(name="A", model=model, output_type=_PermissiveFallbackOutput)
 
     def permissive_fallback(_data: RunErrorHandlerInput[None]) -> RunErrorHandlerResult:
+        warnings.warn("Synthetic unrelated resource warning", ResourceWarning, stacklevel=2)
         return RunErrorHandlerResult(
             final_output=_PermissiveFallbackOutput(
                 payload=cast(Any, {"secret": fallback_secret}),
@@ -2712,7 +2723,12 @@ async def test_empty_final_output_handler_fallback_serialization_follows_redacti
 
     rendered_warnings = "\n".join(str(warning.message) for warning in caught_warnings)
     if redacted:
-        assert not caught_warnings
+        # Unrelated cleanup warnings must not mask checks for serialization or payload leaks.
+        assert not [
+            warning for warning in caught_warnings if issubclass(warning.category, UserWarning)
+        ]
+        assert _MODEL_OUTPUT_SECRET not in rendered_warnings
+        assert fallback_secret not in rendered_warnings
     else:
         assert fallback_secret in rendered_warnings
     assert actual_final_output == _PermissiveFallbackOutput(

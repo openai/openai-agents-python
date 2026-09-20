@@ -1889,16 +1889,20 @@ def _build_handled_function_tool_error_handler(
         input_json: str,
         context: ToolContext[Any],
     ) -> None:
-        json_decode_error = _extract_tool_argument_json_error(error)
+        trace_include_sensitive_data = (
+            context.run_config is None or context.run_config.trace_include_sensitive_data
+        ) and resolve_function_tool_failure_error_function(
+            function_tool, context
+        ) is not default_tool_error_function
+        json_decode_error = (
+            _extract_tool_argument_json_error(error) if trace_include_sensitive_data else None
+        )
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
             span_error_detail = str(json_decode_error)
         else:
             resolved_span_message = span_message
-            span_error_detail = str(error)
-        trace_include_sensitive_data = (
-            context.run_config is None or context.run_config.trace_include_sensitive_data
-        )
+            span_error_detail = str(error) if trace_include_sensitive_data else ""
         trace_error = get_trace_tool_error(
             trace_include_sensitive_data=trace_include_sensitive_data,
             error_message=span_error_detail,
@@ -1964,15 +1968,11 @@ def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
 
 
 def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
-    """The default tool error function, which just returns a generic error message."""
-    json_decode_error = _extract_tool_argument_json_error(error)
-    if json_decode_error is not None:
-        return (
-            "An error occurred while parsing tool arguments. "
-            "Please try again with valid JSON. "
-            f"Error: {json_decode_error}"
-        )
-    return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
+    """Return a fixed error response without exposing the exception to the model.
+
+    Provide a custom ``failure_error_function`` to return application-approved error details.
+    """
+    return "An error occurred while running the tool. Please try again."
 
 
 _FUNCTION_TOOL_TIMEOUT_BEHAVIORS: tuple[ToolTimeoutBehavior, ...] = (
