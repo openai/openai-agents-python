@@ -7,6 +7,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,6 +25,7 @@ from agents.sandbox.manifest import Manifest, SandboxPathGrant
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.snapshot import NoopSnapshot
+from agents.sandbox.types import ExecResult
 
 if TYPE_CHECKING or sys.platform != "win32":
     from agents.sandbox.sandboxes.unix_local import (
@@ -41,6 +43,66 @@ def _session(root: Path, *, grants: tuple[SandboxPathGrant, ...] = ()) -> UnixLo
             snapshot=NoopSnapshot(id="file-io"),
         )
     )
+
+
+@pytest.mark.parametrize("user", [None, "example-user"])
+@pytest.mark.parametrize("grant_alias", [False, True])
+async def test_recursive_rm_preserves_read_only_descendants_and_writable_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str | None, grant_alias: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "data"
+    protected = data / "protected"
+    protected.mkdir(parents=True)
+    secret = protected / "sentinel"
+    secret.write_bytes(b"protected")
+    writable = data / "writable"
+    writable.mkdir()
+    sibling = writable / "sentinel"
+    sibling.write_bytes(b"writable")
+    grant_path = protected
+    if grant_alias:
+        grant_path = tmp_path / "protected-alias"
+        grant_path.symlink_to(protected, target_is_directory=True)
+    session = _session(
+        workspace,
+        grants=(
+            SandboxPathGrant(path=str(data)),
+            SandboxPathGrant(path=str(grant_path), read_only=True),
+        ),
+    )
+    # Isolate the user permission probe; deletion still uses real descriptor-relative IO.
+    monkeypatch.setattr(
+        session, "exec", AsyncMock(return_value=ExecResult(stdout=b"", stderr=b"", exit_code=0))
+    )
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.rm(data, recursive=True, user=user)
+    assert secret.read_bytes() == b"protected"
+    assert sibling.read_bytes() == b"writable"
+
+    await session.rm(writable, recursive=True, user=user)
+    assert not writable.exists()
+    assert secret.read_bytes() == b"protected"
+
+
+async def test_recursive_rm_allows_nested_writable_override(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    protected = tmp_path / "protected"
+    writable = protected / "writable"
+    writable.mkdir(parents=True)
+    (writable / "sentinel").write_bytes(b"writable")
+    session = _session(
+        workspace,
+        grants=(
+            SandboxPathGrant(path=str(protected), read_only=True),
+            SandboxPathGrant(path=str(writable)),
+        ),
+    )
+    await session.rm(writable, recursive=True)
+    assert not writable.exists()
+    assert protected.is_dir()
 
 
 async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path) -> object:

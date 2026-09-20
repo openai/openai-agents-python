@@ -1134,7 +1134,18 @@ class BaseSandboxSession(abc.ABC):
         :param path: Path to remove.
         :param recursive: If true, remove directories recursively.
         :param user: Optional sandbox user to remove as.
+        :raises WorkspaceArchiveWriteError: If recursive removal is requested while
+            the session has any read-only extra path grant.
         """
+        if recursive:
+            policy = self._workspace_path_policy()
+            if any(read_only for _, read_only in policy.extra_path_grant_rules()):
+                workspace_path = policy.normalize_sandbox_path(path, for_write=True)
+                raise WorkspaceArchiveWriteError(
+                    path=posix_path_for_error(workspace_path),
+                    context={"reason": "recursive_remove_with_read_only_grants"},
+                )
+
         path = await self._validate_path_access(path, for_write=True)
 
         cmd: list[str] = ["rm"]

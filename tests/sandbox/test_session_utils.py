@@ -7,18 +7,20 @@ import subprocess
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 from agents.sandbox.entries import GCSMount, InContainerMountStrategy, MountpointMountPattern
 from agents.sandbox.errors import (
+    ExecNonZeroError,
     MountConfigError,
     WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
-from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest import Manifest, SandboxPathGrant
 from agents.sandbox.session import SandboxSessionStartEvent
 from agents.sandbox.session.base_sandbox_session import (
     _READ_PATH_PROBE_SCRIPT,
@@ -445,3 +447,75 @@ def test_register_persist_workspace_skip_path_allows_non_overlapping_path() -> N
     registered = session.register_persist_workspace_skip_path("logs/events.jsonl")
 
     assert registered == Path("logs/events.jsonl")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root", "target", "grant_path"),
+    [
+        ("/workspace", "writable", "/protected"),
+        ("/workspace", Path("missing"), "/protected"),
+        ("/workspace", PureWindowsPath("/workspace/alias/tree"), "/grant-alias"),
+        ("/workspace", "empty-unsearchable", "/protected"),
+        ("/workspace", "writable", "/workspace/overridden"),
+        ("//", "//", "/protected"),
+    ],
+)
+async def test_remote_recursive_rm_refuses_read_only_grants_before_remote_access(
+    root: str, target: str | Path | PureWindowsPath, grant_path: str
+) -> None:
+    class NoRemotePreflightSession(_ManifestSession):
+        async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
+            raise AssertionError("Denied removal must not start remote path validation")
+
+    session = NoRemotePreflightSession(
+        Manifest(
+            root=root,
+            extra_path_grants=(SandboxPathGrant(path=grant_path, read_only=True),),
+        )
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+        await session.rm(target, recursive=True, user=User(name="sandbox-user"))
+
+    assert exc_info.value.context["reason"] == "recursive_remove_with_read_only_grants"
+    assert session.last_command is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recursive", "grants", "expected_args"),
+    [
+        (False, (SandboxPathGrant(path="/protected", read_only=True),), ()),
+        (True, (), ("-rf",)),
+        (True, (SandboxPathGrant(path="/writable", read_only=False),), ("-rf",)),
+    ],
+)
+async def test_remote_rm_preserves_allowed_commands_and_user(
+    recursive: bool, grants: tuple[SandboxPathGrant, ...], expected_args: tuple[str, ...]
+) -> None:
+    session = _ManifestSession(Manifest(root="/workspace", extra_path_grants=grants))
+
+    await session.rm("file with spaces", recursive=recursive, user=User(name="sandbox-user"))
+
+    assert session.last_command == (
+        "sudo",
+        "-u",
+        "sandbox-user",
+        "--",
+        "rm",
+        *expected_args,
+        "--",
+        "/workspace/file with spaces",
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_rm_preserves_command_failure() -> None:
+    session = _QueuedExecSession([ExecResult(stdout=b"", stderr=b"permission denied", exit_code=1)])
+    session.state.manifest = Manifest(root="/workspace")
+
+    with pytest.raises(ExecNonZeroError):
+        await session.rm("file", recursive=True)
+
+    assert session.commands == [("rm", "-rf", "--", "/workspace/file")]
