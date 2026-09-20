@@ -13,8 +13,10 @@ uv run python examples/mcp/git_example/main.py
 The example uses the `MCPServerStdio` class from `agents.mcp`, with the command:
 
 ```bash
-uvx mcp-server-git
+uvx mcp-server-git@2026.8.18
 ```
+
+The server version is pinned so a new server release is not selected automatically. Review upstream changes before updating this pin. This does not lock transitive dependencies or isolate the server from your host; use a trusted package index and run the example only with repositories and paths you trust.
 
 Prior to running the agent, the user is prompted to provide a local directory path to their git repo. Using that, the Agent can invoke Git MCP tools like `git_log` to inspect the git commit log.
 

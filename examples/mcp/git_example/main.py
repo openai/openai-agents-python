@@ -35,7 +35,7 @@ async def main():
 
     async with MCPServerStdio(
         cache_tools_list=True,  # Cache the tools list, for demonstration
-        params={"command": "uvx", "args": ["mcp-server-git"]},
+        params={"command": "uvx", "args": ["mcp-server-git@2026.8.18"]},
     ) as server:
         with trace(workflow_name="MCP Git Example"):
             await run(server, directory_path)
