@@ -198,7 +198,7 @@ class EncryptedSession(SessionABC):
         )
 
     async def _read_compaction_items(
-        self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None
+        self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None = None
     ) -> tuple[list[TResponseInputItem], bool]:
         if limit is None:
             items = await _call_session_method(

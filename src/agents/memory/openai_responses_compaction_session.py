@@ -89,7 +89,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     Automatic compaction requires coverage of stored history by the latest successful
     model exchange, including each occurrence of repeated items. If a bounded read
-    cannot establish coverage, the full history is retained. Explicit manual
+    cannot establish coverage, the full history is retained. If that read changes the
+    history snapshot, the decision hook is called again with the complete snapshot.
+    Item matching respects the wrapped store's declared ID-matching policy. Explicit manual
     ``run_compaction()`` calls still compact the stored history and should be used
     only when that history may be sent.
     """
@@ -153,6 +155,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # append-to-compaction gap. A later wrapper mutation revokes that one
         # pending automatic replacement without inferring ownership from history.
         self._mutation_generation = 0
+
+    @property
+    def _ignore_ids_for_matching(self) -> bool:
+        """Preserve the wrapped store's declared item-matching policy."""
+        return bool(getattr(self.underlying_session, "_ignore_ids_for_matching", False))
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -287,13 +294,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # Read one occurrence beyond what the model saw. If more history exists,
             # coverage fails without loading the entire backend. Do this only after
             # the decision hook approves, and bypass any cached partial snapshot.
-            _, session_items, complete = await self._ensure_compaction_candidates(
-                read_items, limit=len(model_items) + 1
-            )
+            approved_session_items = session_items
+            (
+                compaction_candidate_items,
+                session_items,
+                complete,
+            ) = await self._ensure_compaction_candidates(read_items, limit=len(model_items) + 1)
             remaining = Counter(model_items)
             covered = complete
             for item in session_items:
-                digest = digest_input_item(item)
+                digest = digest_input_item(
+                    item, ignore_ids_for_matching=self._ignore_ids_for_matching
+                )
                 if digest is None or remaining[digest] == 0:
                     covered = False
                     break
@@ -303,6 +315,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     "Skipped automatic compaction because complete stored history could not "
                     "be matched to the latest model exchange. Session history was retained."
                 )
+                return
+            # A bounded reload may include history omitted from the hook's initial
+            # cached/default-limited view. Require approval of the actual snapshot.
+            if session_items != approved_session_items and not self.should_trigger_compaction(
+                {
+                    "response_id": self._response_id,
+                    "compaction_mode": resolved_mode,
+                    "compaction_candidate_items": compaction_candidate_items,
+                    "session_items": session_items,
+                }
+            ):
                 return
 
         self._deferred_response_id = None
@@ -606,6 +629,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         limit: int | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], bool]:
         """Lazy-load candidates, or read a bounded snapshot for automatic coverage checks."""
+        if read_items is None and limit is not None:
+            # Storage wrappers such as EncryptedSession must bound raw reads before
+            # filtering expired items, including when compaction is the outer wrapper.
+            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
         if read_items is not None or limit is not None:
             # An explicit limit bypasses the cache and backend default read limit.
             # The outer view applies decryption and TTL expiration to logical items.

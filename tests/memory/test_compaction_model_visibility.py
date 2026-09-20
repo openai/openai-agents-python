@@ -21,7 +21,7 @@ from tests.test_responses import (
     get_handoff_tool_call,
     get_text_message,
 )
-from tests.utils.simple_session import SimpleListSession
+from tests.utils.simple_session import IdStrippingSession, SimpleListSession
 
 pytestmark = pytest.mark.asyncio
 
@@ -148,6 +148,105 @@ async def test_manual_compaction_can_explicitly_replace_filtered_history(
     if mode == "input":
         assert LOCAL_OUTPUT in str(client.responses.compact.call_args.kwargs["input"])
     assert await session.get_items() == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_automatic_compaction_respects_backend_id_matching_policy(streamed: bool) -> None:
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    backend = IdStrippingSession()
+    duplicate: TResponseInputItem = {"role": "user", "content": "repeated request"}
+    await backend.add_items([duplicate, duplicate])
+    session = OpenAIResponsesCompactionSession(
+        "id-stripping",
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+    model = ScriptedModel(steps=[[get_text_message("ok")], [get_text_message("done")]])
+    agent = Agent(name="worker", model=model)
+    await run(
+        agent,
+        "filtered",
+        session,
+        streamed,
+        RunConfig(session_input_callback=lambda history, new: history[1:] + new),
+    )
+    client.responses.compact.assert_not_awaited()
+    assert (await session.get_items()).count(duplicate) == 2
+    assert all("id" not in item for item in await session.get_items())
+
+    await run(agent, "complete", session, streamed)
+    client.responses.compact.assert_awaited_once()
+    compact_input = client.responses.compact.call_args.kwargs["input"]
+    assert compact_input.count(duplicate) == 2
+    assert "done" in str(compact_input)
+    assert await session.get_items() == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_automatic_compaction_hook_approves_the_reloaded_snapshot(
+    streamed: bool,
+    encrypted: bool,
+    deferred: bool,
+) -> None:
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    backend = SQLiteSession("hook-snapshot", session_settings={"limit": 1})
+    approved_views: list[list[TResponseInputItem]] = []
+
+    def approve(context: Any) -> bool:
+        items = context["session_items"]
+        approved_views.append(list(items))
+        return LOCAL_OUTPUT not in str(items)
+
+    compaction = OpenAIResponsesCompactionSession(
+        "hook-snapshot",
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=approve,
+    )
+    session: SessionABC = compaction
+    if encrypted:
+        pytest.importorskip("cryptography")
+        from agents.extensions.memory.encrypt_session import EncryptedSession
+
+        session = EncryptedSession("hook-snapshot", compaction, encryption_key="synthetic-test-key")
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": LOCAL_OUTPUT},
+                {"role": "user", "content": "visible tail"},
+            ]
+        )
+        model = ScriptedModel(
+            steps=([[get_function_tool_call("lookup")]] if deferred else [])
+            + [[get_text_message("ok")]]
+        )
+        await run(
+            Agent(
+                name="worker",
+                model=model,
+                tools=[get_function_tool(name="lookup", return_value="tool result")],
+            ),
+            "full read",
+            session,
+            streamed,
+            RunConfig(session_settings={"limit": 100}),
+        )
+        assert LOCAL_OUTPUT in str(model.calls[-1].input)
+        assert LOCAL_OUTPUT not in str(approved_views[0])
+        client.responses.compact.assert_not_awaited()
+        assert LOCAL_OUTPUT in str(approved_views[-1])
+        assert LOCAL_OUTPUT in str(await session.get_items(limit=100))
+        if deferred:
+            assert compaction._get_deferred_compaction_response_id() is not None
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize("streamed", [False, True])
@@ -291,9 +390,9 @@ async def test_backend_read_limit_cannot_hide_retained_history_from_compaction(
 
 
 @pytest.mark.parametrize("approve", [False, True])
-@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("encryption", ["none", "outer", "inner"])
 async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
-    approve: bool, encrypted: bool, monkeypatch: pytest.MonkeyPatch
+    approve: bool, encryption: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = MagicMock()
     client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
@@ -306,17 +405,28 @@ async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
         should_trigger_compaction=lambda _: approve,
     )
     clock = [1000]
-    if encrypted:
+    if encryption != "none":
         pytest.importorskip("cryptography")
         from agents.extensions.memory.encrypt_session import EncryptedSession
 
         monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
-        session = EncryptedSession("bounded", session, encryption_key="synthetic-test-key", ttl=10)
+        if encryption == "outer":
+            session = EncryptedSession(
+                "bounded", session, encryption_key="synthetic-test-key", ttl=10
+            )
+        else:
+            session = OpenAIResponsesCompactionSession(
+                "bounded",
+                EncryptedSession("bounded", backend, encryption_key="synthetic-test-key", ttl=10),
+                client=client,
+                compaction_mode="input",
+                should_trigger_compaction=lambda _: approve,
+            )
     try:
         await session.add_items(
             [{"role": "user", "content": f"retained-{index}"} for index in range(100)]
         )
-        if encrypted:
+        if encryption != "none":
             clock[0] += 11
             await session.add_items([{"role": "user", "content": "fresh tail"}])
         read = AsyncMock(wraps=backend.get_items)
@@ -335,7 +445,13 @@ async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
             if not approve:
                 assert all(limit is None or limit == 1 for limit in limits)
             client.responses.compact.assert_not_awaited()
-        assert len(await backend.get_items(limit=1000)) == (105 if encrypted else 104)
+        assert len(await backend.get_items(limit=1000)) == (105 if encryption != "none" else 104)
+        # Explicit manual compaction can still process the application's approved
+        # logical history, including when expired envelopes block automatic coverage.
+        await session.run_compaction({"force": True})  # type: ignore[attr-defined]
+        client.responses.compact.assert_awaited_once()
+        assert "done" in str(client.responses.compact.call_args.kwargs["input"])
+        assert await backend.get_items(limit=1000) == []
     finally:
         backend.close()
 

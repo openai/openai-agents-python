@@ -390,7 +390,7 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return None
 
 
-def digest_input_item(item: Any) -> str | None:
+def digest_input_item(item: Any, *, ignore_ids_for_matching: bool = False) -> str | None:
     """Return a fixed-size digest of an input item for durable occurrence tracking."""
     coerced = _coerce_to_dict(item)
     if coerced is not None:
@@ -406,7 +406,7 @@ def digest_input_item(item: Any) -> str | None:
                 coerced.pop("status", None)
         item = coerced
 
-    fingerprint = fingerprint_input_item(item)
+    fingerprint = fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching)
     if fingerprint is None:
         return None
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()

@@ -100,23 +100,32 @@ def prepare_compaction_model_input(
         return None
     # A failed request must not reuse evidence from an earlier model exchange.
     wrapper._session_compaction_model_items = ()  # type: ignore[attr-defined]
-    return tuple(digest for item in input_items if (digest := digest_input_item(item)) is not None)
+    ignore_ids = _ignore_ids_for_matching(session)
+    return tuple(
+        digest
+        for item in input_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
 
 
 def record_compaction_model_response(
+    session: Session | None,
     wrapper: RunContextWrapper[Any],
     input_digests: tuple[str, ...] | None,
     response: ModelResponse,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None,
 ) -> None:
     """Authorize automatic compaction only from the latest successful model exchange."""
-    if input_digests is None:
+    if input_digests is None or session is None:
         return
     response_items = apply_reasoning_item_id_policy(
         response.to_input_items(), reasoning_item_id_policy
     )
+    ignore_ids = _ignore_ids_for_matching(session)
     wrapper._session_compaction_model_items = input_digests + tuple(  # type: ignore[attr-defined]
-        digest for item in response_items if (digest := digest_input_item(item)) is not None
+        digest
+        for item in response_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
     )
 
 

@@ -2344,7 +2344,7 @@ async def run_single_turn_streamed(
         raise ModelBehaviorError("Model did not produce a final response!")
 
     record_compaction_model_response(
-        context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
+        session, context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
     )
     context_wrapper.usage.add(final_response.usage)
 
@@ -2682,6 +2682,7 @@ async def get_new_response(
         server_conversation_tracker.track_server_items(new_response)
 
     record_compaction_model_response(
+        session,
         context_wrapper,
         compaction_input_digests,
         new_response,
