@@ -7,7 +7,7 @@ import queue
 import random
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, cast
 
@@ -318,7 +318,10 @@ class BackendSpanExporter(TracingExporter):
         return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
-        """Drop or truncate span fields known to be rejected by traces ingest."""
+        """Omit reasoning from generation data and enforce traces ingest field limits.
+
+        Original spans remain available to custom processors and exporters.
+        """
         span_data = payload_item.get("span_data")
         if not isinstance(span_data, dict):
             return payload_item
@@ -329,7 +332,10 @@ class BackendSpanExporter(TracingExporter):
         for field_name in ("input", "output"):
             if field_name not in span_data:
                 continue
-            sanitized_field = self._truncate_span_field_value(span_data[field_name])
+            field_value = span_data[field_name]
+            if span_data.get("type") == "generation":
+                field_value = self._omit_generation_reasoning(field_value)
+            sanitized_field = self._truncate_span_field_value(field_value)
             if sanitized_field is span_data[field_name]:
                 continue
             if not did_mutate:
@@ -376,6 +382,46 @@ class BackendSpanExporter(TracingExporter):
         sanitized_payload_item = dict(payload_item)
         sanitized_payload_item["span_data"] = sanitized_span_data
         return sanitized_payload_item
+
+    def _omit_generation_reasoning(self, value: Any) -> Any:
+        """Filter SDK generation message shapes without traversing arbitrary user data."""
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+            return value
+
+        def omit_message_reasoning(item: Any) -> Any:
+            if not isinstance(item, Mapping):
+                return item
+            item = dict(item)
+            if item.get("role") == "assistant":
+                for key in ("reasoning", "reasoning_content", "thinking_blocks", "thinking"):
+                    item.pop(key, None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    # Legacy thinking replay uses inline Anthropic content blocks.
+                    item["content"] = [
+                        part
+                        for part in content
+                        if not isinstance(part, dict)
+                        or part.get("type") not in ("thinking", "redacted_thinking")
+                    ]
+            return item
+
+        def omit_items(items: Sequence[Any]) -> list[Any]:
+            # Third-party reasoning_content is also normalized into summary text.
+            return [
+                omit_message_reasoning(item)
+                for item in items
+                if not isinstance(item, Mapping) or item.get("type") != "reasoning"
+            ]
+
+        return [
+            {**item, "output": omit_items(item["output"])}
+            if isinstance(item, Mapping)
+            and item.get("object") == "response"
+            and isinstance(item.get("output"), list)
+            else item
+            for item in omit_items(value)
+        ]
 
     def _value_json_size_bytes(self, value: Any) -> int:
         try:
