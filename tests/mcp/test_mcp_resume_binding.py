@@ -1,8 +1,10 @@
+import asyncio
 import json
 
 import pytest
 
 from agents import Agent, RunContextWrapper, Runner, RunState, UserError
+from agents.decorators import tool
 from agents.testing import ScriptedModel
 
 from ..test_responses import get_function_tool_call, get_text_message
@@ -59,17 +61,15 @@ async def test_serialized_mcp_approval_preserves_recipient(streaming: bool, list
         names = [tool.name for tool in await agent.get_all_tools(RunContextWrapper(context=None))]
         assert names == ["mcp_docs__search", "mcp_docs__search_15de6fa1"]
         if listing_change == "before_restore":
-            with pytest.raises(UserError, match="matching recipient binding"):
-                await RunState.from_string(agent, snapshot)
-        else:
-            assert restored is not None
-            with pytest.raises(UserError, match="different recipient"):
-                if streaming:
-                    resumed = Runner.run_streamed(agent, restored)
-                    async for _ in resumed.stream_events():
-                        pass
-                else:
-                    await Runner.run(agent, restored)
+            restored = await RunState.from_string(agent, snapshot)
+        assert restored is not None
+        with pytest.raises(UserError, match="different recipient"):
+            if streaming:
+                resumed = Runner.run_streamed(agent, restored)
+                async for _ in resumed.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, restored)
         assert trusted.tool_calls == other.tool_calls == []
     else:
         assert restored is not None
@@ -101,8 +101,9 @@ async def test_unprefixed_mcp_resume_rejects_different_server_with_same_raw_tool
     snapshot = state.to_json()
     first_server.tools.clear()
     second_server.add_tool("search", {})
-    with pytest.raises(UserError, match="matching recipient binding"):
-        await RunState.from_json(agent, snapshot)
+    restored = await RunState.from_json(agent, snapshot)
+    with pytest.raises(UserError, match="different recipient"):
+        await Runner.run(agent, restored)
     assert first_server.tool_calls == second_server.tool_calls == []
 
 
@@ -121,8 +122,9 @@ async def test_legacy_pending_mcp_call_requires_new_run():
     snapshot = state.to_json()
     snapshot["$schemaVersion"] = "1.17"
     del snapshot["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"]
-    with pytest.raises(UserError, match="Older snapshots"):
-        await RunState.from_json(agent, snapshot)
+    restored = await RunState.from_json(agent, snapshot)
+    with pytest.raises(UserError, match="missing or different recipient binding"):
+        await Runner.run(agent, restored)
     assert server.tool_calls == []
 
 
@@ -149,16 +151,15 @@ async def test_mcp_resume_rejects_different_raw_tool_on_same_server():
     server.add_tool(public_name.removeprefix("mcp_docs__"), {})
     current_tools = await agent.get_all_tools(RunContextWrapper(context=None))
     assert current_tools[1].name == public_name
-    with pytest.raises(UserError, match="matching recipient binding"):
-        await RunState.from_json(agent, snapshot)
+    restored = await RunState.from_json(agent, snapshot)
+    with pytest.raises(UserError, match="different recipient"):
+        await Runner.run(agent, restored)
     assert server.tool_calls == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("schema_version", ["1.14", "1.17", "1.18"])
 async def test_completed_mcp_sibling_does_not_block_function_approval(schema_version: str):
-    from agents.decorators import tool
-
     function_calls: list[str] = []
 
     @tool(needs_approval=True)
@@ -234,4 +235,157 @@ async def test_legacy_mcp_call_missing_during_restore_cannot_rebind(streaming: b
                 pass
         else:
             await Runner.run(agent, restored)
+    assert original.tool_calls == other.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("resume_path", ["in_memory", "before_restore", "after_restore"])
+async def test_rejected_mcp_call_continues_after_recipient_changes(
+    streaming: bool, resume_path: str
+):
+    original = FakeMCPServer(server_name="docs", require_approval="always")
+    other = FakeMCPServer(server_name="docs", require_approval="always")
+    original.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[original, other],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.reject(first.interruptions[0], rejection_message="MCP request declined")
+    snapshot = state.to_json()
+    if resume_path == "after_restore":
+        state = await RunState.from_json(agent, snapshot)
+    original.tools.clear()
+    other.add_tool("search", {})
+    if resume_path == "before_restore":
+        state = await RunState.from_json(agent, snapshot)
+
+    if streaming:
+        result = Runner.run_streamed(agent, state)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, state)
+    assert result.final_output == "done"
+    assert any(getattr(item, "output", None) == "MCP request declined" for item in result.new_items)
+    assert original.tool_calls == other.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_restored_rejection_retains_recipient_when_later_approved(streaming: bool):
+    original = FakeMCPServer(server_name="docs", require_approval="always")
+    other = FakeMCPServer(server_name="docs", require_approval="always")
+    original.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[original, other],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.reject(first.interruptions[0])
+    snapshot = state.to_json()
+    original.tools.clear()
+    other.add_tool("search", {})
+    restored = await RunState.from_json(agent, snapshot)
+    # A second snapshot must still identify the original server, even after discovery.
+    restored = await RunState.from_json(agent, restored.to_json())
+    restored.approve(first.interruptions[0])
+    with pytest.raises(UserError, match="different recipient"):
+        if streaming:
+            result = Runner.run_streamed(agent, restored)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, restored)
+    assert original.tool_calls == other.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_local_override_before_restore_retains_collision_policy(streaming: bool):
+    local_calls: list[str] = []
+
+    @tool
+    async def search() -> str:
+        local_calls.append("search")
+        return "local result"
+
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[server],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    snapshot = state.to_json()
+    agent.tools = [search]
+    restored = await RunState.from_json(agent, snapshot)
+    if streaming:
+        result = Runner.run_streamed(agent, restored)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, restored)
+    assert result.final_output == "done"
+    assert local_calls == ["search"]
+    assert server.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rejection_preserves_recipient_for_later_approval():
+    class ListingServer(FakeMCPServer):
+        ready: asyncio.Event | None = None
+
+        async def list_tools(self, run_context=None, agent=None):
+            tools = await super().list_tools(run_context, agent)
+            if self.ready is not None:
+                loop = asyncio.get_running_loop()
+                # Let discovery and reconciliation finish before requesting cancellation,
+                # without starting another tool whose uncommitted execution blocks retry.
+                loop.call_soon(loop.call_soon, self.ready.set)
+            return tools
+
+    original = FakeMCPServer(server_name="docs", require_approval="always")
+    other = ListingServer(server_name="docs", require_approval="always")
+    original.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[original, other],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    approval = first.interruptions[0]
+    state.reject(approval)
+    original.tools.clear()
+    other.add_tool("search", {})
+    state = await RunState.from_json(agent, state.to_json())
+    other.ready = asyncio.Event()
+    task = asyncio.create_task(Runner.run(agent, state))
+    try:
+        await asyncio.wait_for(other.ready.wait(), timeout=10)
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    other.ready = None
+
+    snapshot = state.to_json()
+    assert snapshot["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"] == [
+        "docs",
+        "search",
+        0,
+    ]
+    restored = await RunState.from_json(agent, snapshot)
+    restored.approve(approval)
+    with pytest.raises(UserError, match="different recipient"):
+        await Runner.run(agent, restored)
     assert original.tool_calls == other.tool_calls == []

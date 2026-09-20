@@ -2042,25 +2042,6 @@ async def resolve_interrupted_turn(
         allow_apply_patch_function_fallback=False,
     )
     current_functions = {run.tool_call.call_id: run for run in classified.functions}
-    for call in calls_to_reconcile:
-        stale_function = stale_functions.get(call.call_id)
-        current_function = current_functions.get(call.call_id)
-        original_binding = (
-            stale_function.function_tool._mcp_tool_binding if stale_function is not None else None
-        )
-        current_binding = (
-            current_function.function_tool._mcp_tool_binding
-            if current_function is not None
-            else None
-        )
-        # Local replacements follow the application's collision policy. Remote
-        # rediscovery requires the original binding even if restore dropped a missing tool.
-        if current_binding is not None and original_binding != current_binding:
-            raise UserError(
-                "Cannot resume a local MCP tool call with a missing or different recipient "
-                "binding. Restore the "
-                "original MCP server configuration and tool listing, or start a new run."
-            )
     current_handoffs = {run.tool_call.call_id: run for run in classified.handoffs}
     current_missing = {run.tool_call.call_id: run for run in classified.function_tools_not_found}
     processed_response.custom_tool_calls = [
@@ -2181,6 +2162,34 @@ async def resolve_interrupted_turn(
         stale_function = stale_functions.get(call_id)
         current_function = current_functions.get(call_id)
         if current_function is not None:
+            original_binding = (
+                stale_function.function_tool._mcp_tool_binding
+                if stale_function is not None
+                else None
+            )
+            current_binding = current_function.function_tool._mcp_tool_binding
+            # Rejected calls cannot invoke MCP. Local replacements follow the
+            # application's collision policy; executing MCP calls keep their recipient.
+            if (
+                approval_status is not False
+                and current_binding is not None
+                and original_binding != current_binding
+            ):
+                raise UserError(
+                    "Cannot resume a local MCP tool call with a missing or different recipient "
+                    "binding. Restore the original MCP server configuration and tool listing, "
+                    "or start a new run."
+                )
+            if current_binding is not None and original_binding != current_binding:
+                # A rejected run can be cancelled before its output is committed.
+                # Retain its original recipient if that state is saved or approved later.
+                current_function = replace(
+                    current_function,
+                    function_tool=replace(
+                        current_function.function_tool,
+                        _mcp_tool_binding=original_binding,
+                    ),
+                )
             reconciled_functions.append(_rebind_function_run(stale_function, current_function))
             continue
 
