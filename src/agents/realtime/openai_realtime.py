@@ -542,8 +542,8 @@ class TransportConfig(TypedDict):
 
     max_size: NotRequired[int | None]
     """Maximum size in bytes of an incoming websocket message.
-    Defaults to None (no limit). Set an explicit byte limit to bound memory usage for
-    long-lived connections behind proxies or in memory-constrained containers."""
+    Defaults to 8 MiB (8 * 1024 * 1024 bytes). Messages above the limit close the connection.
+    Set a different byte limit to match application needs, or None to disable the limit."""
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -680,7 +680,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         connect_kwargs: dict[str, Any] = {
             "user_agent_header": _USER_AGENT,
             "additional_headers": headers,
-            "max_size": None,  # Allow any size of message
+            "max_size": 8 * 1024 * 1024,
         }
 
         if transport_config:
