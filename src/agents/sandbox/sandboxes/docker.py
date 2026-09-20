@@ -31,6 +31,7 @@ from typing_extensions import Self
 
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
+    _mark_mount_validation_error,
     redact_mount_error_data,
 )
 from ..entries import (
@@ -48,6 +49,7 @@ from ..errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
+    MountConfigError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
 )
@@ -1864,6 +1866,17 @@ def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:
 
 
 def _validate_docker_path_grants(manifest: Manifest) -> None:
+    if any(
+        grant.host_path is not None and grant.read_only for grant in manifest.extra_path_grants
+    ) and (_manifest_requires_fuse(manifest) or _manifest_requires_sys_admin(manifest)):
+        # SYS_ADMIN can allow sandbox processes to remount a read-only host bind writable.
+        error = MountConfigError(
+            message="Docker read-only host_path grants cannot be combined with in-container "
+            "storage mounts that require SYS_ADMIN; remove the host grant or use a "
+            "storage strategy that does not require container mount privileges"
+        )
+        _mark_mount_validation_error(error)
+        raise error
     root = _docker_mount_path_identity(manifest.root)
     seen_targets: set[str] = set()
     explicit_targets: set[str] = set()

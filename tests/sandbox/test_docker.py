@@ -56,7 +56,7 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
-from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
@@ -2009,6 +2009,158 @@ async def test_docker_create_container_mounts_explicit_host_path(
             "ReadOnly": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "resume"])
+@pytest.mark.parametrize(
+    "storage_mount",
+    [
+        AzureBlobMount(
+            account="account",
+            container="container",
+            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+        ),
+        S3Mount(
+            bucket="bucket",
+            mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
+        ),
+        S3Mount(
+            bucket="bucket", mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern())
+        ),
+        S3Mount(
+            bucket="bucket",
+            mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern(mode="nfs")),
+        ),
+        S3FilesMount(
+            file_system_id="fs-1234567890abcdef0",
+            mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+        ),
+    ],
+    ids=["fuse", "mountpoint", "rclone-fuse", "rclone-nfs", "s3-files"],
+)
+async def test_docker_rejects_read_only_host_grant_with_privileged_storage_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    storage_mount: Mount,
+) -> None:
+    container = _StartedContainer()
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        entries={"nested": Dir(children={"data": storage_mount})},
+        extra_path_grants=(
+            SandboxPathGrant(path="/mnt/shared-data", host_path=str(tmp_path), read_only=True),
+        ),
+    )
+    if isinstance(storage_mount.mount_strategy.pattern, MountpointMountPattern):
+        manifest = manifest.with_in_container_mount_credential_exposure_acknowledged("nested/data")
+    else:
+        manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledged(
+            "nested/data"
+        )
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+        workspace_root_ready=True,
+    )
+    original_session_id = state.session_id
+
+    def unexpected_provider_access(*args: object, **kwargs: object) -> None:
+        pytest.fail("incompatible grants must fail before Docker access or cleanup")
+
+    async def unexpected_environment_resolution(self: Environment) -> dict[str, str]:
+        pytest.fail("incompatible grants must fail before environment resolution")
+
+    monkeypatch.setattr(client, "image_exists", unexpected_provider_access)
+    monkeypatch.setattr(client, "get_container", unexpected_provider_access)
+    monkeypatch.setattr(client, "_cleanup_failed_create_resources", unexpected_provider_access)
+    monkeypatch.setattr(Environment, "resolve", unexpected_environment_resolution)
+
+    with pytest.raises(MountConfigError, match="read-only host_path grants.*SYS_ADMIN"):
+        if operation == "create":
+            await client.create(
+                manifest=manifest,
+                options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+            )
+        else:
+            await client.resume(state)
+
+    assert docker_client.containers.calls == []
+    assert container.start_calls == 0
+    assert state.session_id == original_session_id
+    assert state.container_id == "existing-container"
+    assert state.workspace_root_ready is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("storage", "explicit_host_path", "read_only"),
+    [
+        ("none", True, True),
+        ("in-container", True, False),
+        ("in-container", False, True),
+        ("docker-volume", True, True),
+    ],
+    ids=["ordinary-read-only-bind", "writable-bind", "path-only-grant", "external-storage"],
+)
+async def test_docker_create_preserves_compatible_host_grants_and_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage: str,
+    explicit_host_path: bool,
+    read_only: bool,
+) -> None:
+    container = _StartedContainer()
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(tmp_path) if explicit_host_path else None,
+                read_only=read_only,
+            ),
+        ),
+    )
+    if storage != "none":
+        manifest.entries["data"] = S3Mount(
+            bucket="bucket",
+            mount_strategy=(
+                InContainerMountStrategy(pattern=RcloneMountPattern())
+                if storage == "in-container"
+                else DockerVolumeMountStrategy(driver="rclone")
+            ),
+        )
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    session = await client.create(
+        manifest=manifest,
+        options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+    )
+
+    assert isinstance(session._inner, DockerSandboxSession)
+    assert container.start_calls == 1
+    kwargs = docker_client.containers.calls[0]
+    mounts = cast(list[dict[str, object]], kwargs.get("mounts", []))
+    binds = [mount for mount in mounts if mount["Type"] == "bind"]
+    assert binds == (
+        [
+            {
+                "Target": "/mnt/shared-data",
+                "Source": str(tmp_path),
+                "Type": "bind",
+                "ReadOnly": read_only,
+            }
+        ]
+        if explicit_host_path
+        else []
+    )
+    assert kwargs.get("cap_add") == (["SYS_ADMIN"] if storage == "in-container" else None)
+    assert any(mount["Type"] == "volume" for mount in mounts) == (storage == "docker-volume")
 
 
 @pytest.mark.asyncio
