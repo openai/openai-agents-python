@@ -35,7 +35,11 @@ class SandboxAgent(Agent[TContext]):
     """
 
     default_manifest: Manifest | None = None
-    """Default sandbox manifest for new sessions created by `Runner` sandbox execution."""
+    """Default sandbox manifest for new sessions created by `Runner` sandbox execution.
+
+    Dictionary inputs cannot authorize local host sources or extra path grants. Configure
+    these on a trusted `Manifest` instance after validating the host paths in application code.
+    """
 
     base_instructions: (
         str
