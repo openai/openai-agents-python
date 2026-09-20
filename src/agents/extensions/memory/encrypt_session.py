@@ -40,8 +40,10 @@ from ...items import TResponseInputItem
 from ...memory.openai_responses_compaction_session import OpenAIResponsesCompactionSession
 from ...memory.session import (
     OpenAIResponsesCompactionArgs,
+    Session,
     SessionABC,
     _call_session_method,
+    _CompactionSnapshot,
     _get_session_wrapper,
 )
 from ...memory.session_settings import SessionSettings, resolve_session_limit
@@ -184,6 +186,7 @@ class EncryptedSession(SessionABC):
             wrapper=wrapper,
             read_items=lambda limit: self._read_compaction_items(limit, wrapper=wrapper),
             prepare_items=self._encrypt_items,
+            read_snapshot=self._get_compaction_snapshot,
         )
 
     async def _defer_encrypted_compaction(
@@ -199,6 +202,32 @@ class EncryptedSession(SessionABC):
             store,
             read_items=lambda limit: self._read_compaction_items(limit, wrapper=wrapper),
         )
+
+    async def _get_compaction_snapshot(self, limit: int) -> _CompactionSnapshot | None:
+        backend: Session = self.underlying_session
+        if isinstance(backend, OpenAIResponsesCompactionSession):
+            backend = backend.underlying_session
+        reader = getattr(backend, "_get_compaction_snapshot", None)
+        if reader is None:
+            return None
+        raw: _CompactionSnapshot | None = await reader(limit)
+        if raw is None:
+            return None
+        items: list[TResponseInputItem] = []
+        positions: list[int] = []
+        for index, encrypted_item in enumerate(raw.items):
+            item = self._unwrap(encrypted_item)
+            if item is not None:
+                items.append(item)
+                positions.append(index)
+
+        async def replace_suffix(start: int, output: list[TResponseInputItem]) -> bool:
+            # Expired envelopes before the first logical item in this bounded
+            # snapshot can be removed too; rows outside the snapshot remain untouched.
+            raw_start = 0 if start == 0 else positions[start]
+            return await raw.replace_suffix(raw_start, self._encrypt_items(output))
+
+        return _CompactionSnapshot(items, raw.complete, replace_suffix)
 
     async def _read_compaction_items(
         self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None = None

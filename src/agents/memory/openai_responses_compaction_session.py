@@ -14,6 +14,7 @@ from ..run_internal.items import (
     ReasoningItemIdPolicy,
     apply_reasoning_item_id_policy,
     digest_input_item,
+    drop_orphan_function_calls,
     normalize_input_items_for_api,
 )
 from ..usage import _response_usage_to_usage
@@ -22,6 +23,7 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    _CompactionSnapshot,
 )
 
 if TYPE_CHECKING:
@@ -36,6 +38,14 @@ _ALL_SESSION_ITEMS_LIMIT = 2_147_483_647
 OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
 
+def _is_user_message(item: TResponseInputItem) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") == "message":
+        return item.get("role") == "user"
+    return item.get("role") == "user" and "content" in item
+
+
 def select_compaction_candidate_items(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
@@ -43,13 +53,6 @@ def select_compaction_candidate_items(
 
     Excludes user messages and compaction items.
     """
-
-    def _is_user_message(item: TResponseInputItem) -> bool:
-        if not isinstance(item, dict):
-            return False
-        if item.get("type") == "message":
-            return item.get("role") == "user"
-        return item.get("role") == "user" and "content" in item
 
     return [
         item
@@ -91,10 +94,13 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     OpenAIConversationsSession) and automatically calls the OpenAI responses.compact
     API after each turn when the decision hook returns True.
 
-    Automatic compaction requires coverage of stored history by the latest successful
-    model exchange, preserving item order and each occurrence of repeated items. If a bounded read
-    cannot establish coverage, the full history is retained. If that read changes the
-    history snapshot, the decision hook is called again with the complete snapshot.
+    Automatic compaction matches stored history against the latest successful model
+    exchange, preserving order and repeated occurrences. Native SQLite and async SQLite
+    stores can atomically replace a bounded, model-visible suffix while retaining older
+    history. Partial suffixes start at a user message to preserve preceding model item
+    groups. Other stores require complete coverage. Partial snapshots use input mode;
+    explicit previous_response_id mode requires complete coverage. The decision hook
+    must approve the selected snapshot and mode before compaction.
     Item matching respects the wrapped store's declared ID-matching policy and the
     current run's reasoning-ID policy. Explicit manual
     ``run_compaction()`` calls still compact the stored history and should be used
@@ -211,6 +217,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
         | None = None,
         prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
+        read_snapshot: Callable[[int], Awaitable[_CompactionSnapshot | None]] | None = None,
     ) -> None:
         # Keep one wrapper mutation boundary from the snapshot through replacement.
         # A concurrent add, pop, or clear waits here and then runs against the
@@ -234,7 +241,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 )
                 return
             await self._run_compaction_locked(
-                args, wrapper=wrapper, read_items=read_items, prepare_items=prepare_items
+                args,
+                wrapper=wrapper,
+                read_items=read_items,
+                prepare_items=prepare_items,
+                read_snapshot=read_snapshot,
             )
 
     async def _run_compaction_locked(
@@ -245,6 +256,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         read_items: Callable[[int | None], Awaitable[tuple[list[TResponseInputItem], bool]]]
         | None = None,
         prepare_items: Callable[[list[TResponseInputItem]], list[TResponseInputItem]] | None = None,
+        read_snapshot: Callable[[int], Awaitable[_CompactionSnapshot | None]] | None = None,
     ) -> None:
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
@@ -294,28 +306,35 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             )
             return
 
+        snapshot: _CompactionSnapshot | None = None
+        suffix_start = 0
         if is_automatic:
             model_exchange: tuple[tuple[str, ...], ReasoningItemIdPolicy | None] = getattr(
                 wrapper, "_session_compaction_model_exchange", ((), None)
             )
             model_items, reasoning_item_id_policy = model_exchange
-            # Read one occurrence beyond what the model saw. If more history exists,
-            # coverage fails without loading the entire backend. Do this only after
-            # the decision hook approves, and bypass any cached partial snapshot.
             approved_session_items = session_items
-            (
-                compaction_candidate_items,
-                session_items,
-                complete,
-            ) = await self._ensure_compaction_candidates(read_items, limit=len(model_items) + 1)
+            approved_mode = resolved_mode
+            if read_snapshot is None:
+                read_snapshot = getattr(self.underlying_session, "_get_compaction_snapshot", None)
+            if read_snapshot is not None:
+                snapshot = await read_snapshot(len(model_items) + 1)
+            if snapshot is not None:
+                session_items = _normalize_compaction_session_items(snapshot.items)
+                complete = snapshot.complete
+            else:
+                # Backends without atomic suffix replacement still require complete
+                # coverage, established by a finite read after the hook approves.
+                _, session_items, complete = await self._ensure_compaction_candidates(
+                    read_items, limit=len(model_items) + 1
+                )
             # Consume model occurrences in order, allowing additional model-only items
             # between stored items while rejecting reordered or missing occurrences.
             # Replay may omit an old reasoning ID, but new caller input and filters can
             # retain it. Select only the representation present in the actual exchange.
-            remaining = iter(model_items)
-            covered = complete
+            remaining = reversed(model_items)
             matched_items: list[TResponseInputItem] = []
-            for item in session_items:
+            for item in reversed(session_items):
                 digest = digest_input_item(
                     item, ignore_ids_for_matching=self._ignore_ids_for_matching
                 )
@@ -334,20 +353,48 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     None,
                 )
                 if matched_digest is None:
-                    covered = False
                     break
                 matched_items.append(item if matched_digest == digest else normalized_item)
-            if not covered:
+            suffix_start = len(session_items) - len(matched_items)
+            if not matched_items or (snapshot is None and (not complete or suffix_start > 0)):
                 logger.warning(
                     "Skipped automatic compaction because complete stored history could not "
                     "be matched to the latest model exchange. Session history was retained."
                 )
                 return
-            session_items = matched_items
+            if snapshot is not None and (not complete or suffix_start > 0):
+                # A response chain may summarize earlier items that will be retained.
+                # Only input mode can scope the summary to this exact suffix.
+                if (requested_mode or self.compaction_mode) == "previous_response_id":
+                    return
+                resolved_mode = "input"
+            session_items = list(reversed(matched_items))
+            if snapshot is not None and (not complete or suffix_start > 0):
+                # Start at a caller message so retained reasoning and its following
+                # model-emitted item stay together, including outside this window.
+                boundary = next(
+                    (index for index, item in enumerate(session_items) if _is_user_message(item)),
+                    None,
+                )
+                if boundary is None:
+                    return
+                suffix_start += boundary
+                session_items = session_items[boundary:]
+                # Keep tool/program groups intact. Pruning a broken group here would
+                # make replacement remove stored items absent from the compact input.
+                if (
+                    drop_orphan_function_calls(
+                        session_items, output_pruning_indexes=set(range(len(session_items)))
+                    )
+                    != session_items
+                ):
+                    return
             compaction_candidate_items = select_compaction_candidate_items(session_items)
             # A bounded reload may include history omitted from the hook's initial
             # cached/default-limited view. Require approval of the actual snapshot.
-            if session_items != approved_session_items and not self.should_trigger_compaction(
+            if (
+                session_items != approved_session_items or resolved_mode != approved_mode
+            ) and not self.should_trigger_compaction(
                 {
                     "response_id": self._response_id,
                     "compaction_mode": resolved_mode,
@@ -381,25 +428,38 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             _normalize_compaction_output_items(compacted.output or [])
         )
 
-        # Prepare output before any destructive operation. Keep the rollback snapshot in
-        # its original storage form so restoring encrypted history does not renew its TTL.
-        stored_output_items = (
-            prepare_items(output_items) if prepare_items is not None else output_items
-        )
-        previous_items = await self._get_all_underlying_session_items()
-        try:
-            await self._replace_underlying_session_items(
-                output_items=stored_output_items,
-                previous_items=previous_items,
+        if snapshot is not None:
+            try:
+                replaced = await snapshot.replace_suffix(suffix_start, output_items)
+                if not replaced:
+                    logger.warning(
+                        "Skipped compaction replacement because the stored suffix changed."
+                    )
+                    return
+            finally:
+                # A transaction can commit before cancellation or acknowledgement failure.
+                self._mutation_generation += 1
+                self._compaction_candidate_items = None
+                self._session_items = None
+        else:
+            # Manual calls and legacy complete snapshots retain whole-history
+            # replacement with the existing rollback semantics.
+            stored_output_items = (
+                prepare_items(output_items) if prepare_items is not None else output_items
             )
-        except (Exception, asyncio.CancelledError):
+            previous_items = await self._get_all_underlying_session_items()
+            try:
+                await self._replace_underlying_session_items(
+                    output_items=stored_output_items, previous_items=previous_items
+                )
+            except (Exception, asyncio.CancelledError):
+                self._mutation_generation += 1
+                raise
             self._mutation_generation += 1
-            raise
-        self._mutation_generation += 1
-        self._compaction_candidate_items = (
-            None if read_items is not None else select_compaction_candidate_items(output_items)
-        )
-        self._session_items = None if read_items is not None else output_items
+            self._compaction_candidate_items = (
+                None if read_items is not None else select_compaction_candidate_items(output_items)
+            )
+            self._session_items = None if read_items is not None else output_items
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",

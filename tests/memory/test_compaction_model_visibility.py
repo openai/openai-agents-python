@@ -372,7 +372,8 @@ async def test_backend_read_limit_cannot_hide_retained_history_from_compaction(
         agent = Agent(name="worker", model=model)
         await run(agent, "limited read", session, streamed)
         assert LOCAL_OUTPUT not in str(model.calls[0].input)
-        client.responses.compact.assert_not_awaited()
+        client.responses.compact.assert_awaited_once()
+        assert LOCAL_OUTPUT not in str(client.responses.compact.call_args.kwargs["input"])
         assert LOCAL_OUTPUT in str(await session.get_items(limit=100))
 
         await run(
@@ -383,7 +384,7 @@ async def test_backend_read_limit_cannot_hide_retained_history_from_compaction(
             RunConfig(session_settings={"limit": 100}),
         )
         assert LOCAL_OUTPUT in str(model.calls[1].input)
-        client.responses.compact.assert_awaited_once()
+        assert client.responses.compact.await_count == 2
         assert LOCAL_OUTPUT in str(client.responses.compact.call_args.kwargs["input"])
         assert await session.get_items(limit=100) == []
     finally:
@@ -432,26 +433,37 @@ async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
             await session.add_items([{"role": "user", "content": "fresh tail"}])
         read = AsyncMock(wraps=backend.get_items)
         backend.get_items = read  # type: ignore[method-assign]
+        snapshot_read = AsyncMock(wraps=backend._get_compaction_snapshot)
+        backend._get_compaction_snapshot = snapshot_read  # type: ignore[method-assign]
         model = ScriptedModel(steps=[[get_text_message("ok")], [get_text_message("done")]])
         agent = Agent(name="worker", model=model)
         for prompt in ("first", "second"):
             read.reset_mock()
+            snapshot_read.reset_mock()
             await run(agent, prompt, session, False)
             # One stored input, one new prompt, one response, and one lookahead item.
             limits = [
                 call.kwargs.get("limit", call.args[0] if call.args else None)
                 for call in read.call_args_list
             ]
-            assert all(limit is None or limit <= 4 for limit in limits)
-            if not approve:
+            if approve:
+                assert all(call.args[0] <= 4 for call in snapshot_read.call_args_list)
+                assert snapshot_read.await_count == 1
+            else:
                 assert all(limit is None or limit == 1 for limit in limits)
-            client.responses.compact.assert_not_awaited()
-        assert len(await backend.get_items(limit=1000)) == (105 if encryption != "none" else 104)
+                snapshot_read.assert_not_awaited()
+                client.responses.compact.assert_not_awaited()
+        assert client.responses.compact.await_count == (2 if approve else 0)
+        assert len(await backend.get_items(limit=1000)) == (
+            98 if approve else (105 if encryption != "none" else 104)
+        )
         # Explicit manual compaction can still process the application's approved
         # logical history, including when limited reads omit live history.
+        client.responses.compact.reset_mock()
         await session.run_compaction({"force": True})  # type: ignore[attr-defined]
         client.responses.compact.assert_awaited_once()
-        assert "done" in str(client.responses.compact.call_args.kwargs["input"])
+        if not approve:
+            assert "done" in str(client.responses.compact.call_args.kwargs["input"])
         assert await backend.get_items(limit=1000) == []
     finally:
         backend.close()
@@ -651,24 +663,27 @@ async def test_expired_read_overhead_does_not_authorize_hidden_history(
             False,
             RunConfig(session_settings={"limit": 100}, call_model_input_filter=hide_history),
         )
-        client.responses.compact.assert_not_awaited()
+        client.responses.compact.assert_awaited_once()
         assert LOCAL_OUTPUT not in str(model.calls[0].input)
-        assert len(await backend.get_items(limit=100)) == 13
+        assert LOCAL_OUTPUT not in str(client.responses.compact.call_args.kwargs["input"])
+        assert len(await backend.get_items(limit=100)) == 11
+        assert LOCAL_OUTPUT in str(await session.get_items(limit=100))
 
         read = AsyncMock(wraps=backend.get_items)
         backend.get_items = read  # type: ignore[method-assign]
-        await run(agent, "bounded", session, False)
+        await run(agent, "bounded", session, False, RunConfig(call_model_input_filter=hide_history))
         # The previous full read's overhead is not carried into a new bounded turn.
         limits = [
             call.kwargs.get("limit", call.args[0] if call.args else None)
             for call in read.call_args_list
         ]
         assert all(limit is None or limit <= 4 for limit in limits)
-        client.responses.compact.assert_not_awaited()
+        assert client.responses.compact.await_count == 2
+        assert LOCAL_OUTPUT not in str(client.responses.compact.call_args.kwargs["input"])
         await run(agent, "visible", session, False, RunConfig(session_settings={"limit": 100}))
-        client.responses.compact.assert_awaited_once()
+        assert client.responses.compact.await_count == 3
         assert LOCAL_OUTPUT in str(client.responses.compact.call_args.kwargs["input"])
-        assert await backend.get_items(limit=100) == []
+        assert await session.get_items(limit=100) == []
     finally:
         backend.close()
 
