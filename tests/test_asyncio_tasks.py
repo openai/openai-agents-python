@@ -129,3 +129,34 @@ async def test_run_producer_consumer_cancels_producer_after_consumer_failure() -
     with pytest.raises(ConsumerError, match="consumer failed"):
         await run_producer_consumer(producer(), consumer())
     assert producer_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_producer_consumer_fail_fast_cancels_blocked_consumer() -> None:
+    consumer_started = asyncio.Event()
+    consumer_cancelled = asyncio.Event()
+    upstream_cancelled = asyncio.Event()
+
+    async def producer() -> None:
+        await consumer_started.wait()
+        raise asyncio.QueueFull
+
+    async def consumer() -> None:
+        consumer_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await upstream_cancelled.wait()
+            consumer_cancelled.set()
+
+    with pytest.raises(asyncio.QueueFull):
+        await asyncio.wait_for(
+            run_producer_consumer(
+                producer(),
+                consumer(),
+                fail_fast_exceptions=(asyncio.QueueFull,),
+                on_failure=upstream_cancelled.set,
+            ),
+            timeout=1,
+        )
+    assert consumer_cancelled.is_set()
