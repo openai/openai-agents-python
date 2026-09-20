@@ -589,6 +589,11 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _mcp_tool_binding: tuple[str, str, int | None] | None = field(
+        default=None, kw_only=True, repr=False
+    )
+    """Original MCP server name, raw tool name, and configured server position for resume."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""

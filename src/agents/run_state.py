@@ -190,7 +190,12 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
+_MCP_BINDING_RESTORE_ERROR = (
+    "Cannot restore a local MCP tool call without a matching recipient binding. "
+    "Keep the original MCP server configuration and tool listing, or start a new run. "
+    "Older snapshots without MCP recipient bindings cannot resume pending local MCP calls."
+)
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -229,6 +234,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
+    "1.18": "Binds restored local MCP calls to their configured server and original tool name.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -2209,6 +2215,10 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
+        Pending local MCP calls require recipient bindings written by schema 1.18 or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Start a new run if an older snapshot lacks these bindings.
+
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
@@ -2289,6 +2299,10 @@ class RunState(Generic[TContext, TAgent]):
         Do not pass client-supplied state directly to this method. Keep the snapshot on the
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Pending local MCP calls require recipient bindings written by schema 1.18 or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Start a new run if an older snapshot lacks these bindings.
 
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
@@ -2565,6 +2579,8 @@ def _serialize_tool_metadata(
 ) -> dict[str, Any]:
     """Build a dictionary of tool metadata for serialization."""
     metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
+    if isinstance(tool, FunctionTool) and tool._mcp_tool_binding is not None:
+        metadata["mcpToolBinding"] = list(tool._mcp_tool_binding)
     namespace = get_function_tool_namespace(tool)
     if namespace is not None:
         metadata["namespace"] = namespace
@@ -3059,6 +3075,7 @@ async def _deserialize_processed_response(
     strict_context: bool = False,
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
+    completed_tool_calls: Collection[tuple[str, str]] = (),
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
@@ -3238,6 +3255,26 @@ async def _deserialize_processed_response(
                     continue
                 tool_name = _resolve_function_tool_name(entry)
                 function_tool = tools_map.get(tool_name) if tool_name else None
+                tool_data = entry.get("tool", {})
+                saved_binding = (
+                    tool_data.get("mcpToolBinding") if isinstance(tool_data, Mapping) else None
+                )
+                current_binding = (
+                    function_tool._mcp_tool_binding if function_tool is not None else None
+                )
+                # Completed siblings remain in the processed response, but resume skips
+                # their committed outputs. They do not need an executable MCP recipient.
+                call_is_completed = (
+                    tool_invocation_call_id(entry.get("tool_call", {})) in completed_tool_calls
+                )
+                if not call_is_completed and (
+                    saved_binding is not None or current_binding is not None
+                ):
+                    if current_binding is None or saved_binding != list(current_binding):
+                        raise validation_error_factory(
+                            _MCP_BINDING_RESTORE_ERROR,
+                            UserError,
+                        )
                 if function_tool is None:
                     continue
 
@@ -4179,6 +4216,11 @@ async def _build_run_state_from_json(
             strict_context=strict_context,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
+            completed_tool_calls={
+                identity
+                for item in state._generated_items
+                if (identity := tool_output_identity(item.raw_item)) is not None
+            },
             validation_error_factory=validation_error_factory,
         )
     else:
@@ -5253,6 +5295,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             "and tool name."
         ),
         "RunState completed tool invocation does not match a restored tool call and output.",
+        _MCP_BINDING_RESTORE_ERROR,
         "RunState sandbox resume state contains an invalid manifest",
         "RunState sandbox resume state has an invalid envelope",
         *(
