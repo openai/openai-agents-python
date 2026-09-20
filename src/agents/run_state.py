@@ -2202,6 +2202,13 @@ class RunState(Generic[TContext, TAgent]):
         This method is used to deserialize a run state from a string that was serialized using
         the `to_string()` method.
 
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
@@ -2275,6 +2282,13 @@ class RunState(Generic[TContext, TAgent]):
 
         This method is used to deserialize a run state from a dict that was created using
         the `to_json()` method.
+
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
@@ -2512,7 +2526,7 @@ def _ensure_json_compatible(value: Any) -> Any:
 
 
 def _serialize_output_value(value: Any) -> Any:
-    """Convert a tool output value, including containers of models, to plain data.
+    """Convert an output value, including containers of models, to plain data.
 
     ``_ensure_json_compatible`` stringifies anything ``json.dumps`` cannot handle, so
     Pydantic models and dataclasses nested in containers would otherwise degrade to
@@ -2851,6 +2865,16 @@ class _DeserializedFunctionAction:
     nested_agent_run_state_data: Mapping[str, Any] | None
 
 
+def _serialize_guardrail_payload(value: Any) -> Any:
+    """Preserve structured payloads without losing best-effort serialization."""
+    try:
+        value = _serialize_output_value(value)
+    except Exception:
+        # Retain the original payload for the existing JSON/string fallback.
+        pass
+    return _ensure_json_compatible(value)
+
+
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
     *,
@@ -2866,11 +2890,11 @@ def _serialize_guardrail_results(
             },
             "output": {
                 "tripwireTriggered": result.output.tripwire_triggered,
-                "outputInfo": _ensure_json_compatible(result.output.output_info),
+                "outputInfo": _serialize_guardrail_payload(result.output.output_info),
             },
         }
         if isinstance(result, OutputGuardrailResult):
-            entry["agentOutput"] = _ensure_json_compatible(result.agent_output)
+            entry["agentOutput"] = _serialize_guardrail_payload(result.agent_output)
             entry["agent"] = _serialize_agent_reference(
                 result.agent,
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -2896,7 +2920,7 @@ def _serialize_tool_guardrail_results(
             {
                 "guardrail": {"type": type_label, "name": guardrail_name},
                 "output": {
-                    "outputInfo": _ensure_json_compatible(result.output.output_info),
+                    "outputInfo": _serialize_guardrail_payload(result.output.output_info),
                     "behavior": result.output.behavior,
                 },
             }

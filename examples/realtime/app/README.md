@@ -20,6 +20,27 @@ cd examples/realtime/app && uv run python server.py
 
 Then open your browser to: http://localhost:8000
 
+### Local-use boundary and limits
+
+Run this demo only on your own trusted machine. The launch command binds to
+`127.0.0.1`. WebSocket connections require a `localhost` or `127.0.0.1` Host and a
+matching HTTP Origin, so open the page from this server. Missing or unrelated
+browser origins are rejected before the server opens an OpenAI session.
+
+These checks do not authenticate local processes, which can forge HTTP headers.
+Do not expose this demo through a public bind address, proxy, or tunnel. A deployed
+service needs its own authentication, authorization, rate limits, account quotas,
+and transport security before opening sessions with server credentials.
+
+The demo allows four simultaneous sessions, including sessions still connecting.
+Each client text message is limited to 1 MiB and each audio message to 24,000 int16
+samples (one second at 24 kHz). Each connection can assemble one image at a time,
+up to 4 MiB of ASCII data URL content in at most 128 chunks; the UI sends images in 60,000-character
+chunks. A direct image message must also fit the text-message limit. These are
+demo limits, not OpenAI API limits. Invalid or excessive input closes the socket
+and releases its session. Keep the launch command's WebSocket backend and queue
+limits when running the example.
+
 ### Debugging Realtime usage
 
 Set `LOG_LEVEL=DEBUG` to log the raw `response.done` usage, the typed per-response usage with modality details, and the cumulative session usage:

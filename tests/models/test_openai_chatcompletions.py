@@ -136,6 +136,16 @@ async def test_falsy_reasoning_is_forwarded() -> None:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_provider_native_extra_args_reach_the_request() -> None:
+    kwargs = await _run_chat_completions_model_with_custom_base_url(
+        ModelSettings(temperature=0.2, extra_args={"timeout": httpx2.Timeout(30.0)})
+    )
+
+    assert kwargs["timeout"] == httpx2.Timeout(30.0)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_get_response_with_text_message(monkeypatch) -> None:
     """
     When the model returns a ChatCompletionMessage with plain text content,

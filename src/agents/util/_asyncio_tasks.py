@@ -118,12 +118,18 @@ async def run_producer_consumer(
     producer: Awaitable[TProducer],
     consumer: Awaitable[TConsumer],
     /,
+    *,
+    fail_fast_exceptions: tuple[type[BaseException], ...] = (),
+    on_failure: Callable[[], None] | None = None,
 ) -> tuple[TProducer, TConsumer]:
     """Run a producer and consumer with asymmetric failure handling.
 
     The producer must signal completion to the consumer in a ``finally`` block. A producer
     failure waits for the consumer to drain before propagating, while a consumer failure or
-    parent cancellation cancels and drains the sibling task.
+    parent cancellation cancels and drains the sibling task. Producer failures matching
+    ``fail_fast_exceptions`` also cancel the consumer without waiting for it to drain;
+    the producer must not wait to signal completion in those cases. Before awaiting cancelled
+    tasks, ``on_failure`` runs synchronously so callers can stop upstream work during cleanup.
     """
     producer_task = asyncio.ensure_future(producer)
     consumer_task = asyncio.ensure_future(consumer)
@@ -138,7 +144,9 @@ async def run_producer_consumer(
 
         try:
             producer_result = producer_task.result()
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, fail_fast_exceptions):
+                raise
             await consumer_task
             raise
 
@@ -148,5 +156,7 @@ async def run_producer_consumer(
         for task in tasks:
             if not task.done():
                 task.cancel()
+        if on_failure is not None:
+            on_failure()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise

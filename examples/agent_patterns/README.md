@@ -61,3 +61,5 @@ See the [`input_guardrails.py`](./input_guardrails.py) and [`output_guardrails.p
 You can pause runs for manual approval before executing sensitive tools. This is useful for operations like sending money, deleting data, or running destructive commands.
 
 See [`human_in_the_loop.py`](./human_in_the_loop.py) for the base approval flow and [`human_in_the_loop_custom_rejection.py`](./human_in_the_loop_custom_rejection.py) for run-level tool error formatting when approvals are rejected.
+
+See [`human_in_the_loop_server.py`](./human_in_the_loop_server.py) for a server-owned snapshot with owner-checked, single-use approval submissions. Its CLI simulates an authenticated client; HTTP authentication and shared production storage are application responsibilities. Never deserialize an unverified client-supplied `RunState` to collect approvals.

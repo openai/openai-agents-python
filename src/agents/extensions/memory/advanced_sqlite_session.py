@@ -1153,6 +1153,13 @@ class AdvancedSQLiteSession(SQLiteSession):
                     f"Cannot delete current branch '{branch_id}'. Use force=True or switch branches first"  # noqa: E501
                 )
             else:
+                # Confirm the branch is known before switching away from it; the delete
+                # below raises for an unknown branch, which would otherwise leave the
+                # session pointing at 'main'.
+                if not any(
+                    branch["branch_id"] == branch_id for branch in await self.list_branches()
+                ):
+                    raise ValueError(f"Branch '{branch_id}' does not exist")
                 # Switch to main before deleting
                 await self.switch_to_branch("main")
 

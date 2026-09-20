@@ -108,12 +108,39 @@ def _import_any_llm_module(
     fake_any_llm: Any = pytypes.ModuleType("any_llm")
     fake_any_llm.AnyLLM = FakeAnyLLMFactory
 
-    sys.modules.pop("agents.extensions.models.any_llm_model", None)
+    # Importing the submodule fresh replaces both bindings that other code resolves
+    # it through: the ``sys.modules`` entry and the ``any_llm_model`` attribute on the
+    # parent package. Route both through ``monkeypatch`` so teardown restores them
+    # together; otherwise a later ``from agents.extensions.models import any_llm_model``
+    # would still see the stub-backed module while ``sys.modules`` has the original.
+    parent_package = importlib.import_module("agents.extensions.models")
+    monkeypatch.delitem(sys.modules, "agents.extensions.models.any_llm_model", raising=False)
+    monkeypatch.delattr(parent_package, "any_llm_model", raising=False)
     monkeypatch.setitem(sys.modules, "any_llm", fake_any_llm)
 
     module = importlib.import_module("agents.extensions.models.any_llm_model")
     monkeypatch.setattr(module, "AnyLLM", FakeAnyLLMFactory, raising=True)
     return module, create_calls
+
+
+def test_import_any_llm_module_restores_module_bindings_on_teardown() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    parent_package = importlib.import_module("agents.extensions.models")
+    original = importlib.import_module("agents.extensions.models.any_llm_model")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        module, _ = _import_any_llm_module(
+            monkeypatch, FakeAnyLLMProvider(supports_responses=False)
+        )
+        assert module is not original
+        assert sys.modules["agents.extensions.models.any_llm_model"] is module
+        assert parent_package.any_llm_model is module
+
+    assert sys.modules["agents.extensions.models.any_llm_model"] is original
+    assert parent_package.any_llm_model is original
 
 
 def _chat_completion(text: str) -> ChatCompletion:

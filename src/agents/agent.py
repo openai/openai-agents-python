@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import dataclasses
 import inspect
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
@@ -72,6 +72,10 @@ if TYPE_CHECKING:
     from .run import RunConfig
     from .run_state import RunState
     from .stream_events import StreamEvent
+
+
+class _AgentToolStreamOverflow(UserError):
+    """The agent tool callback queue exceeded its configured backlog limit."""
 
 
 @dataclass
@@ -602,6 +606,7 @@ class Agent(AgentBase, Generic[TContext]):
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
+        on_stream_max_pending_events: int | None = 1024,
     ) -> FunctionTool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -625,6 +630,13 @@ class Agent(AgentBase, Generic[TContext]):
                 agent run. The callback receives an `AgentToolStreamEvent` containing the nested
                 agent, the originating tool call (when available), and each stream event. When
                 provided, the nested agent is executed in streaming mode.
+            on_stream_max_pending_events: Maximum number of events waiting for `on_stream`,
+                excluding the event currently being handled. Defaults to 1024. Use a positive
+                integer to change the limit or None to allow an unlimited backlog. If the queue
+                remains full after giving the handler an opportunity to run, the nested run and
+                callback dispatch are cancelled and the tool fails through `failure_error_function`.
+                This limits pending event count, not event sizes or total run memory. Has no effect
+                when `on_stream` is not provided.
             failure_error_function: If provided, generate an error message when the tool (agent) run
                 fails. The message is sent to the LLM. If None, the exception is raised instead.
             needs_approval: Bool or callable to decide if this agent tool should pause for approval.
@@ -632,6 +644,9 @@ class Agent(AgentBase, Generic[TContext]):
             input_builder: Optional function to build the nested agent input from structured data.
             include_input_schema: Whether to include the full JSON schema in structured input.
         """
+
+        if on_stream_max_pending_events is not None and on_stream_max_pending_events <= 0:
+            raise UserError("on_stream_max_pending_events must be a positive integer or None")
 
         if run_config is not None:
             from .run_config import _coerce_run_config
@@ -902,9 +917,16 @@ class Agent(AgentBase, Generic[TContext]):
                         conversation_id=None if resume_state is not None else conversation_id,
                         session=session,
                     )
-                    # Dispatch callbacks in the background so slow handlers do not block
-                    # event consumption.
-                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue()
+                    # Keep callbacks decoupled from event consumption within a bounded backlog.
+                    # Reserve one extra slot for completion, including on failure/cancellation.
+                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue(
+                        maxsize=on_stream_max_pending_events + 1
+                        if on_stream_max_pending_events is not None
+                        else 0
+                    )
+                    stream_events = cast(
+                        AsyncGenerator["StreamEvent", None], run_result_streaming.stream_events()
+                    )
 
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
@@ -942,7 +964,7 @@ class Agent(AgentBase, Generic[TContext]):
 
                         current_agent = run_result_streaming.current_agent
                         try:
-                            async for event in run_result_streaming.stream_events():
+                            async for event in stream_events:
                                 if isinstance(event, AgentUpdatedStreamEvent):
                                     current_agent = event.new_agent
 
@@ -951,11 +973,45 @@ class Agent(AgentBase, Generic[TContext]):
                                     "agent": current_agent,
                                     "tool_call": context.tool_call,
                                 }
-                                await event_queue.put(payload)
+                                if (
+                                    on_stream_max_pending_events is not None
+                                    and event_queue.qsize() >= on_stream_max_pending_events
+                                ):
+                                    # A burst of ready events must let a ready callback catch up.
+                                    await asyncio.sleep(0)
+                                    if event_queue.qsize() >= on_stream_max_pending_events:
+                                        raise _AgentToolStreamOverflow(
+                                            "Agent tool on_stream backlog exceeded "
+                                            "on_stream_max_pending_events="
+                                            f"{on_stream_max_pending_events}. "
+                                            "Use a faster handler, increase the limit, "
+                                            "or set it to None."
+                                        )
+                                event_queue.put_nowait(payload)
                         finally:
-                            await event_queue.put(None)
+                            event_queue.put_nowait(None)
 
-                    await run_producer_consumer(enqueue_stream_events(), dispatch_stream_events())
+                    try:
+                        await run_producer_consumer(
+                            enqueue_stream_events(),
+                            dispatch_stream_events(),
+                            fail_fast_exceptions=(_AgentToolStreamOverflow,),
+                            # Stop upstream work before awaiting callback cancellation cleanup.
+                            on_failure=lambda: run_result_streaming.cancel(),
+                        )
+                    except BaseException:
+                        # Cancellation can interrupt the producer between iterator advances.
+                        # Explicitly close the iterator after its owning task has stopped.
+                        try:
+                            await stream_events.aclose()
+                        except BaseException as close_error:
+                            # Cleanup cancellation must not replace the primary failure either.
+                            log_model_and_tool_action_error(
+                                logger,
+                                "Error while closing an agent tool stream after failure",
+                                close_error,
+                            )
+                        raise
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(

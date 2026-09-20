@@ -188,6 +188,25 @@ To use streaming in a run that may pause for approvals, call `Runner.run_streame
 
 `RunState` is designed to be durable. Use `state.to_json()` or `state.to_string()` to store pending work in a database or queue and recreate it later with `RunState.from_json(...)` or `RunState.from_string(...)`.
 
+### Keep approval state on the server
+
+Serialized `RunState` contains execution state, including approval decisions, pending tool calls, and tool arguments. The SDK restores this state; `RunState.from_json()` and `RunState.from_string()` do not authenticate the snapshot or the person submitting it. Only deserialize snapshots from trusted storage, or snapshots whose complete integrity and ownership the application has verified. A schema check or a tool-call fingerprint does not authenticate a snapshot.
+
+For browser or mobile approval interfaces, keep the complete snapshot in application-controlled server storage. Send the reviewer only the tool details that the reviewer is authorized to see and opaque identifiers for the pending decisions. Treat tool names and arguments as untrusted display content and escape them when rendering HTML.
+
+When a decision arrives, the server must:
+
+1. Authenticate the reviewer using the application's session or authentication middleware. Do not take the reviewer's identity from the approval request body.
+2. Authorize that reviewer to act on the stored run and the selected pending calls. Possession of a run ID or decision ID is not authorization.
+3. Validate the submitted decision identifiers and boolean decisions against the pending requests stored on the server. Load the server-owned snapshot and obtain the pending items with `state.get_interruptions()`; do not accept replacement tool calls, arguments, approval records, or serialized state from the client.
+4. Apply `state.approve(...)` or `state.reject(...)` to those server-owned items, then resume the run. Coordinate consumption of each pending request with storage so concurrent or replayed submissions cannot resume the same snapshot twice. In shared storage, use an atomic owner-checked transition before starting resumed execution.
+
+The [server-side approval example](https://github.com/openai/openai-agents-python/blob/main/examples/agent_patterns/human_in_the_loop_server.py) demonstrates this pattern with a CLI client simulation and a store confined to one event loop in one process. It requires one decision for every pending call in a batch. The example consumes a request before deserialization and resumed execution, so failures and cancellations also consume the request. A production application must provide authentication, request protections, storage retention, and recovery that reconciles tool side effects before retrying; this example is not a deployable HTTP service.
+
+Replacing `context` with `context_override`, setting `strict_context=True`, or removing only the serialized approval records does not make an untrusted snapshot safe. Other fields still control resumed execution. If an application transports the complete snapshot through a client, the application must verify its integrity, bind it to the authorized user and run, and prevent replay before deserialization. Such verification does not encrypt the snapshot or hide its contents from the client.
+
+### Serialization options
+
 Useful serialization options:
 
 -   `context_serializer`: Customize how non-mapping context objects are serialized.

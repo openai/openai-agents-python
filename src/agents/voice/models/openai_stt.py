@@ -97,7 +97,14 @@ async def _wait_for_event(
         remaining = timeout - (monotonic() - start_time)
         if remaining <= 0:
             raise TimeoutError(f"Timeout waiting for event(s): {expected_types}")
-        evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
+        try:
+            evt = await asyncio.wait_for(event_queue.get(), timeout=remaining)
+        except asyncio.TimeoutError as e:
+            # On Python 3.10 asyncio.wait_for raises asyncio.TimeoutError, which is not
+            # the builtin TimeoutError the callers catch to wrap the failure as
+            # STTWebsocketConnectionError. The two became one class in 3.11. Raise the
+            # builtin so every timeout leaves this function as the same type.
+            raise TimeoutError(f"Timeout waiting for event(s): {expected_types}") from e
         if isinstance(evt, ErrorSentinel):
             raise _ListenerError("Websocket listener failed") from evt.error
         evt_type = evt.get("type", "")
