@@ -381,7 +381,7 @@ async def test_pending_input_recovery_refreshes_compaction_generation(round_trip
         await backend.clear_session()
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("mode", ["input", "auto"])
 async def test_compaction_reload_preserves_session_retrieval_window(
     mode: Literal["input", "auto"], tmp_path: Path
 ) -> None:
