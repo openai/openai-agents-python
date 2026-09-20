@@ -63,7 +63,8 @@ def validate_client_message(data: str) -> dict[str, Any]:
     try:
         message = json.loads(data)
     except (ValueError, RecursionError):
-        pass
+        logger.debug("Invalid JSON payload received from client", exc_info=True)
+        message = None
     if not isinstance(message, dict):
         raise WebSocketException(code=1008, reason="Expected a JSON object")
 
