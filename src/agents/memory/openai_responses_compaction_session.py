@@ -629,26 +629,28 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         limit: int | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], bool]:
         """Lazy-load candidates, or read a bounded snapshot for automatic coverage checks."""
-        if read_items is None and limit is not None:
-            # Storage wrappers such as EncryptedSession must bound raw reads before
-            # filtering expired items, including when compaction is the outer wrapper.
-            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
-        if read_items is not None or limit is not None:
-            # An explicit limit bypasses the cache and backend default read limit.
-            # The outer view applies decryption and TTL expiration to logical items.
-            if read_items is not None:
-                items, complete = await read_items(limit)
-            else:
-                items = await self.underlying_session.get_items(limit=limit)
-                complete = limit is not None and len(items) < limit
-            history = _normalize_compaction_session_items(items)
-            return select_compaction_candidate_items(history), history, complete
-
-        if self._compaction_candidate_items is not None and self._session_items is not None:
+        cache_snapshot = read_items is None and limit is None
+        if (
+            cache_snapshot
+            and self._compaction_candidate_items is not None
+            and self._session_items is not None
+        ):
             return (self._compaction_candidate_items[:], self._session_items[:], False)
-
-        history = _normalize_compaction_session_items(await self.underlying_session.get_items())
+        if read_items is None:
+            # Storage wrappers own the logical policy view and bounded raw reads,
+            # including when compaction is the outer wrapper.
+            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
+        if read_items is not None:
+            items, complete = await read_items(limit)
+        else:
+            items = await self.underlying_session.get_items(limit=limit)
+            complete = limit is not None and len(items) < limit
+        history = _normalize_compaction_session_items(items)
         candidates = select_compaction_candidate_items(history)
+        if not cache_snapshot:
+            # Explicit coverage limits and outer logical views bypass partial caches.
+            return candidates, history, complete
+
         self._compaction_candidate_items = candidates
         self._session_items = history
 

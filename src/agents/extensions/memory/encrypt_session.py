@@ -159,6 +159,9 @@ class EncryptedSession(SessionABC):
         self.cipher = _derive_session_fernet_key(master, session_id)
         self._kid = "hkdf-v1"
         self._ver = 1
+        # One-use read budget for envelopes omitted by the latest history read.
+        # This is not evidence of completeness or permission to replace history.
+        self._compaction_read_overhead = 0
 
     def __getattr__(self, name: str) -> Any:
         # Expose compaction only when the underlying session actually supports it.
@@ -201,22 +204,28 @@ class EncryptedSession(SessionABC):
         self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None = None
     ) -> tuple[list[TResponseInputItem], bool]:
         if limit is None:
+            # A default-limited policy read must not discard overhead already
+            # observed by a larger model-history read.
+            overhead = self._compaction_read_overhead
             items = await _call_session_method(
                 self.get_items, wrapper=_get_session_wrapper(self, wrapper)
             )
+            self._compaction_read_overhead = max(overhead, self._compaction_read_overhead)
             return items, False
-        # Bound raw reads too: get_items() can expand its window to skip expired
-        # envelopes. A full window cannot prove complete coverage, even if some
-        # of its entries expire, so leave that history untouched.
+        # Reuse only overhead already observed during ordinary history retrieval.
+        # Consume it before I/O; current raw completeness and plaintext visibility
+        # still decide whether compaction can replace the stored history.
+        raw_limit = limit + self._compaction_read_overhead
+        self._compaction_read_overhead = 0
         items = cast(
             list[TResponseInputItem],
             await _call_session_method(
                 self.underlying_session.get_items,
-                limit,
+                raw_limit,
                 wrapper=_get_session_wrapper(self.underlying_session, wrapper),
             ),
         )
-        if len(items) >= limit:
+        if len(items) >= raw_limit:
             return [], False
         return self._unwrap_valid_items(items), True
 
@@ -270,6 +279,7 @@ class EncryptedSession(SessionABC):
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> list[TResponseInputItem]:
+        self._compaction_read_overhead = 0
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
         effective_limit = resolve_session_limit(limit, self.session_settings)
         remaining = self.max_scan_items
@@ -291,6 +301,7 @@ class EncryptedSession(SessionABC):
                     ),
                 )
                 valid_items = self._unwrap_valid_items(encrypted_items)
+                self._compaction_read_overhead = len(encrypted_items) - len(valid_items)
                 if (
                     positive_limit
                     and effective_limit is not None
@@ -319,7 +330,9 @@ class EncryptedSession(SessionABC):
                 wrapper=wrapper,
             ),
         )
-        return self._unwrap_valid_items(encrypted_items)
+        valid_items = self._unwrap_valid_items(encrypted_items)
+        self._compaction_read_overhead = len(encrypted_items) - len(valid_items)
+        return valid_items
 
     def _encrypt_items(self, items: list[TResponseInputItem]) -> list[TResponseInputItem]:
         return cast(list[TResponseInputItem], [self._wrap(item) for item in items])

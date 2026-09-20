@@ -447,7 +447,7 @@ async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
             client.responses.compact.assert_not_awaited()
         assert len(await backend.get_items(limit=1000)) == (105 if encryption != "none" else 104)
         # Explicit manual compaction can still process the application's approved
-        # logical history, including when expired envelopes block automatic coverage.
+        # logical history, including when limited reads omit live history.
         await session.run_compaction({"force": True})  # type: ignore[attr-defined]
         client.responses.compact.assert_awaited_once()
         assert "done" in str(client.responses.compact.call_args.kwargs["input"])
@@ -544,3 +544,129 @@ async def test_automatic_compaction_preserves_reordered_history(
         assert compact_input[:2] == [first, second]
         assert model_only not in compact_input
     assert await session.get_items() == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("outer", [False, True])
+@pytest.mark.parametrize("limited_default", [False, True])
+async def test_automatic_compaction_recovers_after_encrypted_history_expires(
+    streamed: bool, outer: bool, limited_default: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("cryptography")
+    from agents.extensions.memory.encrypt_session import EncryptedSession
+
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+    backend = SQLiteSession("expiry", session_settings={"limit": 20} if limited_default else None)
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session: SessionABC
+    if outer:
+        session = EncryptedSession(
+            "expiry",
+            OpenAIResponsesCompactionSession(
+                "expiry", backend, client=client, compaction_mode="input"
+            ),
+            encryption_key="synthetic-test-key",
+            ttl=10,
+        )
+    else:
+        session = OpenAIResponsesCompactionSession(
+            "expiry",
+            EncryptedSession("expiry", backend, encryption_key="synthetic-test-key", ttl=10),
+            client=client,
+            compaction_mode="input",
+        )
+    model = ScriptedModel(steps=[[get_text_message("ok")] for _ in range(15)])
+    agent = Agent(name="worker", model=model)
+    config = RunConfig(session_settings={"limit": 100}) if limited_default else None
+    try:
+        await session.add_items([{"role": "user", "content": "expired request"}])
+        clock[0] += 11
+        for index in range(15):
+            await run(agent, f"turn {index}", session, streamed, config)
+        client.responses.compact.assert_awaited_once()
+        assert len(client.responses.compact.call_args.kwargs["input"]) == 20
+        assert "expired request" not in str(client.responses.compact.call_args.kwargs["input"])
+        assert len(await backend.get_items(limit=100)) == 10
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("outer", [False, True])
+async def test_expired_read_overhead_does_not_authorize_hidden_history(
+    outer: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("cryptography")
+    from agents.extensions.memory.encrypt_session import EncryptedSession
+
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+    backend = SQLiteSession("expiry-hidden", session_settings={"limit": 1})
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session: SessionABC
+    if outer:
+        session = EncryptedSession(
+            backend.session_id,
+            OpenAIResponsesCompactionSession(
+                backend.session_id,
+                backend,
+                client=client,
+                compaction_mode="input",
+                should_trigger_compaction=lambda _: True,
+            ),
+            encryption_key="synthetic-test-key",
+            ttl=10,
+        )
+    else:
+        session = OpenAIResponsesCompactionSession(
+            backend.session_id,
+            EncryptedSession(
+                backend.session_id, backend, encryption_key="synthetic-test-key", ttl=10
+            ),
+            client=client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda _: True,
+        )
+
+    def hide_history(data: CallModelData[Any]) -> ModelInputData:
+        return ModelInputData(
+            input=[item for item in data.model_data.input if item.get("content") != LOCAL_OUTPUT]
+            + [{"role": "user", "content": "model-only context"}],
+            instructions=data.model_data.instructions,
+        )
+
+    model = ScriptedModel(steps=[[get_text_message("ok")] for _ in range(3)])
+    agent = Agent(name="worker", model=model)
+    try:
+        await session.add_items([{"role": "user", "content": "expired"}] * 10)
+        clock[0] += 11
+        await session.add_items([{"role": "user", "content": LOCAL_OUTPUT}])
+        await run(
+            agent,
+            "filtered",
+            session,
+            False,
+            RunConfig(session_settings={"limit": 100}, call_model_input_filter=hide_history),
+        )
+        client.responses.compact.assert_not_awaited()
+        assert LOCAL_OUTPUT not in str(model.calls[0].input)
+        assert len(await backend.get_items(limit=100)) == 13
+
+        read = AsyncMock(wraps=backend.get_items)
+        backend.get_items = read  # type: ignore[method-assign]
+        await run(agent, "bounded", session, False)
+        # The previous full read's overhead is not carried into a new bounded turn.
+        limits = [
+            call.kwargs.get("limit", call.args[0] if call.args else None)
+            for call in read.call_args_list
+        ]
+        assert all(limit is None or limit <= 4 for limit in limits)
+        client.responses.compact.assert_not_awaited()
+        await run(agent, "visible", session, False, RunConfig(session_settings={"limit": 100}))
+        client.responses.compact.assert_awaited_once()
+        assert LOCAL_OUTPUT in str(client.responses.compact.call_args.kwargs["input"])
+        assert await backend.get_items(limit=100) == []
+    finally:
+        backend.close()
