@@ -2147,6 +2147,113 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         ] == []
 
     @pytest.mark.asyncio
+    async def test_cancelled_close_before_transport_teardown_keeps_connection_state(
+        self, monkeypatch
+    ):
+        """close() cancelled while it is still cancelling response.create tasks has not
+        touched the transport: the websocket and its listener live on, so the item,
+        audio and session state they depend on must survive as well."""
+
+        class RecordingWebSocket:
+            def __init__(self) -> None:
+                self._closed = asyncio.Event()
+                self.sent: list[dict[str, Any]] = []
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> str:
+                await self._closed.wait()
+                raise StopAsyncIteration
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(json.loads(payload))
+
+            async def close(self) -> None:
+                self._closed.set()
+
+        model = OpenAIRealtimeWebSocketModel()
+        listener = AsyncMock()
+        model.add_listener(listener)
+        socket = RecordingWebSocket()
+
+        async def fake_create_websocket_connection(*args, **kwargs):
+            return socket
+
+        monkeypatch.setattr(model, "_create_websocket_connection", fake_create_websocket_connection)
+
+        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        await model._handle_ws_event(
+            {
+                "type": "session.created",
+                "event_id": "event_created",
+                "session": {
+                    "type": "realtime",
+                    "model": "gpt-realtime",
+                    "audio": {
+                        "input": {
+                            "turn_detection": {"type": "semantic_vad", "interrupt_response": True}
+                        },
+                        "output": {"format": {"type": "audio/pcm", "rate": 24000}},
+                    },
+                },
+            }
+        )
+        await model._handle_ws_event(
+            {
+                "type": "response.output_audio.delta",
+                "event_id": "event_1",
+                "response_id": "response_live",
+                "item_id": "item_live",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": base64.b64encode(b"\x00\x01" * 2400).decode(),
+            }
+        )
+        created_session = model._created_session
+        assert created_session is not None
+
+        cancellation_started = asyncio.Event()
+
+        async def wait_until_cancelled():
+            cancellation_started.set()
+            await asyncio.Future()
+
+        with patch.object(model, "_cancel_response_create_tasks", wait_until_cancelled):
+            close_task = asyncio.create_task(model.close())
+            await asyncio.wait_for(cancellation_started.wait(), timeout=1)
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+
+        assert model._websocket is socket
+        assert model._current_item_id == "item_live"
+        assert model._created_session is created_session
+        assert model._audio_state_tracker.get_last_audio_item() == ("item_live", 0)
+
+        listener.on_event.reset_mock()
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "event_id": "event_2",
+                "audio_start_ms": 0,
+                "item_id": "item_user",
+            }
+        )
+
+        emitted = [call.args[0] for call in listener.on_event.call_args_list]
+        interruptions = [
+            event for event in emitted if isinstance(event, RealtimeModelAudioInterruptedEvent)
+        ]
+        assert [event.item_id for event in interruptions] == ["item_live"]
+        truncates = [m for m in socket.sent if m["type"] == "conversation.item.truncate"]
+        assert [m["item_id"] for m in truncates] == ["item_live"]
+
+        await model.close()
+        assert model._current_item_id is None
+        assert model._created_session is None
+
+    @pytest.mark.asyncio
     async def test_response_only_interrupt_requires_response_id(self, model):
         with pytest.raises(ValueError, match="cancel_response_only requires response_id"):
             await model._send_interrupt(RealtimeModelSendInterrupt(cancel_response_only=True))

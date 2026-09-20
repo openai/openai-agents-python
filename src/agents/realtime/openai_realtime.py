@@ -1256,8 +1256,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
+        transport_teardown_started = False
         try:
             await self._cancel_response_create_tasks()
+            # A cancellation above leaves the websocket and its listener running, so the
+            # connection is only considered gone from this point on.
+            transport_teardown_started = True
             cleanup_error: BaseException | None = None
 
             if self._websocket:
@@ -1290,7 +1294,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             if cleanup_error is not None:
                 raise cleanup_error
         finally:
-            self._reset_connection_state()
+            if transport_teardown_started:
+                self._reset_connection_state()
+            else:
+                self._clear_response_audio_indexes()
 
     def _reset_connection_state(self) -> None:
         # The runner reuses one model instance across runs and connect() accepts a new
