@@ -111,6 +111,11 @@ class EncryptedSession(SessionABC):
     per-session key derivation and automatic expiration of old data.
 
     When items expire (exceed TTL), they are silently skipped during retrieval.
+    Expired records remain in the underlying store. By default, finding valid
+    items may read the entire retained history. Set ``max_scan_items`` to bound
+    the cumulative number of items retrieved and unwrapped per ``get_items`` call;
+    overlapping backfill windows count again. This does not bound item byte size,
+    backend-internal work, elapsed time, or ``pop_item`` work.
 
     Note: Expired tokens are rejected based on the system clock of the application server.
     To avoid valid tokens being rejected due to clock drift, ensure all servers in
@@ -123,6 +128,7 @@ class EncryptedSession(SessionABC):
         underlying_session: SessionABC,
         encryption_key: str,
         ttl: int = 600,
+        max_scan_items: int | None = None,
     ):
         """
         Args:
@@ -130,7 +136,21 @@ class EncryptedSession(SessionABC):
             underlying_session: The real session store (e.g. SQLiteSession, SQLAlchemySession)
             encryption_key: Master key (Fernet key or raw secret)
             ttl: Token time-to-live in seconds (default 10 min)
+            max_scan_items: Positive per-read item budget, or None for unlimited
+                work (the default). The underlying store must honor requested
+                limits. Raises RuntimeError when a complete result cannot be
+                established within the budget, even if a full final window is
+                actually the entire store. Increase the budget or manage retained
+                history in the underlying store before retrying. When a budget is
+                set, negative effective retrieval limits raise ValueError before
+                reading storage; use zero to request no history.
+
+        Raises:
+            ValueError: If max_scan_items is not positive.
         """
+        if max_scan_items is not None and max_scan_items <= 0:
+            raise ValueError("max_scan_items must be positive or None")
+        self.max_scan_items = max_scan_items
         self.session_id = session_id
         self.underlying_session = underlying_session
         self.ttl = ttl
@@ -233,8 +253,15 @@ class EncryptedSession(SessionABC):
     ) -> list[TResponseInputItem]:
         wrapper = _get_session_wrapper(self.underlying_session, wrapper)
         effective_limit = resolve_session_limit(limit, self.session_settings)
-        if effective_limit is not None and effective_limit > 0:
-            window = effective_limit
+        remaining = self.max_scan_items
+        if remaining is not None and effective_limit is not None and effective_limit < 0:
+            raise ValueError("limit must be non-negative when max_scan_items is set")
+        positive_limit = effective_limit is not None and effective_limit > 0
+        if positive_limit or (remaining is not None and effective_limit is None):
+            window = effective_limit if positive_limit else remaining
+            assert window is not None
+            if remaining is not None:
+                window = min(window, remaining)
             while True:
                 encrypted_items = cast(
                     list[TResponseInputItem],
@@ -245,11 +272,25 @@ class EncryptedSession(SessionABC):
                     ),
                 )
                 valid_items = self._unwrap_valid_items(encrypted_items)
-                if len(valid_items) >= effective_limit:
+                if (
+                    positive_limit
+                    and effective_limit is not None
+                    and len(valid_items) >= effective_limit
+                ):
                     return valid_items[-effective_limit:]
                 if len(encrypted_items) < window:
                     return valid_items
-                window *= 2
+                next_window = window * 2
+                if remaining is not None:
+                    remaining -= len(encrypted_items)
+                    next_window = min(next_window, remaining)
+                    if next_window <= window:
+                        raise RuntimeError(
+                            "EncryptedSession max_scan_items exhausted before a complete "
+                            "history result could be established; increase max_scan_items "
+                            "or reduce retained history."
+                        )
+                window = next_window
 
         encrypted_items = cast(
             list[TResponseInputItem],

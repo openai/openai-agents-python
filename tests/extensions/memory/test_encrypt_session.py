@@ -1050,6 +1050,223 @@ async def test_encrypted_session_get_items_session_settings_limit_skips_invalid_
     underlying_session.close()
 
 
+@pytest.mark.parametrize("budget", [0, -1])
+async def test_encrypted_session_rejects_nonpositive_scan_budget(
+    budget: int, encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    try:
+        with pytest.raises(ValueError, match="max_scan_items must be positive"):
+            EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=budget)
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("use_settings", [False, True])
+async def test_encrypted_session_scan_budget_rejects_negative_limit_before_read(
+    use_settings: bool, encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key)
+    items: list[TResponseInputItem] = [{"role": "user", "content": "retained history"}]
+    try:
+        await session.add_items(items)
+        if use_settings:
+            session.session_settings = SessionSettings(limit=-1)
+        limit = None if use_settings else -1
+        # Without a budget, SQLite retains its historical unlimited negative-limit read.
+        assert await session.get_items(limit=limit) == items
+        bounded = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=10)
+        read = AsyncMock(wraps=backend.get_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await bounded.get_items(limit=limit)
+        read.assert_not_awaited()
+        # An explicit supported limit overrides an inherited negative default.
+        assert await bounded.get_items(limit=1) == items
+        read.assert_awaited_once_with(1)
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_does_not_turn_redis_negative_limit_into_history(
+    encryption_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fakeredis = pytest.importorskip("fakeredis.aioredis")
+    from agents.extensions.memory.redis_session import RedisSession
+
+    client = fakeredis.FakeRedis()
+    backend = RedisSession(
+        "budget", redis_client=client, session_settings=SessionSettings(limit=-1)
+    )
+    session = EncryptedSession(backend.session_id, backend, encryption_key)
+    try:
+        await session.add_items([{"role": "user", "content": "retained history"}])
+        assert await session.get_items() == []
+        bounded = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=10)
+        read = AsyncMock(wraps=backend.get_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await bounded.get_items()
+        read.assert_not_awaited()
+    finally:
+        await backend.close()
+        await client.aclose()
+
+
+async def test_encrypted_session_scan_budget_counts_overlapping_expired_windows(
+    encryption_key: str, tmp_path: Path, set_fernet_time: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=13)
+    try:
+        await session.add_items([{"role": "user", "content": f"old {i}"} for i in range(20)])
+        set_fernet_time(1_020)
+        stored = await backend.get_items()
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        unwrap = MagicMock(wraps=session._unwrap)
+        monkeypatch.setattr(backend, "get_items", read)
+        monkeypatch.setattr(session, "_unwrap", unwrap)
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+                await session.get_items(limit=2)
+            assert [call.args[0] for call in read.call_args_list] == [2, 4, 7]
+            assert unwrap.call_count == 13
+            read.reset_mock()
+            unwrap.reset_mock()
+        assert await read_items() == stored
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_backfills_in_chronological_order(
+    encryption_key: str, tmp_path: Path, set_fernet_time: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=6)
+    try:
+        await session.add_items([{"role": "user", "content": "expires"}])
+        expired = await backend.get_items()
+        await backend.clear_session()
+        set_fernet_time(1_020)
+        valid: list[TResponseInputItem] = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+        await session.add_items(valid)
+        # A delayed stored envelope can expire before it is appended.
+        await backend.add_items(expired + [_invalid_encrypted_envelope()])
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+
+        session.session_settings = SessionSettings(limit=2)
+        assert await session.get_items() == valid
+        assert [call.args[0] for call in read.call_args_list] == [2, 4]
+        default = EncryptedSession(backend.session_id, backend, encryption_key, 10)
+        assert await default.get_items(limit=2) == valid
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("limit", [None, 100])
+async def test_encrypted_session_scan_budget_rejects_incomplete_full_window(
+    limit: int | None, encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=3)
+    try:
+        await session.add_items([{"role": "user", "content": f"item {i}"} for i in range(3)])
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+            await session.get_items(limit=limit)
+        read.assert_awaited_once_with(3)
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_accepts_short_empty_and_zero_reads(
+    encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=3)
+    try:
+        assert await session.get_items() == []
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+        await session.add_items(items)
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        assert await session.get_items() == items
+        assert await session.get_items(limit=100) == items
+        assert await session.get_items(limit=0) == []
+        assert [call.args[0] for call in read.call_args_list] == [3, 3, 0]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_encrypted_scan_budget_with_session_settings(
+    streamed: bool,
+    encryption_key: str,
+    tmp_path: Path,
+    set_fernet_time: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = SQLiteSession(
+        "budget", tmp_path / "history.db", session_settings=SessionSettings(limit=100)
+    )
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=2)
+    model = ScriptedModel([[get_text_message("answer")]])
+    agent = Agent(name="test", model=model)
+    config = RunConfig(tracing_disabled=True, session_settings=SessionSettings(limit=2))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(agent, "next", session=session, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "next", session=session, run_config=config)
+
+    try:
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"item {i}"} for i in range(5)
+        ]
+        await session.add_items(items)
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        await run()
+        assert model.calls[0].input == items[-2:] + [{"role": "user", "content": "next"}]
+        read.assert_awaited_once_with(2)
+        stored = await read_items()
+        read.reset_mock()
+        set_fernet_time(1_020)
+        with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+            await run()
+        read.assert_awaited_once_with(2)
+        assert len(model.calls) == 1
+        assert await read_items() == stored
+
+        read.reset_mock()
+        config.session_settings = SessionSettings(limit=-1)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await run()
+        read.assert_not_awaited()
+        assert len(model.calls) == 1
+        assert await read_items() == stored
+    finally:
+        backend.close()
+
+
 async def test_encrypted_session_unicode_content(
     encryption_key: str, underlying_session: SQLiteSession
 ):
