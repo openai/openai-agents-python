@@ -117,6 +117,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         model: str = "gpt-4.1",
         compaction_mode: OpenAIResponsesCompactionMode = "auto",
         should_trigger_compaction: Callable[[dict[str, Any]], bool] | None = None,
+        max_rollback_items: int | None = None,
     ):
         """Initialize the compaction session.
 
@@ -133,6 +134,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 stored or no response_id is available.
             should_trigger_compaction: Custom decision hook. Defaults to triggering when
                 10+ compaction candidates exist.
+            max_rollback_items: Optional positive item-count budget for complete history
+                snapshots used by manual compaction and legacy whole-history replacement.
+                Oversized history raises ValueError before the compaction API call or
+                replacement. Reads request at most this budget plus one overflow item.
+                None (default) preserves the existing unlimited rollback policy. This is
+                not a byte limit or a limit on stored history or model input. Native
+                automatic suffix replacement does not need a full-history rollback
+                snapshot and is unaffected. SessionSettings.limit remains a retrieval
+                default, independent of this budget.
         """
         if isinstance(underlying_session, OpenAIConversationsSession):
             raise ValueError(
@@ -143,11 +153,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if not is_openai_model_name(model):
             raise ValueError(f"Unsupported model for OpenAI responses compaction: {model}")
 
+        if max_rollback_items is not None and max_rollback_items <= 0:
+            raise ValueError("max_rollback_items must be positive or None")
+
         self.session_id = session_id
         self.underlying_session = underlying_session
         self._client = client
         self.model = model
         self.compaction_mode = compaction_mode
+        self.max_rollback_items = max_rollback_items
         self.should_trigger_compaction = (
             should_trigger_compaction
             if should_trigger_compaction is not None
@@ -207,6 +221,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         When a run context is provided, the billed compaction request contributes to
         that run's usage totals.
+
+        Manual calls replace the complete stored history, even when the underlying
+        retrieval default exposes fewer items to the compaction request. A finite
+        max_rollback_items budget checks the complete rollback history before loading
+        candidates, including forced calls. Overflow leaves history unchanged.
         """
         await self._run_compaction(args, wrapper=wrapper)
 
@@ -285,6 +304,10 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         is_automatic = wrapper is not None and getattr(
             wrapper, "_session_compaction_is_automatic", False
         )
+        if not is_automatic and self.max_rollback_items is not None:
+            # Check before even a default-unlimited candidate read. Time-filtered
+            # stores can change during the request despite the wrapper mutation lock.
+            await self._get_all_underlying_session_items()
         compaction_candidate_items, session_items, _ = await self._ensure_compaction_candidates(
             read_items
         )
@@ -405,6 +428,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             ):
                 return
 
+        if is_automatic and snapshot is None and self.max_rollback_items is not None:
+            await self._get_all_underlying_session_items()
+
         self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
@@ -448,6 +474,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             stored_output_items = (
                 prepare_items(output_items) if prepare_items is not None else output_items
             )
+            # Refresh after the API request so rollback cannot revive items that
+            # expired while awaiting compaction. This read still honors the budget.
             previous_items = await self._get_all_underlying_session_items()
             try:
                 await self._replace_underlying_session_items(
@@ -483,7 +511,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return items, self._mutation_generation
 
     async def _get_all_underlying_session_items(self) -> list[TResponseInputItem]:
-        return await self.underlying_session.get_items(limit=_ALL_SESSION_ITEMS_LIMIT)
+        limit = (
+            _ALL_SESSION_ITEMS_LIMIT
+            if self.max_rollback_items is None
+            else self.max_rollback_items + 1
+        )
+        items = await self.underlying_session.get_items(limit=limit)
+        if self.max_rollback_items is not None and len(items) > self.max_rollback_items:
+            raise ValueError("Compaction history exceeds max_rollback_items; history was retained")
+        return items
 
     async def _replace_underlying_session_items(
         self,
