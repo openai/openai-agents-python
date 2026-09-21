@@ -2218,6 +2218,7 @@ class RunState(Generic[TContext, TAgent]):
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
         Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
         Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:
@@ -2305,6 +2306,7 @@ class RunState(Generic[TContext, TAgent]):
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
         Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
         Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:

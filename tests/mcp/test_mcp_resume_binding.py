@@ -7,7 +7,6 @@ from agents import Agent, RunContextWrapper, Runner, RunState, UserError, handof
 from agents.decorators import tool
 from agents.testing import ScriptedModel
 
-from ..test_function_tool import _CustomConstructorFunctionTool
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
 
@@ -403,10 +402,75 @@ async def test_restored_rejection_retains_recipient_when_later_approved(streamin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_local_override_before_restore_retains_collision_policy(streaming: bool):
+@pytest.mark.parametrize("restore", [False, True])
+@pytest.mark.parametrize("approval_policy", ["always", "conditional", "never"])
+async def test_mcp_approval_cannot_authorize_local_replacement(
+    streaming: bool, restore: bool, approval_policy: str
+):
+    local_calls: list[str] = []
+    approval_checks: list[dict[str, str]] = []
+
+    async def check_approval(_context, arguments, _call_id):
+        approval_checks.append(arguments)
+        return True
+
+    @tool(
+        needs_approval=check_approval
+        if approval_policy == "conditional"
+        else approval_policy == "always"
+    )
+    async def search(query: str) -> str:
+        local_calls.append(query)
+        return "local result"
+
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("search", {})
+    call = get_function_tool_call("search", '{"query":"synthetic input"}')
+    agent = Agent(
+        name="test",
+        mcp_servers=[server],
+        model=ScriptedModel([[call], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    agent.tools = [search]
+    if restore:
+        state = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="different recipient"):
+        if streaming:
+            result = Runner.run_streamed(agent, state)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state)
+    assert local_calls == []
+    assert approval_checks == []
+    assert server.tool_calls == []
+
+    # A new run selects the intended local recipient and evaluates its own policy.
+    agent.model = ScriptedModel([[call], [get_text_message("done")]])
+    fresh = await Runner.run(agent, "search")
+    if approval_policy != "never":
+        assert len(fresh.interruptions) == 1
+        assert local_calls == []
+        fresh_state = fresh.to_state()
+        fresh_state.approve(fresh.interruptions[0])
+        fresh = await Runner.run(agent, fresh_state)
+    assert fresh.final_output == "done"
+    assert local_calls == ["synthetic input"]
+    assert approval_checks == (
+        [{"query": "synthetic input"}] if approval_policy == "conditional" else []
+    )
+    assert server.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bool):
     local_calls: list[str] = []
 
-    @tool
+    @tool(needs_approval=True)
     async def search() -> str:
         local_calls.append("search")
         return "local result"
@@ -420,45 +484,18 @@ async def test_local_override_before_restore_retains_collision_policy(streaming:
     )
     first = await Runner.run(agent, "search")
     state = first.to_state()
-    state.approve(first.interruptions[0])
-    snapshot = state.to_json()
+    state.reject(first.interruptions[0], rejection_message="MCP request declined")
     agent.tools = [search]
-    restored = await RunState.from_json(agent, snapshot)
+    state = await RunState.from_json(agent, state.to_json())
     if streaming:
-        result = Runner.run_streamed(agent, restored)
+        result = Runner.run_streamed(agent, state)
         async for _ in result.stream_events():
             pass
     else:
-        result = await Runner.run(agent, restored)
+        result = await Runner.run(agent, state)
     assert result.final_output == "done"
-    assert local_calls == ["search"]
-    assert server.tool_calls == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("restore", [False, True])
-async def test_custom_constructor_local_override_preserves_collision_policy(restore: bool):
-    local = _CustomConstructorFunctionTool(session="synthetic-session")
-    server = FakeMCPServer(require_approval="always")
-    server.add_tool(local.name, {})
-    agent = Agent(
-        name="test",
-        mcp_servers=[server],
-        model=ScriptedModel(
-            [[get_function_tool_call(local.name, "{}")], [get_text_message("done")]]
-        ),
-    )
-    first = await Runner.run(agent, "test")
-    state = first.to_state()
-    state.approve(first.interruptions[0])
-    agent.tools = [local]
-    if restore:
-        state = await RunState.from_json(agent, state.to_json())
-    result = await Runner.run(agent, state)
-    assert result.final_output == "done"
-    assert any(getattr(item, "output", None) == "synthetic-session:{}" for item in result.new_items)
-    assert server.tool_calls == []
-    assert local._mcp_tool_binding is None
+    assert any(getattr(item, "output", None) == "MCP request declined" for item in result.new_items)
+    assert local_calls == server.tool_calls == []
 
 
 @pytest.mark.asyncio

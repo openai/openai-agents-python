@@ -2164,13 +2164,9 @@ async def resolve_interrupted_turn(
         current_function = current_functions.get(call_id)
         if current_function is not None:
             current_binding = current_function.function_tool._mcp_tool_binding
-            # Rejected calls cannot invoke MCP. Local replacements follow the
-            # application's collision policy; executing MCP calls keep their recipient.
-            if (
-                approval_status is not False
-                and current_binding is not None
-                and original_binding != current_binding
-            ):
+            # Rejected calls cannot execute. MCP approvals must not authorize a
+            # different MCP recipient or a local replacement's approval policy.
+            if approval_status is not False and original_binding != current_binding:
                 raise UserError(
                     "Cannot resume a local MCP tool call with a missing or different recipient "
                     "binding. Restore the original MCP server configuration and tool listing, "
