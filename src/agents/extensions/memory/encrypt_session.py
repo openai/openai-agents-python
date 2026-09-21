@@ -5,6 +5,8 @@ expiration of old data. When TTL expires, expired items are silently skipped.
 
 Usage::
 
+    import os
+
     from agents.extensions.memory import EncryptedSession, SQLAlchemySession
 
     # Create underlying session (e.g. SQLAlchemySession)
@@ -14,11 +16,15 @@ Usage::
         create_tables=True,
     )
 
+    # Load a high-entropy key provisioned through your secret manager.
+    # Reuse the same key and session ID to read stored data after a restart.
+    encryption_key = os.environ["SESSION_ENCRYPTION_KEY"]
+
     # Wrap with encryption and TTL-based expiration
     session = EncryptedSession(
         session_id="user-123",
         underlying_session=underlying_session,
-        encryption_key="your-encryption-key",
+        encryption_key=encryption_key,
         ttl=600,  # 10 minutes
     )
 
@@ -139,7 +145,13 @@ class EncryptedSession(SessionABC):
         Args:
             session_id: ID for this session
             underlying_session: The real session store (e.g. SQLiteSession, SQLAlchemySession)
-            encryption_key: Master key (Fernet key or raw secret)
+            encryption_key: High-entropy master key, such as
+                Fernet.generate_key().decode("ascii"), or a securely provisioned
+                random secret. Keep the key secret and reuse the same key and
+                session_id to read persisted data after a restart. Raw strings
+                remain accepted for compatibility, but passwords and other
+                low-entropy secrets are unsuitable: HKDF does not harden passwords,
+                and the session ID salt does not add secret entropy.
             ttl: Token time-to-live in seconds (default 10 min)
             max_scan_items: Positive per-read item budget, or None for unlimited
                 work (the default). The underlying store must honor requested
