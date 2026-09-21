@@ -95,8 +95,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     API after each turn when the decision hook returns True.
 
     Automatic compaction matches stored history against the latest successful model
-    exchange, preserving order and repeated occurrences. Native SQLite and async SQLite
-    stores can atomically replace a bounded, model-visible suffix while retaining older
+    exchange, preserving order and repeated occurrences. Native SQLite, async SQLite, and
+    SQLAlchemy (SQLite/PostgreSQL/MySQL) stores can atomically replace a bounded,
+    model-visible suffix while retaining older
     history. Partial suffixes start at a user message to preserve preceding model item
     groups. Other stores require complete coverage. Partial snapshots use input mode;
     explicit previous_response_id mode requires complete coverage. The decision hook

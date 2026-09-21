@@ -119,7 +119,7 @@ class EncryptedSession(SessionABC):
     the cumulative number of items retrieved and unwrapped per ``get_items`` call;
     overlapping backfill windows count again. This does not bound item byte size,
     backend-internal work, elapsed time, or ``pop_item`` work.
-    Successful automatic compaction on native SQLite stores also reclaims a
+    Successful automatic compaction on native SQLite and SQLAlchemy stores reclaims a
     contiguous prefix of authenticated expired envelopes in bounded batches.
 
     Note: Expired tokens are rejected based on the system clock of the application server.
