@@ -1958,11 +1958,7 @@ class RealtimeSession(RealtimeModelListener):
             self._put_event_nowait(
                 RealtimeError(
                     info=self._event_info,
-                    error={
-                        "message": (
-                            f"Tool output send failed; cached output will be retried: {exception}"
-                        )
-                    },
+                    error={"message": "Tool output send failed; cached output will be retried"},
                 )
             )
             return
@@ -1975,7 +1971,7 @@ class RealtimeSession(RealtimeModelListener):
         self._put_event_nowait(
             RealtimeError(
                 info=self._event_info,
-                error={"message": f"Tool call task failed: {exception}"},
+                error={"message": "Tool call task failed"},
             )
         )
 
