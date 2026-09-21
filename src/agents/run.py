@@ -650,6 +650,7 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -666,6 +667,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
             set_agent_tool_state_scope(context_wrapper, uuid4().hex)
 
@@ -2435,6 +2437,7 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
 
             # Override max_turns with the state's max_turns to preserve it across resumption
@@ -2451,6 +2454,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             set_agent_tool_state_scope(context_wrapper, uuid4().hex)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result

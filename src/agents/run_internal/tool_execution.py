@@ -1974,6 +1974,7 @@ class _FunctionToolBatchExecutor:
             call_id=tool_call.call_id,
             tool_namespace=tool_namespace,
             tool_lookup_key=tool_lookup_key,
+            existing_pending=current_approval_item,
         )
         span_fn.set_error(
             SpanError(

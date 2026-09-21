@@ -518,6 +518,7 @@ class ShellAction:
                     tool_type="shell",
                     tool_name=shell_tool.name,
                     call_id=shell_call.call_id,
+                    existing_pending=current_item,
                 )
                 return shell_rejection_item(
                     agent,
@@ -741,6 +742,7 @@ class CustomToolAction:
                     tool_type="custom",
                     tool_name=custom_tool.name,
                     call_id=call_id,
+                    existing_pending=current_item,
                 )
                 return cls._tool_output_item(
                     agent,
@@ -951,6 +953,7 @@ class ApplyPatchAction:
                     tool_type="apply_patch",
                     tool_name=apply_patch_tool.name,
                     call_id=call_id,
+                    existing_pending=current_item,
                 )
                 return apply_patch_rejection_item(
                     agent,

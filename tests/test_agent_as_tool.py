@@ -2091,10 +2091,10 @@ async def test_agent_as_tool_hosted_mcp_nested_sticky_decision_stays_scoped(
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_deferred_same_name_legacy_nested_always_approve_stays_permanent(
+async def test_agent_as_tool_deferred_legacy_nested_approval_requires_fresh_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy deferred approval keys should remain permanent in nested resumed runs."""
+    """Legacy deferred grants require a fresh owner-bound decision before nested resume."""
 
     agent = Agent(name="outer")
     tool_call = make_function_tool_call(
@@ -2207,6 +2207,10 @@ async def test_agent_as_tool_deferred_same_name_legacy_nested_always_approve_sta
 
     output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
 
+    assert output is None
+    assert run_inputs == []
+    tool_context.approve_tool(approval_item, always_approve=True)
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
     assert output == "approved"
     assert run_inputs == [resume_state]
 

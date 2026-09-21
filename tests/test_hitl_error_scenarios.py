@@ -1446,8 +1446,9 @@ async def test_resume_honors_permanent_namespaced_function_approval_with_new_cal
         tools=[lookup_account],
     )[0]
     context_wrapper = make_context_wrapper()
+    agent = Agent(name="billing-agent")
     approved_item = ToolApprovalItem(
-        agent=Agent(name="billing-agent"),
+        agent=agent,
         raw_item=make_function_tool_call(
             "lookup_account",
             call_id="approved-call",
@@ -1493,7 +1494,7 @@ async def test_resume_honors_permanent_namespaced_function_approval_with_new_cal
         record_rejection=_record_rejection,
         pending_interruption_adder=pending.append,
         pending_item_builder=lambda run: ToolApprovalItem(
-            agent=Agent(name="billing-agent"),
+            agent=agent,
             raw_item=run.tool_call,
             tool_name=run.function_tool.name,
             tool_namespace="billing",

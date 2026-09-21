@@ -2569,6 +2569,8 @@ async def _restore_as_schema_1_13(
     state: RunState[Any, Agent[Any]],
 ) -> RunState[Any, Agent[Any]]:
     json_data = state.to_json()
+    for entry in json_data["context"].pop("function_tool_approvals", []):
+        json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = "1.13"
     json_data["context"].pop("tool_invocations", None)
     return await RunState.from_json(agent, json_data)
@@ -2629,6 +2631,8 @@ async def test_legacy_schema_historical_sticky_call_id_is_not_reexecuted(
         starting_agent=agent,
     )
     serialized = state.to_json()
+    for entry in serialized["context"].pop("function_tool_approvals"):
+        serialized["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     serialized["$schemaVersion"] = schema_version
     serialized["context"].pop("tool_invocations", None)
     restored = await RunState.from_json(agent, serialized)
@@ -2695,6 +2699,8 @@ async def test_legacy_changed_pending_call_fails_before_approval_callback(
     )
     state._context = context
     serialized = state.to_json()
+    for entry in serialized["context"].pop("function_tool_approvals", []):
+        serialized["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     serialized["$schemaVersion"] = schema_version
     serialized["context"].pop("tool_invocations", None)
     restored = await RunState.from_json(agent, serialized)
