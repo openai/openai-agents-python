@@ -78,6 +78,7 @@ from agents.sandbox.errors import (
     WorkspaceArchiveWriteError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
+from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializationResult, MaterializedFile
 from agents.sandbox.remote_mount_policy import (
     REMOTE_MOUNT_POLICY,
@@ -5189,9 +5190,11 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     assert '(allow file-write* (subpath "/opt/homebrew"))' not in profile
 
 
+@pytest.mark.parametrize("absolute_command", [False, True])
 def test_unix_local_confined_exec_command_allows_python_virtual_environment_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    absolute_command: bool,
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -5216,7 +5219,7 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
     def _fake_which(name: str, path: str | None = None) -> str | None:
         if name == "sandbox-exec":
             return "/usr/bin/sandbox-exec"
-        if name == "python":
+        if name in ("python", str(python_executable)):
             assert path == path_env
             return str(python_executable)
         return None
@@ -5226,7 +5229,7 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
     monkeypatch.setenv("PATH", path_env)
 
     command = session._confined_exec_command(
-        command_parts=["python", "-V"],
+        command_parts=[str(python_executable) if absolute_command else "python", "-V"],
         workspace_root=workspace_root,
         env={"PATH": path_env},
     )
@@ -5240,6 +5243,113 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
         not in profile_lines
     )
     assert f'(allow file-write* (subpath "{virtual_env_root}"))' not in profile_lines
+
+
+def test_unix_local_confined_exec_command_omits_host_paths_removed_from_child_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    virtual_env_root = tmp_path / "host-project" / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-child-path"),
+            workspace_root_owned=False,
+        )
+    )
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "sh":
+            assert path == "/usr/bin:/bin"
+            return "/bin/sh"
+        return None
+
+    monkeypatch.setattr(unix_local_module.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local_module.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(virtual_env_bin), str(host_bin), "/usr/bin"]))
+
+    command = session._confined_exec_command(
+        command_parts=["sh", "-c", "true"],
+        workspace_root=workspace_root,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    profile = command[2]
+
+    assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    for excluded_path in (virtual_env_root, virtual_env_bin, host_bin):
+        assert f'(subpath "{excluded_path}")' not in profile
+        assert f'(subpath "{excluded_path.resolve()}")' not in profile
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("inherit_path", [False, True])
+async def test_unix_local_virtual_environment_grants_follow_client_path_inheritance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    inherit_path: bool,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    virtual_env_root = tmp_path / "host-project" / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    path_env = str(virtual_env_bin)
+    monkeypatch.setenv("PATH", path_env)
+    manifest = Manifest(
+        root=str(workspace_root),
+        environment=Environment(value={"PATH": path_env}),
+    )
+    client = UnixLocalSandboxClient(
+        inherit_host_environment=False,
+        host_environment_allowlist={"PATH"} if inherit_path else set(),
+    )
+    if resume:
+        original = await UnixLocalSandboxClient().create(
+            manifest=manifest, snapshot=NoopSnapshot(id="original")
+        )
+        session = await client.resume(original.state)
+    else:
+        session = await client.create(manifest=manifest, snapshot=NoopSnapshot(id="created"))
+    inner = session._inner
+    assert isinstance(inner, UnixLocalSandboxSession)
+    env, _cwd = await inner._resolved_exec_context()
+    assert env["PATH"] == path_env
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "sh":
+            assert path == path_env
+            return "/bin/sh"
+        return None
+
+    monkeypatch.setattr(unix_local_module.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local_module.shutil, "which", _fake_which)
+    command = inner._confined_exec_command(
+        command_parts=["sh", "-c", "true"],
+        workspace_root=workspace_root,
+        env=env,
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_bin}"))' in profile_lines
+    )
+    root_grant = f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))'
+    assert (root_grant in profile_lines) is inherit_path
 
 
 def test_unix_local_confined_exec_command_does_not_expand_manifest_virtual_environment(
