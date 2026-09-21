@@ -206,6 +206,11 @@ class SandboxPathGrant(BaseModel):
 
     ``path`` is the POSIX path visible inside the sandbox. ``host_path`` is an optional
     native host source used for local materialization and Docker bind mounts.
+
+    Read-only grants require a backend that preserves authorization through recursive
+    cleanup. Built-in clients accept them only with DockerRemovalService on its
+    supported rootful Linux daemon host. Other backends reject the configuration
+    before creation or resume; migrate to a supported backend without weakening grants.
     """
 
     path: str
@@ -283,6 +288,24 @@ class SandboxPathGrant(BaseModel):
                 "sandbox path grant path must be POSIX absolute when host_path is configured"
             )
         return self
+
+
+def _validate_read_only_grant_capability(
+    grants: tuple[SandboxPathGrant, ...], *, atomic_recursive_remove: bool
+) -> None:
+    """Reject grants a backend cannot preserve through cleanup and snapshot restore.
+
+    Capability comes from trusted backend code, never from the manifest. A backend
+    advertising support must implement recursive removal with authorization that
+    remains valid through every destructive mutation.
+    """
+    if not atomic_recursive_remove and any(grant.read_only for grant in grants):
+        raise ValueError(
+            "Read-only extra path grants require a backend with atomic recursive removal. "
+            "Use DockerSandboxClient with a live DockerRemovalService on its supported "
+            "rootful Linux daemon host, or a backend implementation with equivalent "
+            "mutation-boundary protection. Do not remove read-only protection to migrate."
+        )
 
 
 def sandbox_path_grant_host_path(grant: SandboxPathGrant) -> Path:

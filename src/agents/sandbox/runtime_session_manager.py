@@ -601,6 +601,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 current_manifest,
                 provider_backend_id=session.state.type,
             )
+            session._validate_path_grant_capabilities(current_manifest)
             running = await session.running()
             await session._validate_manifest_application(
                 manifest=current_manifest,
@@ -616,6 +617,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             processed_manifest,
             provider_backend_id=session.state.type,
         )
+        session._validate_path_grant_capabilities(processed_manifest)
         running = await session.running()
         await session._validate_manifest_application(
             manifest=processed_manifest,

@@ -13,6 +13,7 @@ from .._mount_security import (
 from ..errors import MountConfigError
 from ..manifest import Manifest
 from ..snapshot import SnapshotBase, SnapshotSpec
+from ..workspace_paths import _validate_read_only_grant_capability
 from .base_sandbox_session import BaseSandboxSession
 from .dependencies import Dependencies
 from .manager import Instrumentation
@@ -142,7 +143,15 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
             manifest,
             provider_backend_id=self.backend_id,
         )
+        _validate_read_only_grant_capability(
+            manifest.extra_path_grants,
+            atomic_recursive_remove=self._supports_atomic_recursive_remove(),
+        )
         return manifest
+
+    def _supports_atomic_recursive_remove(self) -> bool:
+        """Whether sessions preserve grant authorization through recursive mutation."""
+        return False
 
     @abc.abstractmethod
     async def create(

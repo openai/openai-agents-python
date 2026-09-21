@@ -1765,6 +1765,7 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         if not isinstance(state, E2BSandboxSessionState):
             raise TypeError("E2BSandboxClient.resume expects an E2BSandboxSessionState")
         state.assert_path_grants_rebound()
+        self._validate_manifest_for_create(state.manifest)
 
         sandbox_type = _coerce_sandbox_type(state.sandbox_type)
         SandboxClass = _import_sandbox_class(sandbox_type)

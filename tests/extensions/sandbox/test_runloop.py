@@ -2702,40 +2702,6 @@ class TestRunloopSandbox:
         assert devbox.exec_calls[exec_count + 4][0] == "mkdir -p -- /tmp"
 
     @pytest.mark.asyncio
-    async def test_write_rejects_workspace_symlink_to_read_only_extra_path_grant(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runloop_module = _load_runloop_module(monkeypatch)
-
-        async with runloop_module.RunloopSandboxClient() as client:
-            session = await client.create(
-                manifest=Manifest(
-                    root="/home/user/project",
-                    extra_path_grants=(SandboxPathGrant(path="/tmp/protected", read_only=True),),
-                ),
-                options=runloop_module.RunloopSandboxClientOptions(),
-            )
-            await session.start()
-            sdk = _FakeAsyncRunloopSDK.created_instances[-1]
-            devbox = sdk.devbox.devboxes[session.state.devbox_id]
-            devbox.symlinks["/home/user/project/link"] = "/tmp/protected"
-
-            with pytest.raises(runloop_module.WorkspaceArchiveWriteError) as exc_info:
-                await session.write("link/result.txt", io.BytesIO(b"blocked"))
-
-        assert devbox.file_upload_paths == []
-        assert str(exc_info.value) == (
-            "failed to write archive for path: /home/user/project/link/result.txt"
-        )
-        assert exc_info.value.context == {
-            "path": "/home/user/project/link/result.txt",
-            "reason": "read_only_extra_path_grant",
-            "grant_path": "/tmp/protected",
-            "resolved_path": "/tmp/protected/result.txt",
-        }
-
-    @pytest.mark.asyncio
     async def test_read_wraps_runloop_http_error_with_provider_context(
         self,
         monkeypatch: pytest.MonkeyPatch,

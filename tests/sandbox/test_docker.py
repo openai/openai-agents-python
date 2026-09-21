@@ -4443,7 +4443,7 @@ async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state
             SandboxPathGrant(
                 path="/mnt/shared-data",
                 host_path=str(host_path),
-                read_only=True,
+                read_only=False,
             ),
         ),
     )
@@ -4456,7 +4456,7 @@ async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state
                         "Type": "bind",
                         "Source": str(host_path),
                         "Destination": "/mnt/shared-data",
-                        "RW": False,
+                        "RW": True,
                     }
                 ],
             )

@@ -1623,6 +1623,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         if not isinstance(state, VercelSandboxSessionState):
             raise TypeError("VercelSandboxClient.resume expects a VercelSandboxSessionState")
         state.assert_path_grants_rebound()
+        self._validate_manifest_for_create(state.manifest)
         if state.s3_mounts_non_resumable or _vercel_s3_mounts(state.manifest):
             raise MountConfigError(
                 message=(

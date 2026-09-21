@@ -349,6 +349,9 @@ class DockerSandboxSession(BaseSandboxSession):
                 )
             )
 
+    def _supports_atomic_recursive_remove(self) -> bool:
+        return self._removal_service is not None
+
     async def stop(self) -> None:
         async with self._removal_lock:
             await super().stop()
@@ -1566,6 +1569,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     docker_client: DockerSDKClient
     _instrumentation: Instrumentation
 
+    def _supports_atomic_recursive_remove(self) -> bool:
+        return self._removal_service is not None
+
     def __init__(
         self,
         docker_client: DockerSDKClient,
@@ -1735,6 +1741,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
         state.assert_path_grants_rebound()
+        self._validate_manifest_for_create(state.manifest)
         _validate_docker_path_grants(state.manifest)
         configured_authority = _manifest_has_configured_mount_authority(state.manifest)
         requires_fresh_resource = state.mount_authority_rebound or configured_authority

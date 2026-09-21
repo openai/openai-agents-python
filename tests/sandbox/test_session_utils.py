@@ -16,7 +16,6 @@ from agents.sandbox.errors import (
     ExecNonZeroError,
     MountConfigError,
     WorkspaceArchiveReadError,
-    WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
@@ -475,10 +474,8 @@ async def test_remote_recursive_rm_refuses_read_only_grants_before_remote_access
         )
     )
 
-    with pytest.raises(WorkspaceArchiveWriteError) as exc_info:
+    with pytest.raises(ValueError, match="atomic recursive removal"):
         await session.rm(target, recursive=True, user=User(name="sandbox-user"))
-
-    assert exc_info.value.context["reason"] == "recursive_remove_with_read_only_grants"
     assert session.last_command is None
 
 

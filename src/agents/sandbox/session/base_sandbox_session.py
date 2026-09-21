@@ -36,6 +36,7 @@ from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.parse_utils import parse_ls_la
 from ..workspace_paths import (
     WorkspacePathPolicy,
+    _validate_read_only_grant_capability,
     coerce_posix_path,
     posix_path_as_path,
     posix_path_for_error,
@@ -229,6 +230,16 @@ class BaseSandboxSession(abc.ABC):
 
         return False
 
+    def _supports_atomic_recursive_remove(self) -> bool:
+        """Override only with a removal implementation that protects concurrent grants."""
+        return False
+
+    def _validate_path_grant_capabilities(self, manifest: Manifest) -> None:
+        _validate_read_only_grant_capability(
+            manifest.extra_path_grants,
+            atomic_recursive_remove=self._supports_atomic_recursive_remove(),
+        )
+
     @redact_mount_error_data
     async def start(self) -> None:
         from .._mount_security import validate_manifest_mount_credential_boundaries
@@ -237,6 +248,7 @@ class BaseSandboxSession(abc.ABC):
             self.state.manifest,
             provider_backend_id=self.state.type,
         )
+        self._validate_path_grant_capabilities(self.state.manifest)
         try:
             await self._ensure_backend_started()
             self._start_workspace_root_ready = self.state.workspace_root_ready
@@ -1134,17 +1146,11 @@ class BaseSandboxSession(abc.ABC):
         :param path: Path to remove.
         :param recursive: If true, remove directories recursively.
         :param user: Optional sandbox user to remove as.
-        :raises WorkspaceArchiveWriteError: If recursive removal is requested while
-            the session has any read-only extra path grant.
+        :raises ValueError: If an unsupported read-only grant configuration bypassed
+            session capability validation.
         """
         if recursive:
-            policy = self._workspace_path_policy()
-            if any(read_only for _, read_only in policy.extra_path_grant_rules()):
-                workspace_path = policy.normalize_sandbox_path(path, for_write=True)
-                raise WorkspaceArchiveWriteError(
-                    path=posix_path_for_error(workspace_path),
-                    context={"reason": "recursive_remove_with_read_only_grants"},
-                )
+            self._validate_path_grant_capabilities(self.state.manifest)
 
         path = await self._validate_path_access(path, for_write=True)
 
@@ -1293,6 +1299,7 @@ class BaseSandboxSession(abc.ABC):
             manifest or self.state.manifest,
             provider_backend_id=self.state.type,
         )
+        self._validate_path_grant_capabilities(manifest or self.state.manifest)
 
     @redact_mount_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
