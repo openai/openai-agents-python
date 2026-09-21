@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -74,6 +74,7 @@ from ..session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
 from ..session.workspace_payloads import coerce_write_payload
 from ..snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from ..types import ExecResult, ExposedPortEndpoint, User
+from ..util.blocking_io import run_blocking_workspace_io
 from ..util.iterator_io import IteratorIO
 from ..util.retry import (
     TRANSIENT_HTTP_STATUS_CODES,
@@ -96,24 +97,6 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def _finish_host_removal_call(call: Callable[[], None]) -> None:
-    """Keep cancellation from releasing a paused workload before host work finishes."""
-    task = asyncio.create_task(asyncio.to_thread(call))
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            task.exception()
-        raise
 
 
 # Non-seekable payloads are spooled to measure their length; keep small ones in
@@ -360,7 +343,7 @@ class DockerSandboxSession(BaseSandboxSession):
             await super().rm(path, recursive=recursive, user=user)
             return
         async with self._removal_lock:
-            await _finish_host_removal_call(
+            await run_blocking_workspace_io(
                 lambda: service.remove(
                     self._container, self.state.manifest, path, self._coerce_exec_user(user)
                 )
@@ -582,7 +565,7 @@ class DockerSandboxSession(BaseSandboxSession):
     async def _ensure_backend_started(self) -> None:
         service = self._removal_service
         if service is not None:
-            await _finish_host_removal_call(
+            await run_blocking_workspace_io(
                 lambda: service.assert_bound(self._container, self.state.manifest)
             )
         self._container.reload()
@@ -1613,7 +1596,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             assert container_id is not None
             service = self._removal_service
             if service is not None:
-                await _finish_host_removal_call(lambda: service.bind_new(container, manifest))
+                await run_blocking_workspace_io(lambda: service.bind_new(container, manifest))
             snapshot_id = str(session_id)
             snapshot_instance = resolve_snapshot(snapshot, snapshot_id)
             state = DockerSandboxSessionState(
@@ -1641,7 +1624,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             cleanup_service = self._removal_service
             if cleanup_service is not None and container is not None:
                 with suppress(Exception, asyncio.CancelledError):
-                    await _finish_host_removal_call(lambda: cleanup_service.release(container.id))
+                    await run_blocking_workspace_io(lambda: cleanup_service.release(container.id))
             raise
 
     def _cleanup_failed_create_resources(
@@ -1702,7 +1685,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         service = self._removal_service
         if container_removed and service is not None:
             try:
-                await _finish_host_removal_call(lambda: service.release(inner.state.container_id))
+                await run_blocking_workspace_io(lambda: service.release(inner.state.container_id))
             except (Exception, asyncio.CancelledError) as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
@@ -1743,7 +1726,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         if container is not None:
             existing_service = self._removal_service
             if existing_service is not None:
-                await _finish_host_removal_call(
+                await run_blocking_workspace_io(
                     lambda: existing_service.assert_bound(container, state.manifest)
                 )
             _assert_existing_container_path_grants_match(container, state.manifest)
@@ -1789,7 +1772,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 service = self._removal_service
                 if service is not None:
                     container.start()
-                    await _finish_host_removal_call(
+                    await run_blocking_workspace_io(
                         lambda: service.bind_new(container, state.manifest)
                     )
 
@@ -1814,7 +1797,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 cleanup_service = self._removal_service
                 if cleanup_service is not None and container is not None:
                     with suppress(Exception, asyncio.CancelledError):
-                        await _finish_host_removal_call(
+                        await run_blocking_workspace_io(
                             lambda: cleanup_service.release(container.id)
                         )
             raise

@@ -72,7 +72,7 @@ async def test_recursive_rm_preserves_read_only_descendants_and_writable_sibling
             SandboxPathGrant(path=str(grant_path), read_only=True),
         ),
     )
-    # Isolate the user permission probe; deletion still uses real descriptor-relative IO.
+    # Isolate the user permission probe; the host rejects before destructive file operations.
     monkeypatch.setattr(
         session, "exec", AsyncMock(return_value=ExecResult(stdout=b"", stderr=b"", exit_code=0))
     )
@@ -81,12 +81,15 @@ async def test_recursive_rm_preserves_read_only_descendants_and_writable_sibling
     assert secret.read_bytes() == b"protected"
     assert sibling.read_bytes() == b"writable"
 
-    await session.rm(writable, recursive=True, user=user)
-    assert not writable.exists()
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.rm(writable, recursive=True, user=user)
+    assert sibling.read_bytes() == b"writable"
     assert secret.read_bytes() == b"protected"
 
 
-async def test_recursive_rm_allows_nested_writable_override(tmp_path: Path) -> None:
+async def test_recursive_rm_rejects_nested_writable_override_with_read_only_grant(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     protected = tmp_path / "protected"
@@ -100,8 +103,9 @@ async def test_recursive_rm_allows_nested_writable_override(tmp_path: Path) -> N
             SandboxPathGrant(path=str(writable)),
         ),
     )
-    await session.rm(writable, recursive=True)
-    assert not writable.exists()
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.rm(writable, recursive=True)
+    assert (writable / "sentinel").read_bytes() == b"writable"
     assert protected.is_dir()
 
 
@@ -238,8 +242,10 @@ async def test_safe_symlinks_grants_and_listing_paths_remain_supported(tmp_path:
         await session.write(readonly / "file", io.BytesIO(b"denied"))
     listed = await session.ls(Path("internal/nested"))
     assert [entry.path for entry in listed] == [str(workspace / "real/nested/file")]
-    await session.rm(Path("internal"), recursive=True)
-    assert not (workspace / "real").exists()
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.rm(Path("internal"), recursive=True)
+    await session.rm(Path("internal/nested/file"))
+    assert not (workspace / "real/nested/file").exists()
     assert (allowed / "file").read_bytes() == b"allowed"
 
 
@@ -483,8 +489,9 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
 
 
 @pytest.mark.parametrize("kind", ["missing", "file", "empty", "nonempty"])
-async def test_recursive_rm_checks_descendants_only_for_nonempty_directories(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+@pytest.mark.parametrize("read_only_grant", [False, True])
+async def test_recursive_rm_rejects_read_only_sessions_before_filesystem_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, read_only_grant: bool
 ) -> None:
     import errno
     import stat
@@ -499,13 +506,19 @@ async def test_recursive_rm_checks_descendants_only_for_nonempty_directories(
         tmp_path / "workspace",
         grants=(
             SandboxPathGrant(path=str(target)),
-            SandboxPathGrant(path=str(target / "protected"), read_only=True),
+            *(
+                [SandboxPathGrant(path=str(tmp_path / "protected"), read_only=True)]
+                if read_only_grant
+                else []
+            ),
         ),
     )
     events: list[str] = []
 
     @contextmanager
     def parent(path: Path, **kwargs: object) -> Iterator[tuple[int, str]]:
+        if read_only_grant:
+            pytest.fail("read-only sessions must reject before opening the parent")
         session._files.authorize(path, for_write=True)
         yield 20, path.name
 
@@ -515,12 +528,14 @@ async def test_recursive_rm_checks_descendants_only_for_nonempty_directories(
         return SimpleNamespace(st_mode=stat.S_IFREG if kind == "file" else stat.S_IFDIR)
 
     def rmdir(*args: object, **kwargs: object) -> None:
-        if kind == "nonempty":
+        if kind == "nonempty" and "close" not in events:
             raise OSError(errno.ENOTEMPTY, "not empty")
         events.append("rmdir")
 
-    def unexpected_scan(*args: object) -> None:
-        pytest.fail("protected descendant validation must precede enumeration")
+    @contextmanager
+    def scan(*args: object) -> Iterator[Iterator[SimpleNamespace]]:
+        events.append("scan")
+        yield iter(())
 
     monkeypatch.setattr(session._files, "parent", parent)
     monkeypatch.setattr(
@@ -532,13 +547,21 @@ async def test_recursive_rm_checks_descendants_only_for_nonempty_directories(
             rmdir=rmdir,
             open=lambda *args, **kwargs: 21,
             close=lambda fd: events.append("close"),
-            scandir=unexpected_scan,
+            scandir=scan,
         ),
     )
-    if kind == "nonempty":
+    if read_only_grant:
         with pytest.raises(WorkspaceArchiveWriteError):
             await session.rm(target, recursive=True)
-        assert events == ["close"]
+        assert events == []
     else:
         await session.rm(target, recursive=True)
-        assert events == ([] if kind == "missing" else ["unlink" if kind == "file" else "rmdir"])
+        assert (
+            events
+            == {
+                "missing": [],
+                "file": ["unlink"],
+                "empty": ["rmdir"],
+                "nonempty": ["scan", "close", "rmdir"],
+            }[kind]
+        )

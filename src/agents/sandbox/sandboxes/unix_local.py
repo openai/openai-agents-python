@@ -169,6 +169,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     Workspace paths and SDK file API guards do not confine arbitrary Linux shell commands.
     Use this backend for trusted local execution or within externally provided isolation.
 
+    Recursive SDK removal is unavailable whenever the session has a read-only extra path
+    grant, including for unrelated or missing targets. Local processes can move protected
+    entries during traversal. Use Docker with DockerRemovalService when recursive removal
+    must coexist with read-only grants; sessions without read-only grants retain local removal.
+
     User-scoped listing and writing require sudo access to a system python3 and its standard
     library. These operations run a trusted file worker in Python isolated mode, independently
     of the application's interpreter or virtual environment.

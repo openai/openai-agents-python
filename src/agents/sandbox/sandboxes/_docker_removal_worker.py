@@ -16,6 +16,7 @@ import errno
 import json
 import os
 import posixpath
+import resource
 import stat
 from collections.abc import Generator, Iterator
 from contextlib import ExitStack, closing, contextmanager
@@ -181,25 +182,33 @@ def _remove_leaf(path: str) -> bool:
     return False
 
 
-def _remove(path: str) -> None:
+def _remove(path: str, *, max_entry_visits: int) -> None:
+    remaining = max_entry_visits
+
+    def remove_leaf(selected: str) -> bool:
+        nonlocal remaining
+        if remaining <= 0:
+            raise OSError(errno.E2BIG, "removal_entry_limit")
+        remaining -= 1
+        return _remove_leaf(selected)
+
     pending = [path]
     while pending:
         current = pending[-1]
-        if _remove_leaf(current):
+        if remove_leaf(current):
             pending.pop()
             continue
         # Stream leaf removal; retain only one path per ancestor, never all siblings.
         # Close the iterator before descending so deep trees do not exhaust handles.
         with os.scandir(current) as entries:
             child_directory = next(
-                (child.path for child in entries if not _remove_leaf(child.path)), None
+                (child.path for child in entries if not remove_leaf(child.path)), None
             )
         if child_directory is not None:
             pending.append(child_directory)
 
 
-def _remove_as_user(path: str, user: str) -> None:
-    uid, gid, groups = _user_ids(user)
+def _remove_as_user(path: str, user: str, *, max_entry_visits: int, max_cpu_seconds: int) -> None:
     read_fd, write_fd = os.pipe()
     try:
         pid = os.fork()
@@ -212,10 +221,12 @@ def _remove_as_user(path: str, user: str) -> None:
         exit_code = 1
         try:
             try:
+                resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
+                uid, gid, groups = _user_ids(user)
                 os.setgroups(groups)
                 os.setgid(gid)
                 os.setuid(uid)
-                _remove(path)
+                _remove(path, max_entry_visits=max_entry_visits)
                 outcome: dict[str, Any] = {"ok": True}
             except Exception as exc:
                 outcome = {"ok": False, "errno": getattr(exc, "errno", None)}
@@ -279,7 +290,12 @@ def main() -> None:
                 elif operation == "remove" and requested_path:
                     # The workload stays paused; preserve user search permissions on aliases.
                     path, requested_path = requested_path, ""
-                    _remove_as_user(path, request["user"])
+                    _remove_as_user(
+                        path,
+                        request["user"],
+                        max_entry_visits=request["max_entry_visits"],
+                        max_cpu_seconds=request["max_cpu_seconds"],
+                    )
                 elif operation == "close":
                     break
                 else:

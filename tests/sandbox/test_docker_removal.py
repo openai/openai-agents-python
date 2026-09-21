@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import stat
+import sys
 import threading
 import uuid
 from collections.abc import Iterator
@@ -30,7 +31,6 @@ from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
     DockerSandboxSession,
     DockerSandboxSessionState,
-    _finish_host_removal_call,
 )
 from agents.sandbox.snapshot import NoopSnapshot
 
@@ -85,13 +85,16 @@ class RecordingWorker:
 
 @pytest.fixture
 def service(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> tuple[DockerRemovalService, RecordingContainer, RecordingWorker]:
-    instance = object.__new__(DockerRemovalService)
-    instance.docker_client = Mock()
-    instance._lock = threading.RLock()
-    instance._bindings = {}
-    instance._closed = False
+    monkeypatch.setattr(
+        docker_removal, "sys", SimpleNamespace(platform="linux", exc_info=sys.exc_info)
+    )
+    monkeypatch.setattr(docker_removal, "os", SimpleNamespace(geteuid=lambda: 0))
+    monkeypatch.setattr(docker_removal, "DockerClient", Mock(return_value=Mock()))
+    limits = {"max_concurrent_removals": 4, "max_entry_visits": 100_000, "max_cpu_seconds": 10}
+    limits.update(getattr(request, "param", {}))
+    instance = DockerRemovalService(**limits)
     container = RecordingContainer()
     worker = RecordingWorker(container)
     monkeypatch.setattr(instance, "_state", lambda _: (123, "incarnation"))
@@ -138,8 +141,40 @@ async def test_recursive_removal_preserves_unrelated_writable_trees(
         target, recursive=True, user=User(name="developer")
     )
     assert worker.removed == ["/workspace/build" if target == "build" else target]
-    assert worker.calls[-1] == {"operation": "remove", "user": "developer"}
+    assert worker.calls[-1] == {
+        "operation": "remove",
+        "user": "developer",
+        "max_entry_visits": 100_000,
+        "max_cpu_seconds": 10,
+    }
     assert container.events == ["pause", "unpause", "pause", "unpause"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", [{"max_entry_visits": 3, "max_cpu_seconds": 1}], indirect=True)
+async def test_removal_forwards_application_resource_limits(service: Any) -> None:
+    manager, container, worker = service
+    configured = manifest()
+    manager.bind_new(container, configured)
+    await session(manager, container, configured).rm("build", recursive=True)
+    assert worker.calls[-1] == {
+        "operation": "remove",
+        "user": "1000:1000",
+        "max_entry_visits": 3,
+        "max_cpu_seconds": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "limit", ["max_concurrent_removals", "max_entry_visits", "max_cpu_seconds"]
+)
+def test_service_rejects_nonpositive_limits_before_connecting(service: Any, limit: str) -> None:
+    limits = {"max_concurrent_removals": 4, "max_entry_visits": 100_000, "max_cpu_seconds": 10}
+    limits[limit] = 0
+    docker_removal.DockerClient.reset_mock()
+    with pytest.raises(ValueError, match="resource limits must be positive"):
+        DockerRemovalService(**limits)
+    docker_removal.DockerClient.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -362,7 +397,14 @@ def test_windows_path_is_rejected_before_mutation(service: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_repeated_cancellation_waits_for_actual_host_completion() -> None:
+@pytest.mark.parametrize("outcome", ["success", "exception", "base_exception"])
+async def test_repeated_cancellation_waits_for_actual_host_completion(
+    service: Any, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    manager, container, _ = service
+    configured = manifest()
+    manager.bind_new(container, configured)
+    current = session(manager, container, configured)
     started = threading.Event()
     finish = threading.Event()
     completed: list[str] = []
@@ -372,8 +414,13 @@ async def test_repeated_cancellation_waits_for_actual_host_completion() -> None:
         finished = finish.wait(5)
         assert finished
         completed.append("finished")
+        if outcome == "exception":
+            raise RuntimeError("worker failed")
+        if outcome == "base_exception":
+            raise BaseException("worker stopped")
 
-    task = asyncio.create_task(_finish_host_removal_call(operation))
+    monkeypatch.setattr(manager, "remove", lambda *args: operation())
+    task = asyncio.create_task(current.rm("build", recursive=True))
     try:
         await asyncio.to_thread(started.wait, 5)
         task.cancel()
@@ -396,7 +443,7 @@ def test_empty_directory_needs_no_search_of_its_contents(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         worker_code.os, "scandir", Mock(side_effect=AssertionError("must not search"))
     )
-    worker_code._remove("/workspace/empty")
+    worker_code._remove("/workspace/empty", max_entry_visits=100_000)
     assert removed == ["/workspace/empty"]
 
 
@@ -613,7 +660,12 @@ async def test_missing_target_still_checks_the_requested_user(
             "path": "/workspace/private/missing",
             "workspace_root": "/workspace",
         },
-        {"operation": "remove", "user": "developer"},
+        {
+            "operation": "remove",
+            "user": "developer",
+            "max_entry_visits": 100_000,
+            "max_cpu_seconds": 10,
+        },
     ]
     assert not container.attrs["State"]["Paused"]
 
@@ -629,7 +681,12 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
     requests = [
         {"operation": "bind", "paths": ["/workspace"]},
         {"operation": "inspect", "path": original},
-        {"operation": "remove", "user": "1000:1000"},
+        {
+            "operation": "remove",
+            "user": "1000:1000",
+            "max_entry_visits": 100_000,
+            "max_cpu_seconds": 10,
+        },
     ]
     output = io.StringIO()
     monkeypatch.setattr(worker_code.sys, "argv", ["worker", "123"])
@@ -652,10 +709,10 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
             raise FileNotFoundError("missing leaf")
         return SimpleNamespace(st_mode=0o040755)
 
-    def remove_as_user(path: str, user: str) -> None:
+    def remove_as_user(path: str, user: str, **limits: int) -> None:
         nonlocal current_user
         current_user = user
-        worker_code._remove(path)
+        worker_code._remove(path, max_entry_visits=100_000)
 
     monkeypatch.setattr(worker_code.os, "lstat", lstat)
     monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
@@ -926,9 +983,17 @@ def test_bound_descriptors_are_closed_after_partial_or_normal_lifetime(
     assert closed == ([20] if failure == "open" else [21, 20])
 
 
-@pytest.mark.parametrize("failure", [None, PermissionError(13, "denied"), KeyboardInterrupt()])
+@pytest.mark.parametrize(
+    ("failure", "limit_failure"),
+    [
+        (None, None),
+        (PermissionError(13, "denied"), None),
+        (KeyboardInterrupt(), None),
+        (None, PermissionError(1, "limit denied")),
+    ],
+)
 def test_removal_child_always_exits_without_resuming_parent(
-    failure: BaseException | None, monkeypatch: pytest.MonkeyPatch
+    failure: BaseException | None, limit_failure: OSError | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class ChildExited(BaseException):
         pass
@@ -940,9 +1005,12 @@ def test_removal_child_always_exits_without_resuming_parent(
         exit_codes.append(code)
         raise ChildExited
 
-    monkeypatch.setattr(worker_code, "_user_ids", lambda user: (1000, 1000, []))
+    user_ids = Mock(return_value=(1000, 1000, []))
+    monkeypatch.setattr(worker_code, "_user_ids", user_ids)
     monkeypatch.setattr(worker_code.os, "pipe", lambda: (20, 21))
     monkeypatch.setattr(worker_code.os, "fork", lambda: 0)
+    set_limit = Mock(side_effect=limit_failure)
+    monkeypatch.setattr(worker_code.resource, "setrlimit", set_limit)
     monkeypatch.setattr(worker_code.os, "close", lambda fd: None)
     for name in ("setgroups", "setgid", "setuid"):
         monkeypatch.setattr(worker_code.os, name, lambda value: None)
@@ -950,12 +1018,18 @@ def test_removal_child_always_exits_without_resuming_parent(
     monkeypatch.setattr(worker_code.os, "write", lambda fd, data: writes.append(json.loads(data)))
     monkeypatch.setattr(worker_code.os, "_exit", exit_child)
     with pytest.raises(ChildExited):
-        worker_code._remove_as_user("/workspace/build", "1000:1000")
+        worker_code._remove_as_user(
+            "/workspace/build", "1000:1000", max_entry_visits=100_000, max_cpu_seconds=10
+        )
+    set_limit.assert_called_once_with(worker_code.resource.RLIMIT_CPU, (10, 10))
+    if limit_failure is not None:
+        user_ids.assert_not_called()
+    failure = limit_failure or failure
     assert exit_codes == ([1] if isinstance(failure, KeyboardInterrupt) else [0])
     assert writes == (
         []
         if isinstance(failure, KeyboardInterrupt)
-        else [{"ok": False, "errno": 13}]
+        else [{"ok": False, "errno": getattr(failure, "errno", None)}]
         if failure
         else [{"ok": True}]
     )
@@ -1122,7 +1196,7 @@ def test_worker_removes_deep_tree_without_python_recursion_or_open_directory_sta
     monkeypatch.setattr(
         worker_code.os, "unlink", Mock(side_effect=AssertionError("directories only"))
     )
-    worker_code._remove(paths[0])
+    worker_code._remove(paths[0], max_entry_visits=100_000)
     assert remaining == set()
     assert removed == paths[::-1]
     assert open_scans == 0
@@ -1170,9 +1244,97 @@ def test_worker_streams_wide_directory_without_buffering_sibling_paths(
     monkeypatch.setattr(worker_code.os, "rmdir", rmdir)
     monkeypatch.setattr(worker_code.os, "unlink", unlink)
     monkeypatch.setattr(worker_code.os, "scandir", lambda path: nullcontext(entries()))
-    worker_code._remove("/tree")
+    worker_code._remove("/tree", max_entry_visits=100_000)
     assert root_removed
     assert deleted == count
+
+
+def test_worker_stops_entry_visits_before_additional_filesystem_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visited: list[str] = []
+    scans_closed: list[bool] = []
+
+    def remove_leaf(path: str) -> bool:
+        visited.append(path)
+        return path != "/tree"
+
+    @contextmanager
+    def scan(path: str) -> Iterator[Any]:
+        try:
+            yield (SimpleNamespace(path=f"/tree/{index}") for index in range(100))
+        finally:
+            scans_closed.append(True)
+
+    monkeypatch.setattr(worker_code, "_remove_leaf", remove_leaf)
+    monkeypatch.setattr(worker_code.os, "scandir", scan)
+    with pytest.raises(OSError) as caught:
+        worker_code._remove("/tree", max_entry_visits=3)
+    assert caught.value.errno == errno.E2BIG
+    assert visited == ["/tree", "/tree/0", "/tree/1"]
+    assert scans_closed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", [{"max_concurrent_removals": 1}], indirect=True)
+@pytest.mark.parametrize("outcome", ["success", "failure", "uncertain"])
+async def test_service_bounds_concurrent_removal_without_pausing_rejected_work(
+    service: Any, outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, first_container, first_worker = service
+    second_container = RecordingContainer()
+    second_container.id = "b" * 64
+    second_worker = RecordingWorker(second_container)
+    monkeypatch.setattr(docker_removal, "_Worker", Mock(side_effect=[first_worker, second_worker]))
+    configured = manifest()
+    manager.bind_new(first_container, configured)
+    manager.bind_new(second_container, configured)
+    first_session = session(manager, first_container, configured)
+    second_session = session(manager, second_container, configured)
+    entered = threading.Event()
+    finish = threading.Event()
+    request = first_worker.request
+
+    def block(**data: Any) -> dict[str, Any]:
+        if data["operation"] == "remove":
+            entered.set()
+            if not finish.wait(5):
+                raise RuntimeError("test completion was not released")
+            first_worker.uncertain = outcome == "uncertain"
+            if outcome != "success":
+                raise RuntimeError("worker failure")
+        return request(**data)
+
+    first_worker.request = block
+    first_task = asyncio.create_task(first_session.rm("build", recursive=True))
+    try:
+        started = await asyncio.to_thread(entered.wait, 5)
+        assert started
+        events = list(second_container.events)
+        with pytest.raises(WorkspaceArchiveWriteError) as caught:
+            await second_session.rm("build", recursive=True)
+        assert caught.value.context["reason"] == "docker_removal_capacity"
+        assert second_worker.removed == []
+        assert second_container.events == events
+        assert not first_task.done()
+    finally:
+        finish.set()
+        results = await asyncio.gather(first_task, return_exceptions=True)
+    assert (
+        (results == [None])
+        if outcome == "success"
+        else isinstance(results[0], WorkspaceArchiveWriteError)
+    )
+    if outcome == "uncertain":
+        assert first_container.attrs["State"]["Paused"]
+        manager.release(first_container.id)
+        with pytest.raises(WorkspaceArchiveWriteError) as caught:
+            await second_session.rm("build", recursive=True)
+        assert caught.value.context["reason"] == "docker_removal_capacity"
+    else:
+        await second_session.rm("build", recursive=True)
+        assert second_worker.removed == ["/workspace/build"]
+        assert not first_container.attrs["State"]["Paused"]
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1440,12 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
     requests = [
         {"operation": "bind", "paths": [alias]},
         {"operation": "inspect", "path": original, "workspace_root": alias},
-        {"operation": "remove", "user": "developer"},
+        {
+            "operation": "remove",
+            "user": "developer",
+            "max_entry_visits": 100_000,
+            "max_cpu_seconds": 10,
+        },
     ]
     output = io.StringIO()
     monkeypatch.setattr(worker_code.sys, "argv", ["worker", "123"])
@@ -1303,10 +1470,10 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
             raise PermissionError("workspace alias ancestor denies search")
         return SimpleNamespace(st_mode=stat.S_IFDIR)
 
-    def remove_as_user(path: str, user: str) -> None:
+    def remove_as_user(path: str, user: str, **limits: int) -> None:
         nonlocal current_user
         current_user = user
-        worker_code._remove(path)
+        worker_code._remove(path, max_entry_visits=100_000)
 
     monkeypatch.setattr(worker_code.os, "lstat", metadata)
     monkeypatch.setattr(worker_code.os, "rmdir", removed.append)

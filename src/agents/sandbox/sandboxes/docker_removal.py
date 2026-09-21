@@ -122,7 +122,9 @@ class DockerRemovalService:
     Create the service on the daemon host, then pass its connection and live service
     to the client::
 
-        service = DockerRemovalService()
+        service = DockerRemovalService(
+            max_concurrent_removals=4, max_entry_visits=100_000, max_cpu_seconds=10
+        )
         client = DockerSandboxClient(service.docker_client, removal_service=service)
 
     Use the normal ``client.create`` and ``session.start`` lifecycle. After use, await
@@ -131,20 +133,43 @@ class DockerRemovalService:
     deadlines. Stopped/restarted containers require a fresh session; a binding must
     not be reconstructed from saved paths. Shared mounts and custom security profiles
     are deliberately unsupported by this initial implementation.
+
+    Choose resource limits for the host and share this service across the managed
+    clients. Calls beyond the concurrency limit are rejected before pausing.
+    Each removal child has a CPU-time limit; entry visits include repeated
+    visits to ancestors. Reaching a limit may leave a partially removed tree. These
+    limits do not impose a wall-clock deadline on stalled kernel I/O. An uncertain
+    worker outcome consumes a concurrency slot until all workers have been stopped
+    and the application replaces the service.
     """
 
     docker_client: DockerClient
     _lock: threading.RLock
     _bindings: dict[str, _Binding]
     _closed: bool
+    _removal_slots: threading.BoundedSemaphore
+    _max_entry_visits: int
+    _max_cpu_seconds: int
 
-    def __init__(self, *, socket_path: str = "/var/run/docker.sock") -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrent_removals: int,
+        max_entry_visits: int,
+        max_cpu_seconds: int,
+        socket_path: str = "/var/run/docker.sock",
+    ) -> None:
         if sys.platform != "linux" or os.geteuid() != 0:
             raise RuntimeError("DockerRemovalService requires root on the Linux Docker host")
+        if min(max_concurrent_removals, max_entry_visits, max_cpu_seconds) <= 0:
+            raise ValueError("Docker removal resource limits must be positive")
         self.docker_client = DockerClient(base_url=f"unix://{socket_path}")
         self._lock = threading.RLock()
         self._bindings = {}
         self._closed = False
+        self._removal_slots = threading.BoundedSemaphore(max_concurrent_removals)
+        self._max_entry_visits = max_entry_visits
+        self._max_cpu_seconds = max_cpu_seconds
 
     def _state(self, container: Container) -> tuple[int, str]:
         container.reload()
@@ -283,48 +308,65 @@ class DockerRemovalService:
                 root=manifest.root, extra_path_grants=manifest.extra_path_grants
             )
             original = original_policy.normalize_sandbox_path(path)
-            with self._paused(container, binding.worker):
-                try:
-                    inspection = binding.worker.request(
-                        operation="inspect",
-                        path=original.as_posix(),
-                        workspace_root=manifest.root
-                        if not coerce_posix_path(path).is_absolute()
-                        else None,
-                    )
-                    target = inspection["path"]
-                    if target:
-                        selected = coerce_posix_path(target)
-                        root = binding.policy.normalize_sandbox_path(".")
-                        live_roots = (
-                            root,
-                            *(
-                                grant
-                                for grant, _ in binding.policy.extra_path_grant_rules()
-                                if not grant.is_relative_to(root)
-                            ),
+            if not self._removal_slots.acquire(blocking=False):
+                raise WorkspaceArchiveWriteError(
+                    path=posix_path_for_error(original),
+                    context={"reason": "docker_removal_capacity"},
+                )
+            try:
+                with self._paused(container, binding.worker):
+                    try:
+                        inspection = binding.worker.request(
+                            operation="inspect",
+                            path=original.as_posix(),
+                            workspace_root=manifest.root
+                            if not coerce_posix_path(path).is_absolute()
+                            else None,
                         )
-                        if any(
-                            selected == bound_root
-                            or (inspection["is_directory"] and bound_root.is_relative_to(selected))
-                            for bound_root in live_roots
-                        ):
-                            raise WorkspaceArchiveWriteError(
-                                path=posix_path_for_error(original),
-                                context={"reason": "docker_removal_bound_root"},
+                        target = inspection["path"]
+                        if target:
+                            selected = coerce_posix_path(target)
+                            root = binding.policy.normalize_sandbox_path(".")
+                            live_roots = (
+                                root,
+                                *(
+                                    grant
+                                    for grant, _ in binding.policy.extra_path_grant_rules()
+                                    if not grant.is_relative_to(root)
+                                ),
                             )
-                        if inspection["is_directory"]:
-                            binding.policy.validate_recursive_remove(target)
-                        else:
-                            binding.policy.normalize_sandbox_path(target, for_write=True)
-                    docker_user = user or container.attrs.get("Config", {}).get("User") or "0"
-                    binding.worker.request(operation="remove", user=docker_user)
-                except RuntimeError as exc:
-                    raise WorkspaceArchiveWriteError(
-                        path=posix_path_for_error(original),
-                        context={"reason": "docker_removal_failed"},
-                        cause=exc,
-                    ) from exc
+                            if any(
+                                selected == bound_root
+                                or (
+                                    inspection["is_directory"]
+                                    and bound_root.is_relative_to(selected)
+                                )
+                                for bound_root in live_roots
+                            ):
+                                raise WorkspaceArchiveWriteError(
+                                    path=posix_path_for_error(original),
+                                    context={"reason": "docker_removal_bound_root"},
+                                )
+                            if inspection["is_directory"]:
+                                binding.policy.validate_recursive_remove(target)
+                            else:
+                                binding.policy.normalize_sandbox_path(target, for_write=True)
+                        docker_user = user or container.attrs.get("Config", {}).get("User") or "0"
+                        binding.worker.request(
+                            operation="remove",
+                            user=docker_user,
+                            max_entry_visits=self._max_entry_visits,
+                            max_cpu_seconds=self._max_cpu_seconds,
+                        )
+                    except RuntimeError as exc:
+                        raise WorkspaceArchiveWriteError(
+                            path=posix_path_for_error(original),
+                            context={"reason": "docker_removal_failed"},
+                            cause=exc,
+                        ) from exc
+            finally:
+                if not binding.worker.uncertain:
+                    self._removal_slots.release()
 
     def release(self, container_id: str) -> None:
         """Release authority after its container has been deleted."""
