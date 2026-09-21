@@ -666,21 +666,43 @@ def test_namespace_entry_uses_only_mount_namespace_and_closes_host_directory_han
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("collision", [None, "writable_first", "read_only_first", "workspace"])
 async def test_create_binds_before_returning_the_session(
-    service: Any, monkeypatch: pytest.MonkeyPatch
+    service: Any, monkeypatch: pytest.MonkeyPatch, collision: str | None
 ) -> None:
     manager, container, worker = service
     monkeypatch.setattr(container, "start", lambda: container.events.append("start"), raising=False)
+    remove = Mock()
+    monkeypatch.setattr(container, "remove", remove, raising=False)
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
     client = DockerSandboxClient(manager.docker_client, removal_service=manager)
+    configured = manifest()
+    if collision is not None:
+        worker.aliases["/grant-alias"] = "/workspace" if collision == "workspace" else "/external"
+        if collision == "read_only_first":
+            configured = configured.model_copy(
+                update={"extra_path_grants": tuple(reversed(configured.extra_path_grants))}
+            )
 
     async def create_container(*args: Any, **kwargs: Any) -> RecordingContainer:
         return container
 
     monkeypatch.setattr(client, "_create_container", create_container)
+    if collision is not None:
+        with pytest.raises(ValueError, match="distinct canonical workspace and grant roots"):
+            await client.create(
+                manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
+            )
+        assert manager._bindings == {}
+        assert [call["operation"] for call in worker.calls] == ["bind"]
+        assert worker.removed == []
+        assert container.events == ["start", "pause", "close", "unpause"]
+        remove.assert_called_once_with(force=True)
+        return
+
     wrapped = await client.create(
-        manifest=manifest(), options=DockerSandboxClientOptions(image="trusted-image")
+        manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
     )
     await wrapped.rm("build", recursive=True)
     assert container.events[:3] == ["start", "pause", "unpause"]

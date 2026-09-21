@@ -116,6 +116,7 @@ class DockerRemovalService:
     The service must not be shared with untrusted callers or exposed to containers.
     Only newly created, private containers can acquire a binding. Replacing a bound
     canonical root invalidates it; changing its original symlink alias does not.
+    Workspace and grant roots must resolve to distinct canonical paths.
     Recursive removal rejects the workspace root and effective external grant roots,
     including their ancestors. Remove their children to clear them instead.
 
@@ -262,6 +263,10 @@ class DockerRemovalService:
                     paths=[manifest.root, *(grant.path for grant in manifest.extra_path_grants)],
                 )
                 paths = result["paths"]
+                if len(set(paths)) != len(paths):
+                    raise ValueError(
+                        "Docker removal requires distinct canonical workspace and grant roots"
+                    )
                 policy = WorkspacePathPolicy(
                     root=paths[0],
                     extra_path_grants=tuple(
