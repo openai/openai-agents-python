@@ -116,6 +116,8 @@ class DockerRemovalService:
     The service must not be shared with untrusted callers or exposed to containers.
     Only newly created, private containers can acquire a binding. Replacing a bound
     canonical root invalidates it; changing its original symlink alias does not.
+    Recursive removal rejects the workspace root and effective external grant roots,
+    including their ancestors. Remove their children to clear them instead.
 
     Create the service on the daemon host, then pass its connection and live service
     to the client::
@@ -201,12 +203,22 @@ class DockerRemovalService:
         # The Docker pause request completes before exec or filesystem work begins.
         if self._state(container) != incarnation or not container.attrs["State"]["Paused"]:
             raise RuntimeError("Docker container changed while pausing; left paused")
+        completed = False
         try:
             yield incarnation
+            completed = True
         finally:
+            primary_error = None if completed else sys.exc_info()[1]
             if not already_paused and (worker is None or not worker.uncertain):
-                if self._state(container) == incarnation and container.attrs["State"]["Paused"]:
-                    container.unpause()
+                try:
+                    if self._state(container) == incarnation and container.attrs["State"]["Paused"]:
+                        container.unpause()
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    # Keep the primary cause and avoid a context cycle back to that error.
+                    cleanup_error.__context__ = primary_error.__context__
+                    primary_error.__context__ = cleanup_error
 
     def bind_new(self, container: Container, manifest: Manifest) -> None:
         """Bind before a newly created session is returned to its trusted application."""
@@ -282,6 +294,25 @@ class DockerRemovalService:
                     )
                     target = inspection["path"]
                     if target:
+                        selected = coerce_posix_path(target)
+                        root = binding.policy.normalize_sandbox_path(".")
+                        live_roots = (
+                            root,
+                            *(
+                                grant
+                                for grant, _ in binding.policy.extra_path_grant_rules()
+                                if not grant.is_relative_to(root)
+                            ),
+                        )
+                        if any(
+                            selected == bound_root
+                            or (inspection["is_directory"] and bound_root.is_relative_to(selected))
+                            for bound_root in live_roots
+                        ):
+                            raise WorkspaceArchiveWriteError(
+                                path=posix_path_for_error(original),
+                                context={"reason": "docker_removal_bound_root"},
+                            )
                         if inspection["is_directory"]:
                             binding.policy.validate_recursive_remove(target)
                         else:

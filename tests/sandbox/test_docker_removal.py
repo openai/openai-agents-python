@@ -143,6 +143,118 @@ async def test_recursive_removal_preserves_unrelated_writable_trees(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "is_directory"),
+    [(".", True), ("/workspace", True), ("/external", True), ("/external", False)],
+)
+async def test_recursive_removal_preserves_live_binding_roots(
+    service: Any, monkeypatch: pytest.MonkeyPatch, target: str, is_directory: bool
+) -> None:
+    manager, container, worker = service
+    configured = Manifest(
+        root="/workspace",
+        extra_path_grants=(
+            SandboxPathGrant(path="/external"),
+            SandboxPathGrant(path="/protected", read_only=True),
+        ),
+    )
+    manager.bind_new(container, configured)
+    original_request = worker.request
+
+    def request(**data: Any) -> dict[str, Any]:
+        result = original_request(**data)
+        if data["operation"] == "inspect":
+            result["is_directory"] = is_directory
+        return result
+
+    monkeypatch.setattr(worker, "request", request)
+    current = session(manager, container, configured)
+    with pytest.raises(WorkspaceArchiveWriteError) as caught:
+        await current.rm(target, recursive=True, user=User(name="0"))
+    assert caught.value.context["reason"] == "docker_removal_bound_root"
+    assert worker.removed == []
+    assert not container.attrs["State"]["Paused"]
+    await current.rm("build", recursive=True)
+    assert worker.removed == ["/workspace/build"]
+
+
+@pytest.mark.asyncio
+async def test_recursive_removal_rejects_alias_to_ancestor_of_workspace(service: Any) -> None:
+    manager, container, worker = service
+    configured = Manifest(
+        root="/external/group/workspace",
+        extra_path_grants=(
+            SandboxPathGrant(path="/external"),
+            SandboxPathGrant(path="/protected", read_only=True),
+        ),
+    )
+    manager.bind_new(container, configured)
+    worker.aliases["/external/group/workspace/link/tree"] = "/external/group"
+    current = session(manager, container, configured)
+    with pytest.raises(WorkspaceArchiveWriteError) as caught:
+        await current.rm("link/tree", recursive=True)
+    assert caught.value.context["reason"] == "docker_removal_bound_root"
+    assert worker.removed == []
+    await current.rm("build", recursive=True)
+    assert worker.removed == ["/external/group/workspace/build"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_stage", ["state", "unpause"])
+@pytest.mark.parametrize("operation", ["denied", "worker_failure", "success"])
+async def test_pause_cleanup_preserves_operation_failure(
+    service: Any, monkeypatch: pytest.MonkeyPatch, cleanup_stage: str, operation: str
+) -> None:
+    manager, container, worker = service
+    configured = manifest()
+    manager.bind_new(container, configured)
+    cleanup_error = docker.errors.APIError("cleanup unavailable")
+    worker_error = RuntimeError("worker failure")
+    primary_error = WorkspaceArchiveWriteError(
+        path=Path("/workspace/build"), context={"reason": "test_denied"}
+    )
+    original_request = worker.request
+
+    def fail_cleanup(*_: Any) -> None:
+        raise cleanup_error
+
+    def request(**data: Any) -> dict[str, Any]:
+        if cleanup_stage == "state":
+            monkeypatch.setattr(manager, "_state", fail_cleanup)
+        else:
+            monkeypatch.setattr(container, "unpause", fail_cleanup)
+        if operation == "denied":
+            raise primary_error
+        if operation == "worker_failure":
+            raise worker_error
+        return original_request(**data)
+
+    monkeypatch.setattr(worker, "request", request)
+    current = session(manager, container, configured)
+    if operation == "success":
+        # A caller's handled exception must not be mistaken for an operation failure.
+        try:
+            raise ValueError("previous caller failure")
+        except ValueError:
+            with pytest.raises(docker.errors.APIError) as caught_cleanup:
+                await current.rm("build", recursive=True)
+        assert caught_cleanup.value is cleanup_error
+        assert worker.removed == ["/workspace/build"]
+    else:
+        with pytest.raises(WorkspaceArchiveWriteError) as caught:
+            await current.rm("build", recursive=True)
+        assert caught.value.__context__ is cleanup_error
+        if operation == "denied":
+            assert caught.value is primary_error
+            assert cleanup_error.__context__ is None
+        else:
+            assert caught.value.__cause__ is worker_error
+            assert cleanup_error.__context__ is worker_error
+        assert worker.removed == []
+    assert container.attrs["State"]["Paused"]
+
+
+@pytest.mark.asyncio
 async def test_fixed_grant_alias_cannot_move_protection(service: Any) -> None:
     manager, container, worker = service
     configured = manifest()
