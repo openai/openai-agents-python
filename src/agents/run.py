@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import warnings
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from typing_extensions import Unpack
 
@@ -661,7 +662,7 @@ class AgentRunner:
             )
             context_wrapper = ensure_context_wrapper(context)
             context = context_wrapper.context
-            set_agent_tool_state_scope(context_wrapper, None)
+            set_agent_tool_state_scope(context_wrapper, uuid4().hex)
 
             server_manages_conversation = (
                 conversation_id is not None
@@ -2452,7 +2453,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
-            set_agent_tool_state_scope(context_wrapper, None)
+            set_agent_tool_state_scope(context_wrapper, uuid4().hex)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
             run_state = RunState(

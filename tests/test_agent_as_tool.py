@@ -4140,3 +4140,92 @@ async def test_agent_as_tool_stream_full_backlog_finishes_without_sentinel_deadl
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError, RuntimeError):
             await task
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_fresh_runs_isolate_nested_agent_tool_approvals(streamed: bool) -> None:
+    """Matching provider calls in fresh runs must not reuse another run's nested pause."""
+    executed: list[tuple[dict[str, str], str, Usage]] = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def confirm(ctx: RunContextWrapper[dict[str, str]], value: str) -> str:
+        executed.append((ctx.context, value, ctx.usage))
+        return value
+
+    inner_model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("confirm", '{"value":"first"}', call_id="inner")],
+            [get_function_tool_call("confirm", '{"value":"second"}', call_id="inner")],
+            [get_text_message("second confirmed")],
+            [get_text_message("first confirmed")],
+        ]
+    )
+    inner = Agent(name="inner", model=inner_model, tools=[confirm])
+
+    async def on_stream(_event: AgentToolStreamEvent) -> None:
+        pass
+
+    delegate = inner.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate",
+        on_stream=on_stream if streamed else None,
+    )
+    outer_model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("delegate", '{"input":"go"}', call_id="outer")],
+            [get_function_tool_call("delegate", '{"input":"go"}', call_id="outer")],
+            [get_text_message("second done")],
+            [get_text_message("first done")],
+        ]
+    )
+    outer = Agent(name="outer", model=outer_model, tools=[delegate])
+
+    async def run(input_value: Any, context: dict[str, str]) -> RunResult | RunResultStreaming:
+        if not streamed:
+            return await Runner.run(outer, input_value, context=context)
+        result = Runner.run_streamed(outer, input_value, context=context)
+        async for _event in result.stream_events():
+            pass
+        return result
+
+    first_context = {"user": "first"}
+    second_context = {"user": "second"}
+    first = await run("go", first_context)
+    # Keep the first result alive and paused while a second fresh run uses the same call fields.
+    second = await run("go", second_context)
+    assert len(first.interruptions) == len(second.interruptions) == 1
+    first_call = first.interruptions[0].raw_item
+    second_call = second.interruptions[0].raw_item
+    assert isinstance(first_call, ResponseFunctionToolCall)
+    assert isinstance(second_call, ResponseFunctionToolCall)
+    assert json.loads(first_call.arguments) == {"value": "first"}
+    assert json.loads(second_call.arguments) == {"value": "second"}
+    assert executed == []
+
+    second_state = second.to_state()
+    second_state.approve(second.interruptions[0])
+    second_done = await run(second_state, second_context)
+    assert second_done.final_output == "second done"
+    assert second_done.interruptions == []
+    assert [(context, value) for context, value, _usage in executed] == [(second_context, "second")]
+    assert executed[0][0] is second_context
+    assert executed[0][2] is second_done.context_wrapper.usage
+
+    # Completing the newer run must not consume the older run's pending approval or arguments.
+    still_pending = await run(first.to_state(), first_context)
+    assert len(still_pending.interruptions) == 1
+    assert len(executed) == 1
+    first_state = still_pending.to_state()
+    first_state.approve(still_pending.interruptions[0])
+    first_done = await run(first_state, first_context)
+    assert first_done.final_output == "first done"
+    assert first_done.interruptions == []
+    assert [(context, value) for context, value, _usage in executed] == [
+        (second_context, "second"),
+        (first_context, "first"),
+    ]
+    assert executed[1][0] is first_context
+    assert executed[1][2] is first_done.context_wrapper.usage
+    inner_model.assert_complete()
+    outer_model.assert_complete()
