@@ -24,6 +24,7 @@ from ..agent import Agent
 from ..exceptions import (
     ModelBehaviorError,
     ToolInputGuardrailTripwireTriggered,
+    ToolOutputGuardrailTripwireTriggered,
     UserError,
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
@@ -42,7 +43,7 @@ from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
 from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, Tool, invoke_function_tool
 from ..tool_context import ToolContext
-from ..tool_guardrails import ToolInputGuardrailData
+from ..tool_guardrails import ToolInputGuardrailData, ToolOutputGuardrailData
 from ..util._approvals import evaluate_function_tool_approval
 from ..util._asyncio_tasks import gather_with_cancel
 from ._tool_filtering import filter_enabled_tools
@@ -817,6 +818,30 @@ class RealtimeSession(RealtimeModelListener):
                 return gr_out.behavior["message"]
         return None
 
+    async def _run_tool_output_guardrails(
+        self,
+        *,
+        tool: FunctionTool,
+        tool_context: ToolContext[Any],
+        agent: RealtimeAgent,
+        output: Any,
+    ) -> Any:
+        """Check the result before caching or publishing a function tool output."""
+        guardrails = tool.tool_output_guardrails
+        if not guardrails:
+            return output
+        for guardrail in guardrails:
+            gr_out = await guardrail.run(
+                ToolOutputGuardrailData(
+                    context=tool_context, agent=cast(Agent[Any], agent), output=output
+                )
+            )
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolOutputGuardrailTripwireTriggered(guardrail=guardrail, output=gr_out)
+            if gr_out.behavior["type"] == "reject_content":
+                return gr_out.behavior["message"]
+        return output
+
     def _build_realtime_tool_output(
         self,
         *,
@@ -1239,6 +1264,15 @@ class RealtimeSession(RealtimeModelListener):
                     function_tool=func_tool,
                     context=tool_context,
                     arguments=event.arguments,
+                )
+                if self._closing or self._closed:
+                    return
+
+                result = await self._run_tool_output_guardrails(
+                    tool=func_tool,
+                    tool_context=tool_context,
+                    agent=agent,
+                    output=result,
                 )
                 if self._closing or self._closed:
                     return
