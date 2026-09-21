@@ -17,8 +17,8 @@ import json
 import os
 import posixpath
 import stat
-from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Generator, Iterator
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,7 +69,14 @@ def _bind_paths(paths: list[str]) -> Iterator[_Bindings]:
             resolved = _canonical(path)
             if resolved == "/":
                 raise ValueError("filesystem_root")
-            fd = resources.enter_context(_open_fd(resolved, path_flag | os.O_NOFOLLOW))
+            fd = os.open(resolved, path_flag | os.O_NOFOLLOW)
+            retained = False
+            try:
+                resources.callback(os.close, fd)
+                retained = True
+            finally:
+                if not retained:
+                    os.close(fd)
             entry = os.fstat(fd)
             if entry.st_dev != device or not (
                 stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode)
@@ -96,22 +103,25 @@ def _selected_path(path: str) -> tuple[str, bool]:
     return target, stat.S_ISDIR(entry.st_mode)
 
 
-def _accounts(path: str) -> list[list[str]]:
+def _accounts(path: str) -> Generator[list[str], None, None]:
     try:
         # The workload is paused, so reject special files before opening them.
         if not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
             raise ValueError("account_file_requires_regular_file")
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return []
+        return
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("account_file_requires_regular_file")
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
-            content = stream.read(1024 * 1024 + 1)
-        if len(content) > 1024 * 1024:
-            raise ValueError("account_file_too_large")
-        return [line.split(":") for line in content.splitlines()]
+            remaining = 1024 * 1024
+            while line := stream.readline(remaining + 1):
+                remaining -= len(line)
+                if remaining < 0:
+                    raise ValueError("account_file_too_large")
+                # Extra fields make a record invalid without allocating one item per delimiter.
+                yield line.rstrip("\r\n").split(":", 7)
     finally:
         os.close(fd)
 
@@ -120,8 +130,11 @@ def _user_ids(user: str) -> tuple[int, int, list[int]]:
     name, separator, group = user.partition(":")
     if name.isdecimal() and separator and group.isdecimal():
         return int(name), int(group), []
-    users = _accounts("/etc/passwd")
-    match = next((p for p in users if len(p) == 7 and (p[0] == name or p[2] == name)), None)
+    match = None
+    with closing(_accounts("/etc/passwd")) as users:
+        for entry in users:
+            if match is None and len(entry) == 7 and (entry[0] == name or entry[2] == name):
+                match = entry
     if name.isdecimal():
         uid = int(name)
     elif match is not None:
@@ -130,17 +143,23 @@ def _user_ids(user: str) -> tuple[int, int, list[int]]:
         raise ValueError("unknown_user")
     gid = int(match[3]) if match is not None else 0
     groups: list[int] = []
-    entries = _accounts("/etc/group")
+    found = None
+    with closing(_accounts("/etc/group")) as entries:
+        for entry in entries:
+            if len(entry) != 4:
+                continue
+            if separator:
+                if found is None and entry[0] == group:
+                    found = entry
+            elif match is not None and "," not in match[0] and f",{match[0]}," in f",{entry[3]},":
+                groups.append(int(entry[2]))
     if separator:
-        found = next((p for p in entries if len(p) == 4 and p[0] == group), None)
         if group.isdecimal():
             gid = int(group)
         elif found is not None:
             gid = int(found[2])
         else:
             raise ValueError("unknown_group")
-    elif match is not None:
-        groups = [int(p[2]) for p in entries if len(p) == 4 and match[0] in p[3].split(",")]
     return uid, gid, groups
 
 

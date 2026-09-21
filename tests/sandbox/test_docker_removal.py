@@ -393,8 +393,10 @@ def test_shared_mounts_cannot_acquire_authority(service: Any) -> None:
     ("user", "expected"),
     [
         ("developer", (1000, 1001, [2000])),
+        ("1000", (1000, 1001, [2000])),
         ("1000:3000", (1000, 3000, [])),
         ("developer:tools", (1000, 2000, [])),
+        ("developer:3000", (1000, 3000, [])),
     ],
 )
 def test_requested_user_and_groups_are_preserved(
@@ -404,7 +406,7 @@ def test_requested_user_and_groups_are_preserved(
         "/etc/passwd": [["developer", "x", "1000", "1001", "", "/home/developer", "/bin/sh"]],
         "/etc/group": [["tools", "x", "2000", "developer"]],
     }
-    monkeypatch.setattr(worker_code, "_accounts", accounts.__getitem__)
+    monkeypatch.setattr(worker_code, "_accounts", lambda path: (entry for entry in accounts[path]))
     assert worker_code._user_ids(user) == expected
 
 
@@ -569,7 +571,7 @@ def test_account_special_files_are_rejected_before_open(
     monkeypatch.setattr(worker_code.os, "stat", metadata)
     monkeypatch.setattr(worker_code.os, "open", open_file)
     with pytest.raises(ValueError, match="account_file_requires_regular_file"):
-        worker_code._accounts(path)
+        list(worker_code._accounts(path))
     metadata.assert_called_once_with(path, follow_symlinks=False)
     open_file.assert_not_called()
 
@@ -592,10 +594,99 @@ def test_regular_account_file_is_checked_before_and_after_open(
         lambda *args, **kwargs: io.StringIO("developer:x:1000:1000::/home/developer:/bin/sh\n"),
     )
     monkeypatch.setattr(worker_code.os, "close", lambda _: events.append("close"))
-    assert worker_code._accounts("/etc/passwd") == [
+    assert list(worker_code._accounts("/etc/passwd")) == [
         ["developer", "x", "1000", "1000", "", "/home/developer", "/bin/sh"]
     ]
     assert events == ["stat", "open", "stat", "close"]
+
+
+@pytest.mark.parametrize("shape", ["newlines", "fields", "members", "oversized"])
+def test_user_lookup_bounds_account_parsing(shape: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    class AccountField(str):
+        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+            if maxsplit < 0:
+                raise AssertionError("account fields must not expand into unbounded lists")
+            return super().split(sep, maxsplit)
+
+    class AccountLine(str):
+        def rstrip(self, chars: str | None = None) -> AccountLine:
+            return AccountLine(super().rstrip(chars))
+
+        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+            if not 0 <= maxsplit <= 8:
+                raise AssertionError("account records require bounded field splitting")
+            return [AccountField(field) for field in super().split(sep, maxsplit)]
+
+    class AccountStream(io.StringIO):
+        def read(self, size: int = -1) -> str:
+            raise AssertionError("account lookup must stream records")
+
+        def readline(self, size: int | None = -1) -> str:
+            assert size is not None and 0 < size <= 1024 * 1024 + 1
+            return AccountLine(super().readline(size))
+
+    user_record = "root:x:0:0::/root:/bin/sh\n"
+    group_record = "tools:x:2:root\n"
+    if shape == "newlines":
+        passwd = "\n" * (1024 * 1024 - len(user_record)) + user_record
+        groups = "\n" * (1024 * 1024 - len(group_record)) + group_record
+    elif shape == "fields":
+        passwd = ":" * (1024 * 1024)
+        groups = passwd
+    elif shape == "members":
+        passwd = user_record
+        groups = "tools:x:2:" + "," * (1024 * 1024 - 15) + "root\n"
+    else:
+        passwd = user_record + "\n" * (1024 * 1024)
+        groups = ""
+    streams = {20: AccountStream(passwd), 21: AccountStream(groups)}
+    closed: list[int] = []
+    metadata = SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+    monkeypatch.setattr(
+        worker_code,
+        "os",
+        SimpleNamespace(
+            O_RDONLY=0,
+            O_NOFOLLOW=1,
+            O_NONBLOCK=2,
+            stat=lambda *args, **kwargs: metadata,
+            fstat=lambda fd: metadata,
+            open=lambda path, flags: 20 if path == "/etc/passwd" else 21,
+            fdopen=lambda fd, *args, **kwargs: streams[fd],
+            close=closed.append,
+        ),
+    )
+    if shape == "oversized":
+        with pytest.raises(ValueError, match="account_file_too_large"):
+            worker_code._user_ids("0")
+        assert closed == [20]
+    else:
+        identity = worker_code._user_ids("0")
+        assert identity == (0, 0, [] if shape == "fields" else [2])
+        assert closed == [20, 21]
+        assert streams[21].closed
+    assert streams[20].closed
+
+
+def test_account_stream_closes_on_group_conversion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+
+    def accounts(path: str) -> Iterator[list[str]]:
+        try:
+            if path == "/etc/passwd":
+                yield ["developer", "x", "1000", "1000", "", "/home/developer", "/bin/sh"]
+            else:
+                yield ["tools", "x", "invalid", "developer"]
+                pytest.fail("lookup must stop after conversion failure")
+        finally:
+            closed.append(path)
+
+    monkeypatch.setattr(worker_code, "_accounts", accounts)
+    with pytest.raises(ValueError):
+        worker_code._user_ids("developer")
+    assert closed == ["/etc/passwd", "/etc/group"]
 
 
 @pytest.mark.asyncio
@@ -677,7 +768,7 @@ async def test_workspace_overridden_grant_does_not_invalidate_later_removal(
     assert worker.removed == ["/workspace/cache", "/workspace/build"]
 
 
-@pytest.mark.parametrize("failure", ["open", "fstat", "none"])
+@pytest.mark.parametrize("failure", ["open", "register", "fstat", "none"])
 def test_bound_descriptors_are_closed_after_partial_or_normal_lifetime(
     failure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -687,6 +778,15 @@ def test_bound_descriptors_are_closed_after_partial_or_normal_lifetime(
     monkeypatch.setattr(worker_code, "_canonical", lambda path: path)
     monkeypatch.setattr(worker_code.os, "stat", lambda path: metadata)
     monkeypatch.setattr(worker_code.os, "close", closed.append)
+    if failure == "register":
+        callback = worker_code.ExitStack.callback
+
+        def register(stack: Any, close: Any, fd: int) -> Any:
+            if fd == 21:
+                raise OSError("registration failed")
+            return callback(stack, close, fd)
+
+        monkeypatch.setattr(worker_code.ExitStack, "callback", register)
     monkeypatch.setattr(
         worker_code.os,
         "open",
@@ -1006,7 +1106,7 @@ async def test_unrelated_container_progresses_during_a_blocked_removal(
             second_task = asyncio.create_task(client.delete(wrapped))
         done, _ = await asyncio.wait({second_task}, timeout=1)
         assert second_task in done
-        await second_task
+        second_task.result()
         assert not first_task.done()
         assert not finish.is_set()
     finally:
