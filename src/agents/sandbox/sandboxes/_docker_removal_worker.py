@@ -166,17 +166,17 @@ def _user_ids(user: str) -> tuple[int, int, list[int]]:
     return uid, gid, groups
 
 
-def _remove_leaf(path: str) -> bool:
+def _remove_leaf(path: str, *, dir_fd: int | None = None) -> bool:
     try:
-        entry = os.lstat(path)
+        entry = os.lstat(path, dir_fd=dir_fd)
     except FileNotFoundError:
         return True
     if not stat.S_ISDIR(entry.st_mode):
-        os.unlink(path)
+        os.unlink(path, dir_fd=dir_fd)
         return True
     # Empty directories require no permission to search their contents.
     try:
-        os.rmdir(path)
+        os.rmdir(path, dir_fd=dir_fd)
         return True
     except OSError as exc:
         if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
@@ -187,27 +187,45 @@ def _remove_leaf(path: str) -> bool:
 def _remove(path: str, *, max_entry_visits: int) -> None:
     remaining = max_entry_visits
 
-    def remove_leaf(selected: str) -> bool:
+    def remove_leaf(selected: str, *, dir_fd: int | None = None) -> bool:
         nonlocal remaining
         if remaining <= 0:
             raise OSError(errno.E2BIG, "removal_entry_limit")
         remaining -= 1
-        return _remove_leaf(selected)
+        return _remove_leaf(selected, dir_fd=dir_fd)
 
-    pending = [path]
-    while pending:
-        current = pending[-1]
-        if remove_leaf(current):
-            pending.pop()
-            continue
-        # Stream leaf removal; retain only one path per ancestor, never all siblings.
-        # Close the iterator before descending so deep trees do not exhaust handles.
-        with os.scandir(current) as entries:
-            child_directory = next(
-                (child.path for child in entries if not remove_leaf(child.path)), None
-            )
-        if child_directory is not None:
-            pending.append(child_directory)
+    if remove_leaf(path):
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    ancestors: list[str] = []
+    current_fd = os.open(path, flags)
+    try:
+        while True:
+            # Stream names relative to the pinned directory, even beyond PATH_MAX.
+            # Close the scanner before descent; keep no descriptor stack or sibling list.
+            with os.scandir(current_fd) as entries:
+                child_directory = next(
+                    (
+                        child.name
+                        for child in entries
+                        if not remove_leaf(child.name, dir_fd=current_fd)
+                    ),
+                    None,
+                )
+            if child_directory is not None:
+                parent_fd = current_fd
+                current_fd = os.open(child_directory, flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                ancestors.append(child_directory)
+            elif ancestors:
+                child_fd = current_fd
+                current_fd = os.open("..", flags, dir_fd=child_fd)
+                os.close(child_fd)
+                remove_leaf(ancestors.pop(), dir_fd=current_fd)
+            elif remove_leaf(path):
+                return
+    finally:
+        os.close(current_fd)
 
 
 def _remove_as_user(

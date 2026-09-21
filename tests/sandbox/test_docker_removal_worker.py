@@ -36,9 +36,11 @@ worker_code = pytest.importorskip(
 
 
 def test_empty_directory_needs_no_search_of_its_contents(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(worker_code.os, "lstat", lambda _: SimpleNamespace(st_mode=0o040000))
+    monkeypatch.setattr(
+        worker_code.os, "lstat", lambda _, **kwargs: SimpleNamespace(st_mode=0o040000)
+    )
     removed: list[str] = []
-    monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
+    monkeypatch.setattr(worker_code.os, "rmdir", lambda path, **kwargs: removed.append(path))
     monkeypatch.setattr(
         worker_code.os, "scandir", Mock(side_effect=AssertionError("must not search"))
     )
@@ -184,7 +186,7 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
     current_user = "root"
     removed: list[str] = []
 
-    def lstat(path: str) -> SimpleNamespace:
+    def lstat(path: str, *, dir_fd: int | None = None) -> SimpleNamespace:
         if current_user != "root" and path == original and not accessible:
             raise PermissionError("ancestor denies search")
         if not exists:
@@ -198,7 +200,7 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
         return {"ok": True}
 
     monkeypatch.setattr(worker_code.os, "lstat", lstat)
-    monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
+    monkeypatch.setattr(worker_code.os, "rmdir", lambda path, **kwargs: removed.append(path))
     monkeypatch.setattr(worker_code, "_remove_as_user", remove_as_user)
     worker_code.main()
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
@@ -629,81 +631,166 @@ def test_namespace_entry_closes_mount_handle_when_root_open_fails(
     enter.assert_not_called()
 
 
-def test_worker_removes_deep_tree_without_python_recursion_or_open_directory_stack(
+class _DeepRemovalTree:
+    """Model kernel path limits and descriptor ownership without creating a real tree."""
+
+    def __init__(self, depth: int) -> None:
+        self.depth = depth
+        self.remaining = set(range(depth + 1))
+        self.removed: list[int] = []
+        self.fds: dict[int, int] = {}
+        self.next_fd = 100
+        self.open_scans = 0
+        self.peak_fds = 0
+
+    def lookup(self, path: str, dir_fd: int | None) -> int:
+        if len(path) >= 4096:
+            raise OSError(errno.ENAMETOOLONG, "path too long")
+        if dir_fd is None:
+            assert path == "/tree"
+            node = 0
+        else:
+            assert path in ("d", ".."), "descendants must use a single relative component"
+            node = self.fds[dir_fd] + (1 if path == "d" else -1)
+        if node not in self.remaining:
+            raise FileNotFoundError(path)
+        return node
+
+    def lstat(self, path: str, *, dir_fd: int | None = None) -> SimpleNamespace:
+        self.lookup(path, dir_fd)
+        return SimpleNamespace(st_mode=stat.S_IFDIR)
+
+    def rmdir(self, path: str, *, dir_fd: int | None = None) -> None:
+        node = self.lookup(path, dir_fd)
+        if node + 1 in self.remaining:
+            raise OSError(errno.ENOTEMPTY, "not empty")
+        self.remaining.remove(node)
+        self.removed.append(node)
+
+    def open(self, path: str, flags: int, *, dir_fd: int | None = None) -> int:
+        assert flags & worker_code.os.O_DIRECTORY
+        assert flags & worker_code.os.O_NOFOLLOW
+        assert self.open_scans == 0
+        node = self.lookup(path, dir_fd)
+        self.next_fd += 1
+        self.fds[self.next_fd] = node
+        self.peak_fds = max(self.peak_fds, len(self.fds))
+        assert self.peak_fds <= 2
+        return self.next_fd
+
+    def close(self, fd: int) -> None:
+        del self.fds[fd]
+
+    @contextmanager
+    def scandir(self, fd: int) -> Iterator[Any]:
+        node = self.fds[fd]
+        self.open_scans += 1
+        assert self.open_scans == 1
+        try:
+            yield iter([SimpleNamespace(name="d")] if node + 1 in self.remaining else [])
+        finally:
+            self.open_scans -= 1
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("lstat", "rmdir", "open", "close", "scandir"):
+            monkeypatch.setattr(worker_code.os, name, getattr(self, name))
+        monkeypatch.setattr(
+            worker_code.os, "unlink", Mock(side_effect=AssertionError("directories only"))
+        )
+
+
+def test_worker_removes_deep_tree_beyond_path_max_with_bounded_descriptors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = ["/workspace/build" + "/d" * depth for depth in range(1051)]
-    children = dict(zip(paths, paths[1:], strict=False))
-    remaining = set(paths)
-    removed: list[str] = []
-    open_scans = 0
-
-    def remove_directory(path: str) -> None:
-        assert open_scans <= 1
-        if children.get(path) in remaining:
-            raise OSError(errno.ENOTEMPTY, "not empty")
-        remaining.remove(path)
-        removed.append(path)
-
-    class Scan:
-        def __init__(self, path: str) -> None:
-            self.path = path
-
-        def __enter__(self) -> Any:
-            nonlocal open_scans
-            open_scans += 1
-            assert open_scans == 1
-            return iter([SimpleNamespace(path=children[self.path])])
-
-        def __exit__(self, *args: Any) -> None:
-            nonlocal open_scans
-            open_scans -= 1
-
-    monkeypatch.setattr(worker_code.os, "lstat", lambda path: SimpleNamespace(st_mode=stat.S_IFDIR))
-    monkeypatch.setattr(worker_code.os, "rmdir", remove_directory)
-    monkeypatch.setattr(worker_code.os, "scandir", Scan)
-    monkeypatch.setattr(
-        worker_code.os, "unlink", Mock(side_effect=AssertionError("directories only"))
-    )
-    worker_code._remove(paths[0], max_entry_visits=100_000)
-    assert remaining == set()
-    assert removed == paths[::-1]
-    assert open_scans == 0
+    tree = _DeepRemovalTree(2500)
+    assert len("/tree" + "/d" * tree.depth) > 4096
+    tree.install(monkeypatch)
+    worker_code._remove("/tree", max_entry_visits=100_000)
+    assert tree.remaining == set()
+    assert tree.removed == list(range(tree.depth, -1, -1))
+    assert tree.fds == {}
+    assert tree.open_scans == 0
+    assert tree.peak_fds == 2
 
 
+@pytest.mark.parametrize("failure", ["child_open", "parent_open", "scan", "remove", "budget"])
+def test_worker_closes_traversal_descriptors_after_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    tree = _DeepRemovalTree(3)
+    tree.install(monkeypatch)
+    error = PermissionError(errno.EACCES, "denied")
+    if failure in ("child_open", "parent_open"):
+
+        def open_directory(path: str, flags: int, *, dir_fd: int | None = None) -> int:
+            if path == ("d" if failure == "child_open" else ".."):
+                raise error
+            return tree.open(path, flags, dir_fd=dir_fd)
+
+        monkeypatch.setattr(worker_code.os, "open", open_directory)
+    elif failure == "scan":
+
+        @contextmanager
+        def scan(fd: int) -> Iterator[Any]:
+            with tree.scandir(fd):
+                yield iter(Mock(side_effect=error), None)
+
+        monkeypatch.setattr(worker_code.os, "scandir", scan)
+    elif failure == "remove":
+
+        def rmdir(path: str, *, dir_fd: int | None = None) -> None:
+            if tree.lookup(path, dir_fd) == tree.depth:
+                raise error
+            tree.rmdir(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(worker_code.os, "rmdir", rmdir)
+    with pytest.raises(OSError) as caught:
+        worker_code._remove("/tree", max_entry_visits=2 if failure == "budget" else 100_000)
+    assert caught.value.errno == (errno.E2BIG if failure == "budget" else errno.EACCES)
+    assert tree.fds == {}
+    assert tree.open_scans == 0
+
+
+@pytest.mark.parametrize("leaf_mode", [stat.S_IFREG, stat.S_IFLNK])
 def test_worker_streams_wide_directory_without_buffering_sibling_paths(
     monkeypatch: pytest.MonkeyPatch,
+    leaf_mode: int,
 ) -> None:
     count = 10000
     deleted = 0
     root_removed = False
 
-    def lstat(path: str) -> SimpleNamespace:
-        return SimpleNamespace(st_mode=stat.S_IFDIR if path == "/tree" else stat.S_IFREG)
+    def lstat(path: str, *, dir_fd: int | None = None) -> SimpleNamespace:
+        return SimpleNamespace(st_mode=stat.S_IFDIR if path == "/tree" else leaf_mode)
 
-    def rmdir(path: str) -> None:
+    def rmdir(path: str, *, dir_fd: int | None = None) -> None:
         nonlocal root_removed
         if deleted != count:
             raise OSError(errno.ENOTEMPTY, "not empty")
         root_removed = True
 
-    def unlink(path: str) -> None:
+    def unlink(path: str, *, dir_fd: int | None = None) -> None:
         nonlocal deleted
-        assert path == f"/tree/{deleted}"
+        assert dir_fd == 123
+        assert path == str(deleted)
         deleted += 1
 
     def entries() -> Iterator[SimpleNamespace]:
         for index in range(count):
             assert deleted == index, "each leaf must be consumed before fetching the next"
-            yield SimpleNamespace(path=f"/tree/{index}")
+            yield SimpleNamespace(name=str(index))
 
     monkeypatch.setattr(worker_code.os, "lstat", lstat)
     monkeypatch.setattr(worker_code.os, "rmdir", rmdir)
     monkeypatch.setattr(worker_code.os, "unlink", unlink)
-    monkeypatch.setattr(worker_code.os, "scandir", lambda path: nullcontext(entries()))
+    monkeypatch.setattr(worker_code.os, "open", lambda *args, **kwargs: 123)
+    closed: list[int] = []
+    monkeypatch.setattr(worker_code.os, "close", closed.append)
+    monkeypatch.setattr(worker_code.os, "scandir", lambda fd: nullcontext(entries()))
     worker_code._remove("/tree", max_entry_visits=100_000)
     assert root_removed
     assert deleted == count
+    assert closed == [123]
 
 
 def test_worker_stops_entry_visits_before_additional_filesystem_work(
@@ -712,23 +799,27 @@ def test_worker_stops_entry_visits_before_additional_filesystem_work(
     visited: list[str] = []
     scans_closed: list[bool] = []
 
-    def remove_leaf(path: str) -> bool:
+    def remove_leaf(path: str, *, dir_fd: int | None = None) -> bool:
         visited.append(path)
         return path != "/tree"
 
     @contextmanager
     def scan(path: str) -> Iterator[Any]:
         try:
-            yield (SimpleNamespace(path=f"/tree/{index}") for index in range(100))
+            yield (SimpleNamespace(name=str(index)) for index in range(100))
         finally:
             scans_closed.append(True)
 
     monkeypatch.setattr(worker_code, "_remove_leaf", remove_leaf)
+    monkeypatch.setattr(worker_code.os, "open", lambda *args, **kwargs: 123)
+    closed: list[int] = []
+    monkeypatch.setattr(worker_code.os, "close", closed.append)
     monkeypatch.setattr(worker_code.os, "scandir", scan)
     with pytest.raises(OSError) as caught:
         worker_code._remove("/tree", max_entry_visits=3)
     assert caught.value.errno == errno.E2BIG
-    assert visited == ["/tree", "/tree/0", "/tree/1"]
+    assert visited == ["/tree", "0", "1"]
+    assert closed == [123]
     assert scans_closed == [True]
 
 
@@ -766,7 +857,7 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
     current_user = "root"
     removed: list[str] = []
 
-    def metadata(path: str) -> SimpleNamespace:
+    def metadata(path: str, *, dir_fd: int | None = None) -> SimpleNamespace:
         if current_user == "developer" and path.startswith(alias) and outcome == "search_denied":
             raise PermissionError("workspace alias ancestor denies search")
         return SimpleNamespace(st_mode=stat.S_IFDIR)
@@ -778,7 +869,7 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
         return {"ok": True}
 
     monkeypatch.setattr(worker_code.os, "lstat", metadata)
-    monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
+    monkeypatch.setattr(worker_code.os, "rmdir", lambda path, **kwargs: removed.append(path))
     monkeypatch.setattr(worker_code, "_remove_as_user", remove_as_user)
     worker_code.main()
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
