@@ -647,6 +647,12 @@ class Agent(AgentBase, Generic[TContext]):
             include_input_schema: Whether to include the full JSON schema in structured input.
         """
 
+        if on_stream is not None and not callable(on_stream):
+            raise UserError(
+                "on_stream must be callable or None. Pass run configuration with run_config=... "
+                "instead of as the fifth positional argument."
+            )
+
         if on_stream_max_pending_events is not None and on_stream_max_pending_events <= 0:
             raise UserError("on_stream_max_pending_events must be a positive integer or None")
 
