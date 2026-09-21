@@ -1342,7 +1342,6 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
         if not isinstance(state, DaytonaSandboxSessionState):
             raise TypeError("DaytonaSandboxClient.resume expects a DaytonaSandboxSessionState")
         state.assert_path_grants_rebound()
-        self._validate_manifest_for_create(state.manifest)
 
         daytona_sandbox = None
         reconnected = False

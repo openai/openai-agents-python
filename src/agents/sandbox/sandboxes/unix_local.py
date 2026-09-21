@@ -169,11 +169,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     Workspace paths and SDK file API guards do not confine arbitrary Linux shell commands.
     Use this backend for trusted local execution or within externally provided isolation.
 
-    Read-only extra path grants are rejected during creation, resume, and manifest
-    application because local processes can move protected entries during cleanup.
-    Migrate these configurations to Docker with DockerRemovalService on its supported
-    rootful Linux daemon host, or a backend with equivalent atomic removal protection.
-    Do not make protected grants writable to migrate.
+    Recursive SDK removal is unavailable whenever the session has a read-only extra path
+    grant, including for unrelated or missing targets. Local processes can move protected
+    entries during traversal. Use Docker with DockerRemovalService when recursive removal
+    must coexist with read-only grants; sessions without read-only grants retain local removal.
 
     User-scoped listing and writing require sudo access to a system python3 and its standard
     library. These operations run a trusted file worker in Python isolated mode, independently
@@ -209,10 +208,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         manifest: Manifest | None = None,
         session_running: bool | None = None,
     ) -> None:
-        await super()._validate_manifest_application(
-            only_ephemeral=only_ephemeral,
-            manifest=manifest,
-            session_running=session_running,
+        _ = (only_ephemeral, session_running)
+        from .._mount_security import validate_manifest_mount_credential_boundaries
+
+        validate_manifest_mount_credential_boundaries(
+            manifest or self.state.manifest,
+            provider_backend_id="unix_local",
         )
 
     async def _prepare_backend_workspace(self) -> None:
@@ -1015,7 +1016,6 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         if recursive:
-            self._validate_path_grant_capabilities(self.state.manifest)
             normalized = self.normalize_path(path, for_write=True)
             self._files.validate_recursive_remove(normalized)
         if user is not None:
@@ -1310,7 +1310,6 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
         state.assert_path_grants_rebound()
-        self._validate_manifest_for_create(state.manifest)
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
         inner._host_environment_allowlist = self._host_environment_allowlist

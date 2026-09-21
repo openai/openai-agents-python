@@ -1970,6 +1970,64 @@ async def test_docker_create_persists_configured_labels(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configuration", ["host-bind", "path-only", "external-storage", "privileged-storage"]
+)
+async def test_docker_create_preserves_compatible_read_only_grants_and_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configuration: str
+) -> None:
+    container = _StartedContainer()
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    grant = SandboxPathGrant(
+        path="/run/agents-security-mounted-probe",
+        host_path=None if configuration == "path-only" else str(tmp_path),
+        read_only=True,
+    )
+    manifest = Manifest(extra_path_grants=(grant,))
+    if configuration in ("external-storage", "privileged-storage"):
+        manifest = manifest.model_copy(
+            update={
+                "entries": {
+                    "data": S3Mount(
+                        bucket="example-bucket",
+                        mount_strategy=(
+                            DockerVolumeMountStrategy(driver="rclone")
+                            if configuration == "external-storage"
+                            else InContainerMountStrategy(pattern=RcloneMountPattern())
+                        ),
+                    )
+                }
+            }
+        )
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    created = await client.create(
+        manifest=manifest,
+        options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+    )
+
+    assert created.state.manifest == manifest
+    assert container.start_calls == 1
+    call = docker_client.containers.calls[0]
+    mounts = cast(list[dict[str, object]], call.get("mounts", []))
+    if configuration == "path-only":
+        assert mounts == []
+    else:
+        assert {
+            "Target": grant.path,
+            "Source": str(tmp_path),
+            "Type": "bind",
+            "ReadOnly": True,
+        } in mounts
+    if configuration == "external-storage":
+        assert any(mount["Type"] == "volume" for mount in mounts)
+    if configuration == "privileged-storage":
+        assert call["cap_add"] == ["SYS_ADMIN"]
+    assert created._inner._removal_service is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("root", ["/workspace", "/mnt/sibling/../workspace"])
 async def test_docker_create_container_mounts_explicit_host_path(
     tmp_path: Path,
@@ -4443,7 +4501,7 @@ async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state
             SandboxPathGrant(
                 path="/mnt/shared-data",
                 host_path=str(host_path),
-                read_only=False,
+                read_only=True,
             ),
         ),
     )
@@ -4456,7 +4514,7 @@ async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state
                         "Type": "bind",
                         "Source": str(host_path),
                         "Destination": "/mnt/shared-data",
-                        "RW": True,
+                        "RW": False,
                     }
                 ],
             )

@@ -77,16 +77,15 @@ async def test_live_manifest_update_preserves_removal_authority(
         grants = (*grants, SandboxPathGrant(path="/new-grant", read_only=True))
     capability = ConfigureManifest(grants=grants)
 
-    if not bound or change_grants:
-        reason = "original live authority binding" if bound else "atomic recursive removal"
-        with pytest.raises(ValueError, match=reason):
+    if bound and change_grants:
+        with pytest.raises(ValueError, match="original live authority binding"):
             await runtime._create_resources(
                 agent=agent, capabilities=[capability], is_resumed_state=False
             )
         assert current.state is original_state
         assert current.state.manifest == configured
         apply_entries.assert_not_awaited()
-        assert [call["operation"] for call in worker.calls] == (["bind"] if bound else [])
+        assert [call["operation"] for call in worker.calls] == ["bind"]
     else:
         resources = await runtime._create_resources(
             agent=agent, capabilities=[capability], is_resumed_state=False

@@ -1697,7 +1697,6 @@ class RunloopSandboxClient(BaseSandboxClient[RunloopSandboxClientOptions | None]
         if not isinstance(state, RunloopSandboxSessionState):
             raise TypeError("RunloopSandboxClient.resume expects a RunloopSandboxSessionState")
         state.assert_path_grants_rebound()
-        self._validate_manifest_for_create(state.manifest)
 
         devbox = None
         reconnected = False

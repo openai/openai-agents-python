@@ -75,13 +75,15 @@ async def test_recursive_rm_preserves_read_only_descendants_and_writable_sibling
     execute = AsyncMock(side_effect=AssertionError("no user process should start"))
     monkeypatch.setattr(session, "_check_rm_with_exec", probe)
     monkeypatch.setattr(session, "exec", execute)
-    with pytest.raises(ValueError, match="atomic recursive removal"):
+    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
         await session.rm(data, recursive=True, user=user)
+    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
     assert secret.read_bytes() == b"protected"
     assert sibling.read_bytes() == b"writable"
 
-    with pytest.raises(ValueError, match="atomic recursive removal"):
+    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
         await session.rm(writable, recursive=True, user=user)
+    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
     probe.assert_not_awaited()
     execute.assert_not_awaited()
     assert sibling.read_bytes() == b"writable"
@@ -121,7 +123,7 @@ async def test_recursive_rm_rejects_nested_writable_override_with_read_only_gran
             SandboxPathGrant(path=str(writable)),
         ),
     )
-    with pytest.raises(ValueError, match="atomic recursive removal"):
+    with pytest.raises(WorkspaceArchiveWriteError):
         await session.rm(writable, recursive=True)
     assert (writable / "sentinel").read_bytes() == b"writable"
     assert protected.is_dir()
@@ -260,7 +262,7 @@ async def test_safe_symlinks_grants_and_listing_paths_remain_supported(tmp_path:
         await session.write(readonly / "file", io.BytesIO(b"denied"))
     listed = await session.ls(Path("internal/nested"))
     assert [entry.path for entry in listed] == [str(workspace / "real/nested/file")]
-    with pytest.raises(ValueError, match="atomic recursive removal"):
+    with pytest.raises(WorkspaceArchiveWriteError):
         await session.rm(Path("internal"), recursive=True)
     await session.rm(Path("internal/nested/file"))
     assert not (workspace / "real/nested/file").exists()
@@ -450,16 +452,13 @@ async def test_injected_session_uses_current_grants_without_rebinding_aliases(
 
     alias.unlink()
     alias.symlink_to(outside, target_is_directory=True)
-    previous_manifest = session.state.manifest
-    with pytest.raises(ValueError, match="atomic recursive removal"):
-        await configure(
-            SandboxPathGrant(path=str(alias)), SandboxPathGrant(path=str(added), read_only=True)
-        )
-    assert session.state.manifest is previous_manifest
+    await configure(
+        SandboxPathGrant(path=str(alias)), SandboxPathGrant(path=str(added), read_only=True)
+    )
     with pytest.raises(InvalidManifestPathError):
         await session.write(alias / "file", io.BytesIO(b"new"))
-    await session.write(added / "file", io.BytesIO(b"still allowed"))
-    assert (added / "file").read_bytes() == b"still allowed"
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.write(added / "file", io.BytesIO(b"new"))
     assert (outside / "file").read_bytes() == b"original content"
 
     await configure()
@@ -572,7 +571,7 @@ async def test_recursive_rm_rejects_read_only_sessions_before_filesystem_operati
         ),
     )
     if read_only_grant:
-        with pytest.raises(ValueError, match="atomic recursive removal"):
+        with pytest.raises(WorkspaceArchiveWriteError):
             await session.rm(target, recursive=True)
         with pytest.raises(WorkspaceArchiveWriteError):
             session._files.rm(target, recursive=True)
