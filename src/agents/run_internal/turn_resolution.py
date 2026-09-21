@@ -1224,6 +1224,12 @@ async def resolve_interrupted_turn(
     ) -> None:
         if isinstance(call_id, str) and call_id in rejected_function_call_ids:
             return
+        approval_record = (
+            function_approval_items_by_call_id.get(call_id)
+            or approval_items_by_call_id.get(call_id)
+            if call_id
+            else None
+        )
         rejection_message = REJECTION_MESSAGE
         if call_id:
             tool_namespace = get_tool_call_namespace(tool_call)
@@ -1236,10 +1242,7 @@ async def resolve_interrupted_turn(
                 call_id=call_id,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
-                existing_pending=(
-                    function_approval_items_by_call_id.get(call_id)
-                    or approval_items_by_call_id.get(call_id)
-                ),
+                existing_pending=approval_record,
             )
         rejected_function_outputs.append(
             function_rejection_item(
@@ -1248,7 +1251,11 @@ async def resolve_interrupted_turn(
                 rejection_message=rejection_message,
                 output_json_schema=function_tool.output_json_schema,
                 scope_id=tool_state_scope_id,
-                tool_origin=get_function_tool_origin(function_tool),
+                tool_origin=(
+                    approval_record.tool_origin
+                    if approval_record is not None
+                    else get_function_tool_origin(function_tool)
+                ),
             )
         )
         if isinstance(call_id, str):
@@ -2164,9 +2171,17 @@ async def resolve_interrupted_turn(
         current_function = current_functions.get(call_id)
         if current_function is not None:
             current_binding = current_function.function_tool._mcp_tool_binding
+            missing_mcp_binding = (
+                original_binding is None
+                and approval_record is not None
+                and approval_record.tool_origin is not None
+                and approval_record.tool_origin.type == ToolOriginType.MCP
+            )
             # Rejected calls cannot execute. MCP approvals must not authorize a
             # different MCP recipient or a local replacement's approval policy.
-            if approval_status is not False and original_binding != current_binding:
+            if approval_status is not False and (
+                missing_mcp_binding or original_binding != current_binding
+            ):
                 raise UserError(
                     "Cannot resume a local MCP tool call with a missing or different recipient "
                     "binding. Restore the original MCP server configuration and tool listing, "

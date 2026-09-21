@@ -5,7 +5,9 @@ import pytest
 
 from agents import Agent, RunContextWrapper, Runner, RunState, UserError, handoff
 from agents.decorators import tool
+from agents.items import ToolCallItem, ToolCallOutputItem
 from agents.testing import ScriptedModel
+from agents.tool import ToolOrigin, ToolOriginType
 
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
@@ -467,7 +469,8 @@ async def test_mcp_approval_cannot_authorize_local_replacement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bool):
+@pytest.mark.parametrize("restore", [False, True])
+async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bool, restore: bool):
     local_calls: list[str] = []
 
     @tool(needs_approval=True)
@@ -475,7 +478,7 @@ async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bo
         local_calls.append("search")
         return "local result"
 
-    server = FakeMCPServer(require_approval="always")
+    server = FakeMCPServer(server_name="docs", require_approval="always")
     server.add_tool("search", {})
     agent = Agent(
         name="test",
@@ -483,10 +486,13 @@ async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bo
         model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
     )
     first = await Runner.run(agent, "search")
+    expected_origin = ToolOrigin(type=ToolOriginType.MCP, mcp_server_name="docs")
+    assert first.interruptions[0].tool_origin == expected_origin
     state = first.to_state()
     state.reject(first.interruptions[0], rejection_message="MCP request declined")
     agent.tools = [search]
-    state = await RunState.from_json(agent, state.to_json())
+    if restore:
+        state = await RunState.from_json(agent, state.to_json())
     if streaming:
         result = Runner.run_streamed(agent, state)
         async for _ in result.stream_events():
@@ -494,8 +500,73 @@ async def test_rejected_mcp_call_does_not_invoke_local_replacement(streaming: bo
     else:
         result = await Runner.run(agent, state)
     assert result.final_output == "done"
-    assert any(getattr(item, "output", None) == "MCP request declined" for item in result.new_items)
+    call_items = [item for item in result.new_items if isinstance(item, ToolCallItem)]
+    output_items = [item for item in result.new_items if isinstance(item, ToolCallOutputItem)]
+    assert len(call_items) == len(output_items) == 1
+    assert call_items[0].tool_origin == output_items[0].tool_origin == expected_origin
+    assert output_items[0].output == "MCP request declined"
+    snapshot = result.to_state().to_json()
+    serialized_outputs = [
+        item for item in snapshot["generated_items"] if item["type"] == "tool_call_output_item"
+    ]
+    assert len(serialized_outputs) == 1
+    assert serialized_outputs[0]["tool_origin"] == {"type": "mcp", "mcp_server_name": "docs"}
+    restored = await RunState.from_json(agent, snapshot)
+    restored_outputs = [
+        item for item in restored._generated_items if isinstance(item, ToolCallOutputItem)
+    ]
+    assert len(restored_outputs) == 1
+    assert restored_outputs[0].tool_origin == expected_origin
     assert local_calls == server.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("original_mcp", [False, True])
+async def test_legacy_approval_cannot_authorize_local_replacement_of_mcp(
+    streaming: bool, original_mcp: bool
+):
+    local_calls: list[str] = []
+
+    @tool(needs_approval=True)
+    async def search() -> str:
+        local_calls.append("search")
+        return "local result"
+
+    server = FakeMCPServer(server_name="docs", require_approval="always")
+    server.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        tools=[] if original_mcp else [search],
+        mcp_servers=[server] if original_mcp else [],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    snapshot = state.to_json()
+    snapshot["$schemaVersion"] = "1.17"
+    del snapshot["last_processed_response"]["mcp_tool_bindings"]
+    agent.tools = [search]
+    restored = await RunState.from_json(agent, snapshot)
+
+    async def resume():
+        if streaming:
+            result = Runner.run_streamed(agent, restored)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, restored)
+
+    if original_mcp:
+        with pytest.raises(UserError, match="missing or different recipient binding"):
+            await resume()
+        assert local_calls == []
+    else:
+        result = await resume()
+        assert result.final_output == "done"
+        assert local_calls == ["search"]
+    assert server.tool_calls == []
 
 
 @pytest.mark.asyncio
