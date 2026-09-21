@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
@@ -87,6 +87,7 @@ from ..workspace_paths import (
     sandbox_path_grant_host_path,
     sandbox_path_str,
 )
+from .docker_removal import DockerRemovalService
 
 _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=8,
@@ -94,6 +95,24 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _finish_host_removal_call(call: Callable[[], None]) -> None:
+    """Keep cancellation from releasing a paused workload before host work finishes."""
+    task = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
 
 
 # Non-seekable payloads are spooled to measure their length; keep small ones in
@@ -301,6 +320,7 @@ class DockerSandboxSession(BaseSandboxSession):
         docker_client: DockerSDKClient,
         container: Container,
         state: DockerSandboxSessionState,
+        removal_service: DockerRemovalService | None = None,
     ) -> None:
         self._docker_client = docker_client
         self._container = container
@@ -311,6 +331,8 @@ class DockerSandboxSession(BaseSandboxSession):
         self._pty_processes = {}
         self._reserved_pty_process_ids = set()
         self._cleanup_tasks = set()
+        self._removal_service = removal_service
+        self._removal_lock = asyncio.Lock()
 
     @classmethod
     def from_state(
@@ -319,8 +341,37 @@ class DockerSandboxSession(BaseSandboxSession):
         *,
         container: Container,
         docker_client: DockerSDKClient,
+        removal_service: DockerRemovalService | None = None,
     ) -> "DockerSandboxSession":
-        return cls(docker_client=docker_client, container=container, state=state)
+        return cls(
+            docker_client=docker_client,
+            container=container,
+            state=state,
+            removal_service=removal_service,
+        )
+
+    async def rm(
+        self, path: Path | str, *, recursive: bool = False, user: str | User | None = None
+    ) -> None:
+        """Use live host-side authority for recursive removal when configured."""
+        service = self._removal_service
+        if not recursive or service is None:
+            await super().rm(path, recursive=recursive, user=user)
+            return
+        async with self._removal_lock:
+            await _finish_host_removal_call(
+                lambda: service.remove(
+                    self._container, self.state.manifest, path, self._coerce_exec_user(user)
+                )
+            )
+
+    async def stop(self) -> None:
+        async with self._removal_lock:
+            await super().stop()
+
+    async def shutdown(self) -> None:
+        async with self._removal_lock:
+            await super().shutdown()
 
     def supports_docker_volume_mounts(self) -> bool:
         """Docker attaches volume-driver mounts when creating the container."""
@@ -528,6 +579,8 @@ class DockerSandboxSession(BaseSandboxSession):
         return res
 
     async def _ensure_backend_started(self) -> None:
+        if self._removal_service is not None:
+            self._removal_service.assert_bound(self._container, self.state.manifest)
         self._container.reload()
         if not await self.running():
             self._container.start()
@@ -1515,6 +1568,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         *,
         instrumentation: Instrumentation | None = None,
         dependencies: Dependencies | None = None,
+        removal_service: DockerRemovalService | None = None,
     ) -> None:
         super().__init__()
         self.docker_client = docker_client
@@ -1522,6 +1576,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             instrumentation if instrumentation is not None else Instrumentation()
         )
         self._dependencies = dependencies
+        if removal_service is not None and removal_service.docker_client is not docker_client:
+            raise ValueError("Use the Docker client's live removal service connection")
+        self._removal_service = removal_service
 
     @redact_mount_error_data
     async def create(
@@ -1550,6 +1607,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             container.start()
             container_id = container.id
             assert container_id is not None
+            service = self._removal_service
+            if service is not None:
+                await _finish_host_removal_call(lambda: service.bind_new(container, manifest))
             snapshot_id = str(session_id)
             snapshot_instance = resolve_snapshot(snapshot, snapshot_id)
             state = DockerSandboxSessionState(
@@ -1566,6 +1626,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 docker_client=self.docker_client,
                 container=container,
                 state=state,
+                removal_service=self._removal_service,
             )
             return self._wrap_session(inner, instrumentation=self._instrumentation)
         except BaseException:
@@ -1573,6 +1634,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 container=container,
                 volume_names=volume_names,
             )
+            if self._removal_service is not None and container is not None:
+                self._removal_service.release(container.id)
             raise
 
     def _cleanup_failed_create_resources(
@@ -1620,6 +1683,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         else:
             try:
                 container.remove()
+                if self._removal_service is not None:
+                    self._removal_service.release(container.id)
             except docker.errors.NotFound:
                 pass
             except BaseException as exc:
@@ -1660,6 +1725,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         container = None if requires_fresh_resource else self.get_container(state.container_id)
         reused_existing_container = container is not None
         if container is not None:
+            if self._removal_service is not None:
+                self._removal_service.assert_bound(container, state.manifest)
             _assert_existing_container_path_grants_match(container, state.manifest)
             _assert_existing_container_network_configuration_matches(
                 container,
@@ -1700,9 +1767,18 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 assert container_id is not None
                 state.container_id = container_id
                 state.workspace_root_ready = False
+                service = self._removal_service
+                if service is not None:
+                    container.start()
+                    await _finish_host_removal_call(
+                        lambda: service.bind_new(container, state.manifest)
+                    )
 
             inner = DockerSandboxSession(
-                container=container, docker_client=self.docker_client, state=state
+                container=container,
+                docker_client=self.docker_client,
+                state=state,
+                removal_service=self._removal_service,
             )
             inner._resume_workspace_probe_pending = True
             inner._set_start_state_preserved(reused_existing_container)
@@ -1716,6 +1792,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                     container=container,
                     volume_names=(replacement_volume_names if replacement_volumes_prepared else ()),
                 )
+                if self._removal_service is not None and container is not None:
+                    self._removal_service.release(container.id)
             raise
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

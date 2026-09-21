@@ -36,6 +36,7 @@ try:
     )
 
     _HAS_DOCKER = True
+    from .docker_removal import DockerRemovalService as DockerRemovalService
 except Exception:  # pragma: no cover
     # Docker is an optional extra; keep base imports working without it.
     _HAS_DOCKER = False
@@ -59,5 +60,6 @@ if _HAS_DOCKER:
             "DockerSandboxClientOptions",
             "DockerSandboxSession",
             "DockerSandboxSessionState",
+            "DockerRemovalService",
         ]
     )
