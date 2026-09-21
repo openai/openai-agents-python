@@ -25,7 +25,7 @@ import re
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,11 +73,21 @@ class _Worker:
         return cast(dict[str, Any], response)
 
     def close(self) -> None:
+        operations: list[Callable[[], object]] = []
         if self.process.stdin is not None:
-            self.process.stdin.close()
-        self.process.wait()
+            operations.append(self.process.stdin.close)
+        operations.append(self.process.wait)
         if self.process.stdout is not None:
-            self.process.stdout.close()
+            operations.append(self.process.stdout.close)
+        error: Exception | None = None
+        for operation in operations:
+            try:
+                operation()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
 
 def _configuration(manifest: Manifest) -> tuple[str, tuple[tuple[str, bool], ...]]:
@@ -279,6 +289,15 @@ class DockerRemovalService:
     def close(self) -> None:
         """Release workers; an uncertain operation does not automatically thaw its container."""
         with self._lock:
+            error: Exception | None = None
             for container_id in tuple(self._bindings):
-                self.release(container_id)
-            self.docker_client.close()
+                try:
+                    self.release(container_id)
+                except Exception as exc:
+                    if error is None:
+                        error = exc
+            try:
+                self.docker_client.close()
+            finally:
+                if error is not None:
+                    raise error

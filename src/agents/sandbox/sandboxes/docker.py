@@ -1672,10 +1672,12 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         except BaseException as exc:
             cleanup_error = exc
 
+        container_removed = False
         try:
             container = self.docker_client.containers.get(inner.state.container_id)
         except docker.errors.NotFound:
             container = None
+            container_removed = True
         except BaseException as exc:
             container = None
             if cleanup_error is None:
@@ -1683,10 +1685,17 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         else:
             try:
                 container.remove()
-                if self._removal_service is not None:
-                    self._removal_service.release(container.id)
             except docker.errors.NotFound:
-                pass
+                container_removed = True
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                container_removed = True
+
+        if container_removed and self._removal_service is not None:
+            try:
+                self._removal_service.release(inner.state.container_id)
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
