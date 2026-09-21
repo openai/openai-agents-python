@@ -37,6 +37,7 @@ from agents.sandbox.sandboxes.docker import (
     DockerSandboxSession,
     DockerSandboxSessionState,
 )
+from agents.sandbox.sandboxes.docker_removal import _Worker
 from agents.sandbox.snapshot import NoopSnapshot
 
 worker_code = pytest.importorskip(
@@ -799,10 +800,11 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
             raise FileNotFoundError("missing leaf")
         return SimpleNamespace(st_mode=0o040755)
 
-    def remove_as_user(path: str, user: str, **limits: int) -> None:
+    def remove_as_user(path: str, user: str, **limits: int) -> dict[str, Any]:
         nonlocal current_user
         current_user = user
         worker_code._remove(path, max_entry_visits=100_000)
+        return {"ok": True}
 
     monkeypatch.setattr(worker_code.os, "lstat", lstat)
     monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
@@ -815,9 +817,69 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
         "is_directory": exists,
     }
     assert responses[2] == (
-        {"ok": True} if accessible else {"ok": False, "reason": "PermissionError"}
+        {"ok": True} if accessible else {"ok": False, "reason": "PermissionError", "errno": None}
     )
     assert removed == ([original] if accessible and exists else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "error_number"),
+    [("PermissionError", errno.EACCES), ("OSError", errno.E2BIG), ("ValueError", None)],
+)
+async def test_child_failure_reaches_structured_session_error(
+    service: Any, monkeypatch: pytest.MonkeyPatch, reason: str, error_number: int | None
+) -> None:
+    manager, container, _ = service
+    configured = manifest()
+    requests = [
+        {"operation": "bind", "paths": ["/workspace", "/external", "/grant-alias"]},
+        {"operation": "inspect", "path": "/workspace/build"},
+        {
+            "operation": "remove",
+            "user": "developer",
+            "max_entry_visits": 100_000,
+            "max_cpu_seconds": 10,
+        },
+    ]
+    output = io.StringIO()
+    child_response = {"ok": False, "reason": reason, "errno": error_number}
+    with monkeypatch.context() as worker_patch:
+        worker_patch.setattr(worker_code.sys, "argv", ["worker", "123"])
+        worker_patch.setattr(
+            worker_code.sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))
+        )
+        worker_patch.setattr(worker_code.sys, "stdout", output)
+        worker_patch.setattr(worker_code, "_enter_container", lambda _: None)
+        worker_patch.setattr(
+            worker_code,
+            "_bind_paths",
+            lambda paths: nullcontext(SimpleNamespace(paths=paths, validate=lambda: None)),
+        )
+        worker_patch.setattr(worker_code, "_selected_path", lambda path: (path, True))
+        worker_patch.setattr(worker_code.os, "pipe", lambda: (20, 21))
+        worker_patch.setattr(worker_code.os, "fork", lambda: 123)
+        worker_patch.setattr(
+            worker_code.os, "read", lambda fd, size: json.dumps(child_response).encode()
+        )
+        worker_patch.setattr(worker_code.os, "waitpid", lambda pid, options: (pid, 0))
+        worker_patch.setattr(worker_code.os, "close", lambda fd: None)
+        worker_code.main()
+
+    worker = object.__new__(_Worker)
+    worker.process = SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO(output.getvalue()))
+    worker.uncertain = False
+    monkeypatch.setattr(docker_removal, "_Worker", lambda _: worker)
+    manager.bind_new(container, configured)
+    with pytest.raises(WorkspaceArchiveWriteError) as caught:
+        await session(manager, container, configured).rm("build", recursive=True, user="developer")
+    assert caught.value.context["reason"] == "docker_removal_failed"
+    assert caught.value.context["worker_reason"] == reason
+    assert caught.value.context["errno"] == error_number
+    assert isinstance(caught.value.cause, OSError)
+    assert caught.value.cause.errno == error_number
+    assert not worker.uncertain
+    assert not container.attrs["State"]["Paused"]
 
 
 @pytest.mark.parametrize("path", ["/etc/passwd", "/etc/group"])
@@ -1078,6 +1140,8 @@ def test_bound_descriptors_are_closed_after_partial_or_normal_lifetime(
     [
         (None, None),
         (PermissionError(13, "denied"), None),
+        (OSError(errno.E2BIG, "removal_entry_limit"), None),
+        (ValueError("unknown_user"), None),
         (KeyboardInterrupt(), None),
         (None, PermissionError(1, "limit denied")),
     ],
@@ -1095,7 +1159,10 @@ def test_removal_child_always_exits_without_resuming_parent(
         exit_codes.append(code)
         raise ChildExited
 
-    user_ids = Mock(return_value=(1000, 1000, []))
+    user_ids = Mock(
+        return_value=(1000, 1000, []),
+        side_effect=failure if isinstance(failure, ValueError) else None,
+    )
     monkeypatch.setattr(worker_code, "_user_ids", user_ids)
     monkeypatch.setattr(worker_code.os, "pipe", lambda: (20, 21))
     monkeypatch.setattr(worker_code.os, "fork", lambda: 0)
@@ -1119,7 +1186,13 @@ def test_removal_child_always_exits_without_resuming_parent(
     assert writes == (
         []
         if isinstance(failure, KeyboardInterrupt)
-        else [{"ok": False, "errno": getattr(failure, "errno", None)}]
+        else [
+            {
+                "ok": False,
+                "reason": type(failure).__name__,
+                "errno": getattr(failure, "errno", None),
+            }
+        ]
         if failure
         else [{"ok": True}]
     )
@@ -1560,10 +1633,11 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
             raise PermissionError("workspace alias ancestor denies search")
         return SimpleNamespace(st_mode=stat.S_IFDIR)
 
-    def remove_as_user(path: str, user: str, **limits: int) -> None:
+    def remove_as_user(path: str, user: str, **limits: int) -> dict[str, Any]:
         nonlocal current_user
         current_user = user
         worker_code._remove(path, max_entry_visits=100_000)
+        return {"ok": True}
 
     monkeypatch.setattr(worker_code.os, "lstat", metadata)
     monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
@@ -1571,11 +1645,11 @@ def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
     worker_code.main()
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
     if outcome == "repointed":
-        assert responses[1] == {"ok": False, "reason": "ValueError"}
-        assert responses[2] == {"ok": False, "reason": "ValueError"}
+        assert responses[1] == {"ok": False, "reason": "ValueError", "errno": None}
+        assert responses[2] == {"ok": False, "reason": "ValueError", "errno": None}
     elif outcome == "search_denied":
         assert responses[1]["path"] == "/canonical/build"
-        assert responses[2] == {"ok": False, "reason": "PermissionError"}
+        assert responses[2] == {"ok": False, "reason": "PermissionError", "errno": None}
     else:
         assert responses[1]["path"] == "/canonical/build"
         assert responses[2] == {"ok": True}

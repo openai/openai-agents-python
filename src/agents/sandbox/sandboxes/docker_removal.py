@@ -69,7 +69,7 @@ class _Worker:
             self.uncertain = True
             raise RuntimeError("Docker removal worker transport failed") from exc
         if not response["ok"]:
-            raise RuntimeError(f"Docker removal worker rejected request: {response['reason']}")
+            raise OSError(response["errno"], response["reason"])
         return cast(dict[str, Any], response)
 
     def close(self) -> None:
@@ -363,6 +363,16 @@ class DockerRemovalService:
                             max_entry_visits=self._max_entry_visits,
                             max_cpu_seconds=self._max_cpu_seconds,
                         )
+                    except OSError as exc:
+                        raise WorkspaceArchiveWriteError(
+                            path=posix_path_for_error(original),
+                            context={
+                                "reason": "docker_removal_failed",
+                                "worker_reason": exc.strerror,
+                                "errno": exc.errno,
+                            },
+                            cause=exc,
+                        ) from exc
                     except RuntimeError as exc:
                         raise WorkspaceArchiveWriteError(
                             path=posix_path_for_error(original),

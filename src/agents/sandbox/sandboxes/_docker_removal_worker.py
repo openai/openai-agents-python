@@ -208,7 +208,9 @@ def _remove(path: str, *, max_entry_visits: int) -> None:
             pending.append(child_directory)
 
 
-def _remove_as_user(path: str, user: str, *, max_entry_visits: int, max_cpu_seconds: int) -> None:
+def _remove_as_user(
+    path: str, user: str, *, max_entry_visits: int, max_cpu_seconds: int
+) -> dict[str, Any]:
     read_fd, write_fd = os.pipe()
     try:
         pid = os.fork()
@@ -229,7 +231,11 @@ def _remove_as_user(path: str, user: str, *, max_entry_visits: int, max_cpu_seco
                 _remove(path, max_entry_visits=max_entry_visits)
                 outcome: dict[str, Any] = {"ok": True}
             except Exception as exc:
-                outcome = {"ok": False, "errno": getattr(exc, "errno", None)}
+                outcome = {
+                    "ok": False,
+                    "reason": type(exc).__name__,
+                    "errno": getattr(exc, "errno", None),
+                }
             os.write(write_fd, json.dumps(outcome).encode("utf-8"))
             exit_code = 0
         finally:
@@ -243,9 +249,8 @@ def _remove_as_user(path: str, user: str, *, max_entry_visits: int, max_cpu_seco
         os.close(read_fd)
     if wait_status != 0 or not result:
         raise RuntimeError("removal_worker_failed")
-    data = json.loads(result)
-    if not data["ok"]:
-        raise OSError(data["errno"] or 1, "removal_failed")
+    data: dict[str, Any] = json.loads(result)
+    return data
 
 
 def _enter_container(pid: int) -> None:
@@ -290,7 +295,7 @@ def main() -> None:
                 elif operation == "remove" and requested_path:
                     # The workload stays paused; preserve user search permissions on aliases.
                     path, requested_path = requested_path, ""
-                    _remove_as_user(
+                    response = _remove_as_user(
                         path,
                         request["user"],
                         max_entry_visits=request["max_entry_visits"],
@@ -301,7 +306,11 @@ def main() -> None:
                 else:
                     raise ValueError("invalid_worker_operation")
             except Exception as exc:
-                response = {"ok": False, "reason": type(exc).__name__}
+                response = {
+                    "ok": False,
+                    "reason": type(exc).__name__,
+                    "errno": getattr(exc, "errno", None),
+                }
             print(json.dumps(response), flush=True)
 
 
