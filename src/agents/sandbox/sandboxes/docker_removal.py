@@ -5,9 +5,9 @@ host Python workers, not binaries supplied by the container. It does not listen 
 a network socket. Give its Docker client only to trusted application code.
 
 The service requires a trusted image, Docker 26+ with its builtin seccomp profile,
-and the runc runtime. Workspaces and grant roots must exist in the image.
-The initial implementation excludes shared mounts, additional capabilities, user
-namespaces, and containers whose workspace or grant roots do not already exist.
+and the runc runtime. Workspaces and path-only grant roots must exist in the image.
+Read-only host bind mounts are supported outside the private workspace. Writable
+shared mounts, additional capabilities, user namespaces, and missing roots are excluded.
 The application must exclusively own container lifecycle and Docker API access;
 other host administrators are trusted. A service/worker transport failure leaves
 the container paused. Before manually resuming it, stop all service workers.
@@ -36,7 +36,12 @@ from docker.models.containers import Container  # type: ignore[import-untyped]
 
 from ..errors import WorkspaceArchiveWriteError
 from ..manifest import Manifest
-from ..workspace_paths import WorkspacePathPolicy, coerce_posix_path, posix_path_for_error
+from ..workspace_paths import (
+    WorkspacePathPolicy,
+    coerce_posix_path,
+    posix_path_for_error,
+    sandbox_path_grant_host_path,
+)
 
 
 class _Worker:
@@ -90,9 +95,14 @@ class _Worker:
             raise error
 
 
-def _configuration(manifest: Manifest) -> tuple[str, tuple[tuple[str, bool], ...]]:
+def _configuration(manifest: Manifest) -> tuple[str, tuple[tuple[str, bool, str | None], ...]]:
     return manifest.root, tuple(
-        (grant.path, grant.read_only) for grant in manifest.extra_path_grants
+        (
+            grant.path,
+            grant.read_only,
+            str(sandbox_path_grant_host_path(grant)) if grant.host_path is not None else None,
+        )
+        for grant in manifest.extra_path_grants
     )
 
 
@@ -100,7 +110,7 @@ def _configuration(manifest: Manifest) -> tuple[str, tuple[tuple[str, bool], ...
 class _Binding:
     worker: _Worker
     incarnation: tuple[int, str]
-    configuration: tuple[str, tuple[tuple[str, bool], ...]]
+    configuration: tuple[str, tuple[tuple[str, bool, str | None], ...]]
     policy: WorkspacePathPolicy
     lock: threading.RLock = field(default_factory=threading.RLock)
 
@@ -132,8 +142,10 @@ class DockerRemovalService:
     ``client.delete(session)`` before calling ``service.close()``. Each removal pauses
     all workload processes until it finishes, which can affect concurrent command
     deadlines. Stopped/restarted containers require a fresh session; a binding must
-    not be reconstructed from saved paths. Shared mounts and custom security profiles
-    are deliberately unsupported by this initial implementation.
+    not be reconstructed from saved paths. Read-only host bind mounts outside the
+    private workspace are supported; writable shared mounts and custom security
+    profiles are unsupported. Other host processes that can modify mount sources
+    must be trusted; pausing the container does not pause host processes.
 
     Choose resource limits for the host and share this service across the managed
     clients. Calls beyond the concurrency limit are rejected before pausing.
@@ -189,7 +201,12 @@ class DockerRemovalService:
         ):
             raise ValueError("Docker removal requires Docker 26+ with builtin seccomp and runc")
         if (
-            attrs.get("Mounts")
+            any(
+                mount.get("Type") != "bind"
+                or mount.get("RW") is not False
+                or mount.get("Propagation") != "rprivate"
+                for mount in attrs.get("Mounts", [])
+            )
             or host.get("Privileged")
             or host.get("CapAdd")
             or host.get("CapDrop")
@@ -253,8 +270,19 @@ class DockerRemovalService:
                 raise ValueError("Docker removal service is closed")
             if container.id in self._bindings:
                 raise ValueError("Docker removal authority is already bound")
-        if any(grant.host_path is not None for grant in manifest.extra_path_grants):
-            raise ValueError("Docker removal service does not support shared host paths")
+        if any(
+            grant.host_path is not None and not grant.read_only
+            for grant in manifest.extra_path_grants
+        ):
+            raise ValueError("Docker removal service does not support writable shared host paths")
+        # Reuse the Docker client's mount authority checks without a module import cycle.
+        from .docker import (
+            _assert_existing_container_path_grants_match,
+            _validate_docker_path_grants,
+        )
+
+        _validate_docker_path_grants(manifest)
+        _assert_existing_container_path_grants_match(container, manifest)
         with self._paused(container) as incarnation:
             worker = _Worker(incarnation[0])
             try:
@@ -263,6 +291,15 @@ class DockerRemovalService:
                     paths=[manifest.root, *(grant.path for grant in manifest.extra_path_grants)],
                 )
                 paths = result["paths"]
+                root = coerce_posix_path(paths[0])
+                for grant, path in zip(manifest.extra_path_grants, paths[1:], strict=True):
+                    mounted = coerce_posix_path(path)
+                    if grant.host_path is not None and (
+                        mounted.is_relative_to(root) or root.is_relative_to(mounted)
+                    ):
+                        raise ValueError(
+                            "Docker removal requires host mounts outside the workspace"
+                        )
                 if len(set(paths)) != len(paths):
                     raise ValueError(
                         "Docker removal requires distinct canonical workspace and grant roots"

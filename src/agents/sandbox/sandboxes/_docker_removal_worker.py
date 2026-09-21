@@ -79,7 +79,9 @@ def _bind_paths(paths: list[str]) -> Iterator[_Bindings]:
                 if not retained:
                     os.close(fd)
             entry = os.fstat(fd)
-            if entry.st_dev != device or not (
+            # The service validates all shared mounts as read-only grants before binding.
+            # The workspace itself must remain on the container's private root filesystem.
+            if (not resolved_paths and entry.st_dev != device) or not (
                 stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode)
             ):
                 raise ValueError("grant_requires_private_root_filesystem")

@@ -598,12 +598,39 @@ def test_host_service_verifies_local_pid_and_identity_user_maps(
     }
     monkeypatch.setattr(Path, "read_text", lambda path: values[path.name])
     assert DockerRemovalService._state(manager, container) == (123, "incarnation")
+    container.attrs["Mounts"] = [{"Type": "bind", "RW": False, "Propagation": "rprivate"}]
+    assert DockerRemovalService._state(manager, container) == (123, "incarnation")
+    for field, value in (("Type", "volume"), ("RW", True), ("Propagation", "rshared")):
+        mount = container.attrs["Mounts"][0]
+        previous = mount[field]
+        mount[field] = value
+        with pytest.raises(ValueError, match="private container"):
+            DockerRemovalService._state(manager, container)
+        mount[field] = previous
     values["cgroup"] = "0::/unrelated"
     with pytest.raises(ValueError, match="not on this service's host"):
         DockerRemovalService._state(manager, container)
 
 
-def test_shared_mounts_cannot_acquire_authority(service: Any) -> None:
+def test_writable_shared_mounts_cannot_acquire_authority(service: Any) -> None:
+    manager, container, worker = service
+    configured = Manifest(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/toolchain", host_path="/host/toolchain"),),
+    )
+    with pytest.raises(ValueError, match="shared host paths"):
+        manager.bind_new(container, configured)
+    assert worker.calls == []
+    assert not container.attrs["State"]["Paused"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restore", [False, True])
+async def test_read_only_host_mount_preserves_workspace_cleanup(
+    service: Any, monkeypatch: pytest.MonkeyPatch, restore: bool
+) -> None:
+    from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
+
     manager, container, worker = service
     configured = Manifest(
         root="/workspace",
@@ -611,10 +638,121 @@ def test_shared_mounts_cannot_acquire_authority(service: Any) -> None:
             SandboxPathGrant(path="/toolchain", host_path="/host/toolchain", read_only=True),
         ),
     )
-    with pytest.raises(ValueError, match="shared host paths"):
+    container.attrs["Mounts"] = [
+        {
+            "Type": "bind",
+            "Source": "/host/toolchain",
+            "Destination": "/toolchain",
+            "RW": False,
+            "Propagation": "rprivate",
+        }
+    ]
+    monkeypatch.setattr(container, "start", lambda: None, raising=False)
+    client = DockerSandboxClient(manager.docker_client, removal_service=manager)
+    monkeypatch.setattr(client, "_create_container", AsyncMock(return_value=container))
+    wrapped = await client.create(
+        manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
+    )
+    if restore:
+        current = session(manager, container, configured)
+        monkeypatch.setattr(
+            current,
+            "ls",
+            AsyncMock(
+                return_value=[
+                    FileEntry(
+                        path="/workspace/build",
+                        kind=EntryKind.DIRECTORY,
+                        permissions=Permissions(directory=True),
+                        owner="0",
+                        group="0",
+                        size=0,
+                    )
+                ]
+            ),
+        )
+        await current._clear_workspace_dir_on_resume_pruned(
+            current_dir=Path("/workspace"), skip_rel_paths=set()
+        )
+    else:
+        await wrapped.rm("build", recursive=True)
+    assert worker.removed == ["/workspace/build"]
+    worker.aliases["/workspace/link/child"] = "/toolchain/child"
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await wrapped.rm("link/child", recursive=True)
+    assert worker.removed == ["/workspace/build"]
+    changed = configured.model_copy(
+        update={
+            "extra_path_grants": (
+                SandboxPathGrant(path="/toolchain", host_path="/host/replaced", read_only=True),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="original live authority"):
+        manager.assert_bound(container, changed)
+
+
+@pytest.mark.parametrize("invalid", ["source", "writable", "missing", "workspace_alias"])
+def test_read_only_host_binding_rejects_untrusted_mount_layout(service: Any, invalid: str) -> None:
+    manager, container, worker = service
+    configured = Manifest(
+        root="/workspace",
+        extra_path_grants=(
+            SandboxPathGrant(path="/toolchain", host_path="/host/toolchain", read_only=True),
+        ),
+    )
+    mount = {
+        "Type": "bind",
+        "Source": "/host/toolchain",
+        "Destination": "/toolchain",
+        "RW": False,
+        "Propagation": "rprivate",
+    }
+    if invalid == "source":
+        mount["Source"] = "/host/other"
+    if invalid == "writable":
+        mount["RW"] = True
+    container.attrs["Mounts"] = [] if invalid == "missing" else [mount]
+    if invalid == "workspace_alias":
+        worker.aliases["/toolchain"] = "/workspace/mounted"
+    with pytest.raises(ValueError):
         manager.bind_new(container, configured)
-    assert worker.calls == []
+    assert not manager._bindings
+    assert not worker.removed
     assert not container.attrs["State"]["Paused"]
+
+
+@pytest.mark.parametrize("workspace_device", [1, 2])
+def test_worker_pins_external_mount_device_but_requires_private_workspace(
+    monkeypatch: pytest.MonkeyPatch, workspace_device: int
+) -> None:
+    metadata = {
+        20: SimpleNamespace(st_dev=workspace_device, st_ino=10, st_mode=stat.S_IFDIR),
+        21: SimpleNamespace(st_dev=2, st_ino=11, st_mode=stat.S_IFDIR),
+    }
+    closed: list[int] = []
+    monkeypatch.setattr(worker_code.os, "O_PATH", 0, raising=False)
+    monkeypatch.setattr(worker_code, "_canonical", lambda path: path)
+    monkeypatch.setattr(
+        worker_code.os,
+        "stat",
+        lambda path, **kwargs: SimpleNamespace(st_dev=1)
+        if path == "/"
+        else metadata[20 if path == "/workspace" else 21],
+    )
+    monkeypatch.setattr(worker_code.os, "open", Mock(side_effect=[20, 21]))
+    monkeypatch.setattr(worker_code.os, "fstat", metadata.__getitem__)
+    monkeypatch.setattr(worker_code.os, "close", closed.append)
+    if workspace_device != 1:
+        with pytest.raises(ValueError, match="private_root_filesystem"):
+            with worker_code._bind_paths(["/workspace", "/toolchain"]):
+                pytest.fail("workspace must remain private")
+        assert closed == [20]
+    else:
+        with worker_code._bind_paths(["/workspace", "/toolchain"]) as bindings:
+            bindings.validate()
+            assert bindings.fds == [20, 21]
+        assert closed == [21, 20]
 
 
 @pytest.mark.parametrize(
