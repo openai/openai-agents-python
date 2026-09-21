@@ -289,8 +289,9 @@ class AgentBase(Generic[TContext]):
                 return bool(await res)
             return bool(res)
 
-        results = await gather_with_cancel(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
+        tools = list(self.tools)
+        results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
+        enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
         return all_tools
