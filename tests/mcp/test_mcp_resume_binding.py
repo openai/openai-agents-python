@@ -7,6 +7,7 @@ from agents import Agent, RunContextWrapper, Runner, RunState, UserError
 from agents.decorators import tool
 from agents.testing import ScriptedModel
 
+from ..test_function_tool import _CustomConstructorFunctionTool
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
 
@@ -340,7 +341,82 @@ async def test_local_override_before_restore_retains_collision_policy(streaming:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_rejection_preserves_recipient_for_later_approval():
+@pytest.mark.parametrize("restore", [False, True])
+async def test_custom_constructor_local_override_preserves_collision_policy(restore: bool):
+    local = _CustomConstructorFunctionTool(session="synthetic-session")
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool(local.name, {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[server],
+        model=ScriptedModel(
+            [[get_function_tool_call(local.name, "{}")], [get_text_message("done")]]
+        ),
+    )
+    first = await Runner.run(agent, "test")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    agent.tools = [local]
+    if restore:
+        state = await RunState.from_json(agent, state.to_json())
+    result = await Runner.run(agent, state)
+    assert result.final_output == "done"
+    assert any(getattr(item, "output", None) == "synthetic-session:{}" for item in result.new_items)
+    assert server.tool_calls == []
+    assert local._mcp_tool_binding is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("round_trip", [False, True])
+async def test_removed_local_override_preserves_original_mcp_recipient(
+    streaming: bool, round_trip: bool
+):
+    local_calls: list[str] = []
+
+    @tool
+    async def search() -> str:
+        local_calls.append("search")
+        return "local result"
+
+    server = FakeMCPServer(server_name="docs", require_approval="always")
+    server.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[server],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    agent.tools = [search]
+    restored = await RunState.from_json(agent, state.to_json())
+    agent.tools = []
+    if round_trip:
+        restored = await RunState.from_json(agent, restored.to_json())
+    if streaming:
+        result = Runner.run_streamed(agent, restored)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, restored)
+    assert result.final_output == "done"
+    assert server.tool_calls == ["search"]
+    assert local_calls == []
+    # Restoration must not put historical MCP metadata on the application's tool.
+    assert search._mcp_tool_binding is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_override", [False, True])
+async def test_cancelled_rejection_preserves_recipient_for_later_approval(local_override: bool):
+    local_calls: list[str] = []
+
+    @tool
+    async def search() -> str:
+        local_calls.append("search")
+        return "local result"
+
     class ListingServer(FakeMCPServer):
         ready: asyncio.Event | None = None
 
@@ -367,6 +443,8 @@ async def test_cancelled_rejection_preserves_recipient_for_later_approval():
     state.reject(approval)
     original.tools.clear()
     other.add_tool("search", {})
+    if local_override:
+        agent.tools = [search]
     state = await RunState.from_json(agent, state.to_json())
     other.ready = asyncio.Event()
     task = asyncio.create_task(Runner.run(agent, state))
@@ -375,7 +453,8 @@ async def test_cancelled_rejection_preserves_recipient_for_later_approval():
     finally:
         task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        _ = await task
+    assert task.cancelled()
     other.ready = None
 
     snapshot = state.to_json()
@@ -384,8 +463,11 @@ async def test_cancelled_rejection_preserves_recipient_for_later_approval():
         "search",
         0,
     ]
+    agent.tools = []
     restored = await RunState.from_json(agent, snapshot)
     restored.approve(approval)
     with pytest.raises(UserError, match="different recipient"):
         await Runner.run(agent, restored)
     assert original.tool_calls == other.tool_calls == []
+    assert local_calls == []
+    assert search._mcp_tool_binding is None

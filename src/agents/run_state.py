@@ -2213,6 +2213,7 @@ class RunState(Generic[TContext, TAgent]):
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
         Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:
@@ -2299,6 +2300,7 @@ class RunState(Generic[TContext, TAgent]):
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
         Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:
@@ -3257,16 +3259,15 @@ async def _deserialize_processed_response(
                 )
                 if function_tool is None:
                     continue
-                if function_tool._mcp_tool_binding is not None:
+                if saved_binding is not None or function_tool._mcp_tool_binding is not None:
                     # Preserve the original recipient until resume decides whether the
-                    # call will execute. Discovery must not replace approval provenance.
-                    function_tool = dataclasses.replace(
-                        function_tool,
-                        _mcp_tool_binding=(
-                            cast(tuple[str, str, int | None], tuple(saved_binding))
-                            if isinstance(saved_binding, list)
-                            else None
-                        ),
+                    # call will execute, including when a local override is selected.
+                    # Discovery must not replace approval provenance.
+                    function_tool = copy.copy(function_tool)
+                    function_tool._mcp_tool_binding = (
+                        cast(tuple[str, str, int | None], tuple(saved_binding))
+                        if isinstance(saved_binding, list)
+                        else None
                     )
 
                 tool_call_data_raw = entry.get("tool_call", {})

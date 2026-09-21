@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -2180,15 +2180,15 @@ async def resolve_interrupted_turn(
                     "binding. Restore the original MCP server configuration and tool listing, "
                     "or start a new run."
                 )
-            if current_binding is not None and original_binding != current_binding:
+            if original_binding != current_binding:
                 # A rejected run can be cancelled before its output is committed.
-                # Retain its original recipient if that state is saved or approved later.
+                # Retain its original recipient even through a local replacement if
+                # that state is saved or approved later.
+                function_tool = copy(current_function.function_tool)
+                function_tool._mcp_tool_binding = original_binding
                 current_function = replace(
                     current_function,
-                    function_tool=replace(
-                        current_function.function_tool,
-                        _mcp_tool_binding=original_binding,
-                    ),
+                    function_tool=function_tool,
                 )
             reconciled_functions.append(_rebind_function_run(stale_function, current_function))
             continue
