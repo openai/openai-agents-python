@@ -721,14 +721,18 @@ def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_clie
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
-    with patch("agents.tracing.processors.time.sleep") as sleep_for_retry:
-        exporter._export_with_deadline(
-            [get_span(mock_processor())], deadline=time.monotonic() + 0.01
-        )
+    with patch("agents.tracing.processors.time") as clock:
+        # Spend the deadline budget only during backoff, independent of machine load.
+        clock.monotonic.return_value = 100.0
+
+        def advance_clock(delay: float) -> None:
+            clock.monotonic.return_value += delay
+
+        clock.sleep.side_effect = advance_clock
+        exporter._export_with_deadline([get_span(mock_processor())], deadline=100.01)
 
     assert mock_client.return_value.post.call_count == 1
-    sleep_for_retry.assert_called_once()
-    assert sleep_for_retry.call_args.args[0] <= 0.1
+    clock.sleep.assert_called_once_with(pytest.approx(0.01))
 
     exporter.close()
 

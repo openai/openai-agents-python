@@ -52,6 +52,7 @@ from ..errors import (
     MountConfigError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
 )
 from ..manifest import Manifest
 from ..session import SandboxSession, SandboxSessionState
@@ -835,6 +836,27 @@ class DockerSandboxSession(BaseSandboxSession):
             error_cls=WorkspaceArchiveWriteError,
             error_path=path,
         )
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        workspace_path = await self._validate_path_access(path)
+        # Docker writes already require POSIX sh and head -c. Restrict this
+        # internal read to image-owned utilities, independent of manifest PATH.
+        result = await self.exec(
+            "/bin/sh",
+            "-c",
+            "PATH=/usr/bin:/bin; export PATH; "
+            '[ -e "$1" ] || exit 44; [ -f "$1" ] || exit 45; head -c "$2" < "$1"',
+            "sh",
+            sandbox_path_str(workspace_path),
+            str(max_bytes),
+            shell=False,
+            timeout=30.0,
+        )
+        if result.exit_code == 44:
+            raise WorkspaceReadNotFoundError(path=path)
+        if not result.ok():
+            raise WorkspaceArchiveReadError(path=path)
+        return result.stdout
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         workspace_path = await self._validate_path_access(path)

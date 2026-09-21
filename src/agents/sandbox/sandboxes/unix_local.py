@@ -1030,6 +1030,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        return self._files.read_bounded(self.normalize_path(path), max_bytes)
+
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
             await self._check_read_with_exec(path, user=user)

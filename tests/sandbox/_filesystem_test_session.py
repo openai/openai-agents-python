@@ -75,6 +75,10 @@ class FilesystemTestSandboxSession(BaseSandboxSession):
         except OSError as error:
             raise WorkspaceArchiveReadError(path=path, cause=error) from error
 
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        with self.normalize_path(path).open("rb") as stream:
+            return stream.read(max_bytes)
+
     async def write(
         self,
         path: Path,

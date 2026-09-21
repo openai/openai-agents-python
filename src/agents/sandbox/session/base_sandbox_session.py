@@ -25,6 +25,7 @@ from ..errors import (
     InvalidManifestPathError,
     MountConfigError,
     PtySessionNotFoundError,
+    SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -928,6 +929,55 @@ class BaseSandboxSession(abc.ABC):
         :returns: A readable file-like object.
         :raises: FileNotFoundError: If the path does not exist.
         """
+
+    async def read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        """Read a prefix of at most ``max_bytes`` bytes.
+
+        Uses the session identity and the same path scope as ``read(path)``.
+        A result of exactly ``max_bytes`` bytes does not indicate EOF. Backends
+        provided by the SDK bound acquisition from the source. For compatibility,
+        custom backends inherit a fallback that consumes and closes the stream
+        returned by ``read()``. That fallback cannot bound any data acquired inside
+        ``read()`` before it returns. Override ``_read_bounded`` to provide that
+        guarantee. Encoded transports may reject responses exceeding their bounded
+        framing budget. Failures use payload-free ``WorkspaceArchiveReadError``
+        diagnostics.
+        """
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        # Raise outside the handler: provider exceptions may retain response bodies.
+        reason = "bounded_read_failed"
+        retryable: bool | None = None
+        missing = False
+        try:
+            return await self._read_bounded(path, max_bytes=max_bytes)
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
+            missing = True
+        except SandboxError as error:
+            retryable = error.retryable
+            if error.context.get("reason") == "bounded_read_wire_limit":
+                reason = "bounded_read_wire_limit"
+        except Exception:
+            # Discard payload-bearing provider diagnostics at this boundary.
+            reason = "bounded_read_failed"
+        if missing:
+            raise WorkspaceReadNotFoundError(path=path)
+        raise WorkspaceArchiveReadError(path=path, context={"reason": reason}, retryable=retryable)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        stream = await self.read(path)
+        try:
+            result = bytearray()
+            while len(result) < max_bytes:
+                remaining = max_bytes - len(result)
+                payload = stream.read(remaining)
+                if not payload:
+                    break
+                chunk = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+                result.extend(chunk[:remaining])
+            return bytes(result)
+        finally:
+            stream.close()
 
     @abc.abstractmethod
     async def write(

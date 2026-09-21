@@ -27,7 +27,7 @@ from agents.sandbox.entries import (
     R2Mount,
     S3Mount,
 )
-from agents.sandbox.entries.mounts.base import InContainerMountAdapter
+from agents.sandbox.entries.mounts.base import InContainerMountAdapter, MountStrategyBase
 from agents.sandbox.errors import (
     InvalidManifestPathError,
     MountConfigError,
@@ -445,11 +445,34 @@ def _load_modal_module(
     monkeypatch.setitem(sys.modules, "modal.exception", fake_modal_exception)
     monkeypatch.setitem(sys.modules, "modal.config", fake_modal_config)
     monkeypatch.setitem(sys.modules, "modal.container_process", fake_container_process)
-    sys.modules.pop("agents.extensions.sandbox.modal.sandbox", None)
-    sys.modules.pop("agents.extensions.sandbox.modal.mounts", None)
-    sys.modules.pop("agents.extensions.sandbox.modal", None)
+    # Re-importing an adapter also replaces its registered model classes.
+    # Record undo before clearing these entries for fresh class registration;
+    # unrelated registrations must survive teardown.
+    monkeypatch.setitem(
+        SandboxSessionState._subclass_registry,
+        "modal",
+        SandboxSessionState._subclass_registry.get("modal", SandboxSessionState),
+    )
+    del SandboxSessionState._subclass_registry["modal"]
+    monkeypatch.setitem(
+        MountStrategyBase._subclass_registry,
+        "modal_cloud_bucket",
+        MountStrategyBase._subclass_registry.get("modal_cloud_bucket", MountStrategyBase),
+    )
+    del MountStrategyBase._subclass_registry["modal_cloud_bucket"]
+    module_names = (
+        "agents.extensions.sandbox.modal.sandbox",
+        "agents.extensions.sandbox.modal.mounts",
+        "agents.extensions.sandbox.modal",
+    )
+    for name in module_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
 
     module: Any = importlib.import_module("agents.extensions.sandbox.modal.sandbox")
+    # Track the fresh imports too, so teardown removes them before restoring
+    # any original modules alongside the real provider SDK.
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, sys.modules.pop(name))
     return module, create_calls, registry_tags
 
 

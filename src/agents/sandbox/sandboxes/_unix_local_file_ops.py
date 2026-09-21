@@ -60,6 +60,19 @@ class _FileOps:
             os.close(fd)
             raise
 
+    def read_bounded(self, path: Path, max_bytes: int) -> bytes:
+        with self.parent(path) as (parent_fd, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("Bounded reads require a regular file")
+            stream = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
+            return stream.read(max_bytes)
+
     def write(self, path: Path, stream: io.IOBase) -> None:
         with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
             fd = os.open(
