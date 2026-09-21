@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Literal, TypeGuard, cast
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -118,6 +119,8 @@ class EncryptedSession(SessionABC):
     the cumulative number of items retrieved and unwrapped per ``get_items`` call;
     overlapping backfill windows count again. This does not bound item byte size,
     backend-internal work, elapsed time, or ``pop_item`` work.
+    Successful automatic compaction on native SQLite stores also reclaims a
+    contiguous prefix of authenticated expired envelopes in bounded batches.
 
     Note: Expired tokens are rejected based on the system clock of the application server.
     To avoid valid tokens being rejected due to clock drift, ensure all servers in
@@ -210,24 +213,44 @@ class EncryptedSession(SessionABC):
         reader = getattr(backend, "_get_compaction_snapshot", None)
         if reader is None:
             return None
-        raw: _CompactionSnapshot | None = await reader(limit)
+        # Authenticate timestamps before authorizing deletion; InvalidToken alone
+        # can also mean a wrong key, corruption or a future timestamp.
+        expired_before = int(time.time()) - self.ttl
+        cipher = self.cipher
+
+        def is_expired(item: TResponseInputItem) -> bool:
+            if not _is_encrypted_envelope(item):
+                return False
+            try:
+                return cipher.extract_timestamp(item["payload"]) < expired_before
+            except (InvalidToken, TypeError):
+                return False
+
+        raw: _CompactionSnapshot | None = await reader(limit, prune_prefix=is_expired)
         if raw is None:
             return None
         items: list[TResponseInputItem] = []
         positions: list[int] = []
+        retained_boundary = 0
         for index, encrypted_item in enumerate(raw.items):
             item = self._unwrap(encrypted_item)
             if item is not None:
                 items.append(item)
                 positions.append(index)
+            elif not is_expired(encrypted_item):
+                # An unreadable envelope is not necessarily expired. Keep it and
+                # everything before it outside the eligible replacement suffix.
+                retained_boundary = index + 1
+                items.clear()
+                positions.clear()
 
         async def replace_suffix(start: int, output: list[TResponseInputItem]) -> bool:
-            # Expired envelopes before the first logical item in this bounded
-            # snapshot can be removed too; rows outside the snapshot remain untouched.
-            raw_start = 0 if start == 0 else positions[start]
+            # Observed expired rows may be part of the selected raw suffix.
+            # The transaction separately reclaims the authenticated expired prefix.
+            raw_start = retained_boundary if start == 0 else positions[start]
             return await raw.replace_suffix(raw_start, self._encrypt_items(output))
 
-        return _CompactionSnapshot(items, raw.complete, replace_suffix)
+        return _CompactionSnapshot(items, raw.complete and retained_boundary == 0, replace_suffix)
 
     async def _read_compaction_items(
         self, limit: int | None, *, wrapper: RunContextWrapper[Any] | None = None

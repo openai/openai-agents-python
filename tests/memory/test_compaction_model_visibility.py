@@ -455,7 +455,9 @@ async def test_automatic_compaction_does_not_reload_unbounded_hidden_history(
                 client.responses.compact.assert_not_awaited()
         assert client.responses.compact.await_count == (2 if approve else 0)
         assert len(await backend.get_items(limit=1000)) == (
-            98 if approve else (105 if encryption != "none" else 104)
+            (0 if encryption != "none" else 98)
+            if approve
+            else (105 if encryption != "none" else 104)
         )
         # Explicit manual compaction can still process the application's approved
         # logical history, including when limited reads omit live history.
@@ -666,7 +668,7 @@ async def test_expired_read_overhead_does_not_authorize_hidden_history(
         client.responses.compact.assert_awaited_once()
         assert LOCAL_OUTPUT not in str(model.calls[0].input)
         assert LOCAL_OUTPUT not in str(client.responses.compact.call_args.kwargs["input"])
-        assert len(await backend.get_items(limit=100)) == 11
+        assert len(await backend.get_items(limit=100)) == 1
         assert LOCAL_OUTPUT in str(await session.get_items(limit=100))
 
         read = AsyncMock(wraps=backend.get_items)

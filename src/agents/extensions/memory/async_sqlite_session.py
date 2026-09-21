@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -347,7 +347,12 @@ class AsyncSQLiteSession(SessionABC):
             (self.session_id,),
         )
 
-    async def _get_compaction_snapshot(self, limit: int) -> _CompactionSnapshot | None:
+    async def _get_compaction_snapshot(
+        self,
+        limit: int,
+        *,
+        prune_prefix: Callable[[TResponseInputItem], bool] | None = None,
+    ) -> _CompactionSnapshot | None:
         if type(self) is not AsyncSQLiteSession:
             return None
         query = (
@@ -382,6 +387,32 @@ class AsyncSQLiteSession(SessionABC):
                     if current != expected:
                         await conn.rollback()
                         return False
+                    if prune_prefix is not None:
+                        while True:
+                            async with conn.execute(
+                                f"SELECT id, message_data FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id < ? ORDER BY id LIMIT ?",
+                                (self.session_id, expected[0][0], limit),
+                            ) as cursor:
+                                prefix = list(await cursor.fetchall())
+                            expired_end = None
+                            for row_id, data in prefix:
+                                try:
+                                    item = json.loads(data)
+                                except (json.JSONDecodeError, TypeError):
+                                    break
+                                if not prune_prefix(item):
+                                    break
+                                expired_end = row_id
+                            if expired_end is None:
+                                break
+                            await conn.execute(
+                                f"DELETE FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id <= ?",
+                                (self.session_id, expired_end),
+                            )
+                            if expired_end != prefix[-1][0] or len(prefix) < limit:
+                                break
                     await conn.execute(
                         f"DELETE FROM {self.messages_table} WHERE session_id = ? AND id >= ?",
                         (self.session_id, expected[0][0]),

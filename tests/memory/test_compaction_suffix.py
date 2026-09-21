@@ -63,7 +63,6 @@ async def test_expired_prefix_does_not_block_full_live_window(
             client=client,
         )
     await session.add_items([{"role": "user", "content": "expired"}] * expired_count)
-    expired_rows = await backend.get_items(limit=100)
     clock[0] += 11
     await session.add_items(
         [{"role": "assistant" if i % 2 else "user", "content": f"live {i}"} for i in range(20)]
@@ -83,7 +82,7 @@ async def test_expired_prefix_does_not_block_full_live_window(
         # Auto mode must scope the request to the suffix, not the whole response chain.
         assert len(client.responses.compact.call_args.kwargs["input"]) == 22
     remaining = await backend.get_items(limit=100)
-    assert remaining == expired_rows[:-1]
+    assert remaining == []
 
 
 async def test_suffix_transaction_rolls_back_failed_insert(
@@ -249,9 +248,9 @@ async def test_cancelled_suffix_transaction_settles_before_newer_append(
         assert not append.done()
         release.set()
         async_release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await work
-        await append
+        results = await asyncio.gather(work, append, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert results[1] is None
         assert await backend.get_items(limit=100) == original[:-1] + [summary, newer]
     finally:
         release.set()
@@ -267,7 +266,10 @@ async def test_cancelled_suffix_transaction_settles_before_newer_append(
 async def test_failed_encrypted_suffix_transaction_preserves_original_tokens(
     backend: SQLiteSession | AsyncSQLiteSession,
     outer: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
     client = MagicMock()
     session: SessionABC
     if outer:
@@ -281,15 +283,18 @@ async def test_failed_encrypted_suffix_transaction_preserves_original_tokens(
                 should_trigger_compaction=lambda _: True,
             ),
             encryption_key="synthetic-key",
+            ttl=10,
         )
     else:
         session = OpenAIResponsesCompactionSession(
             "suffix",
-            EncryptedSession("suffix", backend, encryption_key="synthetic-key"),
+            EncryptedSession("suffix", backend, encryption_key="synthetic-key", ttl=10),
             client=client,
             compaction_mode="input",
             should_trigger_compaction=lambda _: True,
         )
+    await session.add_items([{"role": "user", "content": "expired"}] * 4)
+    clock[0] += 11
     await session.add_items([{"role": "user", "content": str(i)} for i in range(4)])
     saved: list[TResponseInputItem] = []
 
@@ -312,8 +317,80 @@ async def test_failed_encrypted_suffix_transaction_preserves_original_tokens(
             session=session,
             run_config=RunConfig(session_settings={"limit": 1}),
         )
-    assert len(saved) == 6
+    assert len(saved) == 10
     assert await backend.get_items(limit=100) == saved
+
+
+@pytest.mark.parametrize("outer", [False, True])
+async def test_repeated_ttl_bursts_do_not_accumulate_expired_rows(
+    backend: SQLiteSession | AsyncSQLiteSession, outer: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session: SessionABC
+    if outer:
+        session = EncryptedSession(
+            "suffix",
+            OpenAIResponsesCompactionSession("suffix", backend, client=client),
+            encryption_key="synthetic-key",
+            ttl=10,
+        )
+    else:
+        session = OpenAIResponsesCompactionSession(
+            "suffix",
+            EncryptedSession("suffix", backend, encryption_key="synthetic-key", ttl=10),
+            client=client,
+        )
+    model = ScriptedModel(steps=[[get_text_message("done")] for _ in range(20)])
+    agent = Agent(name="worker", model=model)
+    for cycle in range(2):
+        for _ in range(3):
+            for _ in range(3):
+                await Runner.run(agent, "below threshold", session=session)
+            clock[0] += 11
+        assert client.responses.compact.await_count == cycle
+        await session.add_items(
+            [{"role": "assistant" if i % 2 else "user", "content": f"live {i}"} for i in range(20)]
+        )
+        await Runner.run(agent, "cross threshold", session=session)
+        assert client.responses.compact.await_count == cycle + 1
+        assert await backend.get_items(limit=100) == []
+
+
+@pytest.mark.parametrize("untrusted", [False, True], ids=["live", "wrong-key"])
+async def test_prefix_cleanup_stops_before_retained_history(
+    backend: SQLiteSession | AsyncSQLiteSession, untrusted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+    encrypted = EncryptedSession("suffix", backend, encryption_key="synthetic-key", ttl=10)
+    await encrypted.add_items([{"role": "user", "content": "expired"}] * 40)
+    retained: list[TResponseInputItem] = []
+    if untrusted:
+        other = EncryptedSession("suffix", backend, encryption_key="other-synthetic-key", ttl=10)
+        await other.add_items([{"role": "user", "content": "unknown key"}])
+        retained.extend(await backend.get_items(limit=1))
+    clock[0] += 11
+    await encrypted.add_items([{"role": "user", "content": "retained live"}] * 2)
+    retained.extend(await backend.get_items(limit=2))
+    await encrypted.add_items(
+        [{"role": "assistant" if i % 2 else "user", "content": f"live {i}"} for i in range(20)]
+    )
+    # Fernet accepts a token exactly at its TTL boundary; cleanup must do so too.
+    clock[0] += 10
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session = OpenAIResponsesCompactionSession("suffix", encrypted, client=client)
+    await Runner.run(
+        Agent(name="worker", model=ScriptedModel(steps=[[get_text_message("done")]])),
+        "cross threshold",
+        session=session,
+    )
+    client.responses.compact.assert_awaited_once()
+    assert "retained live" not in str(client.responses.compact.call_args.kwargs)
+    assert await backend.get_items(limit=100) == retained
 
 
 async def test_partial_compaction_does_not_split_tool_call_and_output(
@@ -358,6 +435,48 @@ async def test_partial_compaction_does_not_split_tool_call_and_output(
         "content": "continue",
     }
     assert await backend.get_items(limit=100) == history
+
+
+@pytest.mark.parametrize("outer", [False, True])
+@pytest.mark.parametrize("interspersed", [False, True], ids=["prefix", "interspersed"])
+async def test_unverifiable_rows_inside_snapshot_are_retained(
+    backend: SQLiteSession | AsyncSQLiteSession, outer: bool, interspersed: bool
+) -> None:
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    session: SessionABC
+    if outer:
+        session = EncryptedSession(
+            "suffix",
+            OpenAIResponsesCompactionSession(
+                "suffix", backend, client=client, should_trigger_compaction=lambda _: True
+            ),
+            encryption_key="synthetic-key",
+        )
+    else:
+        session = OpenAIResponsesCompactionSession(
+            "suffix",
+            EncryptedSession("suffix", backend, encryption_key="synthetic-key"),
+            client=client,
+            should_trigger_compaction=lambda _: True,
+        )
+    if interspersed:
+        await session.add_items([{"role": "user", "content": "earlier visible history"}])
+    other = EncryptedSession("suffix", backend, encryption_key="other-synthetic-key")
+    await other.add_items([{"role": "user", "content": "retained under another key"}])
+    retained = await backend.get_items(limit=100)
+    reply = get_text_message("done")
+    await Runner.run(
+        Agent(name="worker", model=ScriptedModel(steps=[[reply]])),
+        "continue",
+        session=session,
+    )
+    client.responses.compact.assert_awaited_once()
+    assert await backend.get_items(limit=100) == retained
+    assert client.responses.compact.call_args.kwargs["input"] == [
+        {"role": "user", "content": "continue"},
+        reply.model_dump(exclude_unset=True),
+    ]
 
 
 @pytest.mark.parametrize("follower", ["tool", "message"])
