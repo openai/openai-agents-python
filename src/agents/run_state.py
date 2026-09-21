@@ -1985,6 +1985,10 @@ class RunState(Generic[TContext, TAgent]):
             "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
+            "mcp_tool_bindings": {
+                call_id: list(binding)
+                for call_id, binding in processed_response.mcp_tool_bindings.items()
+            },
         }
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
@@ -2578,8 +2582,6 @@ def _serialize_tool_metadata(
 ) -> dict[str, Any]:
     """Build a dictionary of tool metadata for serialization."""
     metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
-    if isinstance(tool, FunctionTool) and tool._mcp_tool_binding is not None:
-        metadata["mcpToolBinding"] = list(tool._mcp_tool_binding)
     namespace = get_function_tool_namespace(tool)
     if namespace is not None:
         metadata["namespace"] = namespace
@@ -3253,22 +3255,8 @@ async def _deserialize_processed_response(
                     continue
                 tool_name = _resolve_function_tool_name(entry)
                 function_tool = tools_map.get(tool_name) if tool_name else None
-                tool_data = entry.get("tool", {})
-                saved_binding = (
-                    tool_data.get("mcpToolBinding") if isinstance(tool_data, Mapping) else None
-                )
                 if function_tool is None:
                     continue
-                if saved_binding is not None or function_tool._mcp_tool_binding is not None:
-                    # Preserve the original recipient until resume decides whether the
-                    # call will execute, including when a local override is selected.
-                    # Discovery must not replace approval provenance.
-                    function_tool = copy.copy(function_tool)
-                    function_tool._mcp_tool_binding = (
-                        cast(tuple[str, str, int | None], tuple(saved_binding))
-                        if isinstance(saved_binding, list)
-                        else None
-                    )
 
                 tool_call_data_raw = entry.get("tool_call", {})
                 tool_call_data = (
@@ -3450,6 +3438,13 @@ async def _deserialize_processed_response(
         if approval_item is not None:
             interruptions.append(approval_item)
 
+    saved_bindings = processed_response_data.get("mcp_tool_bindings", {})
+    mcp_tool_bindings = {
+        call_id: cast(tuple[str, str, int | None], tuple(binding))
+        for call_id, binding in saved_bindings.items()
+        if isinstance(binding, list)
+    }
+
     return ProcessedResponse(
         new_items=new_items,
         handoffs=handoffs,
@@ -3462,6 +3457,7 @@ async def _deserialize_processed_response(
         tools_used=processed_response_data.get("tools_used", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
+        mcp_tool_bindings=mcp_tool_bindings,
     )
 
 

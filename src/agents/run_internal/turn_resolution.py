@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -2160,13 +2160,9 @@ async def resolve_interrupted_turn(
             else True
         )
         stale_function = stale_functions.get(call_id)
+        original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
         if current_function is not None:
-            original_binding = (
-                stale_function.function_tool._mcp_tool_binding
-                if stale_function is not None
-                else None
-            )
             current_binding = current_function.function_tool._mcp_tool_binding
             # Rejected calls cannot invoke MCP. Local replacements follow the
             # application's collision policy; executing MCP calls keep their recipient.
@@ -2179,16 +2175,6 @@ async def resolve_interrupted_turn(
                     "Cannot resume a local MCP tool call with a missing or different recipient "
                     "binding. Restore the original MCP server configuration and tool listing, "
                     "or start a new run."
-                )
-            if original_binding != current_binding:
-                # A rejected run can be cancelled before its output is committed.
-                # Retain its original recipient even through a local replacement if
-                # that state is saved or approved later.
-                function_tool = copy(current_function.function_tool)
-                function_tool._mcp_tool_binding = original_binding
-                current_function = replace(
-                    current_function,
-                    function_tool=function_tool,
                 )
             reconciled_functions.append(_rebind_function_run(stale_function, current_function))
             continue
@@ -2208,6 +2194,11 @@ async def resolve_interrupted_turn(
                 ),
             )
         if current_handoff is not None and approval_status is True:
+            if original_binding is not None:
+                raise UserError(
+                    "Cannot resume a local MCP tool call as a handoff. Restore the original "
+                    "tool configuration, or start a new run."
+                )
             if stale_function is not None:
                 _reject_nested_replacement(stale_function)
             reconciled_handoffs.append(current_handoff)
@@ -3468,6 +3459,11 @@ def process_model_response(
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
         function_tools_not_found=function_tools_not_found,
+        mcp_tool_bindings={
+            run.tool_call.call_id: binding
+            for run in functions
+            if (binding := run.function_tool._mcp_tool_binding) is not None
+        },
     )
 
 

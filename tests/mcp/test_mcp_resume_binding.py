@@ -3,13 +3,107 @@ import json
 
 import pytest
 
-from agents import Agent, RunContextWrapper, Runner, RunState, UserError
+from agents import Agent, RunContextWrapper, Runner, RunState, UserError, handoff
 from agents.decorators import tool
 from agents.testing import ScriptedModel
 
 from ..test_function_tool import _CustomConstructorFunctionTool
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("changed_recipient", [False, True])
+async def test_mcp_recipient_survives_absent_tool_during_restore(
+    streaming: bool, changed_recipient: bool
+):
+    original = FakeMCPServer(server_name="docs", require_approval="always")
+    other = FakeMCPServer(server_name="docs", require_approval="always")
+    original.add_tool("search", {})
+    agent = Agent(
+        name="test",
+        mcp_servers=[original, other],
+        model=ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]]),
+    )
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    snapshot = state.to_json()
+    original.tools.clear()
+    restored = await RunState.from_json(agent, snapshot)
+    # Saving while discovery has no candidate must retain the original recipient.
+    restored = await RunState.from_json(agent, restored.to_json())
+    (other if changed_recipient else original).add_tool("search", {})
+
+    async def resume():
+        if streaming:
+            result = Runner.run_streamed(agent, restored)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, restored)
+
+    if changed_recipient:
+        with pytest.raises(UserError, match="different recipient"):
+            await resume()
+        assert original.tool_calls == other.tool_calls == []
+    else:
+        result = await resume()
+        assert result.final_output == "done"
+        assert original.tool_calls == ["search"]
+        assert other.tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("restore", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_mcp_approval_cannot_authorize_handoff(
+    streaming: bool, restore: bool, approved: bool
+):
+    handoff_calls: list[str] = []
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("search", {})
+    model = ScriptedModel([[get_function_tool_call("search", "{}")], [get_text_message("done")]])
+    agent = Agent(name="test", mcp_servers=[server], model=model)
+    delegate = Agent(name="delegate", model=model)
+    first = await Runner.run(agent, "search")
+    state = first.to_state()
+    if approved:
+        state.approve(first.interruptions[0])
+    else:
+        state.reject(first.interruptions[0], rejection_message="MCP request declined")
+    agent.handoffs = [
+        handoff(
+            delegate,
+            tool_name_override="search",
+            on_handoff=lambda _context: handoff_calls.append("handoff"),
+        )
+    ]
+    if restore:
+        state = await RunState.from_json(agent, state.to_json())
+
+    async def resume():
+        if streaming:
+            result = Runner.run_streamed(agent, state)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, state)
+
+    if approved:
+        with pytest.raises(UserError, match="MCP tool call as a handoff"):
+            await resume()
+    else:
+        result = await resume()
+        assert result.final_output == "done"
+        assert result.last_agent is agent
+        assert any(
+            getattr(item, "output", None) == "MCP request declined" for item in result.new_items
+        )
+    assert server.tool_calls == []
+    assert handoff_calls == []
 
 
 @pytest.mark.asyncio
@@ -45,7 +139,9 @@ async def test_serialized_mcp_approval_preserves_recipient(streaming: bool, list
     snapshot = state.to_string()
     payload = json.loads(snapshot)
     assert payload["$schemaVersion"] == "1.18"
-    assert payload["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"] == [
+    assert payload["last_processed_response"]["mcp_tool_bindings"][
+        first.interruptions[0].raw_item.call_id
+    ] == [
         "docs",
         "search",
         0,
@@ -122,7 +218,7 @@ async def test_legacy_pending_mcp_call_requires_new_run():
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
     snapshot["$schemaVersion"] = "1.17"
-    del snapshot["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"]
+    del snapshot["last_processed_response"]["mcp_tool_bindings"]
     restored = await RunState.from_json(agent, snapshot)
     with pytest.raises(UserError, match="missing or different recipient binding"):
         await Runner.run(agent, restored)
@@ -192,8 +288,7 @@ async def test_completed_mcp_sibling_does_not_block_function_approval(schema_ver
     snapshot = state.to_json()
     snapshot["$schemaVersion"] = schema_version
     if schema_version != "1.18":
-        for entry in snapshot["last_processed_response"]["functions"]:
-            entry["tool"].pop("mcpToolBinding", None)
+        snapshot["last_processed_response"].pop("mcp_tool_bindings", None)
     if schema_version == "1.14":
         snapshot["context"].pop("tool_invocations", None)
     restored = await RunState.from_json(agent, snapshot)
@@ -224,7 +319,7 @@ async def test_legacy_mcp_call_missing_during_restore_cannot_rebind(streaming: b
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
     snapshot["$schemaVersion"] = "1.17"
-    del snapshot["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"]
+    del snapshot["last_processed_response"]["mcp_tool_bindings"]
 
     original.tools.clear()
     restored = await RunState.from_json(agent, snapshot)
@@ -458,7 +553,7 @@ async def test_cancelled_rejection_preserves_recipient_for_later_approval(local_
     other.ready = None
 
     snapshot = state.to_json()
-    assert snapshot["last_processed_response"]["functions"][0]["tool"]["mcpToolBinding"] == [
+    assert snapshot["last_processed_response"]["mcp_tool_bindings"][approval.raw_item.call_id] == [
         "docs",
         "search",
         0,
