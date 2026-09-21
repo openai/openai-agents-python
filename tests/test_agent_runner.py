@@ -5299,9 +5299,7 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     async def fake_get_all_tools(*_: Any, **__: Any) -> list[Any]:
         return []
 
-    monkeypatch.setattr("agents.run.get_all_tools", fake_get_all_tools)
     monkeypatch.setattr("agents.run_internal.run_loop.get_all_tools", fake_get_all_tools)
-    monkeypatch.setattr("agents.run.initialize_computer_tools", noop_initialize_computer_tools)
     monkeypatch.setattr(
         "agents.run_internal.run_loop.initialize_computer_tools", noop_initialize_computer_tools
     )

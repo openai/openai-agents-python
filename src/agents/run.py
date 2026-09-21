@@ -83,6 +83,7 @@ from .run_internal.agent_runner_helpers import (
     validate_output_guardrails_with_server_managed_conversation,
     validate_session_conversation_settings,
 )
+from .run_internal.agent_tool_configuration import agent_tool_configuration_run
 from .run_internal.approvals import approvals_from_step
 from .run_internal.blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
@@ -120,9 +121,7 @@ from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
-    get_all_tools,
     get_output_schema,
-    initialize_computer_tools,
     resolve_interrupted_turn,
     run_input_guardrails,
     run_output_guardrails,
@@ -563,7 +562,13 @@ class AgentRunner:
         redacted_error: BaseException | None = None
         try:
             try:
-                return await self._run_impl(starting_agent, input, **kwargs)
+                configuration_agent = (
+                    input._current_agent
+                    if isinstance(input, RunState) and input._current_agent is not None
+                    else starting_agent
+                )
+                with agent_tool_configuration_run(configuration_agent):
+                    return await self._run_impl(starting_agent, input, **kwargs)
             except BaseException as error:
                 if not _is_error_data_redacted(error):
                     raise
@@ -1482,11 +1487,6 @@ class AgentRunner:
                             if not run_state._pending_input:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
-                    all_tools = await get_all_tools(execution_agent, context_wrapper)
-                    all_tools = await initialize_computer_tools(
-                        tools=all_tools, context_wrapper=context_wrapper
-                    )
-
                     if current_span is None:
                         if (output_schema := get_output_schema(execution_agent)) is not None:
                             output_type_name = output_schema.name()
@@ -1699,7 +1699,6 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 run_single_turn(
                                     bindings=current_bindings,
-                                    all_tools=all_tools,
                                     original_input=original_input,
                                     generated_items=items_for_model,
                                     hooks=hooks,
@@ -1774,7 +1773,6 @@ class AgentRunner:
                         else:
                             turn_result = await run_single_turn(
                                 bindings=current_bindings,
-                                all_tools=all_tools,
                                 original_input=original_input,
                                 generated_items=items_for_model,
                                 hooks=hooks,
@@ -2601,24 +2599,30 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
-            await start_streaming(
-                starting_input=input_for_result,
-                streamed_result=streamed_result,
-                starting_agent=starting_agent,
-                max_turns=max_turns,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                run_config=run_config,
-                error_handlers=error_handlers,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-                conversation_id=conversation_id,
-                session=session,
-                run_state=run_state,
-                trace_workflow_name=trace_workflow_name,
-                is_resumed_state=is_resumed_state,
-                sandbox_runtime=sandbox_runtime,
+            configuration_agent = (
+                run_state._current_agent
+                if run_state is not None and run_state._current_agent is not None
+                else starting_agent
             )
+            with agent_tool_configuration_run(configuration_agent):
+                await start_streaming(
+                    starting_input=input_for_result,
+                    streamed_result=streamed_result,
+                    starting_agent=starting_agent,
+                    max_turns=max_turns,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    run_config=run_config,
+                    error_handlers=error_handlers,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                    conversation_id=conversation_id,
+                    session=session,
+                    run_state=run_state,
+                    trace_workflow_name=trace_workflow_name,
+                    is_resumed_state=is_resumed_state,
+                    sandbox_runtime=sandbox_runtime,
+                )
 
         # Keep the outer task frame inside the boundary so it cannot retain run payloads.
         streamed_result.run_loop_task = asyncio.create_task(

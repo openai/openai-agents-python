@@ -107,6 +107,7 @@ from .agent_runner_helpers import (
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
 )
+from .agent_tool_configuration import guard_agent_tool_configuration
 from .approvals import approvals_from_step
 from .blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
@@ -1551,11 +1552,6 @@ async def start_streaming(
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
 
-            all_tools = await get_all_tools(execution_agent, context_wrapper)
-            all_tools = await initialize_computer_tools(
-                tools=all_tools, context_wrapper=context_wrapper
-            )
-
             if current_span is None:
                 if (output_schema := get_output_schema(execution_agent)) is not None:
                     output_type_name = output_schema.name()
@@ -1800,7 +1796,6 @@ async def start_streaming(
                         run_config,
                         should_run_agent_start_hooks,
                         tool_use_tracker,
-                        all_tools,
                         server_conversation_tracker,
                         pending_server_items=pending_server_items,
                         session=session,
@@ -2071,7 +2066,6 @@ async def run_single_turn_streamed(
     run_config: RunConfig,
     should_run_agent_start_hooks: bool,
     tool_use_tracker: AgentToolUseTracker,
-    all_tools: list[Tool],
     server_conversation_tracker: OpenAIServerConversationTracker | None = None,
     session: Session | None = None,
     pending_server_items: list[RunItem] | None = None,
@@ -2110,21 +2104,25 @@ async def run_single_turn_streamed(
         turn_input = []
     context_wrapper.turn_input = list(turn_input)
 
-    if should_run_agent_start_hooks:
-        agent_hook_context = AgentHookContext(
-            context=context_wrapper.context,
-            usage=context_wrapper.usage,
-            turn_input=turn_input,
-        )
-        context_wrapper._share_tool_state_with(agent_hook_context)
-        await gather_with_cancel(
-            hooks.on_agent_start(agent_hook_context, public_agent),
-            (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-        )
+    with guard_agent_tool_configuration(public_agent):
+        if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=turn_input,
+            )
+            context_wrapper._share_tool_state_with(agent_hook_context)
+            await gather_with_cancel(
+                hooks.on_agent_start(agent_hook_context, public_agent),
+                (
+                    public_agent.hooks.on_start(agent_hook_context, public_agent)
+                    if public_agent.hooks is not None
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        all_tools = await get_all_tools(execution_agent, context_wrapper)
+    all_tools = await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
     output_schema = get_output_schema(execution_agent)
 
@@ -2420,7 +2418,6 @@ async def run_single_turn_streamed(
 async def run_single_turn(
     *,
     bindings: AgentBindings[TContext],
-    all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
     hooks: RunHooks[TContext],
@@ -2448,21 +2445,25 @@ async def run_single_turn(
         turn_input = []
     context_wrapper.turn_input = list(turn_input)
 
-    if should_run_agent_start_hooks:
-        agent_hook_context = AgentHookContext(
-            context=context_wrapper.context,
-            usage=context_wrapper.usage,
-            turn_input=turn_input,
-        )
-        context_wrapper._share_tool_state_with(agent_hook_context)
-        await gather_with_cancel(
-            hooks.on_agent_start(agent_hook_context, public_agent),
-            (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-        )
+    with guard_agent_tool_configuration(public_agent):
+        if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=turn_input,
+            )
+            context_wrapper._share_tool_state_with(agent_hook_context)
+            await gather_with_cancel(
+                hooks.on_agent_start(agent_hook_context, public_agent),
+                (
+                    public_agent.hooks.on_start(agent_hook_context, public_agent)
+                    if public_agent.hooks is not None
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        all_tools = await get_all_tools(execution_agent, context_wrapper)
+    all_tools = await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
     system_prompt, prompt_config = await gather_with_cancel(
         execution_agent.get_system_prompt(context_wrapper),

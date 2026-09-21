@@ -120,6 +120,7 @@ from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
+from .agent_tool_configuration import register_agent_tool_configuration
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -578,6 +579,10 @@ async def execute_handoffs(
     actual_handoff = run_handoffs[0]
     with handoff_span(from_agent=public_agent.name) as span_handoff:
         handoff = actual_handoff.handoff
+        if handoff._agent_ref is not None:
+            target_agent = handoff._agent_ref()
+            if target_agent is not None:
+                register_agent_tool_configuration(target_agent)
         context_wrapper._mark_tool_invocation_executed(
             actual_handoff.tool_call,
             invocation_role="handoff",
@@ -585,6 +590,7 @@ async def execute_handoffs(
         new_agent: Agent[Any] = await handoff.on_invoke_handoff(
             context_wrapper, actual_handoff.tool_call.arguments
         )
+        register_agent_tool_configuration(new_agent)
         span_handoff.span_data.to_agent = new_agent.name
         if multiple_handoffs:
             requested_agents = [handoff.handoff.agent_name for handoff in run_handoffs]

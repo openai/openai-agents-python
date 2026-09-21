@@ -6802,3 +6802,283 @@ async def test_runner_keeps_public_agent_identity_for_hooks_and_streaming() -> N
     assert all(item.agent is streamed_agent for item in streamed_result.new_items)
     assert run_item_events
     assert all(event.item.agent is streamed_agent for event in run_item_events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("enablement_source", ["context", "agent"])
+async def test_start_hook_state_controls_prepared_sandbox_tools(
+    streamed: bool, enablement_source: str
+) -> None:
+    from agents.decorators import tool
+
+    def is_enabled(context, agent) -> bool:
+        if enablement_source == "context":
+            return context.context["enabled"]
+        return agent.name == "sandbox"
+
+    @tool(is_enabled=is_enabled)
+    async def optional_tool() -> str:
+        return "optional"
+
+    class DisableToolHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            assert agent is public_agent
+            context.context["enabled"] = False
+            agent.name = "sandbox-disabled"
+
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
+    session = _FakeSession(Manifest())
+    public_agent = SandboxAgent(name="sandbox", model=model, tools=[optional_tool])
+    config = _sandbox_run_config(_FakeClient(session))
+    if streamed:
+        result = Runner.run_streamed(
+            public_agent,
+            "go",
+            context={"enabled": True},
+            hooks=DisableToolHooks(),
+            run_config=config,
+        )
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(
+            public_agent,
+            "go",
+            context={"enabled": True},
+            hooks=DisableToolHooks(),
+            run_config=config,
+        )
+    assert result.final_output == "done"
+    assert result.last_agent is public_agent
+    assert all(tool.name != "optional_tool" for tool in model.calls[0].tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("hook_kind", ["run", "agent"])
+@pytest.mark.parametrize("replace_tools", [False, True])
+@pytest.mark.parametrize("call_removed", [False, True])
+async def test_start_hooks_refresh_sandbox_application_tools(
+    streamed: bool, hook_kind: str, replace_tools: bool, call_removed: bool
+) -> None:
+    from agents import ModelBehaviorError
+    from agents.decorators import tool
+
+    effects: list[str] = []
+    hook_calls: list[Agent[Any]] = []
+    enabled_agents: list[Agent[Any]] = []
+    capability_tools: list[Tool] = []
+    session = _FakeSession(Manifest())
+
+    @tool
+    async def removed() -> str:
+        effects.append("removed")
+        return "removed"
+
+    async def added_is_enabled(context, agent) -> bool:
+        await asyncio.sleep(0)
+        enabled_agents.append(agent)
+        return agent.name == "sandbox-ready"
+
+    @tool(is_enabled=added_is_enabled)
+    async def added() -> str:
+        effects.append("added")
+        return "added"
+
+    class BoundCapability(_RecordingCapability):
+        def tools(self) -> list[Tool]:
+            bound_session = self.bound_session
+            assert bound_session is not None
+
+            @tool
+            async def bound_tool() -> str:
+                assert self.bound_session is bound_session
+                effects.append("bound")
+                return "bound"
+
+            capability_tools.append(bound_tool)
+            return [bound_tool]
+
+    async def update(context, agent) -> None:
+        await asyncio.sleep(0)
+        assert agent is public_agent
+        hook_calls.append(agent)
+        agent.name = "sandbox-ready"
+        if replace_tools:
+            agent.tools = [added]
+        else:
+            agent.tools.clear()
+
+    class UpdateRunHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await update(context, agent)
+
+    class UpdateAgentHooks(AgentHooks):
+        async def on_start(self, context, agent) -> None:
+            await update(context, agent)
+
+    model = ScriptedModel()
+    if call_removed:
+        model.enqueue([get_function_tool_call("removed", "{}")])
+    else:
+        if replace_tools:
+            model.enqueue([get_function_tool_call("added", "{}")])
+        model.enqueue([get_function_tool_call("bound_tool", "{}", call_id="bound_call")])
+        model.enqueue([get_final_output_message("done")])
+    public_agent = SandboxAgent(
+        name="sandbox",
+        model=model,
+        tools=[removed],
+        capabilities=[BoundCapability(provided_tools=[])],
+        hooks=UpdateAgentHooks() if hook_kind == "agent" else None,
+    )
+    run_hooks = UpdateRunHooks() if hook_kind == "run" else None
+    config = _sandbox_run_config(_FakeClient(session))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(public_agent, "go", hooks=run_hooks, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(public_agent, "go", hooks=run_hooks, run_config=config)
+        assert result.final_output == "done"
+        assert result.last_agent is public_agent
+
+    if call_removed:
+        with pytest.raises(ModelBehaviorError, match="removed"):
+            await run()
+        assert effects == []
+    else:
+        await run()
+        assert effects == (["added", "bound"] if replace_tools else ["bound"])
+    assert hook_calls == [public_agent]
+    assert all(agent is public_agent for agent in enabled_agents)
+    assert len(capability_tools) == 1
+    expected_tools = ([added] if replace_tools else []) + capability_tools
+    assert model.calls
+    assert all(call.tools == expected_tools for call in model.calls)
+    assert all(call.tools[-1] is capability_tools[0] for call in model.calls)
+    assert public_agent.tools == ([added] if replace_tools else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("hook_kind", ["run", "agent"])
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_start_hooks_control_sandbox_mcp_filters(
+    streamed: bool, hook_kind: str, allowed: bool
+) -> None:
+    from agents import ModelBehaviorError
+    from agents.mcp import ToolFilterContext
+
+    from ..mcp.helpers import FakeMCPServer
+
+    filter_agents: list[Agent[Any]] = []
+
+    async def tool_filter(context: ToolFilterContext, tool) -> bool:
+        await asyncio.sleep(0)
+        filter_agents.append(context.agent)
+        return context.agent.name == "allowed"
+
+    async def update(agent) -> None:
+        await asyncio.sleep(0)
+        assert agent is public_agent
+        agent.name = "allowed" if allowed else "blocked"
+
+    class UpdateRunHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await update(agent)
+
+    class UpdateAgentHooks(AgentHooks):
+        async def on_start(self, context, agent) -> None:
+            await update(agent)
+
+    server = FakeMCPServer(tool_filter=tool_filter, server_name="docs")
+    server.add_tool("lookup", {})
+    model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("mcp_docs__lookup", "{}")],
+            [get_final_output_message("done")],
+        ]
+    )
+    public_agent = SandboxAgent(
+        name="blocked" if allowed else "allowed",
+        model=model,
+        capabilities=[],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+        hooks=UpdateAgentHooks() if hook_kind == "agent" else None,
+    )
+    run_hooks = UpdateRunHooks() if hook_kind == "run" else None
+    config = _sandbox_run_config(_FakeClient(_FakeSession(Manifest())))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(public_agent, "go", hooks=run_hooks, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(public_agent, "go", hooks=run_hooks, run_config=config)
+        assert result.final_output == "done"
+        assert result.last_agent is public_agent
+
+    if allowed:
+        await run()
+    else:
+        with pytest.raises(ModelBehaviorError, match="mcp_docs__lookup"):
+            await run()
+
+    assert filter_agents
+    assert all(agent is public_agent for agent in filter_agents)
+    assert model.calls
+    for call in model.calls:
+        assert [tool.name for tool in call.tools] == (["mcp_docs__lookup"] if allowed else [])
+    assert server.tool_calls == (["lookup"] if allowed else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_sandbox_mcp_names_remain_distinct_from_conditional_handoffs(streamed: bool) -> None:
+    from agents import handoff
+
+    from ..mcp.helpers import FakeMCPServer
+
+    class RenameHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await asyncio.sleep(0)
+            agent.name = "after"
+
+    server = FakeMCPServer(server_name="docs")
+    server.add_tool("lookup", {})
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
+    agent = SandboxAgent(
+        name="before",
+        model=model,
+        capabilities=[],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+        handoffs=[
+            handoff(
+                Agent(name="target", model=model),
+                tool_name_override="mcp_docs__lookup",
+                is_enabled=lambda context, current_agent: current_agent.name == "before",
+            )
+        ],
+    )
+    config = _sandbox_run_config(_FakeClient(_FakeSession(Manifest())))
+    config.tool_name_collision_policy = "error"
+    if streamed:
+        result = Runner.run_streamed(agent, "go", hooks=RenameHooks(), run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", hooks=RenameHooks(), run_config=config)
+
+    assert result.final_output == "done"
+    assert len(model.calls) == 1
+    call = model.calls[0]
+    assert len(call.tools) == 1
+    assert call.tools[0].name.startswith("mcp_docs__lookup")
+    assert call.tools[0].name not in {item.tool_name for item in call.handoffs}

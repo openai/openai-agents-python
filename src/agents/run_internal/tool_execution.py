@@ -23,6 +23,7 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
+from .._public_agent import get_public_agent
 from .._tool_identity import (
     FunctionToolLookupKey,
     NamedToolLookupKey,
@@ -578,7 +579,7 @@ async def resolve_enabled_function_tools(
         attr = tool.is_enabled
         if isinstance(attr, bool):
             return attr
-        result = attr(context_wrapper, agent)
+        result = attr(context_wrapper, get_public_agent(agent))
         if inspect.isawaitable(result):
             return bool(await result)
         return bool(result)

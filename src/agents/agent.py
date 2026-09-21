@@ -212,6 +212,14 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "tools":
+            from .run_internal.agent_tool_configuration import assign_agent_tools
+
+            assign_agent_tools(self, value)
+        else:
+            object.__setattr__(self, name, value)
+
     async def _get_mcp_tool_reserved_names(
         self, run_context: RunContextWrapper[TContext]
     ) -> set[str]:
@@ -253,6 +261,8 @@ class AgentBase(Generic[TContext]):
 
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
+        from ._public_agent import get_public_agent
+
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
@@ -267,7 +277,7 @@ class AgentBase(Generic[TContext]):
             self.mcp_servers,
             convert_schemas_to_strict,
             run_context,
-            self,
+            get_public_agent(self),
             failure_error_function=failure_error_function,
             include_server_in_tool_names=include_server_in_tool_names,
             reserved_tool_names=reserved_tool_names,
@@ -275,6 +285,14 @@ class AgentBase(Generic[TContext]):
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
+        from ._public_agent import get_public_agent
+        from .run_internal.agent_tool_configuration import (
+            register_agent_tool_configuration,
+            snapshot_agent_tools,
+        )
+
+        register_agent_tool_configuration(get_public_agent(self))
+        tools = snapshot_agent_tools(self)
         mcp_tools = await self.get_mcp_tools(run_context)
 
         async def _check_tool_enabled(tool: Tool) -> bool:
@@ -284,16 +302,16 @@ class AgentBase(Generic[TContext]):
             attr = tool.is_enabled
             if isinstance(attr, bool):
                 return attr
-            res = attr(run_context, self)
+            res = attr(run_context, get_public_agent(self))
             if inspect.isawaitable(res):
                 return bool(await res)
             return bool(res)
 
-        tools = list(self.tools)
         results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
         enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
+        snapshot_agent_tools(get_public_agent(self))
         return all_tools
 
 
@@ -1148,5 +1166,5 @@ class Agent(AgentBase, Generic[TContext]):
         return await PromptUtil.to_model_input(
             self.prompt,
             run_context,
-            cast(Agent[TContext], get_public_agent(self)),
+            get_public_agent(self),
         )
