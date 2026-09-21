@@ -11,6 +11,7 @@ import dataclasses
 import functools
 import inspect
 import json
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -1613,7 +1614,7 @@ class _FunctionToolBatchExecutor:
             if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
                 enabled_function_tool_ids.add(function_tool_id)
-        pending_tool_runs = list(enumerate(self.tool_runs))
+        pending_tool_runs = deque(enumerate(self.tool_runs))
         self._fill_tool_task_slots(pending_tool_runs)
 
         try:
@@ -1633,7 +1634,7 @@ class _FunctionToolBatchExecutor:
             self.tool_output_guardrail_results,
         )
 
-    def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:
+    def _fill_tool_task_slots(self, pending_tool_runs: deque[tuple[int, ToolRunFunction]]) -> None:
         max_concurrency = self.max_function_tool_concurrency
         available_slots = (
             len(pending_tool_runs)
@@ -1641,7 +1642,7 @@ class _FunctionToolBatchExecutor:
             else max_concurrency - len(self.pending_tasks)
         )
         while available_slots > 0 and pending_tool_runs:
-            order, tool_run = pending_tool_runs.pop(0)
+            order, tool_run = pending_tool_runs.popleft()
             self._create_tool_task(tool_run, order)
             available_slots -= 1
 
@@ -1659,7 +1660,7 @@ class _FunctionToolBatchExecutor:
 
     async def _drain_pending_tasks(
         self,
-        pending_tool_runs: list[tuple[int, ToolRunFunction]],
+        pending_tool_runs: deque[tuple[int, ToolRunFunction]],
     ) -> None:
         while self.pending_tasks:
             done_tasks, self.pending_tasks = await asyncio.wait(

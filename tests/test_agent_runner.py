@@ -1841,6 +1841,67 @@ def _find_reasoning_input_item(
 
 
 @pytest.mark.asyncio
+async def test_function_tool_queue_preserves_fifo_across_multiple_refills():
+    started: list[int] = []
+    completed: list[int] = []
+    started_events = [asyncio.Event() for _ in range(7)]
+    release_events = [asyncio.Event() for _ in range(7)]
+
+    async def tracked_tool(value: int) -> str:
+        started.append(value)
+        started_events[value].set()
+        await release_events[value].wait()
+        completed.append(value)
+        return f"ok-{value}"
+
+    model = ScriptedModel()
+    model.enqueue(
+        [
+            get_function_tool_call("tracked_tool", json.dumps({"value": value}), call_id=str(value))
+            for value in range(7)
+        ]
+    )
+    model.enqueue([get_text_message("done")])
+    agent = Agent(name="test", model=model, tools=[function_tool(tracked_tool)])
+    run_task = asyncio.create_task(
+        Runner.run(
+            agent,
+            "run tools",
+            run_config=RunConfig(
+                tool_execution=ToolExecutionConfig(max_function_tool_concurrency=2)
+            ),
+        )
+    )
+    try:
+        # Timeouts only detect hangs; events control the completion order.
+        await asyncio.wait_for(started_events[1].wait(), timeout=5)
+        assert started == [0, 1]
+        for value in range(1, 6):
+            release_events[value].set()
+            await asyncio.wait_for(started_events[value + 1].wait(), timeout=5)
+            assert started == list(range(value + 2))
+            assert completed == list(range(1, value + 1))
+
+        release_events[6].set()
+        release_events[0].set()
+        result = await asyncio.wait_for(run_task, timeout=5)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    assert result.final_output == "done"
+    assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "ok-0",
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+        "ok-5",
+        "ok-6",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_simple_first_run():
     model = ScriptedModel()
     agent = Agent(
