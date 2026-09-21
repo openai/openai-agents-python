@@ -562,6 +562,23 @@ class DockerSandboxSession(BaseSandboxSession):
             )
         return res
 
+    async def _validate_manifest_application(
+        self,
+        *,
+        only_ephemeral: bool = False,
+        manifest: Manifest | None = None,
+        session_running: bool | None = None,
+    ) -> None:
+        await super()._validate_manifest_application(
+            only_ephemeral=only_ephemeral, manifest=manifest, session_running=session_running
+        )
+        service = self._removal_service
+        if service is not None:
+            selected_manifest = manifest if manifest is not None else self.state.manifest
+            await run_blocking_workspace_io(
+                lambda: service.assert_bound(self._container, selected_manifest)
+            )
+
     async def _ensure_backend_started(self) -> None:
         service = self._removal_service
         if service is not None:

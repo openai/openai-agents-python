@@ -20,9 +20,14 @@ from unittest.mock import AsyncMock, Mock
 import docker.errors  # type: ignore[import-untyped]
 import pytest
 
+from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest, Permissions, SandboxPathGrant, User
+from agents.sandbox.capabilities import Capability
+from agents.sandbox.entries import File
 from agents.sandbox.errors import InvalidManifestPathError, WorkspaceArchiveWriteError
 from agents.sandbox.files import EntryKind, FileEntry
+from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
+from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.sandboxes import (
     DockerRemovalService,
     docker_removal,
@@ -127,6 +132,69 @@ def session(
         ),
         removal_service=service,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("bound", "change_grants"), [(True, True), (True, False), (False, True)])
+async def test_live_manifest_update_preserves_removal_authority(
+    service: Any, monkeypatch: pytest.MonkeyPatch, bound: bool, change_grants: bool
+) -> None:
+    class ConfigureManifest(Capability):
+        type: str = "configure_manifest"
+        grants: tuple[SandboxPathGrant, ...]
+
+        def process_manifest(self, manifest: Manifest) -> Manifest:
+            return manifest.model_copy(
+                update={
+                    "extra_path_grants": self.grants,
+                    "entries": {"added.txt": File(content=b"capability")},
+                }
+            )
+
+    manager, container, worker = service
+    configured = manifest()
+    current = session(manager, container, configured)
+    if bound:
+        manager.bind_new(container, configured)
+    else:
+        current._removal_service = None
+    monkeypatch.setattr(current, "running", AsyncMock(return_value=True))
+    apply_entries = AsyncMock()
+    monkeypatch.setattr(current, "_apply_entry_batch", apply_entries)
+    original_state = current.state
+    agent = SandboxAgent(name="Live removal authority")
+    runtime = SandboxRuntimeSessionManager(
+        starting_agent=agent, sandbox_config=SandboxRunConfig(session=current), run_state=None
+    )
+    grants = configured.extra_path_grants
+    if change_grants:
+        grants = (*grants, SandboxPathGrant(path="/new-grant", read_only=True))
+    capability = ConfigureManifest(grants=grants)
+
+    if bound and change_grants:
+        with pytest.raises(ValueError, match="original live authority binding"):
+            await runtime._create_resources(
+                agent=agent, capabilities=[capability], is_resumed_state=False
+            )
+        assert current.state is original_state
+        assert current.state.manifest == configured
+        apply_entries.assert_not_awaited()
+        assert [call["operation"] for call in worker.calls] == ["bind"]
+    else:
+        resources = await runtime._create_resources(
+            agent=agent, capabilities=[capability], is_resumed_state=False
+        )
+        assert resources.session is current
+        assert current.state.manifest.extra_path_grants == grants
+        assert current.state.manifest.entries == {"added.txt": File(content=b"capability")}
+        apply_entries.assert_awaited_once()
+        applied = apply_entries.await_args
+        assert applied is not None
+        assert applied.args[0] == [(Path("/workspace/added.txt"), File(content=b"capability"))]
+
+    if bound:
+        await current.rm("build", recursive=True)
+        assert worker.removed == ["/workspace/build"]
 
 
 @pytest.mark.asyncio
