@@ -1462,6 +1462,72 @@ async def test_streamed_run_surfaces_redacted_output_validation_error(
 
 @pytest.mark.parametrize("redacted", [False, True])
 @pytest.mark.asyncio
+async def test_streamed_task_observers_follow_model_data_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    redacted: bool,
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", redacted)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    input_secret = "STREAM_TASK_INPUT_CANARY"
+    context = {"private": "STREAM_TASK_CONTEXT_CANARY"}
+    session = SimpleListSession(
+        session_id="stream-task-redaction",
+        history=[{"role": "user", "content": "STREAM_TASK_SESSION_CANARY"}],
+    )
+    model = ScriptedModel(steps=[[get_text_message(f'{{"answer": "{_MODEL_OUTPUT_SECRET}"}}')]])
+    agent = Agent(name="A", model=model, output_type=_RequiredOutput)
+    result = Runner.run_streamed(agent, input_secret, context=context, session=session)
+    task = result.run_loop_task
+    assert task is not None
+    observed = asyncio.get_running_loop().create_future()
+
+    def observe_task(completed: asyncio.Task[Any]) -> None:
+        error = completed.exception()
+        assert isinstance(error, ModelBehaviorError)
+        # Snapshot before a result accessor or stream consumer can sanitize the exception.
+        frames = [dict(frame) for frame in _agents_traceback_frame_locals(error)]
+        observed.set_result((error, frames, repr(frames)))
+
+    task.add_done_callback(observe_task)
+    error, callback_frames, callback_snapshot = await observed
+    with pytest.raises(ModelBehaviorError) as exc_info:
+        await task
+    assert exc_info.value is error
+    await_frames = _agents_traceback_frame_locals(error)
+
+    if redacted:
+        assert error.run_data is None
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        for secret in (
+            input_secret,
+            context["private"],
+            "STREAM_TASK_SESSION_CANARY",
+            _MODEL_OUTPUT_SECRET,
+        ):
+            assert secret not in callback_snapshot
+            _assert_secret_absent_from_agents_traceback(error, secret)
+        for frame in callback_frames + await_frames:
+            for value in frame.values():
+                assert value is not session
+                assert value is not result
+                assert value is not context
+                assert not isinstance(value, RunContextWrapper)
+    else:
+        assert _MODEL_OUTPUT_SECRET in str(error)
+        assert isinstance(error.__cause__, ValidationError)
+        assert input_secret in callback_snapshot
+        assert any(frame.get("session") is session for frame in callback_frames)
+        assert any(frame.get("session") is session for frame in await_frames)
+
+    with pytest.raises(ModelBehaviorError) as stream_exc_info:
+        async for _ in result.stream_events():
+            pass
+    assert stream_exc_info.value is error
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.asyncio
 async def test_streamed_run_loop_exception_follows_model_data_policy(
     monkeypatch: pytest.MonkeyPatch,
     redacted: bool,

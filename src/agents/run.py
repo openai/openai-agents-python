@@ -2600,28 +2600,29 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
-            await _await_data_redacted_error_boundary(
-                lambda: start_streaming(
-                    starting_input=input_for_result,
-                    streamed_result=streamed_result,
-                    starting_agent=starting_agent,
-                    max_turns=max_turns,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    run_config=run_config,
-                    error_handlers=error_handlers,
-                    previous_response_id=previous_response_id,
-                    auto_previous_response_id=auto_previous_response_id,
-                    conversation_id=conversation_id,
-                    session=session,
-                    run_state=run_state,
-                    trace_workflow_name=trace_workflow_name,
-                    is_resumed_state=is_resumed_state,
-                    sandbox_runtime=sandbox_runtime,
-                )
+            await start_streaming(
+                starting_input=input_for_result,
+                streamed_result=streamed_result,
+                starting_agent=starting_agent,
+                max_turns=max_turns,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                error_handlers=error_handlers,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                conversation_id=conversation_id,
+                session=session,
+                run_state=run_state,
+                trace_workflow_name=trace_workflow_name,
+                is_resumed_state=is_resumed_state,
+                sandbox_runtime=sandbox_runtime,
             )
 
-        streamed_result.run_loop_task = asyncio.create_task(run_loop())
+        # Keep the outer task frame inside the boundary so it cannot retain run payloads.
+        streamed_result.run_loop_task = asyncio.create_task(
+            _await_data_redacted_error_boundary(run_loop)
+        )
         if owns_model_provider:
             model_provider = run_config.model_provider
             streamed_result._ensure_model_provider_cleanup_on_completion(
