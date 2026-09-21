@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -1589,6 +1590,11 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _search_sync():
             """Synchronous helper to search turns by content."""
+            encoded_term = json.dumps(search_term)[1:-1]
+            for char in ("\\", "%", "_"):
+                encoded_term = encoded_term.replace(char, "\\" + char)
+            # Preserve SQLite LIKE's ASCII-only case-insensitive matching.
+            search_pattern = re.compile(re.escape(search_term), re.IGNORECASE | re.ASCII)
             with self._locked_connection() as conn:
                 resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
@@ -1602,10 +1608,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                         JOIN {self.messages_table} am ON ms.message_id = am.id
                         WHERE ms.session_id = ? AND ms.branch_id = ?
                         AND ms.message_type = 'user'
-                        AND am.message_data LIKE ?
+                        AND am.message_data LIKE ? ESCAPE '\\'
                         ORDER BY ms.branch_turn_number
                     """,
-                        (self.session_id, resolved_branch_id, f"%{search_term}%"),
+                        (self.session_id, resolved_branch_id, f"%{encoded_term}%"),
                     )
 
                     matches = []
@@ -1613,6 +1619,14 @@ class AdvancedSQLiteSession(SQLiteSession):
                         turn_num, message_data, created_at = row
                         try:
                             content = json.loads(message_data).get("content", "")
+                            # An encoded match can start inside a literal JSON escape.
+                            texts = (
+                                [content]
+                                if isinstance(content, str)
+                                else [part.get("text", "") for part in content]
+                            )
+                            if not any(search_pattern.search(text) for text in texts):
+                                continue
                             matches.append(
                                 {
                                     "turn": turn_num,

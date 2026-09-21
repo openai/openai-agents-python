@@ -1912,6 +1912,115 @@ async def test_find_turns_by_content():
     session.close()
 
 
+@pytest.mark.parametrize(
+    ("earlier_content", "matching_content", "search_term"),
+    [
+        ("Dogs", "Tell me about cats", "CATS"),
+        ("Tokyo", "大阪の天気", "大阪"),
+        ("Hello", "你好世界", "你好"),
+        (r"Literal \u00e9", "café", "é"),
+        ("café", r"Literal \u00e9", r"\u00e9"),
+        ("CAFÉ", "café", "é"),
+        (r"Literal \n", "First\nsecond", "\n"),
+        ("First\nsecond", r"Literal \n", r"\n"),
+        ("No quotes", 'Say "hello"', '"hello"'),
+        ("Plain path", r"C:\notes", r"C:\notes"),
+        ("100 dollars 東京", "100% 東京", "100% 東京"),
+        ("axb 東京", "a_b 東京", "a_b 東京"),
+        ("No percent", "50%", "%"),
+        ("No underscore", "a_b", "_"),
+    ],
+)
+async def test_find_turns_by_content_matches_literal_text(
+    earlier_content: str, matching_content: str, search_term: str
+):
+    """Search decoded content, without interpreting JSON escapes or SQL wildcards."""
+    session = AdvancedSQLiteSession(session_id="literal_search", create_tables=True)
+    try:
+        await session.add_items([{"role": "user", "content": earlier_content}])
+        await session.add_items([{"role": "user", "content": matching_content}])
+
+        matches = await session.find_turns_by_content(search_term)
+        assert [turn["turn"] for turn in matches] == [2]
+        assert matches[0]["full_content"] == matching_content
+        assert matches[0]["content"] == matching_content
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["string", "text_parts"])
+async def test_create_branch_from_content_uses_decoded_match(structured: bool):
+    """A literal escape in an earlier turn must not become the branch point."""
+    session = AdvancedSQLiteSession(session_id="decoded_branch", create_tables=True)
+    earlier_item: TResponseInputItem = {"role": "user", "content": r"Literal \u00e9"}
+    matching_item: TResponseInputItem = {"role": "user", "content": "café"}
+    if structured:
+        earlier_item["content"] = [{"type": "input_text", "text": r"Literal \u00e9"}]
+        matching_item["content"] = [{"type": "input_text", "text": "café"}]
+    try:
+        await session.add_items([earlier_item])
+        await session.add_items([matching_item])
+
+        matches = await session.find_turns_by_content("é")
+        assert [turn["turn"] for turn in matches] == [2]
+        assert matches[0]["full_content"] == matching_item["content"]
+
+        assert await session.create_branch_from_content("é", "cafe_branch") == "cafe_branch"
+        assert await session.get_items() == [earlier_item]
+    finally:
+        session.close()
+
+
+async def test_find_turns_by_content_with_escaped_text_parts():
+    """Structured text is searched after decoding, without matching the message envelope."""
+    session = AdvancedSQLiteSession(session_id="escaped_text_parts", create_tables=True)
+    try:
+        await session.add_items(
+            [{"role": "user", "content": [{"type": "input_text", "text": r"Literal \n"}]}]
+        )
+        await session.add_items(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": '東京 "café"\n50% a_b'},
+                        {"type": "input_image", "image_url": "https://example.com/image.png"},
+                    ],
+                }
+            ]
+        )
+
+        for search_term in ('東京 "café"', "\n", "50% a_b"):
+            assert [turn["turn"] for turn in await session.find_turns_by_content(search_term)] == [
+                2
+            ]
+        assert [turn["turn"] for turn in await session.find_turns_by_content(r"\n")] == [1]
+        assert await session.find_turns_by_content("user") == []
+    finally:
+        session.close()
+
+
+async def test_find_turns_by_content_filters_session_and_branch(tmp_path: Path):
+    """Decoded matching retains the query's session and branch boundaries."""
+    db_path = tmp_path / "content_search.db"
+    session = AdvancedSQLiteSession(session_id="search", db_path=db_path, create_tables=True)
+    other = AdvancedSQLiteSession(session_id="other", db_path=db_path, create_tables=True)
+    try:
+        await other.add_items([{"role": "user", "content": "東京 other session"}])
+        await session.add_items([{"role": "user", "content": "First turn"}])
+        await session.add_items([{"role": "user", "content": "東京 main"}])
+        await session.create_branch_from_turn(2, "alternate")
+        await session.add_items([{"role": "user", "content": "東京 alternate"}])
+
+        matches = await session.find_turns_by_content("東京")
+        assert [turn["full_content"] for turn in matches] == ["東京 alternate"]
+        matches = await session.find_turns_by_content("東京", branch_id="main")
+        assert [turn["full_content"] for turn in matches] == ["東京 main"]
+    finally:
+        session.close()
+        other.close()
+
+
 async def test_get_conversation_turns_with_list_content():
     """List (multimodal) content is previewed as a string instead of crashing or leaking a list."""
     session_id = "conversation_turns_list_content_test"
