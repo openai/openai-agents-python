@@ -25,7 +25,6 @@ from agents.sandbox.manifest import Manifest, SandboxPathGrant
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.snapshot import NoopSnapshot
-from agents.sandbox.types import ExecResult
 
 if TYPE_CHECKING or sys.platform != "win32":
     from agents.sandbox.sandboxes.unix_local import (
@@ -72,19 +71,40 @@ async def test_recursive_rm_preserves_read_only_descendants_and_writable_sibling
             SandboxPathGrant(path=str(grant_path), read_only=True),
         ),
     )
-    # Isolate the user permission probe; the host rejects before destructive file operations.
-    monkeypatch.setattr(
-        session, "exec", AsyncMock(return_value=ExecResult(stdout=b"", stderr=b"", exit_code=0))
-    )
-    with pytest.raises(WorkspaceArchiveWriteError):
+    probe = AsyncMock(side_effect=LookupError("unknown requested user"))
+    execute = AsyncMock(side_effect=AssertionError("no user process should start"))
+    monkeypatch.setattr(session, "_check_rm_with_exec", probe)
+    monkeypatch.setattr(session, "exec", execute)
+    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
         await session.rm(data, recursive=True, user=user)
+    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
     assert secret.read_bytes() == b"protected"
     assert sibling.read_bytes() == b"writable"
 
-    with pytest.raises(WorkspaceArchiveWriteError):
+    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
         await session.rm(writable, recursive=True, user=user)
+    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
+    probe.assert_not_awaited()
+    execute.assert_not_awaited()
     assert sibling.read_bytes() == b"writable"
     assert secret.read_bytes() == b"protected"
+
+
+@pytest.mark.parametrize(("recursive", "read_only"), [(False, True), (True, False)])
+async def test_supported_rm_still_runs_user_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recursive: bool, read_only: bool
+) -> None:
+    session = _session(
+        tmp_path / "workspace",
+        grants=(SandboxPathGrant(path=str(tmp_path / "external"), read_only=read_only),),
+    )
+    failure = LookupError("unknown requested user")
+    probe = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(session, "_check_rm_with_exec", probe)
+    with pytest.raises(LookupError) as rejected:
+        await session.rm("build", recursive=recursive, user="example-user")
+    assert rejected.value is failure
+    probe.assert_awaited_once_with("build", recursive=recursive, user="example-user")
 
 
 async def test_recursive_rm_rejects_nested_writable_override_with_read_only_grant(
@@ -553,6 +573,8 @@ async def test_recursive_rm_rejects_read_only_sessions_before_filesystem_operati
     if read_only_grant:
         with pytest.raises(WorkspaceArchiveWriteError):
             await session.rm(target, recursive=True)
+        with pytest.raises(WorkspaceArchiveWriteError):
+            session._files.rm(target, recursive=True)
         assert events == []
     else:
         await session.rm(target, recursive=True)

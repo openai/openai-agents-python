@@ -42,13 +42,17 @@ class _UnixLocalFiles(_FileOps):
         # Reauthorize resolved paths against captured roots without following new symlinks.
         return self._policy.normalize_path(path, for_write=for_write)
 
-    def rm(self, path: Path, *, recursive: bool) -> None:
-        if recursive and any(read_only for _, read_only in self._policy.extra_path_grant_rules()):
+    def validate_recursive_remove(self, path: Path) -> None:
+        if any(read_only for _, read_only in self._policy.extra_path_grant_rules()):
             # Local processes can move protected entries into any tree during traversal.
             path = self.authorize(path, for_write=True)
             raise WorkspaceArchiveWriteError(
                 path=path, context={"reason": "recursive_remove_with_read_only_grants"}
             )
+
+    def rm(self, path: Path, *, recursive: bool) -> None:
+        if recursive:
+            self.validate_recursive_remove(path)
         super().rm(path, recursive=recursive)
 
     @contextmanager

@@ -1015,9 +1015,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         recursive: bool = False,
         user: str | User | None = None,
     ) -> None:
+        if recursive:
+            normalized = self.normalize_path(path, for_write=True)
+            self._files.validate_recursive_remove(normalized)
         if user is not None:
             normalized = await self._check_rm_with_exec(path, recursive=recursive, user=user)
-        else:
+        elif not recursive:
             normalized = self.normalize_path(path, for_write=True)
         try:
             if recursive:
