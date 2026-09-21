@@ -3039,9 +3039,15 @@ async def _restore_pending_nested_agent_tool_runs(
         if not isinstance(tool_call, ResponseFunctionToolCall):
             continue
 
+        # A nested run serializes agent references relative to the agent tool's own agent,
+        # so that agent must also be the root when the references are resolved again.
+        nested_root_agent = function_action.action.function_tool._agent_instance
+        if not isinstance(nested_root_agent, Agent):
+            nested_root_agent = current_agent
+
         try:
             nested_state = await _build_run_state_from_json(
-                initial_agent=current_agent,
+                initial_agent=nested_root_agent,
                 state_json=dict(nested_state_data),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
