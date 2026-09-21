@@ -41,10 +41,8 @@ class _UnixLocalFiles(_FileOps):
         # Reauthorize resolved paths against captured roots without following new symlinks.
         return self._policy.normalize_path(path, for_write=for_write)
 
-    def rm(self, path: Path, *, recursive: bool) -> None:
-        if recursive:
-            self._policy.validate_recursive_remove(path)
-        super().rm(path, recursive=recursive)
+    def _validate_recursive_remove(self, path: Path) -> None:
+        self._policy.validate_recursive_remove(path)
 
     @contextmanager
     def parent(

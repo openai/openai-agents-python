@@ -26,8 +26,8 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,7 +36,7 @@ from docker.models.containers import Container  # type: ignore[import-untyped]
 
 from ..errors import WorkspaceArchiveWriteError
 from ..manifest import Manifest
-from ..workspace_paths import WorkspacePathPolicy, posix_path_for_error
+from ..workspace_paths import WorkspacePathPolicy, coerce_posix_path, posix_path_for_error
 
 
 class _Worker:
@@ -102,6 +102,11 @@ class _Binding:
     incarnation: tuple[int, str]
     configuration: tuple[str, tuple[tuple[str, bool], ...]]
     policy: WorkspacePathPolicy
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def close(self) -> None:
+        with self.lock:
+            self.worker.close()
 
 
 class DockerRemovalService:
@@ -129,6 +134,7 @@ class DockerRemovalService:
     docker_client: DockerClient
     _lock: threading.RLock
     _bindings: dict[str, _Binding]
+    _closed: bool
 
     def __init__(self, *, socket_path: str = "/var/run/docker.sock") -> None:
         if sys.platform != "linux" or os.geteuid() != 0:
@@ -136,6 +142,7 @@ class DockerRemovalService:
         self.docker_client = DockerClient(base_url=f"unix://{socket_path}")
         self._lock = threading.RLock()
         self._bindings = {}
+        self._closed = False
 
     def _state(self, container: Container) -> tuple[int, str]:
         container.reload()
@@ -204,65 +211,74 @@ class DockerRemovalService:
     def bind_new(self, container: Container, manifest: Manifest) -> None:
         """Bind before a newly created session is returned to its trusted application."""
         with self._lock:
+            if self._closed:
+                raise ValueError("Docker removal service is closed")
             if container.id in self._bindings:
                 raise ValueError("Docker removal authority is already bound")
-            if any(grant.host_path is not None for grant in manifest.extra_path_grants):
-                raise ValueError("Docker removal service does not support shared host paths")
-            with self._paused(container) as incarnation:
-                worker = _Worker(incarnation[0])
-                try:
-                    result = worker.request(
-                        operation="bind",
-                        paths=[
-                            manifest.root,
-                            *(grant.path for grant in manifest.extra_path_grants),
-                        ],
-                    )
-                    paths = result["paths"]
-                    policy = WorkspacePathPolicy(
-                        root=paths[0],
-                        extra_path_grants=tuple(
-                            grant.model_copy(update={"path": path})
-                            for grant, path in zip(
-                                manifest.extra_path_grants, paths[1:], strict=True
-                            )
-                        ),
-                    )
+        if any(grant.host_path is not None for grant in manifest.extra_path_grants):
+            raise ValueError("Docker removal service does not support shared host paths")
+        with self._paused(container) as incarnation:
+            worker = _Worker(incarnation[0])
+            try:
+                result = worker.request(
+                    operation="bind",
+                    paths=[manifest.root, *(grant.path for grant in manifest.extra_path_grants)],
+                )
+                paths = result["paths"]
+                policy = WorkspacePathPolicy(
+                    root=paths[0],
+                    extra_path_grants=tuple(
+                        grant.model_copy(update={"path": path})
+                        for grant, path in zip(manifest.extra_path_grants, paths[1:], strict=True)
+                    ),
+                )
+                with self._lock:
+                    if self._closed or container.id in self._bindings:
+                        raise ValueError("Docker removal authority cannot be registered")
                     self._bindings[container.id] = _Binding(
                         worker, incarnation, _configuration(manifest), policy
                     )
-                except BaseException:
+            except BaseException:
+                with suppress(Exception):
                     worker.close()
-                    raise
+                raise
 
-    def assert_bound(self, container: Container, manifest: Manifest) -> None:
+    @contextmanager
+    def _bound(self, container: Container, manifest: Manifest) -> Iterator[_Binding]:
         with self._lock:
             binding = self._bindings.get(container.id)
-            if binding is None or binding.configuration != _configuration(manifest):
+        if binding is None:
+            raise ValueError("Docker removal requires the original live authority binding")
+        with binding.lock:
+            with self._lock:
+                current = self._bindings.get(container.id)
+            if current is not binding or binding.configuration != _configuration(manifest):
                 raise ValueError("Docker removal requires the original live authority binding")
             if binding.worker.uncertain or self._state(container) != binding.incarnation:
                 raise ValueError("Docker removal authority is no longer usable")
+            yield binding
+
+    def assert_bound(self, container: Container, manifest: Manifest) -> None:
+        with self._bound(container, manifest):
+            pass
 
     def remove(
         self, container: Container, manifest: Manifest, path: Path | str, user: str | None
     ) -> None:
         """Authorize and remove while the workload is paused; never use container exec."""
-        with self._lock:
-            self.assert_bound(container, manifest)
-            binding = self._bindings[container.id]
+        with self._bound(container, manifest) as binding:
             original_policy = WorkspacePathPolicy(
                 root=manifest.root, extra_path_grants=manifest.extra_path_grants
             )
             original = original_policy.normalize_sandbox_path(path)
-            selected = (
-                original
-                if Path(path).is_absolute()
-                else binding.policy.normalize_sandbox_path(path)
-            )
             with self._paused(container, binding.worker):
                 try:
                     inspection = binding.worker.request(
-                        operation="inspect", path=selected.as_posix()
+                        operation="inspect",
+                        path=original.as_posix(),
+                        workspace_root=manifest.root
+                        if not coerce_posix_path(path).is_absolute()
+                        else None,
                     )
                     target = inspection["path"]
                     if target:
@@ -283,21 +299,24 @@ class DockerRemovalService:
         """Release authority after its container has been deleted."""
         with self._lock:
             binding = self._bindings.pop(container_id, None)
-            if binding is not None:
-                binding.worker.close()
+        if binding is not None:
+            binding.close()
 
     def close(self) -> None:
         """Release workers; an uncertain operation does not automatically thaw its container."""
         with self._lock:
-            error: Exception | None = None
-            for container_id in tuple(self._bindings):
-                try:
-                    self.release(container_id)
-                except Exception as exc:
-                    if error is None:
-                        error = exc
+            self._closed = True
+            bindings = tuple(self._bindings.values())
+            self._bindings.clear()
+        error: Exception | None = None
+        for binding in bindings:
             try:
-                self.docker_client.close()
-            finally:
-                if error is not None:
-                    raise error
+                binding.close()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        try:
+            self.docker_client.close()
+        finally:
+            if error is not None:
+                raise error

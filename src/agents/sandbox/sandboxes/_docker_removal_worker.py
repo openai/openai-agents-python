@@ -19,6 +19,7 @@ import posixpath
 import stat
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -40,33 +41,10 @@ def _open_fd(path: str, flags: int) -> Iterator[int]:
         os.close(fd)
 
 
+@dataclass
 class _Bindings:
-    def __init__(self, paths: list[str]) -> None:
-        self.paths: list[str] = []
-        self.fds: list[int] = []
-        self._resources = ExitStack()
-        path_flag = getattr(os, "O_PATH", None)
-        if path_flag is None:
-            raise RuntimeError("Linux O_PATH is required")
-        device = os.stat("/").st_dev
-        try:
-            for path in paths:
-                resolved = _canonical(path)
-                if resolved == "/":
-                    raise ValueError("filesystem_root")
-                fd = self._resources.enter_context(_open_fd(resolved, path_flag | os.O_NOFOLLOW))
-                self.fds.append(fd)
-                entry = os.fstat(fd)
-                if entry.st_dev != device or not (
-                    stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode)
-                ):
-                    raise ValueError("grant_requires_private_root_filesystem")
-                self.paths.append(resolved)
-            if not stat.S_ISDIR(os.fstat(self.fds[0]).st_mode):
-                raise ValueError("workspace_requires_existing_directory")
-        except BaseException:
-            self.close()
-            raise
+    paths: list[str]
+    fds: list[int]
 
     def validate(self) -> None:
         for path, fd in zip(self.paths, self.fds, strict=False):
@@ -77,9 +55,31 @@ class _Bindings:
             if _canonical(path) != path or (entry.st_dev, entry.st_ino) != _identity(fd):
                 raise ValueError("bound_root_replaced")
 
-    def close(self) -> None:
-        self._resources.close()
-        self.fds.clear()
+
+@contextmanager
+def _bind_paths(paths: list[str]) -> Iterator[_Bindings]:
+    path_flag = getattr(os, "O_PATH", None)
+    if path_flag is None:
+        raise RuntimeError("Linux O_PATH is required")
+    device = os.stat("/").st_dev
+    with ExitStack() as resources:
+        resolved_paths: list[str] = []
+        fds: list[int] = []
+        for path in paths:
+            resolved = _canonical(path)
+            if resolved == "/":
+                raise ValueError("filesystem_root")
+            fd = resources.enter_context(_open_fd(resolved, path_flag | os.O_NOFOLLOW))
+            entry = os.fstat(fd)
+            if entry.st_dev != device or not (
+                stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode)
+            ):
+                raise ValueError("grant_requires_private_root_filesystem")
+            resolved_paths.append(resolved)
+            fds.append(fd)
+        if not stat.S_ISDIR(os.fstat(fds[0]).st_mode):
+            raise ValueError("workspace_requires_existing_directory")
+        yield _Bindings(resolved_paths, fds)
 
 
 def _selected_path(path: str) -> tuple[str, bool]:
@@ -144,30 +144,39 @@ def _user_ids(user: str) -> tuple[int, int, list[int]]:
     return uid, gid, groups
 
 
+def _remove_leaf(path: str) -> bool:
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISDIR(entry.st_mode):
+        os.unlink(path)
+        return True
+    # Empty directories require no permission to search their contents.
+    try:
+        os.rmdir(path)
+        return True
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+            raise
+    return False
+
+
 def _remove(path: str) -> None:
-    pending = [(path, False)]
+    pending = [path]
     while pending:
-        current, children_removed = pending.pop()
-        if children_removed:
-            os.rmdir(current)
+        current = pending[-1]
+        if _remove_leaf(current):
+            pending.pop()
             continue
-        try:
-            entry = os.lstat(current)
-        except FileNotFoundError:
-            continue
-        if not stat.S_ISDIR(entry.st_mode):
-            os.unlink(current)
-            continue
-        # An empty directory can be removed without permission to search the directory.
-        try:
-            os.rmdir(current)
-            continue
-        except OSError as exc:
-            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                raise
-        pending.append((current, True))
+        # Stream leaf removal; retain only one path per ancestor, never all siblings.
+        # Close the iterator before descending so deep trees do not exhaust handles.
         with os.scandir(current) as entries:
-            pending.extend((child.path, False) for child in entries)
+            child_directory = next(
+                (child.path for child in entries if not _remove_leaf(child.path)), None
+            )
+        if child_directory is not None:
+            pending.append(child_directory)
 
 
 def _remove_as_user(path: str, user: str) -> None:
@@ -227,18 +236,24 @@ def main() -> None:
     _enter_container(int(sys.argv[1]))
     bindings: _Bindings | None = None
     requested_path = ""
-    try:
+    with ExitStack() as resources:
         for line in sys.stdin:
             try:
                 request = json.loads(line)
                 operation = request["operation"]
                 response: dict[str, Any] = {"ok": True}
                 if operation == "bind" and bindings is None:
-                    bindings = _Bindings(request["paths"])
+                    bindings = resources.enter_context(_bind_paths(request["paths"]))
                     response["paths"] = bindings.paths
                 elif operation == "inspect" and bindings is not None:
                     requested_path = ""
                     bindings.validate()
+                    workspace_alias = request.get("workspace_root")
+                    if (
+                        workspace_alias is not None
+                        and _canonical(workspace_alias) != bindings.paths[0]
+                    ):
+                        raise ValueError("workspace_alias_changed")
                     selected, is_directory = _selected_path(request["path"])
                     requested_path = request["path"]
                     response.update(path=selected, is_directory=is_directory)
@@ -253,9 +268,6 @@ def main() -> None:
             except Exception as exc:
                 response = {"ok": False, "reason": type(exc).__name__}
             print(json.dumps(response), flush=True)
-    finally:
-        if bindings is not None:
-            bindings.close()
 
 
 if __name__ == "__main__":

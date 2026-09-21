@@ -466,7 +466,8 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     monkeypatch.setattr(os, "scandir", paused_scandir)
     task = asyncio.create_task(session.rm(Path("child"), recursive=True))
     try:
-        assert await asyncio.to_thread(started.wait, 5)
+        did_start = await asyncio.to_thread(started.wait, 5)
+        assert did_start
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
@@ -479,3 +480,65 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "empty", "nonempty"])
+async def test_recursive_rm_checks_descendants_only_for_nonempty_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    import errno
+    import stat
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from agents.sandbox.sandboxes import _unix_local_file_ops as file_ops
+
+    target = tmp_path / "external"
+    session = _session(
+        tmp_path / "workspace",
+        grants=(
+            SandboxPathGrant(path=str(target)),
+            SandboxPathGrant(path=str(target / "protected"), read_only=True),
+        ),
+    )
+    events: list[str] = []
+
+    @contextmanager
+    def parent(path: Path, **kwargs: object) -> Iterator[tuple[int, str]]:
+        session._files.authorize(path, for_write=True)
+        yield 20, path.name
+
+    def metadata(*args: object, **kwargs: object) -> SimpleNamespace:
+        if kind == "missing":
+            raise FileNotFoundError("missing target")
+        return SimpleNamespace(st_mode=stat.S_IFREG if kind == "file" else stat.S_IFDIR)
+
+    def rmdir(*args: object, **kwargs: object) -> None:
+        if kind == "nonempty":
+            raise OSError(errno.ENOTEMPTY, "not empty")
+        events.append("rmdir")
+
+    def unexpected_scan(*args: object) -> None:
+        pytest.fail("protected descendant validation must precede enumeration")
+
+    monkeypatch.setattr(session._files, "parent", parent)
+    monkeypatch.setattr(
+        file_ops,
+        "os",
+        SimpleNamespace(
+            stat=metadata,
+            unlink=lambda *args, **kwargs: events.append("unlink"),
+            rmdir=rmdir,
+            open=lambda *args, **kwargs: 21,
+            close=lambda fd: events.append("close"),
+            scandir=unexpected_scan,
+        ),
+    )
+    if kind == "nonempty":
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await session.rm(target, recursive=True)
+        assert events == ["close"]
+    else:
+        await session.rm(target, recursive=True)
+        assert events == ([] if kind == "missing" else ["unlink" if kind == "file" else "rmdir"])

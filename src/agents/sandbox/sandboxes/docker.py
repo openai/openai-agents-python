@@ -15,6 +15,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Final, Literal, cast
@@ -579,8 +580,11 @@ class DockerSandboxSession(BaseSandboxSession):
         return res
 
     async def _ensure_backend_started(self) -> None:
-        if self._removal_service is not None:
-            self._removal_service.assert_bound(self._container, self.state.manifest)
+        service = self._removal_service
+        if service is not None:
+            await _finish_host_removal_call(
+                lambda: service.assert_bound(self._container, self.state.manifest)
+            )
         self._container.reload()
         if not await self.running():
             self._container.start()
@@ -1634,8 +1638,10 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 container=container,
                 volume_names=volume_names,
             )
-            if self._removal_service is not None and container is not None:
-                self._removal_service.release(container.id)
+            cleanup_service = self._removal_service
+            if cleanup_service is not None and container is not None:
+                with suppress(Exception, asyncio.CancelledError):
+                    await _finish_host_removal_call(lambda: cleanup_service.release(container.id))
             raise
 
     def _cleanup_failed_create_resources(
@@ -1669,7 +1675,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         cleanup_error: BaseException | None = None
         try:
             await inner.shutdown()
-        except BaseException as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             cleanup_error = exc
 
         container_removed = False
@@ -1678,7 +1684,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         except docker.errors.NotFound:
             container = None
             container_removed = True
-        except BaseException as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             container = None
             if cleanup_error is None:
                 cleanup_error = exc
@@ -1687,16 +1693,17 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 container.remove()
             except docker.errors.NotFound:
                 container_removed = True
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
             else:
                 container_removed = True
 
-        if container_removed and self._removal_service is not None:
+        service = self._removal_service
+        if container_removed and service is not None:
             try:
-                self._removal_service.release(inner.state.container_id)
-            except BaseException as exc:
+                await _finish_host_removal_call(lambda: service.release(inner.state.container_id))
+            except (Exception, asyncio.CancelledError) as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
 
@@ -1705,7 +1712,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 volume = self.docker_client.volumes.get(volume_name)
             except docker.errors.NotFound:
                 continue
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
                 continue
@@ -1713,7 +1720,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 volume.remove()
             except docker.errors.NotFound:
                 continue
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
         if cleanup_error is not None:
@@ -1734,8 +1741,11 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         container = None if requires_fresh_resource else self.get_container(state.container_id)
         reused_existing_container = container is not None
         if container is not None:
-            if self._removal_service is not None:
-                self._removal_service.assert_bound(container, state.manifest)
+            existing_service = self._removal_service
+            if existing_service is not None:
+                await _finish_host_removal_call(
+                    lambda: existing_service.assert_bound(container, state.manifest)
+                )
             _assert_existing_container_path_grants_match(container, state.manifest)
             _assert_existing_container_network_configuration_matches(
                 container,
@@ -1801,8 +1811,12 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                     container=container,
                     volume_names=(replacement_volume_names if replacement_volumes_prepared else ()),
                 )
-                if self._removal_service is not None and container is not None:
-                    self._removal_service.release(container.id)
+                cleanup_service = self._removal_service
+                if cleanup_service is not None and container is not None:
+                    with suppress(Exception, asyncio.CancelledError):
+                        await _finish_host_removal_call(
+                            lambda: cleanup_service.release(container.id)
+                        )
             raise
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:

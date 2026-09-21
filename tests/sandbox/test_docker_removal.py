@@ -9,6 +9,8 @@ import json
 import stat
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any, cast
@@ -89,6 +91,7 @@ def service(
     instance.docker_client = Mock()
     instance._lock = threading.RLock()
     instance._bindings = {}
+    instance._closed = False
     container = RecordingContainer()
     worker = RecordingWorker(container)
     monkeypatch.setattr(instance, "_state", lambda _: (123, "incarnation"))
@@ -254,7 +257,8 @@ async def test_repeated_cancellation_waits_for_actual_host_completion() -> None:
 
     def operation() -> None:
         started.set()
-        assert finish.wait(5)
+        finished = finish.wait(5)
+        assert finished
         completed.append("finished")
 
     task = asyncio.create_task(_finish_host_removal_call(operation))
@@ -460,7 +464,11 @@ async def test_relative_parent_segments_use_the_normalized_request(service: Any)
     configured = manifest()
     manager.bind_new(container, configured)
     await session(manager, container, configured).rm("link/../build", recursive=True)
-    assert worker.calls[-2] == {"operation": "inspect", "path": "/workspace/build"}
+    assert worker.calls[-2] == {
+        "operation": "inspect",
+        "path": "/workspace/build",
+        "workspace_root": "/workspace",
+    }
     assert worker.removed == ["/workspace/build"]
 
 
@@ -486,7 +494,11 @@ async def test_missing_target_still_checks_the_requested_user(
             "private/missing", recursive=True, user="developer"
         )
     assert calls == [
-        {"operation": "inspect", "path": "/workspace/private/missing"},
+        {
+            "operation": "inspect",
+            "path": "/workspace/private/missing",
+            "workspace_root": "/workspace",
+        },
         {"operation": "remove", "user": "developer"},
     ]
     assert not container.attrs["State"]["Paused"]
@@ -512,8 +524,8 @@ def test_worker_protocol_keeps_original_traversal_for_user_scoped_removal(
     monkeypatch.setattr(worker_code, "_enter_container", lambda _: None)
     monkeypatch.setattr(
         worker_code,
-        "_Bindings",
-        lambda paths: SimpleNamespace(paths=paths, validate=lambda: None, close=lambda: None),
+        "_bind_paths",
+        lambda paths: nullcontext(SimpleNamespace(paths=paths, validate=lambda: None)),
     )
     monkeypatch.setattr(worker_code, "_canonical", lambda _: "/workspace/shared")
     current_user = "root"
@@ -692,13 +704,13 @@ def test_bound_descriptors_are_closed_after_partial_or_normal_lifetime(
         ),
     )
     if failure == "none":
-        bindings = worker_code._Bindings(["/workspace", "/protected"])
-        assert closed == []
-        bindings.close()
-        bindings.close()
+        with worker_code._bind_paths(["/workspace", "/protected"]) as bindings:
+            assert bindings.paths == ["/workspace", "/protected"]
+            assert closed == []
     else:
         with pytest.raises(OSError):
-            worker_code._Bindings(["/workspace", "/protected"])
+            with worker_code._bind_paths(["/workspace", "/protected"]):
+                pytest.fail("binding must fail")
     assert closed == ([20] if failure == "open" else [21, 20])
 
 
@@ -745,9 +757,15 @@ def test_worker_closes_bindings_when_response_write_fails(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(worker_code.sys, "stdout", Mock(write=Mock(side_effect=BrokenPipeError)))
     monkeypatch.setattr(worker_code, "_enter_container", lambda pid: None)
-    monkeypatch.setattr(
-        worker_code, "_Bindings", lambda paths: SimpleNamespace(paths=paths, close=close)
-    )
+
+    @contextmanager
+    def bind_paths(paths: list[str]) -> Iterator[Any]:
+        try:
+            yield SimpleNamespace(paths=paths)
+        finally:
+            close()
+
+    monkeypatch.setattr(worker_code, "_bind_paths", bind_paths)
     with pytest.raises(BrokenPipeError):
         worker_code.main()
     close.assert_called_once_with()
@@ -804,8 +822,8 @@ def test_service_close_attempts_all_workers_and_client_after_a_worker_failure(se
     failed = Mock(close=Mock(side_effect=primary))
     survivor = Mock()
     manager._bindings = {
-        "first": SimpleNamespace(worker=failed),
-        "second": SimpleNamespace(worker=survivor),
+        "first": SimpleNamespace(close=failed.close),
+        "second": SimpleNamespace(close=survivor.close),
     }
     manager.docker_client.close.side_effect = OSError("secondary client failure")
     with pytest.raises(BrokenPipeError) as caught:
@@ -848,7 +866,8 @@ async def test_delete_releases_authority_only_after_confirmed_container_removal(
         assert container.id in manager._bindings
         assert "close" not in container.events
     else:
-        assert await client.delete(wrapped) is wrapped
+        deleted = await client.delete(wrapped)
+        assert deleted is wrapped
         assert container.id not in manager._bindings
         assert container.events.count("close") == 1
     shutdown.assert_awaited_once_with()
@@ -865,7 +884,7 @@ def test_worker_removes_deep_tree_without_python_recursion_or_open_directory_sta
     open_scans = 0
 
     def remove_directory(path: str) -> None:
-        assert open_scans == 0
+        assert open_scans <= 1
         if children.get(path) in remaining:
             raise OSError(errno.ENOTEMPTY, "not empty")
         remaining.remove(path)
@@ -895,3 +914,241 @@ def test_worker_removes_deep_tree_without_python_recursion_or_open_directory_sta
     assert remaining == set()
     assert removed == paths[::-1]
     assert open_scans == 0
+
+
+def test_bind_preserves_request_failure_when_worker_cleanup_fails(service: Any) -> None:
+    manager, container, worker = service
+    primary = RuntimeError("worker transport failed")
+    worker.request = Mock(side_effect=primary)
+    worker.close = Mock(side_effect=BrokenPipeError("cleanup failed"))
+    with pytest.raises(RuntimeError) as caught:
+        manager.bind_new(container, manifest())
+    assert caught.value is primary
+    worker.close.assert_called_once_with()
+    assert manager._bindings == {}
+
+
+def test_worker_streams_wide_directory_without_buffering_sibling_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    count = 10000
+    deleted = 0
+    root_removed = False
+
+    def lstat(path: str) -> SimpleNamespace:
+        return SimpleNamespace(st_mode=stat.S_IFDIR if path == "/tree" else stat.S_IFREG)
+
+    def rmdir(path: str) -> None:
+        nonlocal root_removed
+        if deleted != count:
+            raise OSError(errno.ENOTEMPTY, "not empty")
+        root_removed = True
+
+    def unlink(path: str) -> None:
+        nonlocal deleted
+        assert path == f"/tree/{deleted}"
+        deleted += 1
+
+    def entries() -> Iterator[SimpleNamespace]:
+        for index in range(count):
+            assert deleted == index, "each leaf must be consumed before fetching the next"
+            yield SimpleNamespace(path=f"/tree/{index}")
+
+    monkeypatch.setattr(worker_code.os, "lstat", lstat)
+    monkeypatch.setattr(worker_code.os, "rmdir", rmdir)
+    monkeypatch.setattr(worker_code.os, "unlink", unlink)
+    monkeypatch.setattr(worker_code.os, "scandir", lambda path: nullcontext(entries()))
+    worker_code._remove("/tree")
+    assert root_removed
+    assert deleted == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rm", "delete"])
+async def test_unrelated_container_progresses_during_a_blocked_removal(
+    service: Any, operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, first_container, first_worker = service
+    second_container = RecordingContainer()
+    second_container.id = "b" * 64
+    second_container.remove = Mock()
+    second_worker = RecordingWorker(second_container)
+    monkeypatch.setattr(docker_removal, "_Worker", Mock(side_effect=[first_worker, second_worker]))
+    configured = manifest()
+    manager.bind_new(first_container, configured)
+    manager.bind_new(second_container, configured)
+    first_session = session(manager, first_container, configured)
+    second_session = session(manager, second_container, configured)
+    entered = threading.Event()
+    finish = threading.Event()
+    request = first_worker.request
+
+    def block(**data: Any) -> dict[str, Any]:
+        if data["operation"] == "remove":
+            entered.set()
+            if not finish.wait(5):
+                raise RuntimeError("test completion was not released")
+        return request(**data)
+
+    first_worker.request = block
+    first_task = asyncio.create_task(first_session.rm("build", recursive=True))
+    second_task = None
+    try:
+        started = await asyncio.to_thread(entered.wait, 5)
+        assert started
+        if operation == "rm":
+            second_task = asyncio.create_task(second_session.rm("build", recursive=True))
+        else:
+            client = DockerSandboxClient(manager.docker_client, removal_service=manager)
+            monkeypatch.setattr(second_session, "shutdown", AsyncMock())
+            manager.docker_client.containers.get.return_value = second_container
+            wrapped = client._wrap_session(second_session, instrumentation=client._instrumentation)
+            second_task = asyncio.create_task(client.delete(wrapped))
+        done, _ = await asyncio.wait({second_task}, timeout=1)
+        assert second_task in done
+        await second_task
+        assert not first_task.done()
+        assert not finish.is_set()
+    finally:
+        finish.set()
+        await asyncio.gather(
+            first_task, *([second_task] if second_task else []), return_exceptions=True
+        )
+    assert first_worker.removed == ["/workspace/build"]
+    assert not first_container.attrs["State"]["Paused"]
+    if operation == "rm":
+        assert second_worker.removed == ["/workspace/build"]
+    else:
+        assert second_container.id not in manager._bindings
+        assert second_container.events.count("close") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accessible", [False, True])
+async def test_relative_removal_preserves_workspace_alias_traversal(
+    service: Any, accessible: bool
+) -> None:
+    manager, container, worker = service
+    alias = "/private/workspace-alias"
+    worker.aliases[alias] = "/workspace"
+    worker.aliases[alias + "/build"] = "/workspace/build"
+    configured = Manifest(root=alias)
+    manager.bind_new(container, configured)
+    request = worker.request
+    inspected: dict[str, Any] = {}
+
+    def check_user(**data: Any) -> dict[str, Any]:
+        if data["operation"] == "inspect":
+            inspected.update(data)
+        if data["operation"] == "remove":
+            assert data["user"] == "developer"
+            if inspected["path"].startswith("/private/") and not accessible:
+                raise RuntimeError("PermissionError")
+        return request(**data)
+
+    worker.request = check_user
+    current = session(manager, container, configured)
+    if accessible:
+        await current.rm("build", recursive=True, user="developer")
+    else:
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await current.rm("build", recursive=True, user="developer")
+    assert inspected == {"operation": "inspect", "path": alias + "/build", "workspace_root": alias}
+    assert worker.removed == (["/workspace/build"] if accessible else [])
+
+
+@pytest.mark.parametrize("outcome", ["allowed", "search_denied", "repointed"])
+def test_worker_preserves_workspace_alias_permissions_and_bound_identity(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alias = "/private/workspace-alias"
+    original = alias + "/build"
+    requests = [
+        {"operation": "bind", "paths": [alias]},
+        {"operation": "inspect", "path": original, "workspace_root": alias},
+        {"operation": "remove", "user": "developer"},
+    ]
+    output = io.StringIO()
+    monkeypatch.setattr(worker_code.sys, "argv", ["worker", "123"])
+    monkeypatch.setattr(worker_code.sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests))))
+    monkeypatch.setattr(worker_code.sys, "stdout", output)
+    monkeypatch.setattr(worker_code, "_enter_container", lambda pid: None)
+    monkeypatch.setattr(
+        worker_code,
+        "_bind_paths",
+        lambda paths: nullcontext(SimpleNamespace(paths=["/canonical"], validate=lambda: None)),
+    )
+    monkeypatch.setattr(
+        worker_code,
+        "_canonical",
+        lambda path: "/different" if outcome == "repointed" else "/canonical",
+    )
+    current_user = "root"
+    removed: list[str] = []
+
+    def metadata(path: str) -> SimpleNamespace:
+        if current_user == "developer" and path.startswith(alias) and outcome == "search_denied":
+            raise PermissionError("workspace alias ancestor denies search")
+        return SimpleNamespace(st_mode=stat.S_IFDIR)
+
+    def remove_as_user(path: str, user: str) -> None:
+        nonlocal current_user
+        current_user = user
+        worker_code._remove(path)
+
+    monkeypatch.setattr(worker_code.os, "lstat", metadata)
+    monkeypatch.setattr(worker_code.os, "rmdir", removed.append)
+    monkeypatch.setattr(worker_code, "_remove_as_user", remove_as_user)
+    worker_code.main()
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    if outcome == "repointed":
+        assert responses[1] == {"ok": False, "reason": "ValueError"}
+        assert responses[2] == {"ok": False, "reason": "ValueError"}
+    elif outcome == "search_denied":
+        assert responses[1]["path"] == "/canonical/build"
+        assert responses[2] == {"ok": False, "reason": "PermissionError"}
+    else:
+        assert responses[1]["path"] == "/canonical/build"
+        assert responses[2] == {"ok": True}
+    assert removed == ([original] if outcome == "allowed" else [])
+
+
+@pytest.mark.asyncio
+async def test_delete_keeps_event_loop_live_and_waits_for_worker_cleanup_on_cancel(
+    service: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, container, worker = service
+    manager.bind_new(container, manifest())
+    container.remove = Mock()
+    manager.docker_client.containers.get.return_value = container
+    client = DockerSandboxClient(manager.docker_client, removal_service=manager)
+    inner = session(manager, container, manifest())
+    monkeypatch.setattr(inner, "shutdown", AsyncMock())
+    wrapped = client._wrap_session(inner, instrumentation=client._instrumentation)
+    entered = threading.Event()
+    finish = threading.Event()
+    completed: list[str] = []
+
+    def close() -> None:
+        entered.set()
+        if not finish.wait(5):
+            raise RuntimeError("test completion was not released")
+        completed.append("closed")
+
+    worker.close = close
+    task = asyncio.create_task(client.delete(wrapped))
+    try:
+        started = await asyncio.to_thread(entered.wait, 5)
+        assert started
+        assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+    finally:
+        finish.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert completed == ["closed"]
+    assert container.id not in manager._bindings

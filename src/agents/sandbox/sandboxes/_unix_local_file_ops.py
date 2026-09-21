@@ -7,6 +7,7 @@ import sys
 if sys.platform == "win32":  # pragma: no cover
     raise ImportError("UnixLocal file operations are not supported on Windows.")
 
+import errno
 import grp
 import io
 import json
@@ -14,7 +15,7 @@ import os
 import pwd
 import shutil
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
@@ -94,9 +95,17 @@ class _FileOps:
         finally:
             os.close(fd)
 
+    def _validate_recursive_remove(self, path: Path) -> None:
+        pass
+
     def rm(self, path: Path, *, recursive: bool) -> None:
         with self.parent(path, for_write=True) as (parent_fd, name):
-            _remove_at(parent_fd, name, recursive=recursive)
+            _remove_at(
+                parent_fd,
+                name,
+                recursive=recursive,
+                validate_tree=lambda: self._validate_recursive_remove(path),
+            )
 
     def listing(self, path: Path) -> list[dict[str, str | int]]:
         with self.parent(path) as (parent_fd, name):
@@ -141,14 +150,29 @@ def _entry(path: Path, entry: os.stat_result) -> dict[str, str | int]:
     }
 
 
-def _remove_at(parent_fd: int, name: str, *, recursive: bool) -> None:
+def _remove_at(
+    parent_fd: int,
+    name: str,
+    *,
+    recursive: bool,
+    validate_tree: Callable[[], None] | None = None,
+) -> None:
     entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if not stat.S_ISDIR(entry.st_mode):
         os.unlink(name, dir_fd=parent_fd)
         return
     if recursive:
+        # Atomic removal of an empty directory cannot affect a protected descendant.
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                raise
         fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         try:
+            if validate_tree is not None:
+                validate_tree()
             with os.scandir(fd) as entries:
                 for child in entries:
                     try:
