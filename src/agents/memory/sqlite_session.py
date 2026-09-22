@@ -5,13 +5,13 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC, _await_mutation as _await_mutation
+from .session import SessionABC, _await_mutation as _await_mutation, _CompactionSnapshot
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
@@ -334,6 +334,93 @@ class SQLiteSession(SessionABC):
                 return _decode_rows(list(reversed(cursor.fetchall())))
 
         return await asyncio.to_thread(_get_items_sync)
+
+    async def _get_compaction_snapshot(
+        self,
+        limit: int,
+        *,
+        prune_prefix: Callable[[TResponseInputItem], bool] | None = None,
+    ) -> _CompactionSnapshot | None:
+        # Subclasses may maintain extra indexes or transform get/add items. They must
+        # supply their own snapshot operation rather than inherit a bypass of those hooks.
+        if type(self) is not SQLiteSession:
+            return None
+
+        def read_rows():
+            with self._locked_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT id, message_data FROM {self.messages_table} "
+                    "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (self.session_id, limit),
+                ).fetchall()[::-1]
+                complete = (
+                    len(rows) < limit
+                    or not conn.execute(
+                        f"SELECT 1 FROM {self.messages_table} "
+                        "WHERE session_id = ? AND id < ? LIMIT 1",
+                        (self.session_id, rows[0][0]),
+                    ).fetchone()
+                )
+                return rows, complete
+
+        rows, complete = await asyncio.to_thread(read_rows)
+        try:
+            items = [json.loads(data) for _, data in rows]
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        async def replace_suffix(start: int, output: list[TResponseInputItem]) -> bool:
+            expected = rows[start:]
+            if not expected:
+                return False
+
+            def replace_sync() -> bool:
+                with self._write_connection() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    current = conn.execute(
+                        f"SELECT id, message_data FROM {self.messages_table} "
+                        "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                        (self.session_id, len(expected)),
+                    ).fetchall()[::-1]
+                    if current != expected:
+                        conn.rollback()
+                        return False
+                    if prune_prefix is not None:
+                        while True:
+                            prefix = conn.execute(
+                                f"SELECT id, message_data FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id < ? ORDER BY id LIMIT ?",
+                                (self.session_id, expected[0][0], limit),
+                            ).fetchall()
+                            expired_end = None
+                            for row_id, data in prefix:
+                                try:
+                                    item = json.loads(data)
+                                except (json.JSONDecodeError, TypeError):
+                                    break
+                                if not prune_prefix(item):
+                                    break
+                                expired_end = row_id
+                            if expired_end is None:
+                                break
+                            conn.execute(
+                                f"DELETE FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id <= ?",
+                                (self.session_id, expired_end),
+                            )
+                            if expired_end != prefix[-1][0] or len(prefix) < limit:
+                                break
+                    conn.execute(
+                        f"DELETE FROM {self.messages_table} WHERE session_id = ? AND id >= ?",
+                        (self.session_id, expected[0][0]),
+                    )
+                    self._insert_items(conn, output)
+                    conn.commit()
+                    return True
+
+            return await _await_mutation(asyncio.to_thread(replace_sync))
+
+        return _CompactionSnapshot(items, complete, replace_suffix)
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, cast
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
@@ -532,10 +533,10 @@ async def test_function_tool_default_error_works():
     ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="")
 
     result = await tool.on_invoke_tool(ctx, "")
-    assert "Invalid JSON" in str(result)
+    assert result == "An error occurred while running the tool. Please try again."
 
     result = await tool.on_invoke_tool(ctx, "{}")
-    assert "Invalid JSON" in str(result)
+    assert result == "An error occurred while running the tool. Please try again."
 
     result = await tool.on_invoke_tool(ctx, '{"a": 1}')
     assert result == default_tool_error_function(ctx, ValueError("test"))
@@ -808,9 +809,7 @@ async def test_manual_function_tool_uses_default_failure_error_function() -> Non
         error=asyncio.CancelledError("manual-tool-cancelled"),
     )
 
-    expected = (
-        "An error occurred while running the tool. Please try again. Error: manual-tool-cancelled"
-    )
+    expected = "An error occurred while running the tool. Please try again."
     assert result == expected
     assert (
         tool_module.resolve_function_tool_failure_error_function(manual_tool)
@@ -1065,6 +1064,114 @@ def test_function_tool_does_not_mutate_params_json_schema() -> None:
     assert tool.params_json_schema["required"] == ["x"]
 
 
+@pytest.mark.parametrize(
+    ("parent", "use_ref"),
+    [
+        ({"type": "object", "properties": {}}, True),
+        ({"type": "object"}, True),
+        ({}, True),
+        ({"type": "object", "properties": {}}, False),
+    ],
+)
+def test_function_tool_rejects_single_all_of_that_broadens_closed_parent(
+    parent: dict[str, Any], use_ref: bool
+) -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    entry = {"type": "object", "properties": {"value": {"type": "string"}}}
+    schema = {
+        **parent,
+        "additionalProperties": False,
+        "$defs": {"Entry": entry},
+        "allOf": [{"$ref": "#/$defs/Entry"} if use_ref else copy.deepcopy(entry)],
+    }
+    original = copy.deepcopy(schema)
+    validator = Draft202012Validator(original)
+    assert validator.is_valid({})
+    assert not validator.is_valid({"value": "example"})
+
+    with pytest.raises(UserError, match="singleton `allOf`.*properties"):
+        FunctionTool(name="t", description="d", params_json_schema=schema, on_invoke_tool=noop)
+
+    assert schema == original
+    non_strict_tool = FunctionTool(
+        name="t",
+        description="d",
+        params_json_schema=schema,
+        on_invoke_tool=noop,
+        strict_json_schema=False,
+    )
+    assert non_strict_tool.params_json_schema == original
+    assert not Draft202012Validator(non_strict_tool.params_json_schema).is_valid(
+        {"value": "example"}
+    )
+
+
+@pytest.mark.parametrize("parent", [{"type": "object"}, {"type": "object", "properties": {}}])
+def test_function_tool_single_all_of_wrapper_remains_strict(parent: dict[str, Any]) -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = {
+        **parent,
+        "description": "wrapper",
+        "allOf": [{"type": "object", "properties": {"value": {"type": "string"}}}],
+    }
+    original = copy.deepcopy(schema)
+    tool = FunctionTool(name="t", description="d", params_json_schema=schema, on_invoke_tool=noop)
+
+    assert schema == original
+    assert tool.params_json_schema["description"] == "wrapper"
+    assert tool.params_json_schema["required"] == ["value"]
+    validator = Draft202012Validator(tool.params_json_schema)
+    assert validator.is_valid({"value": "example"})
+    assert not validator.is_valid({})
+    assert not validator.is_valid({"value": "example", "extra": True})
+
+
+def test_function_tool_nested_single_all_of_ref_wrapper_remains_strict() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = {
+        "type": "object",
+        "components": {
+            "schemas": {
+                "Inner": {"type": "object", "properties": {"value": {"type": "string"}}},
+                "Outer": {"type": "object", "allOf": [{"$ref": "#/components/schemas/Inner"}]},
+            }
+        },
+        "allOf": [{"$ref": "#/components/schemas/Outer"}],
+    }
+    original = copy.deepcopy(schema)
+    tool = FunctionTool(name="t", description="d", params_json_schema=schema, on_invoke_tool=noop)
+
+    assert schema == original
+    assert tool.params_json_schema["required"] == ["value"]
+    assert "allOf" not in tool.params_json_schema
+    validator = Draft202012Validator(tool.params_json_schema)
+    assert validator.is_valid({"value": "example"})
+    assert not validator.is_valid({"value": "example", "extra": True})
+
+
+def test_function_tool_single_all_of_closed_empty_object_remains_strict() -> None:
+    async def noop(ctx: ToolContext[Any], input: str) -> str:
+        return ""
+
+    schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+        "allOf": [{"type": "object", "properties": {}}],
+    }
+    tool = FunctionTool(name="t", description="d", params_json_schema=schema, on_invoke_tool=noop)
+
+    validator = Draft202012Validator(tool.params_json_schema)
+    assert validator.is_valid({})
+    assert not validator.is_valid({"value": "example"})
+
+
 def test_function_tool_rejects_deep_schema_before_copying() -> None:
     async def noop(ctx: ToolContext[Any], input: str) -> str:
         return ""
@@ -1268,10 +1375,7 @@ async def test_default_failure_error_function_survives_deepcopy() -> None:
         error=asyncio.CancelledError(),
     )
 
-    expected = (
-        "An error occurred while running the tool. Please try again. "
-        "Error: Tool execution cancelled."
-    )
+    expected = "An error occurred while running the tool. Please try again."
     assert result == expected
     assert (
         tool_module.resolve_function_tool_failure_error_function(copied_tool)

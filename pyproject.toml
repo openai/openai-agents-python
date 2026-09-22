@@ -128,6 +128,7 @@ dev = [
   "grpcio>=1.60.0",
   "pyright==1.1.408",
   "pymongo>=4.14",
+  "twilio>=9,<10",
 ]
 
 [tool.uv.workspace]

@@ -2466,8 +2466,8 @@ async def test_resume_rebuilds_function_runs_from_object_approvals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_rebuilds_local_mcp_function_runs_from_approvals() -> None:
-    """Rebuild should resolve approved MCP-backed function tools from agent.mcp_servers."""
+async def test_resume_rejects_local_mcp_approval_without_recipient_binding() -> None:
+    """Approval metadata alone cannot establish the original MCP recipient."""
 
     server = FakeMCPServer(require_approval="always")
     server.add_tool("add", {"type": "object", "properties": {}})
@@ -2496,28 +2496,20 @@ async def test_resume_rebuilds_local_mcp_function_runs_from_approvals() -> None:
         interruptions=[],
     )
 
-    result = await _resolve_interrupted_turn(
-        agent=agent,
-        original_input="resume approvals",
-        original_pre_step_items=[],
-        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
-        processed_response=processed_response,
-        hooks=RunHooks(),
-        context_wrapper=context_wrapper,
-        run_config=RunConfig(),
-        run_state=run_state,
-    )
+    with pytest.raises(UserError, match="missing or different recipient binding"):
+        await _resolve_interrupted_turn(
+            agent=agent,
+            original_input="resume approvals",
+            original_pre_step_items=[],
+            new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+            processed_response=processed_response,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(),
+            run_state=run_state,
+        )
 
-    assert not isinstance(result.next_step, NextStepInterruption)
-    assert server.tool_calls == ["add"]
-    executed_call_ids = {
-        extract_tool_call_id(item.raw_item)
-        for item in result.new_step_items
-        if isinstance(item, ToolCallOutputItem)
-    }
-    assert "call-mcp-rebuild" in executed_call_ids, (
-        "Approved local MCP tool should be rebuilt and executed from pending approvals"
-    )
+    assert server.tool_calls == []
 
 
 @pytest.mark.asyncio

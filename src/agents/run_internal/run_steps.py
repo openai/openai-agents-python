@@ -131,6 +131,10 @@ class ProcessedResponse:
         default_factory=list
     )
     custom_tool_calls: list[ToolRunCustom] = dataclasses.field(default_factory=list)
+    mcp_tool_bindings: dict[str, tuple[str, str, int | None]] = dataclasses.field(
+        default_factory=dict
+    )
+    # Original invocation recipients, independent of the currently available callables.
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing

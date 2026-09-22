@@ -680,10 +680,10 @@ def test_put_event_nowait_skips_events_during_cleanup(state_name: str):
 @pytest.mark.parametrize(
     ("exception", "expected_message"),
     [
-        (RuntimeError("tool failed"), "Tool call task failed: tool failed"),
+        (RuntimeError("tool failed"), "Tool call task failed"),
         (
             _PendingToolOutputSendError("call-1", RuntimeError("send failed")),
-            "Tool output send failed; cached output will be retried: send failed",
+            "Tool output send failed; cached output will be retried",
         ),
     ],
 )
@@ -1989,8 +1989,7 @@ class TestToolCallExecution:
         assert any(isinstance(event, RealtimeToolStart) for event in events)
 
         error_event = next(event for event in events if isinstance(event, RealtimeError))
-        assert "Tool call task failed" in error_event.error["message"]
-        assert "timed out" in error_event.error["message"]
+        assert error_event.error == {"message": "Tool call task failed"}
 
     @pytest.mark.asyncio
     async def test_function_tool_with_multiple_tools_available(self, mock_model, mock_agent):

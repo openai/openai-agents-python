@@ -190,7 +190,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -229,6 +229,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
+    "1.18": "Binds restored local MCP calls to their configured server and original tool name.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1984,6 +1985,10 @@ class RunState(Generic[TContext, TAgent]):
             "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
+            "mcp_tool_bindings": {
+                call_id: list(binding)
+                for call_id, binding in processed_response.mcp_tool_bindings.items()
+            },
         }
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
@@ -2209,6 +2214,13 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
+        Executing pending local MCP calls requires recipient bindings written by schema 1.18
+        or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
+        Start a new run to execute an MCP call if an older snapshot lacks these bindings.
+
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
@@ -2289,6 +2301,13 @@ class RunState(Generic[TContext, TAgent]):
         Do not pass client-supplied state directly to this method. Keep the snapshot on the
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Executing pending local MCP calls requires recipient bindings written by schema 1.18
+        or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
+        Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
@@ -3020,9 +3039,15 @@ async def _restore_pending_nested_agent_tool_runs(
         if not isinstance(tool_call, ResponseFunctionToolCall):
             continue
 
+        # A nested run serializes agent references relative to the agent tool's own agent,
+        # so that agent must also be the root when the references are resolved again.
+        nested_root_agent = function_action.action.function_tool._agent_instance
+        if not isinstance(nested_root_agent, Agent):
+            nested_root_agent = current_agent
+
         try:
             nested_state = await _build_run_state_from_json(
-                initial_agent=current_agent,
+                initial_agent=nested_root_agent,
                 state_json=dict(nested_state_data),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
@@ -3421,6 +3446,13 @@ async def _deserialize_processed_response(
         if approval_item is not None:
             interruptions.append(approval_item)
 
+    saved_bindings = processed_response_data.get("mcp_tool_bindings", {})
+    mcp_tool_bindings = {
+        call_id: cast(tuple[str, str, int | None], tuple(binding))
+        for call_id, binding in saved_bindings.items()
+        if isinstance(binding, list)
+    }
+
     return ProcessedResponse(
         new_items=new_items,
         handoffs=handoffs,
@@ -3433,6 +3465,7 @@ async def _deserialize_processed_response(
         tools_used=processed_response_data.get("tools_used", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
+        mcp_tool_bindings=mcp_tool_bindings,
     )
 
 
