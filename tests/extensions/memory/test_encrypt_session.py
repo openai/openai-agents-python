@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import tempfile
+import threading
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -825,32 +828,159 @@ async def test_encrypted_pop_rechecks_authentication_after_expired_tail(
         underlying_session.close()
 
 
-async def test_encrypted_pop_restores_wrong_key_envelope_under_interleaved_append(
-    underlying_session: SQLiteSession,
-):
-    """Test that popping an unauthenticated item immediately restores it without loss."""
-    correct = EncryptedSession("test_session", underlying_session, "correct-key")
-    wrong = EncryptedSession("test_session", underlying_session, "wrong-key")
+@pytest.mark.parametrize("operation", ["append", "clear"])
+async def test_encrypted_pop_authentication_is_atomic_with_concurrent_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    other_backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
+    writer = EncryptedSession("test_session", other_backend, "correct-key")
+    entered = threading.Event()
+    release = threading.Event()
+    started = asyncio.Event()
+    authenticate = wrong.cipher.extract_timestamp
+    saved: TResponseInputItem = {"role": "user", "content": "saved"}
+    newer: TResponseInputItem = {"role": "assistant", "content": "newer"}
+
+    def paused_authenticate(token: bytes) -> int:
+        entered.set()
+        assert release.wait(timeout=10)
+        return authenticate(token)
+
+    async def mutate() -> None:
+        started.set()
+        if operation == "append":
+            await writer.add_items([newer])
+        else:
+            await writer.clear_session()
+
+    monkeypatch.setattr(wrong.cipher, "extract_timestamp", paused_authenticate)
+    tasks: list[asyncio.Task[Any]] = []
+    try:
+        await correct.add_items([saved])
+        # A separate connection bypasses SQLiteSession's process-local lock.
+        with closing(sqlite3.connect(tmp_path / "history.db", timeout=0)) as observer:
+            original_rows = observer.execute("SELECT * FROM agent_messages").fetchall()
+            # A separate event loop also permits this probe on the old code,
+            # which authenticated synchronously on the calling loop.
+            pop = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(wrong.pop_item())))
+            tasks.append(pop)
+            assert await asyncio.to_thread(entered.wait, 5)
+            mutation = asyncio.create_task(mutate())
+            tasks.append(mutation)
+            await started.wait()
+            assert observer.execute("SELECT * FROM agent_messages").fetchall() == original_rows
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                observer.execute("BEGIN IMMEDIATE")
+            release.set()
+            with pytest.raises(InvalidToken):
+                await asyncio.wait_for(pop, 5)
+            await asyncio.wait_for(mutation, 5)
+
+        if operation == "append":
+            assert await correct.get_items() == [saved, newer]
+            assert await correct.pop_item() == newer
+            assert await correct.pop_item() == saved
+        else:
+            assert await correct.get_items() == []
+        assert await correct.pop_item() is None
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        backend.close()
+        other_backend.close()
+
+
+async def test_encrypted_pop_wrong_key_preserves_row_identity(tmp_path: Path) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
     try:
         await correct.add_items([{"role": "user", "content": "saved"}])
-        original_ciphertext = await underlying_session.get_items()
-
-        # Wrong-key pop raises InvalidToken and immediately restores the popped item
-        with pytest.raises(InvalidToken):
-            await wrong.pop_item()
-
-        assert await underlying_session.get_items() == original_ciphertext
-
-        # An interleaved append from another writer occurs
-        await correct.add_items([{"role": "assistant", "content": "interleaved"}])
-
-        # Verify all items remain intact and readable with the correct key
-        items = await correct.get_items()
-        assert [i.get("content") for i in items] == ["saved", "interleaved"]
-        assert await correct.pop_item() == {"role": "assistant", "content": "interleaved"}
-        assert await correct.pop_item() == {"role": "user", "content": "saved"}
+        with closing(sqlite3.connect(tmp_path / "history.db")) as observer:
+            original_rows = observer.execute("SELECT * FROM agent_messages").fetchall()
+            for _ in range(2):
+                with pytest.raises(InvalidToken):
+                    await wrong.pop_item()
+                assert observer.execute("SELECT * FROM agent_messages").fetchall() == original_rows
     finally:
-        underlying_session.close()
+        backend.close()
+
+
+async def test_encrypted_pop_cancellation_waits_for_authentication_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
+    entered = threading.Event()
+    release = threading.Event()
+    authenticate = wrong.cipher.extract_timestamp
+
+    def paused_authenticate(token: bytes) -> int:
+        entered.set()
+        assert release.wait(timeout=10)
+        return authenticate(token)
+
+    monkeypatch.setattr(wrong.cipher, "extract_timestamp", paused_authenticate)
+    pop = None
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "saved"}
+        await correct.add_items([saved])
+        ciphertext = await backend.get_items()
+        pop = asyncio.create_task(wrong.pop_item())
+        assert await asyncio.to_thread(entered.wait, 5)
+        pop.cancel()
+        await asyncio.sleep(0)
+        pop.cancel()
+        await asyncio.sleep(0)
+        assert not pop.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pop, 5)
+        assert await backend.get_items() == ciphertext
+        assert await correct.pop_item() == saved
+    finally:
+        release.set()
+        if pop is not None:
+            await asyncio.gather(pop, return_exceptions=True)
+        backend.close()
+
+
+async def test_encrypted_pop_rejects_overridden_sqlite_pop(tmp_path: Path) -> None:
+    class CustomPopSession(SQLiteSession):
+        async def pop_item(self) -> TResponseInputItem | None:
+            raise AssertionError("Must not call the unsupported pop implementation")
+
+    backend = CustomPopSession("test_session", tmp_path / "history.db")
+    session = EncryptedSession("test_session", backend, "correct-key")
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "saved"}
+        await session.add_items([saved])
+        with pytest.raises(NotImplementedError, match="SQLiteSession"):
+            await session.pop_item()
+        assert await session.get_items() == [saved]
+    finally:
+        backend.close()
+
+
+async def test_encrypted_pop_preserves_plaintext_and_inherited_sqlite_behavior(
+    tmp_path: Path,
+) -> None:
+    class InheritedSession(SQLiteSession):
+        pass
+
+    backend = InheritedSession("test_session", tmp_path / "history.db")
+    session = EncryptedSession("test_session", backend, "correct-key")
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "legacy plaintext"}
+        await backend.add_items([saved])
+        assert await session.pop_item() == saved
+        assert await session.pop_item() is None
+    finally:
+        backend.close()
 
 
 async def test_encrypted_session_clear(encryption_key: str, underlying_session: SQLiteSession):
@@ -928,8 +1058,9 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
     await session.add_items([{"role": "user", "content": "hello"}], wrapper=wrapper)
     await session.add_items([{"role": "user", "content": "other tenant"}], wrapper=other_wrapper)
     assert await session.get_items(wrapper=wrapper) == [{"role": "user", "content": "hello"}]
-    assert await session.pop_item(wrapper=wrapper) == {"role": "user", "content": "hello"}
-    assert await session.pop_item(wrapper=wrapper) is None
+    with pytest.raises(NotImplementedError, match="SQLiteSession"):
+        await session.pop_item(wrapper=wrapper)
+    assert await session.get_items(wrapper=wrapper) == [{"role": "user", "content": "hello"}]
     await session.add_items([{"role": "user", "content": "clear me"}], wrapper=wrapper)
     await session.clear_session(wrapper=wrapper)
 

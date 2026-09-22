@@ -45,6 +45,7 @@ from ...memory.session import (
     _get_session_wrapper,
 )
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.sqlite_session import SQLiteSession
 from ...run_context import RunContextWrapper
 
 
@@ -204,31 +205,14 @@ class EncryptedSession(SessionABC):
         token = self.cipher.encrypt(_to_json_bytes(payload)).decode("utf-8")
         return {"__enc__": 1, "v": self._ver, "kid": self._kid, "payload": token}
 
-    def _unwrap_envelope(self, item: EncryptedEnvelope) -> tuple[TResponseInputItem | None, bool]:
-        """Unwrap an encrypted envelope.
-
-        Returns (item, is_authentic):
-        - If valid and unexpired: (item, True)
-        - If authentic but expired: (None, True)
-        - If unauthenticated / wrong key / malformed: (None, False)
-        """
-        try:
-            token = item["payload"].encode("utf-8")
-            self.cipher.extract_timestamp(token)
-        except (InvalidToken, KeyError):
-            return None, False
-
-        try:
-            plaintext = self.cipher.decrypt(token, ttl=self.ttl)
-            return cast(TResponseInputItem, _from_json_bytes(plaintext)), True
-        except (InvalidToken, KeyError):
-            return None, True
-
     def _unwrap(self, item: TResponseInputItem | EncryptedEnvelope) -> TResponseInputItem | None:
         if not _is_encrypted_envelope(item):
             return cast(TResponseInputItem, item)
-        item_val, _ = self._unwrap_envelope(item)
-        return item_val
+        try:
+            plaintext = self.cipher.decrypt(item["payload"].encode("utf-8"), ttl=self.ttl)
+            return cast(TResponseInputItem, _from_json_bytes(plaintext))
+        except (InvalidToken, KeyError):
+            return None
 
     def _unwrap_valid_items(
         self, encrypted_items: list[TResponseInputItem]
@@ -300,32 +284,35 @@ class EncryptedSession(SessionABC):
         """Remove the latest readable item, skipping authenticated expired items.
 
         Raises ``InvalidToken`` if an encrypted item cannot be authenticated with
-        this session's key, restoring the item to the underlying session so that
-        recoverable ciphertext is preserved.
+        this session's key. Authentication runs inside the SQLite transaction;
+        failure leaves the item's ciphertext and position unchanged.
+
+        Only ``SQLiteSession`` and subclasses using its unchanged ``pop_item``
+        implementation support this operation. Other backends and wrappers raise
+        ``NotImplementedError`` before any storage operation. Use ``SQLiteSession``
+        when encrypted history needs to support popping items. Reading, adding,
+        and clearing items remain available for other backends.
         """
-        # ponytail: pop directly to eliminate TOCTOU; restore on bad key
-        wrapper = _get_session_wrapper(self.underlying_session, wrapper)
-        while True:
-            enc = await _call_session_method(
-                self.underlying_session.pop_item,
-                wrapper=wrapper,
+        underlying = self.underlying_session
+        if (
+            not isinstance(underlying, SQLiteSession)
+            or type(underlying).pop_item is not SQLiteSession.pop_item
+        ):
+            raise NotImplementedError(
+                "EncryptedSession.pop_item requires SQLiteSession with its default pop_item "
+                "implementation for atomic authentication."
             )
+
+        def authenticate(item: TResponseInputItem) -> None:
+            if _is_encrypted_envelope(item):
+                # ponytail: verify without TTL so authentic expired items still drain.
+                self.cipher.extract_timestamp(item["payload"].encode("utf-8"))
+
+        while True:
+            enc = await underlying._pop_item_with_validation(authenticate)
             if not enc:
                 return None
-            if not _is_encrypted_envelope(enc):
-                return cast(TResponseInputItem, enc)
-
-            item, is_authentic = self._unwrap_envelope(enc)
-            if not is_authentic:
-                await _call_session_method(
-                    self.underlying_session.add_items,
-                    [enc],
-                    wrapper=wrapper,
-                )
-                raise InvalidToken(
-                    "Cannot authenticate encrypted item with the configured session key."
-                )
-
+            item = self._unwrap(enc)
             if item is not None:
                 return item
 
