@@ -2,5 +2,5 @@ fastapi>=0.141.1
 starlette>=1.6.0
 openai>=3.8.0,<4
 httpx2>=2.12.0
-uvicorn[standard]>=0.52.4
+uvicorn[standard]>=0.53.0
 python-dotenv>=1.2.3
