@@ -595,21 +595,40 @@ def test_read_only_host_binding_rejects_untrusted_mount_layout(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("collision", [None, "writable_first", "read_only_first", "workspace"])
+@pytest.mark.parametrize(
+    "failure", [None, "writable_first", "read_only_first", "workspace", "transport", "close"]
+)
 async def test_create_binds_before_returning_the_session(
-    service: Any, monkeypatch: pytest.MonkeyPatch, collision: str | None
+    service: Any, monkeypatch: pytest.MonkeyPatch, failure: str | None
 ) -> None:
     manager, container, worker = service
     monkeypatch.setattr(container, "start", lambda: container.events.append("start"), raising=False)
-    remove = Mock()
+    removed_pauses: list[bool] = []
+    remove = Mock(
+        side_effect=lambda **kwargs: removed_pauses.append(container.attrs["State"]["Paused"])
+    )
     monkeypatch.setattr(container, "remove", remove, raising=False)
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
     client = DockerSandboxClient(manager.docker_client, removal_service=manager)
     configured = manifest()
-    if collision is not None:
-        worker.aliases["/grant-alias"] = "/workspace" if collision == "workspace" else "/external"
-        if collision == "read_only_first":
+    primary = RuntimeError("worker transport failed")
+    if failure in ("transport", "close"):
+        request = worker.request
+
+        def lost_request(**kwargs: Any) -> dict[str, Any]:
+            request(**kwargs)
+            worker.uncertain = True
+            raise primary
+
+        monkeypatch.setattr(worker, "request", lost_request)
+        if failure == "close":
+            monkeypatch.setattr(
+                worker, "close", Mock(side_effect=BrokenPipeError("cleanup failed"))
+            )
+    elif failure is not None:
+        worker.aliases["/grant-alias"] = "/workspace" if failure == "workspace" else "/external"
+        if failure == "read_only_first":
             configured = configured.model_copy(
                 update={"extra_path_grants": tuple(reversed(configured.extra_path_grants))}
             )
@@ -618,15 +637,25 @@ async def test_create_binds_before_returning_the_session(
         return container
 
     monkeypatch.setattr(client, "_create_container", create_container)
-    if collision is not None:
-        with pytest.raises(ValueError, match="distinct canonical workspace and grant roots"):
+    if failure is not None:
+        with pytest.raises((ValueError, RuntimeError)) as caught:
             await client.create(
                 manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
             )
         assert manager._bindings == {}
         assert [call["operation"] for call in worker.calls] == ["bind"]
         assert worker.removed == []
-        assert container.events == ["start", "pause", "close", "unpause"]
+        if failure in ("transport", "close"):
+            assert caught.value is primary
+            assert container.events == (
+                ["start", "pause", "close"] if failure == "transport" else ["start", "pause"]
+            )
+            assert removed_pauses == [True]
+        else:
+            assert "distinct canonical workspace and grant roots" in str(caught.value)
+            assert container.events == ["start", "pause", "close", "unpause"]
+        if failure == "close":
+            worker.close.assert_called_once_with()
         remove.assert_called_once_with(force=True)
         return
 
@@ -772,18 +801,6 @@ async def test_delete_releases_authority_only_after_confirmed_container_removal(
         assert container.events.count("close") == 1
     shutdown.assert_awaited_once_with()
     assert worker.removed == []
-
-
-def test_bind_preserves_request_failure_when_worker_cleanup_fails(service: Any) -> None:
-    manager, container, worker = service
-    primary = RuntimeError("worker transport failed")
-    worker.request = Mock(side_effect=primary)
-    worker.close = Mock(side_effect=BrokenPipeError("cleanup failed"))
-    with pytest.raises(RuntimeError) as caught:
-        manager.bind_new(container, manifest())
-    assert caught.value is primary
-    worker.close.assert_called_once_with()
-    assert manager._bindings == {}
 
 
 @pytest.mark.asyncio

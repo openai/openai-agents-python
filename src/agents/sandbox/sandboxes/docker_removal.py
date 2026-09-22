@@ -237,7 +237,7 @@ class DockerRemovalService:
 
     @contextmanager
     def _paused(
-        self, container: Container, worker: _Worker | None = None
+        self, container: Container, worker_uncertain: Callable[[], bool]
     ) -> Iterator[tuple[int, str]]:
         incarnation = self._state(container)
         already_paused = bool(container.attrs["State"]["Paused"])
@@ -252,7 +252,7 @@ class DockerRemovalService:
             completed = True
         finally:
             primary_error = None if completed else sys.exc_info()[1]
-            if not already_paused and (worker is None or not worker.uncertain):
+            if not already_paused and not worker_uncertain():
                 try:
                     if self._state(container) == incarnation and container.attrs["State"]["Paused"]:
                         container.unpause()
@@ -283,7 +283,10 @@ class DockerRemovalService:
 
         _validate_docker_path_grants(manifest)
         _assert_existing_container_path_grants_match(container, manifest)
-        with self._paused(container) as incarnation:
+        worker: _Worker | None = None
+        with self._paused(
+            container, lambda: worker is not None and worker.uncertain
+        ) as incarnation:
             worker = _Worker(incarnation[0])
             try:
                 result = worker.request(
@@ -356,7 +359,7 @@ class DockerRemovalService:
                     context={"reason": "docker_removal_capacity"},
                 )
             try:
-                with self._paused(container, binding.worker):
+                with self._paused(container, lambda: binding.worker.uncertain):
                     try:
                         inspection = binding.worker.request(
                             operation="inspect",
