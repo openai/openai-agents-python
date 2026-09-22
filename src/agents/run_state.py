@@ -56,7 +56,6 @@ from ._tool_identity import (
     serialize_function_tool_lookup_key,
 )
 from ._tool_invocation import (
-    tool_invocation_approval_scope,
     tool_invocation_call_id,
     tool_invocation_identity,
     tool_invocation_identity_and_scope,
@@ -195,7 +194,6 @@ CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
-_SCOPED_TOOL_APPROVALS_MIN_SCHEMA_VERSION = "1.18"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -231,10 +229,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
-    "1.18": (
-        "Binds restored local MCP calls to their configured server and original tool name and "
-        "persists independent approval decisions for tools sharing a name across invocations."
-    ),
+    "1.18": "Binds restored local MCP calls to their configured server and original tool name.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -4039,118 +4034,6 @@ async def _build_run_state_from_json(
         validation_error_factory=validation_error_factory,
     )
     schema_major, schema_minor = (int(part) for part in schema_version.split(".", maxsplit=1))
-    scoped_approval_major, scoped_approval_minor = (
-        int(part) for part in _SCOPED_TOOL_APPROVALS_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
-    )
-    context_data = state_json.get("context")
-    approvals = context_data.get("approvals") if isinstance(context_data, Mapping) else None
-    tool_invocations = (
-        context_data.get("tool_invocations") if isinstance(context_data, Mapping) else None
-    )
-    if (
-        (schema_major, schema_minor) < (1, 15)
-        and isinstance(approvals, Mapping)
-        and isinstance(patch_approval := approvals.get("apply_patch"), Mapping)
-        and (patch_approval.get("approved") is True or patch_approval.get("rejected") is True)
-    ):
-        raise validation_error_factory(
-            "Run state contains an unscoped sticky apply_patch approval whose native or sandbox "
-            "invocation scope cannot be determined. Restart the run and obtain a new approval.",
-            UserError,
-        )
-    if isinstance(approvals, Mapping):
-
-        def approval_record_scopes(approval_key: str, approval_record: object) -> set[str] | None:
-            if not isinstance(approval_record, Mapping) or approval_key != "apply_patch":
-                return None
-            expected_scopes: dict[str, str] = {}
-            for invocation_type in ("apply_patch_call", "custom_tool_call"):
-                expected_scope = tool_invocation_approval_scope(
-                    {"type": invocation_type, "name": approval_key},
-                    tool_name=approval_key,
-                )
-                assert expected_scope is not None
-                expected_scopes[invocation_type] = expected_scope[1]
-            decisions = (approval_record.get("approved"), approval_record.get("rejected"))
-            if (
-                any(not isinstance(decision, bool | list) for decision in decisions)
-                or any(
-                    isinstance(decision, list)
-                    and any(not isinstance(call_id, str) or not call_id for call_id in decision)
-                    for decision in decisions
-                )
-                or decisions[0] is True
-                and decisions[1] is True
-                or isinstance(decisions[0], list)
-                and isinstance(decisions[1], list)
-                and bool(set(decisions[0]) & set(decisions[1]))
-            ):
-                return None
-            scopes: set[str] = set()
-            sticky_scope = approval_record.get("sticky_scope")
-            if any(isinstance(decision, bool) for decision in decisions) or (
-                "sticky_scope" in approval_record
-            ):
-                if sticky_scope not in expected_scopes.values():
-                    return None
-                assert isinstance(sticky_scope, str)
-                scopes.add(sticky_scope)
-            for decision in decisions:
-                if not isinstance(decision, list):
-                    continue
-                for call_id in decision:
-                    if (
-                        not isinstance(call_id, str)
-                        or not call_id
-                        or not isinstance(tool_invocations, Mapping)
-                        or not isinstance(invocation := tool_invocations.get(call_id), Mapping)
-                        or (scope := expected_scopes.get(cast(str, invocation.get("type")))) is None
-                        or invocation.get("approval_scope") != scope
-                    ):
-                        return None
-                    scopes.add(scope)
-            return scopes
-
-        if (
-            (schema_major, schema_minor) >= (1, 15)
-            and "apply_patch" in approvals
-            and approval_record_scopes("apply_patch", approvals["apply_patch"]) is None
-        ):
-            raise validation_error_factory(
-                "RunState scoped tool approval contains invalid invocation scope or "
-                "decision state.",
-                UserError,
-            )
-        for approval_key, approval_record in approvals.items():
-            if not isinstance(approval_key, str) or not RunContextWrapper._is_scoped_approval_key(
-                approval_key
-            ):
-                continue
-            if (schema_major, schema_minor) < (scoped_approval_major, scoped_approval_minor):
-                raise validation_error_factory(
-                    "Run state contains invocation-scoped tool approvals but uses schema version "
-                    f"{schema_version}. Invocation-scoped tool approvals require schema version "
-                    f"{_SCOPED_TOOL_APPROVALS_MIN_SCHEMA_VERSION} or later.",
-                    UserError,
-                )
-
-            approval_scope, bare_approval_key = approval_key.split(":", maxsplit=2)[1:]
-            scoped_scopes = approval_record_scopes(bare_approval_key, approval_record)
-            bare_scopes = approval_record_scopes(
-                bare_approval_key, approvals.get(bare_approval_key)
-            )
-            valid_record = (
-                scoped_scopes == {approval_scope}
-                and bare_scopes is not None
-                and len(bare_scopes) == 1
-                and approval_scope not in bare_scopes
-            )
-            if not valid_record:
-                raise validation_error_factory(
-                    "RunState scoped tool approval contains invalid invocation scope or "
-                    "decision state.",
-                    UserError,
-                )
     programmatic_major, programmatic_minor = (
         int(part) for part in _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
     )
@@ -5405,21 +5288,10 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "RunState completed tool invocation does not match a restored tool call and output.",
         "RunState sandbox resume state contains an invalid manifest",
         "RunState sandbox resume state has an invalid envelope",
-        "RunState scoped tool approval contains invalid invocation scope or decision state.",
-        (
-            "Run state contains an unscoped sticky apply_patch approval whose native or sandbox "
-            "invocation scope cannot be determined. Restart the run and obtain a new approval."
-        ),
         *(
             "Run state contains Programmatic Tool Calling data but uses schema version "
             f"{schema_version}. Programmatic Tool Calling requires schema version "
             f"{_PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION} or later."
-            for schema_version in SUPPORTED_SCHEMA_VERSIONS
-        ),
-        *(
-            "Run state contains invocation-scoped tool approvals but uses schema version "
-            f"{schema_version}. Invocation-scoped tool approvals require schema version "
-            f"{_SCOPED_TOOL_APPROVALS_MIN_SCHEMA_VERSION} or later."
             for schema_version in SUPPORTED_SCHEMA_VERSIONS
         ),
     }

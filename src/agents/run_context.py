@@ -250,143 +250,10 @@ class RunContextWrapper(Generic[TContext]):
                 candidate = getattr(raw, "id", None)
         return RunContextWrapper._to_str_or_none(candidate)
 
-    @staticmethod
-    def _is_scoped_approval_key(approval_key: str) -> bool:
-        """Identify the reserved namespace for independently scoped approvals."""
-        prefix = "__scoped_approval__:"
-        if not approval_key.startswith(prefix):
-            return False
-        approval_scope, separator, bare_key = approval_key[len(prefix) :].partition(":")
-        return bool(separator and bare_key and is_tool_invocation_digest(approval_scope))
-
-    @classmethod
-    def _require_unreserved_approval_key(cls, approval_key: str) -> None:
-        if cls._is_scoped_approval_key(approval_key):
-            raise ModelBehaviorError(
-                "Tool approval names must not use the reserved scoped-approval namespace."
-            )
-
-    @staticmethod
-    def _scoped_approval_key(approval_key: str, approval_scope: str) -> str:
-        return f"__scoped_approval__:{approval_scope}:{approval_key}"
-
-    def _approval_keys_for_scope(
-        self,
-        approval_key: str,
-        approval_scope: str | None,
-    ) -> tuple[str, ...]:
-        if approval_scope is None:
-            return (approval_key,)
-        scoped_key = self._scoped_approval_key(approval_key, approval_scope)
-        scoped_record = self._approvals.get(scoped_key)
-        if (
-            scoped_record is not None
-            and (
-                scoped_record.sticky_scope is not None
-                or isinstance(scoped_record.approved, bool)
-                or isinstance(scoped_record.rejected, bool)
-            )
-            and scoped_record.sticky_scope != approval_scope
-        ):
-            raise ModelBehaviorError(
-                "Scoped tool approval state does not match its canonical invocation scope."
-            )
-        return (scoped_key, approval_key)
-
-    def _approval_record_has_other_scope(
-        self,
-        approval_record: _ApprovalRecord,
-        approval_scope: str,
-    ) -> bool:
-        if approval_record.sticky_scope is not None:
-            return approval_record.sticky_scope != approval_scope
-        for decision in (approval_record.approved, approval_record.rejected):
-            if not isinstance(decision, list):
-                continue
-            for call_id in decision:
-                invocation_record = self._tool_invocations.get(call_id)
-                if (
-                    invocation_record is not None
-                    and invocation_record.approval_scope != approval_scope
-                ):
-                    return True
-        return False
-
-    def _partition_approval_record_by_scope(
-        self, approval_key: str, approval_record: _ApprovalRecord
-    ) -> dict[str, str]:
-        records: dict[str, _ApprovalRecord] = {}
-
-        def record_for_scope(scope: str) -> _ApprovalRecord:
-            return records.setdefault(scope, _ApprovalRecord())
-
-        for field_name in ("approved", "rejected"):
-            decision = getattr(approval_record, field_name)
-            if isinstance(decision, bool):
-                if approval_record.sticky_scope is None:
-                    raise ModelBehaviorError(
-                        "Sticky tool approval state is missing its canonical invocation scope."
-                    )
-                setattr(record_for_scope(approval_record.sticky_scope), field_name, decision)
-                continue
-            for call_id in decision:
-                invocation = self._tool_invocations.get(call_id)
-                if invocation is None:
-                    raise ModelBehaviorError(
-                        "Tool approval state is missing its canonical invocation binding."
-                    )
-                target = record_for_scope(invocation.approval_scope)
-                target_decision = getattr(target, field_name)
-                assert isinstance(target_decision, list)
-                target_decision.append(call_id)
-        for call_id, message in approval_record.rejection_messages.items():
-            invocation = self._tool_invocations.get(call_id)
-            if invocation is None:
-                raise ModelBehaviorError(
-                    "Tool approval state is missing its canonical invocation binding."
-                )
-            record_for_scope(invocation.approval_scope).rejection_messages[call_id] = message
-        if approval_record.sticky_scope is not None:
-            sticky_record = record_for_scope(approval_record.sticky_scope)
-            sticky_record.sticky_scope = approval_record.sticky_scope
-            sticky_record.sticky_rejection_message = approval_record.sticky_rejection_message
-        if not records:
-            return {}
-        bare_scope = approval_record.sticky_scope or next(iter(records))
-        keys = {bare_scope: approval_key}
-        self._approvals[approval_key] = records.pop(bare_scope)
-        for scope, record in records.items():
-            scoped_key = self._scoped_approval_key(approval_key, scope)
-            self._approvals[scoped_key] = record
-            keys[scope] = scoped_key
-        return keys
-
     def _get_or_create_approval_entry(
         self,
         approval_key: str | HostedMCPApprovalKey,
-        *,
-        approval_scope: str | None = None,
     ) -> _ApprovalRecord:
-        if isinstance(approval_key, str):
-            self._require_unreserved_approval_key(approval_key)
-            if approval_scope is not None and approval_key == "apply_patch":
-                scoped_key, _ = self._approval_keys_for_scope(approval_key, approval_scope)
-                scoped_record = self._approvals.get(scoped_key)
-                approval_entry = self._approvals.get(approval_key)
-                if scoped_record is not None:
-                    if self._approval_record_has_other_scope(scoped_record, approval_scope):
-                        raise ModelBehaviorError(
-                            "Scoped tool approval state does not match its canonical "
-                            "invocation scope."
-                        )
-                    approval_key = scoped_key
-                elif approval_entry is not None and self._approval_record_has_other_scope(
-                    approval_entry,
-                    approval_scope,
-                ):
-                    approval_key = self._partition_approval_record_by_scope(
-                        approval_key, approval_entry
-                    ).get(approval_scope, scoped_key)
         approval_entry = self._approvals.get(approval_key)
         if approval_entry is None:
             approval_entry = _ApprovalRecord()
@@ -595,19 +462,13 @@ class RunContextWrapper(Generic[TContext]):
 
         matching_keys: set[str | HostedMCPApprovalKey] = set()
         for approval_key in approval_keys:
-            candidate_keys: tuple[str | HostedMCPApprovalKey, ...] = (
-                self._approval_keys_for_scope(approval_key, approval_scope)
-                if isinstance(approval_key, str)
-                else (approval_key,)
-            )
-            for candidate_key in candidate_keys:
-                record = self._approvals.get(candidate_key)
-                if (
-                    record is not None
-                    and (isinstance(record.approved, bool) or isinstance(record.rejected, bool))
-                    and record.sticky_scope == approval_scope
-                ):
-                    matching_keys.add(candidate_key)
+            record = self._approvals.get(approval_key)
+            if (
+                record is not None
+                and (isinstance(record.approved, bool) or isinstance(record.rejected, bool))
+                and record.sticky_scope == approval_scope
+            ):
+                matching_keys.add(approval_key)
         return frozenset(matching_keys)
 
     def _mark_tool_call_completed(
@@ -760,51 +621,17 @@ class RunContextWrapper(Generic[TContext]):
         return self._get_approval_status_for_key(tool_name, call_id)
 
     def _get_approval_status_for_key(
-        self,
-        approval_key: str,
-        call_id: str,
-        *,
-        approval_scope: str | None = None,
+        self, approval_key: str, call_id: str, *, approval_scope: str | None = None
     ) -> bool | None:
         """Return True/False/None for a concrete approval key and tool call."""
-        approval_entry = self._get_approval_record_for_key(
-            approval_key,
-            call_id,
-            approval_scope=approval_scope,
-        )
+        approval_entry = self._approvals.get(approval_key)
+        if (
+            approval_entry is not None
+            and approval_scope is not None
+            and approval_entry.sticky_scope != approval_scope
+        ):
+            return self._get_per_call_approval_status_for_record(approval_entry, call_id)
         return self._get_approval_status_for_record(approval_entry, call_id)
-
-    def _get_approval_record_for_key(
-        self,
-        approval_key: str,
-        call_id: str,
-        *,
-        approval_scope: str | None = None,
-    ) -> _ApprovalRecord | None:
-        invocation_record = self._tool_invocations.get(call_id)
-        if approval_scope is None and invocation_record is not None:
-            approval_scope = invocation_record.approval_scope
-        for candidate_key in self._approval_keys_for_scope(approval_key, approval_scope):
-            approval_entry = self._approvals.get(candidate_key)
-            if approval_entry is None:
-                continue
-            exact_status = self._get_per_call_approval_status_for_record(approval_entry, call_id)
-            status = self._get_approval_status_for_record(approval_entry, call_id)
-            if status is None:
-                continue
-            if (
-                exact_status is None
-                and approval_scope is not None
-                and approval_entry.sticky_scope != approval_scope
-                and not (
-                    candidate_key == approval_key
-                    and approval_entry.sticky_scope is None
-                    and self._allow_legacy_approval_binding_reconstruction
-                )
-            ):
-                continue
-            return approval_entry
-        return None
 
     @staticmethod
     def _get_approval_status_for_record(
@@ -985,7 +812,6 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None = None,
     ) -> str | None:
         """Return a stored rejection message for a tool call if one exists."""
-        self._require_unreserved_approval_key(tool_name)
         if existing_pending is not None:
             hosted_request = get_hosted_mcp_approval_request_identity(existing_pending)
             if hosted_request is not None:
@@ -1058,26 +884,13 @@ class RunContextWrapper(Generic[TContext]):
             ):
                 candidates.append(pending_tool_name)
 
-        scope_identity = (
-            tool_invocation_approval_scope(
-                existing_pending.raw_item,
-                tool_lookup_key=existing_pending.tool_lookup_key,
-                tool_name=existing_pending.tool_name,
-            )
-            if existing_pending is not None
-            else None
-        )
-        approval_scope = scope_identity[1] if scope_identity is not None else None
         for candidate in candidates:
-            self._require_unreserved_approval_key(candidate)
-            approval_entry = self._get_approval_record_for_key(
-                candidate,
-                call_id,
-                approval_scope=approval_scope,
-            )
+            approval_entry = self._approvals.get(candidate)
             if not approval_entry:
                 continue
-            return self._get_rejection_message_for_key(approval_entry, call_id)
+            message = self._get_rejection_message_for_key(approval_entry, call_id)
+            if message is not None:
+                return message
         return None
 
     def _apply_approval_decision(
@@ -1090,8 +903,6 @@ class RunContextWrapper(Generic[TContext]):
     ) -> None:
         """Record an approval or rejection decision."""
         hosted_request = get_hosted_mcp_approval_request_identity(approval_item)
-        approval_keys: tuple[str, ...] = ()
-        exact_approval_key: str | None = None
         if hosted_request is not None:
             call_id = hosted_request.request_id
             if call_id is None:
@@ -1105,10 +916,6 @@ class RunContextWrapper(Generic[TContext]):
         else:
             call_id = self._resolve_call_id(approval_item)
             hosted_identity = None
-            approval_keys = self._resolve_approval_keys(approval_item) or ("unknown_tool",)
-            exact_approval_key = self._resolve_approval_key(approval_item)
-            for approval_key in (*approval_keys, exact_approval_key):
-                self._require_unreserved_approval_key(approval_key)
 
         call_identity = tool_invocation_call_id(approval_item.raw_item)
         if call_identity is not None and call_identity[1] is None:
@@ -1165,6 +972,7 @@ class RunContextWrapper(Generic[TContext]):
                     self._restored_unbound_approval_call_ids.add(call_id)
         approval_entries: tuple[tuple[_ApprovalRecord, bool], ...]
         if hosted_request is not None:
+            approval_keys: tuple[str, ...] = ()
             assert call_id is not None
             hosted_key: HostedMCPApprovalKey
             if hosted_identity is None:
@@ -1187,16 +995,11 @@ class RunContextWrapper(Generic[TContext]):
                     ),
                 )
         else:
-            assert exact_approval_key is not None
+            approval_keys = self._resolve_approval_keys(approval_item) or ("unknown_tool",)
+            exact_approval_key = self._resolve_approval_key(approval_item)
             decision_keys = (exact_approval_key,) if always or call_id is None else approval_keys
             approval_entries = tuple(
-                (
-                    self._get_or_create_approval_entry(
-                        approval_key,
-                        approval_scope=scope_identity[1] if scope_identity is not None else None,
-                    ),
-                    always,
-                )
+                (self._get_or_create_approval_entry(approval_key), always)
                 for approval_key in decision_keys
             )
 
@@ -1218,6 +1021,15 @@ class RunContextWrapper(Generic[TContext]):
                     approval_entry.rejection_messages.clear()
                     approval_entry.sticky_rejection_message = None
                 continue
+
+            if scope_identity is not None and approval_entry.sticky_scope != scope_identity[1]:
+                # A decision for another scope replaces the shared key's sticky default.
+                if isinstance(approval_entry.approved, bool):
+                    approval_entry.approved = []
+                if isinstance(approval_entry.rejected, bool):
+                    approval_entry.rejected = []
+                approval_entry.sticky_scope = None
+                approval_entry.sticky_rejection_message = None
 
             opposite = approval_entry.rejected if approve else approval_entry.approved
             if isinstance(opposite, list) and call_id in opposite:
@@ -1280,7 +1092,6 @@ class RunContextWrapper(Generic[TContext]):
         """Return approval status, retrying with pending item's tool name if necessary."""
         if not isinstance(call_id, str) or not call_id:
             raise ModelBehaviorError("Approval-gated tool calls require a non-empty call ID.")
-        self._require_unreserved_approval_key(tool_name)
         if existing_pending is not None:
             self._restore_pending_approval_binding(existing_pending)
             pending_identity = tool_invocation_identity(
@@ -1368,39 +1179,16 @@ class RunContextWrapper(Generic[TContext]):
             ):
                 candidates.append(pending_tool_name)
 
-        selected_invocation = (
-            current_invocation if current_invocation is not None else existing_pending
-        )
-        scope_identity = (
-            tool_invocation_approval_scope(
-                selected_invocation.raw_item,
-                tool_lookup_key=selected_invocation.tool_lookup_key,
-                tool_name=selected_invocation.tool_name,
-            )
-            if selected_invocation is not None
-            else None
-        )
-        approval_scope = scope_identity[1] if scope_identity is not None else None
-        if current_invocation is not None and call_id in self._tool_invocations:
-            current_call_identity = tool_invocation_call_id(current_invocation.raw_item)
-            if current_call_identity is not None and current_call_identity[1] == call_id:
-                self._tool_invocation_status(
-                    current_invocation.raw_item,
-                    tool_lookup_key=current_invocation.tool_lookup_key,
-                    tool_name=current_invocation.tool_name,
-                )
         status: bool | None = None
         matched_record: _ApprovalRecord | None = None
         for candidate in candidates:
-            self._require_unreserved_approval_key(candidate)
-            matched_record = self._get_approval_record_for_key(
-                candidate,
-                call_id,
-                approval_scope=approval_scope,
-            )
-            status = self._get_approval_status_for_record(matched_record, call_id)
+            status = self._get_approval_status_for_key(candidate, call_id)
             if status is not None:
+                matched_record = self._approvals.get(candidate)
                 break
+        selected_invocation = (
+            current_invocation if current_invocation is not None else existing_pending
+        )
         if status is None or matched_record is None or selected_invocation is None:
             return status
         is_sticky = isinstance(matched_record.approved, bool) or isinstance(

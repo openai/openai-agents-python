@@ -30,11 +30,6 @@ from tests.sandbox._apply_patch_test_session import (
 )
 from tests.utils.hitl import make_context_wrapper
 
-_MULTI_OPERATION_PATCH = (
-    "*** Begin Patch\n*** Add File: harmless.txt\n+harmless\n"
-    "*** Delete File: protected.txt\n*** End Patch\n"
-)
-
 
 class TestSandboxApplyPatchTool:
     def test_exposes_custom_apply_patch_tool(self) -> None:
@@ -186,16 +181,11 @@ class TestSandboxApplyPatchTool:
         assert checked_paths == [(expected_path, expected_move_to)]
 
     @pytest.mark.parametrize("round_trip", [False, True], ids=["in-memory", "json"])
-    @pytest.mark.parametrize(
-        "sandbox_approved", [True, False], ids=["sandbox-approved", "sandbox-rejected"]
-    )
-    @pytest.mark.parametrize("approved", [True, False], ids=["native-approved", "native-rejected"])
+    @pytest.mark.parametrize("native_approved", [True, False])
+    @pytest.mark.parametrize("sandbox_approved", [True, False])
     @pytest.mark.asyncio
-    async def test_multi_operation_checker_ignores_other_plane_sticky_approval(
-        self,
-        approved: bool,
-        sandbox_approved: bool,
-        round_trip: bool,
+    async def test_multi_operation_checker_ignores_native_sticky_approval(
+        self, native_approved: bool, sandbox_approved: bool, round_trip: bool
     ) -> None:
         checked_paths: list[str] = []
 
@@ -209,70 +199,58 @@ class TestSandboxApplyPatchTool:
         session = ApplyPatchSession()
         session.files[protected_path] = b"protected"
         tool = SandboxApplyPatchTool(session=session, needs_approval=needs_approval)
-        context_wrapper = make_context_wrapper()
-        native_approval = _native_patch_approval(Agent(name="patcher"))
-        if approved:
-            context_wrapper.approve_tool(native_approval, always_approve=True)
-        else:
-            context_wrapper.reject_tool(native_approval, always_reject=True)
-
-        result = await _execute_custom_tool_call(
-            tool, context_wrapper=context_wrapper, raw_input=_MULTI_OPERATION_PATCH
+        context = make_context_wrapper()
+        native_approval = ToolApprovalItem(
+            agent=Agent(name="patcher"),
+            raw_item={
+                "type": "apply_patch_call",
+                "call_id": "native_apply",
+                "operation": {"type": "create_file", "path": "native.txt", "diff": "+native\n"},
+            },
+            tool_name="apply_patch",
         )
+        if native_approved:
+            context.approve_tool(native_approval, always_approve=True)
+        else:
+            context.reject_tool(native_approval, always_reject=True)
+        raw_input = (
+            "*** Begin Patch\n*** Add File: harmless.txt\n+harmless\n"
+            "*** Delete File: protected.txt\n*** End Patch\n"
+        )
+
+        result = await _execute_custom_tool_call(tool, context_wrapper=context, raw_input=raw_input)
 
         assert isinstance(result, ToolApprovalItem)
         assert checked_paths == ["harmless.txt", "protected.txt"]
         assert session.files == {protected_path: b"protected"}
-
-        state = RunState(
-            context=context_wrapper, original_input="patch", starting_agent=result.agent
-        )
+        state = RunState(context=context, original_input="patch", starting_agent=result.agent)
         state._current_step = NextStepInterruption(interruptions=[result])
         if round_trip:
             state = await RunState.from_json(result.agent, state.to_json())
-        interruption = state.get_interruptions()[0]
         if sandbox_approved:
-            state.approve(interruption)
+            state.approve(state.get_interruptions()[0])
         else:
-            state.reject(interruption, rejection_message="Sandbox patch denied")
+            state.reject(state.get_interruptions()[0], rejection_message="Sandbox patch denied")
         if round_trip:
             state = await RunState.from_json(result.agent, state.to_json())
         assert state._context is not None
-        context_wrapper = state._context
 
         resumed = await _execute_custom_tool_call(
-            tool, context_wrapper=context_wrapper, raw_input=_MULTI_OPERATION_PATCH
+            tool, context_wrapper=state._context, raw_input=raw_input
         )
 
         assert isinstance(resumed, ToolCallOutputItem)
         if sandbox_approved:
-            assert protected_path not in session.files
-            assert session.files[Path("/workspace/harmless.txt")] == b"harmless"
+            assert session.files == {Path("/workspace/harmless.txt"): b"harmless"}
         else:
             assert resumed.output == "Sandbox patch denied"
             assert session.files == {protected_path: b"protected"}
 
-        native_followup = _native_patch_approval(result.agent, "native_followup")
-        assert (
-            context_wrapper.get_approval_status(
-                tool.name, "native_followup", current_invocation=native_followup
-            )
-            is approved
-        )
-
     @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
-    @pytest.mark.parametrize(
-        ("always", "native_sticky", "different_call"),
-        [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
-        ids=["once", "always", "native-sticky", "other-sandbox-call"],
-    )
     @pytest.mark.asyncio
     async def test_multi_operation_checker_stops_when_approval_resolves(
         self,
         approved: bool,
-        always: bool,
-        native_sticky: bool,
-        different_call: bool,
     ) -> None:
         checker_started = asyncio.Event()
         release_checker = asyncio.Event()
@@ -291,12 +269,6 @@ class TestSandboxApplyPatchTool:
         session = ApplyPatchSession()
         tool = SandboxApplyPatchTool(session=session, needs_approval=needs_approval)
         context_wrapper = make_context_wrapper()
-        if native_sticky:
-            native_approval = _native_patch_approval(Agent(name="patcher"))
-            if approved:
-                context_wrapper.reject_tool(native_approval, always_reject=True)
-            else:
-                context_wrapper.approve_tool(native_approval, always_approve=True)
         raw_input = (
             "*** Begin Patch\n"
             "*** Add File: first.txt\n"
@@ -305,10 +277,15 @@ class TestSandboxApplyPatchTool:
             "+second\n"
             "*** End Patch\n"
         )
-        approval_item = _custom_patch_approval(
-            Agent(name="patcher"),
-            "other_sandbox_call" if different_call else "call_apply",
-            raw_input,
+        approval_item = ToolApprovalItem(
+            agent=Agent(name="patcher"),
+            raw_item={
+                "type": "custom_tool_call",
+                "name": tool.name,
+                "call_id": "call_apply",
+                "input": raw_input,
+            },
+            tool_name=tool.name,
         )
         execution_task = asyncio.create_task(
             _execute_custom_tool_call(
@@ -319,14 +296,10 @@ class TestSandboxApplyPatchTool:
         )
         try:
             await asyncio.wait_for(checker_started.wait(), timeout=1)
-            if different_call:
-                assert "call_apply" not in context_wrapper._tool_invocations
             if approved:
-                context_wrapper.approve_tool(approval_item, always_approve=always)
+                context_wrapper.approve_tool(approval_item)
             else:
-                context_wrapper.reject_tool(approval_item, always_reject=always)
-            if different_call:
-                assert "call_apply" not in context_wrapper._tool_invocations
+                context_wrapper.reject_tool(approval_item)
             release_checker.set()
             result = await execution_task
         finally:
@@ -731,31 +704,6 @@ class TestSandboxApplyPatchTool:
             raw_input="*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch\n",
         )
         assert Path("/workspace/moved.txt") not in session.files
-
-
-def _native_patch_approval(agent: Agent[Any], call_id: str = "native_apply") -> ToolApprovalItem:
-    return ToolApprovalItem(
-        agent=agent,
-        raw_item={
-            "type": "apply_patch_call",
-            "call_id": call_id,
-            "operation": {"type": "create_file", "path": "native.txt", "diff": "+native\n"},
-        },
-        tool_name="apply_patch",
-    )
-
-
-def _custom_patch_approval(agent: Agent[Any], call_id: str, raw_input: str) -> ToolApprovalItem:
-    return ToolApprovalItem(
-        agent=agent,
-        raw_item={
-            "type": "custom_tool_call",
-            "name": "apply_patch",
-            "call_id": call_id,
-            "input": raw_input,
-        },
-        tool_name="apply_patch",
-    )
 
 
 async def _execute_custom_tool_call(
