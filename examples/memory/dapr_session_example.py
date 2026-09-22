@@ -37,8 +37,18 @@ PREREQUISITES:
 2. Install Docker (for running Redis and optionally Dapr containers)
 3. Install openai-agents with dapr in your environment:
         pip install openai-agents[dapr]
-4. Use the built-in helper to create components and start containers (Creates ./components with Redis + PostgreSQL and starts containers if Docker is available.):
+4. Export POSTGRES_PASSWORD with a strong, unique single-line password (not "postgres") using your
+   shell's hidden-input prompt or secret manager. Do not put the password in shell history.
+   Use the built-in helper for first-time local setup on POSIX systems (requires Docker):
         python examples/memory/dapr_session_example.py --setup-env --only-setup
+   The helper binds both databases to 127.0.0.1 and stores the password in an owner-only
+   component file. Choose a directory you control, without symlinks in its path, and keep
+   it private and out of version control. Windows users must configure protected components
+   and databases manually, then run this example without --setup-env.
+   Setup accepts only a local Docker Unix socket and rejects concurrent setup in the same
+   component directory. A new empty directory can remain after a preflight failure.
+   Existing named containers are never reused or changed. Inspect and migrate them manually,
+   or run an already configured environment without --setup-env.
 5. As always, ensure that the OPENAI_API_KEY environment variable is set.
 6. Optionally, if planning on using other Dapr features, run: dapr init
      - This installs Redis, Zipkin, and Placement service locally
@@ -64,10 +74,13 @@ In production, you may want to preserve existing conversation history.
 
 import argparse
 import asyncio
+import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 os.environ["GRPC_VERBOSITY"] = (
     "ERROR"  # Suppress gRPC warnings caused by the Dapr Python SDK gRPC connection.
@@ -301,41 +314,33 @@ async def demonstrate_advanced_features():
 async def setup_instructions():
     """Print setup instructions for running the example."""
     print("\n=== Setup Instructions (Multi-store) ===")
-    print("\n1. Create components (Redis + PostgreSQL) in ./components:")
-    print("""
-# Save as components/statestore-redis.yaml
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: statestore-redis
-spec:
-  type: state.redis
-  version: v1
-  metadata:
-  - name: redisHost
-    value: localhost:6379
-  - name: redisPassword
-    value: ""
-
-# Save as components/statestore-postgres.yaml
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: statestore-postgres
-spec:
-  type: state.postgresql
-  version: v2
-  metadata:
-  - name: connectionString
-    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
-""")
-    print("   You can select which one the main demo uses via env var:")
-    print("   export DAPR_STATE_STORE=statestore-redis  # or statestore-postgres")
-    print("   Start both Redis and PostgreSQL for this multi-store demo:")
-    print("   docker run -d -p 6379:6379 redis:7-alpine")
     print(
-        "   docker run -d -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=dapr postgres:16-alpine"
+        "\n1. For first-time local setup, export POSTGRES_PASSWORD with a strong, unique password."
     )
+    print("   Use a hidden-input shell prompt or secret manager; do not put it in shell history.")
+    print("   The password must be a single line, not blank or 'postgres'. Then run:")
+    print("   python examples/memory/dapr_session_example.py --setup-env --only-setup")
+    print("   This creates Redis and PostgreSQL containers bound to 127.0.0.1.")
+    print("   Generated component files are owner-only and contain the database password.")
+    print("   Setup requires POSIX and a directory you control, with no symlinks in its path.")
+    print(
+        "   Keep the components private and out of version control, including custom directories."
+    )
+    print(
+        "   On Windows, configure protected components and databases manually and skip --setup-env."
+    )
+    print("   Docker must use a local Unix socket; remote and TCP endpoints are rejected.")
+    print(
+        "   Concurrent setup in the same directory is rejected; retry after the other setup exits."
+    )
+    print("   A new empty component directory may remain after a preflight failure.")
+    print("   Existing named containers cause setup to stop without changing them.")
+    print(
+        "   Inspect and migrate old resources manually, or skip setup for a configured environment."
+    )
+    print("   Different existing component files require review and explicit --overwrite.")
+    print("   You can select which store the main demo uses via env var:")
+    print("   export DAPR_STATE_STORE=statestore-redis  # or statestore-postgres")
 
     print("\n   NOTE: Always use secret references for passwords/keys in production!")
     print("   See: https://docs.dapr.io/operations/components/component-secrets/")
@@ -434,57 +439,67 @@ async def demonstrate_multi_store():
 # ------------------------------------------------------------------------------------------------
 
 
-def _write_text_file(path: Path, content: str, overwrite: bool) -> None:
-    if path.exists() and not overwrite:
-        return
-    path.write_text(content, encoding="utf-8")
+def _write_text_file(path: Path, content: str) -> None:
+    # A temporary file keeps credentials owner-only even when replacing an older file.
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f"{path.name}.", delete=False
+    ) as f:
+        temporary_path = Path(f.name)
+        try:
+            f.write(content)
+            f.close()
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
 
-def _docker_available() -> bool:
-    return shutil.which("docker") is not None
-
-
-def _container_running(name: str):
-    if not _docker_available():
-        return None
-    try:
-        result = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", name],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip().lower() == "true"
-    except Exception:
-        return None
-
-
-def _ensure_container(name: str, run_args: list[str]) -> None:
-    if not _docker_available():
+def _ensure_container(
+    docker_command: list[str], name: str, run_args: list[str], *, env: dict[str, str]
+) -> None:
+    result = subprocess.run(
+        [*docker_command, "run", "-d", "--name", name, *run_args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        # Docker output can contain credentials; leave any partial setup for manual inspection.
         raise SystemExit(
-            "Docker is required to automatically start containers for '"
-            + name
-            + "'.\nInstall Docker: https://docs.docker.com/get-docker/\n"
-            + "Alternatively, start the container manually and re-run with --setup-env."
+            f"Could not create container '{name}'. Inspect Docker and any partially created "
+            "resources manually before retrying; no containers were removed."
         )
-    status = _container_running(name)
-    if status is True:
-        print(f"Container '{name}' already running.")
-        return
-    if status is False:
-        subprocess.run(["docker", "start", name], check=False)
-        print(f"Started existing container '{name}'.")
-        return
-    subprocess.run(["docker", "run", "-d", "--name", name, *run_args], check=False)
     print(f"Created and started container '{name}'.")
 
 
 def setup_environment(components_dir: str = "./components", overwrite: bool = False) -> None:
-    """Create Redis/PostgreSQL component files and start containers if available."""
-    components_path = Path(components_dir)
-    components_path.mkdir(parents=True, exist_ok=True)
+    """Provision fresh local containers with an explicit password and private components."""
+    if os.name != "posix":
+        raise SystemExit(
+            "--setup-env requires POSIX owner-only file permissions. Configure protected "
+            "components and databases manually, then run without --setup-env."
+        )
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    if (
+        not password.strip()
+        or password.strip().lower() == "postgres"
+        or "\r" in password
+        or "\n" in password
+    ):
+        raise SystemExit(
+            "Set POSTGRES_PASSWORD to a nonblank, non-default, single-line password before setup."
+        )
+    components_path = Path(components_dir).absolute()
+    # Do not resolve first: that would hide symlinks in the supplied directory path.
+    if any(path.is_symlink() for path in (components_path, *components_path.parents)):
+        raise SystemExit(
+            "The components directory and its ancestors must not be symlinks. "
+            "Choose a direct path to a directory you control; no resources were changed."
+        )
+    # URI encoding preserves punctuation and Unicode without YAML or connection-string injection.
+    connection_string = json.dumps(
+        f"postgresql://postgres:{quote(password, safe='')}@127.0.0.1:5432/dapr"
+    )
 
     redis_component = """
 apiVersion: dapr.io/v1alpha1
@@ -496,12 +511,12 @@ spec:
   version: v1
   metadata:
   - name: redisHost
-    value: localhost:6379
+    value: 127.0.0.1:6379
   - name: redisPassword
     value: ""
 """.lstrip()
 
-    postgres_component = """
+    postgres_component = f"""
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -511,7 +526,7 @@ spec:
   version: v2
   metadata:
   - name: connectionString
-    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
+    value: {connection_string}
 """.lstrip()
 
     default_component = """
@@ -524,33 +539,116 @@ spec:
   version: v1
   metadata:
   - name: redisHost
-    value: localhost:6379
+    value: 127.0.0.1:6379
   - name: redisPassword
     value: ""
 """.lstrip()
 
-    _write_text_file(components_path / "statestore-redis.yaml", redis_component, overwrite)
-    _write_text_file(components_path / "statestore-postgres.yaml", postgres_component, overwrite)
-    _write_text_file(components_path / "statestore.yaml", default_component, overwrite)
-
-    print(f"Components written under: {components_path.resolve()}")
-
-    _ensure_container("dapr_redis", ["-p", "6379:6379", "redis:7-alpine"])
-    _ensure_container(
-        "dapr_postgres",
-        [
-            "-p",
-            "5432:5432",
-            "-e",
-            "POSTGRES_USER=postgres",
-            "-e",
-            "POSTGRES_PASSWORD=postgres",
-            "-e",
-            "POSTGRES_DB=dapr",
-            "postgres:16-alpine",
-        ],
+    components = {
+        "statestore-redis.yaml": redis_component,
+        "statestore-postgres.yaml": postgres_component,
+        "statestore.yaml": default_component,
+    }
+    if shutil.which("docker") is None:
+        raise SystemExit("Docker is required for --setup-env. Install and start Docker first.")
+    docker_env = {key: value for key, value in os.environ.items() if key != "POSTGRES_PASSWORD"}
+    # Docker resolves DOCKER_HOST, DOCKER_CONTEXT and its active context without contacting a daemon.
+    endpoint = subprocess.run(
+        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=docker_env,
     )
-    print("Environment setup complete.")
+    if endpoint.returncode != 0:
+        raise SystemExit(
+            "Could not inspect the Docker endpoint. Check your Docker context and retry."
+        )
+    docker_host = endpoint.stdout.strip()
+    if not docker_host.startswith("unix:///"):
+        raise SystemExit(
+            "--setup-env requires a local Docker Unix socket. Select a local Docker context "
+            "or configure the databases manually and run without --setup-env."
+        )
+    # Pin every daemon command to the inspected socket, even if the active context changes.
+    docker_command = ["docker", "--host", docker_host]
+    docker_env.pop("DOCKER_CONTEXT", None)
+    docker_env.pop("DOCKER_HOST", None)
+
+    # Lock the directory itself: no lock file or stale-lock recovery is needed.
+    # A new empty directory may remain if preflight fails.
+    import fcntl
+
+    components_path.mkdir(parents=True, exist_ok=True)
+    directory_fd = os.open(components_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(
+                "Another setup is using this components directory. Retry after it exits."
+            ) from None
+        # Complete all compatibility checks before writing files or creating containers.
+        for filename, content in components.items():
+            path = components_path / filename
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise SystemExit(
+                    f"Component '{filename}' must be a regular file, not a link or directory."
+                )
+            if path.exists() and not overwrite and path.read_text(encoding="utf-8") != content:
+                raise SystemExit(
+                    f"Component '{filename}' differs from this setup. Review it and use --overwrite "
+                    "only if replacing it is intended; no resources were changed."
+                )
+        existing = subprocess.run(
+            [*docker_command, "container", "ls", "--all", "--format", "{{.Names}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=docker_env,
+        )
+        if existing.returncode != 0:
+            raise SystemExit(
+                "Could not list Docker containers. Check that Docker is running and retry."
+            )
+        if {"dapr_redis", "dapr_postgres"}.intersection(existing.stdout.splitlines()):
+            raise SystemExit(
+                "Existing dapr_redis or dapr_postgres container found. No component files or containers were changed. "
+                "Inspect its port bindings and database credentials and migrate manually. "
+                "For an already configured environment, run without --setup-env. "
+                "--overwrite only applies to component files."
+            )
+
+        for filename, content in components.items():
+            _write_text_file(components_path / filename, content)
+        print(f"Private components written under: {components_path.resolve()}")
+
+        _ensure_container(
+            docker_command,
+            "dapr_redis",
+            ["-p", "127.0.0.1:6379:6379", "redis:7-alpine"],
+            env=docker_env,
+        )
+        _ensure_container(
+            docker_command,
+            "dapr_postgres",
+            [
+                "-p",
+                "127.0.0.1:5432:5432",
+                "-e",
+                "POSTGRES_USER=postgres",
+                "-e",
+                "POSTGRES_PASSWORD",
+                "-e",
+                "POSTGRES_DB=dapr",
+                "postgres:16-alpine",
+            ],
+            env={**docker_env, "POSTGRES_PASSWORD": password},
+        )
+        print("Environment setup complete.")
+
+    finally:
+        os.close(directory_fd)
 
 
 if __name__ == "__main__":
@@ -558,17 +656,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--setup-env",
         action="store_true",
-        help="Create ./components and add Redis/PostgreSQL components; start containers if possible.",
+        help=(
+            "Provision new loopback-only Redis/PostgreSQL containers and private components on POSIX. "
+            "Requires a local Docker Unix socket and a non-default, single-line POSTGRES_PASSWORD; "
+            "refuses existing named containers and concurrent setup in the same directory."
+        ),
     )
     parser.add_argument(
         "--components-dir",
         default="./components",
-        help="Path to Dapr components directory (default: ./components)",
+        help="Directory you control, with no symlinks in its path (default: ./components)",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite existing component files if present.",
+        help="Replace reviewed component files; never change or reuse existing containers.",
     )
     parser.add_argument(
         "--only-setup",

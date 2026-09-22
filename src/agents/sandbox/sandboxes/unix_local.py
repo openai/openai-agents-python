@@ -785,18 +785,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 seen.add(key)
                 allowed.append(root)
 
-        for path_entry in env.get("PATH", "").split(os.pathsep):
+        child_path_entries = env.get("PATH", "").split(os.pathsep)
+        for path_entry in child_path_entries:
             if path_entry:
                 _append(path_entry)
 
         executable = shutil.which(command_parts[0], path=env.get("PATH"))
         _append(executable)
 
-        # Only host-controlled PATH entries may widen a bin grant to its virtual environment
-        # root. Manifest environment overrides must not authorize broader host filesystem reads.
-        for path_entry in os.environ.get("PATH", "").split(os.pathsep):
-            if path_entry:
-                _append(path_entry, allow_virtual_environment_root=True)
+        # The client must permit PATH inheritance before retained host entries can widen a bin
+        # grant to its virtual environment root. Matching manifest values cannot grant authority.
+        if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
+            for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+                if path_entry and path_entry in child_path_entries:
+                    _append(path_entry, allow_virtual_environment_root=True)
         return allowed
 
     def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:

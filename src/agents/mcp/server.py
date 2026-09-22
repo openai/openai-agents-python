@@ -892,6 +892,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         *,
         tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
         tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+        max_list_pages: int | None = None,
     ):
         """
         Args:
@@ -935,6 +936,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 server before the tool is invoked.
             tool_output_guardrails: Optional list of guardrails applied to every tool on this
                 server after the tool returns.
+            max_list_pages: Maximum successful pages per automatic `list_tools()` or
+                `list_prompts()` call. Set a positive integer to bound pagination; `None`
+                (the default) applies no page limit. A final page at the limit succeeds;
+                otherwise `UserError` is raised without returning or caching a partial list.
+                Failed requests follow the existing retry policy and do not reset this budget.
+                This does not limit page size or apply to explicit resource pagination.
         """
         mcp_compat.enable_legacy_httpx_compat()
         super().__init__(
@@ -957,6 +964,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # the public timeout attribute before a later connection attempt.
         _client_session_read_timeout(client_session_timeout_seconds)
         _validate_retry_backoff_seconds_max(retry_backoff_seconds_max)
+        if max_list_pages is not None:
+            if isinstance(max_list_pages, bool) or not isinstance(max_list_pages, int):
+                raise TypeError("max_list_pages must be a positive integer or None.")
+            if max_list_pages < 1:
+                raise ValueError("max_list_pages must be a positive integer or None.")
+        self.max_list_pages = max_list_pages
         self.client_session_timeout_seconds = client_session_timeout_seconds
         self.max_retry_attempts = max_retry_attempts
         self.retry_backoff_seconds_base = retry_backoff_seconds_base
@@ -1454,23 +1467,28 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 cursor: str | None = None
                 seen_cursors: set[str | None] = set()
 
-                async def fetch_pages() -> bool:
+                async def fetch_pages() -> Literal["complete", "repeated_cursor", "page_limit"]:
                     nonlocal cursor
                     while True:
+                        if (
+                            self.max_list_pages is not None
+                            and len(seen_cursors) >= self.max_list_pages
+                        ):
+                            return "page_limit"
                         result = await self._list_tools_page(session, cursor)
                         tools.extend(result.tools)
                         seen_cursors.add(cursor)
                         next_cursor = result_next_cursor(result)
                         if next_cursor is None:
-                            return True
+                            return "complete"
                         if next_cursor in seen_cursors:
-                            return False
+                            return "repeated_cursor"
                         cursor = next_cursor
 
-                pagination_complete = False
+                pagination_status: str | None = None
                 pagination_failure: BaseException | None = None
                 try:
-                    pagination_complete = await self._run_with_retries(fetch_pages)
+                    pagination_status = await self._run_with_retries(fetch_pages)
                 except BaseException as error:
                     if cursor is None:
                         raise
@@ -1483,13 +1501,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     else:
                         pagination_failure = _credential_safe_exception_leaf(error)
 
-                if pagination_failure is not None or not pagination_complete:
+                if pagination_failure is not None or pagination_status != "complete":
                     cursor = None
                     seen_cursors.clear()
                     tools.clear()
                     del fetch_pages
                     if pagination_failure is not None:
                         raise pagination_failure from None
+                    if pagination_status == "page_limit":
+                        raise UserError(
+                            "MCP tool listing exceeded max_list_pages. Increase max_list_pages "
+                            "to allow more pages, or check the server pagination."
+                        ) from None
                     raise UserError(
                         f"MCP server '{self._error_name}' returned a repeated cursor while "
                         "listing tools."
@@ -1646,9 +1669,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         seen_cursors: set[str | None] = {None}
         pagination_failure: BaseException | None = None
         repeated_cursor = False
+        page_limit_reached = False
         page: ListPromptsResult | None = None
         next_cursor: str | None = None
         while cursor is not None:
+            if self.max_list_pages is not None and len(seen_cursors) >= self.max_list_pages:
+                page_limit_reached = True
+                break
             try:
                 page = await self._list_prompts_page(session, cursor)
             except BaseException as error:
@@ -1669,7 +1696,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 break
             cursor = next_cursor
 
-        if pagination_failure is not None or repeated_cursor:
+        if pagination_failure is not None or repeated_cursor or page_limit_reached:
             cursor = None
             seen_cursors.clear()
             prompts.clear()
@@ -1678,6 +1705,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             del result
             if pagination_failure is not None:
                 raise pagination_failure from None
+            if page_limit_reached:
+                raise UserError(
+                    "MCP prompt listing exceeded max_list_pages. Increase max_list_pages "
+                    "to allow more pages, or check the server pagination."
+                ) from None
             raise UserError(
                 f"MCP server '{self._error_name}' returned a repeated cursor while listing prompts."
             ) from None
@@ -1913,6 +1945,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         *,
         tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
         tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+        max_list_pages: int | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -1961,6 +1994,12 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 server before the tool is invoked.
             tool_output_guardrails: Optional list of guardrails applied to every tool on this
                 server after the tool returns.
+            max_list_pages: Maximum successful pages per automatic `list_tools()` or
+                `list_prompts()` call. Set a positive integer to bound pagination; `None`
+                (the default) applies no page limit. A final page at the limit succeeds;
+                otherwise `UserError` is raised without returning or caching a partial list.
+                Failed requests follow the existing retry policy and do not reset this budget.
+                This does not limit page size or apply to explicit resource pagination.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -1975,6 +2014,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            max_list_pages=max_list_pages,
             tool_input_guardrails=tool_input_guardrails,
             tool_output_guardrails=tool_output_guardrails,
         )
@@ -2055,6 +2095,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         *,
         tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
         tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+        max_list_pages: int | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -2105,6 +2146,12 @@ class MCPServerSse(_MCPServerWithClientSession):
                 server before the tool is invoked.
             tool_output_guardrails: Optional list of guardrails applied to every tool on this
                 server after the tool returns.
+            max_list_pages: Maximum successful pages per automatic `list_tools()` or
+                `list_prompts()` call. Set a positive integer to bound pagination; `None`
+                (the default) applies no page limit. A final page at the limit succeeds;
+                otherwise `UserError` is raised without returning or caching a partial list.
+                Failed requests follow the existing retry policy and do not reset this budget.
+                This does not limit page size or apply to explicit resource pagination.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2119,6 +2166,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            max_list_pages=max_list_pages,
             tool_input_guardrails=tool_input_guardrails,
             tool_output_guardrails=tool_output_guardrails,
         )
@@ -2225,6 +2273,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         *,
         tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
         tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+        max_list_pages: int | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -2276,6 +2325,12 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 server before the tool is invoked.
             tool_output_guardrails: Optional list of guardrails applied to every tool on this
                 server after the tool returns.
+            max_list_pages: Maximum successful pages per automatic `list_tools()` or
+                `list_prompts()` call. Set a positive integer to bound pagination; `None`
+                (the default) applies no page limit. A final page at the limit succeeds;
+                otherwise `UserError` is raised without returning or caching a partial list.
+                Failed requests follow the existing retry policy and do not reset this budget.
+                This does not limit page size or apply to explicit resource pagination.
         """
         super().__init__(
             cache_tools_list=cache_tools_list,
@@ -2290,6 +2345,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             tool_meta_resolver=tool_meta_resolver,
             custom_data_extractor=custom_data_extractor,
             retry_backoff_seconds_max=retry_backoff_seconds_max,
+            max_list_pages=max_list_pages,
             tool_input_guardrails=tool_input_guardrails,
             tool_output_guardrails=tool_output_guardrails,
         )

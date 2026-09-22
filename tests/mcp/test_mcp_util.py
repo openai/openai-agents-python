@@ -1110,7 +1110,7 @@ async def test_mcp_tool_inner_cancellation_becomes_tool_error():
 
     result = await function_tool.on_invoke_tool(tool_context, "{}")
     assert isinstance(result, str)
-    assert "tool execution was cancelled" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -1399,7 +1399,7 @@ async def test_mcp_default_tool_error_hides_url_credentials():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
 
     assert isinstance(result, str)
-    assert _SANITIZED_SERVER_NAME in result
+    assert result == "An error occurred while running the tool. Please try again."
     for secret in _SERVER_URL_SECRETS:
         assert secret not in result
 
@@ -1449,7 +1449,7 @@ async def test_mcp_tool_timeout_handling():
     # Verify that the result is an error message
     assert isinstance(result, str)
     assert "error" in result.lower() or "occurred" in result.lower()
-    assert "Timed out" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -1473,7 +1473,7 @@ async def test_mcp_tool_cancellation_returns_error_message():
     result = await function_tool.on_invoke_tool(tool_context, "{}")
 
     assert isinstance(result, str)
-    assert "cancelled" in result.lower()
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -2165,12 +2165,9 @@ def test_to_function_tool_single_all_of_annotated_alias_remains_strict():
             }
         },
         "type": "object",
-        "allOf": [
-            {
-                "$ref": "#/components/schemas/Outer",
-                "title": "entry",
-            }
-        ],
+        "properties": {
+            "payload": {"allOf": [{"$ref": "#/components/schemas/Outer", "title": "entry"}]}
+        },
         "additionalProperties": False,
     }
     tool = MCPTool(name="test_tool", inputSchema=schema)
@@ -2178,12 +2175,39 @@ def test_to_function_tool_single_all_of_annotated_alias_remains_strict():
     function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
 
     assert function_tool.strict_json_schema is True
-    assert function_tool.params_json_schema["description"] == "outer"
-    assert function_tool.params_json_schema["title"] == "entry"
-    assert function_tool.params_json_schema["properties"] == {"value": {"type": "string"}}
-    assert function_tool.params_json_schema["required"] == ["value"]
+    payload = function_tool.params_json_schema["properties"]["payload"]
+    assert payload["description"] == "outer"
+    assert payload["title"] == "entry"
+    assert payload["properties"] == {"value": {"type": "string"}}
+    assert payload["required"] == ["value"]
     assert function_tool.params_json_schema["additionalProperties"] is False
-    assert "$ref" not in function_tool.params_json_schema
+    assert "$ref" not in payload
+
+
+@pytest.mark.parametrize("declare_properties", [True, False])
+def test_to_function_tool_single_all_of_closed_parent_falls_back(declare_properties):
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "$defs": {
+            "Entry": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        },
+        "allOf": [{"$ref": "#/$defs/Entry"}],
+    }
+    if declare_properties:
+        schema["properties"] = {}
+    original = copy.deepcopy(schema)
+    tool = MCPTool(name="test_tool", inputSchema=schema)
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == {**original, "properties": {}}
+    assert tool_input_schema(tool) == original
 
 
 def test_to_function_tool_single_all_of_annotated_entry_conflict_falls_back():

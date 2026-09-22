@@ -163,6 +163,16 @@ To customize this default setup, to send traces to alternative or additional bac
 1. [`add_trace_processor()`][agents.tracing.add_trace_processor] lets you add an **additional** trace processor that will receive traces and spans as they are ready. This lets you do your own processing in addition to sending traces to OpenAI's backend.
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
+### Redaction before export
+
+Trace processors are independent observers. The default provider catches a processor's callback exceptions and continues calling the other registered processors. A redaction processor registered before an exporter therefore does not prevent that exporter from receiving data if redaction fails. Adding a processor with `add_trace_processor()` also leaves the default OpenAI exporter registered.
+
+When export depends on successful redaction, keep redaction and delivery inside the same application-owned exporter. Use `set_trace_processors()` to replace the default processors with a `BatchTraceProcessor` configured with that exporter. The exporter should copy the serialized payloads, redact the copies, and pass only the redacted results to the destination. If serialization, copying, or redaction fails, discard the batch before invoking the destination. Log a fixed failure message without the payload, exception text, or traceback.
+
+The [trace redaction example](https://github.com/openai/openai-agents-python/blob/main/examples/basic/trace_redaction.py) demonstrates this composition using existing tracing APIs. The example prints only event categories and trace/span linkage IDs to the local console; it makes no API calls. Its allowlist omits names, metadata, errors, and span data. Caller-supplied IDs must contain no sensitive information, or the application must map those IDs to safe values. This diagnostic output is not the OpenAI tracing ingest schema; an application sending data to a backend must supply a redaction policy and destination compatible with that backend.
+
+The redactor and destination are trusted application code. They must not independently log or send the original data. The batch processor can invoke the exporter during background export, explicit flush, or shutdown, so callbacks must be safe to use from those execution contexts. A failed batch is dropped; subsequent batches can still be exported. Replacement affects future processor callbacks and does not erase data already buffered by a previously registered processor. Configure the replacement before creating traces or running agents.
+
 
 ## Tracing with non-OpenAI models
 
@@ -238,3 +248,4 @@ The following community and vendor integrations support the tracing API surface 
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
 -   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
+-   [Laminar](https://laminar.sh/docs/tracing/integrations/openai-agents-sdk)

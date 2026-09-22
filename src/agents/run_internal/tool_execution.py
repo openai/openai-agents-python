@@ -11,6 +11,7 @@ import dataclasses
 import functools
 import inspect
 import json
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -22,6 +23,7 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
+from .._public_agent import get_public_agent
 from .._tool_identity import (
     FunctionToolLookupKey,
     NamedToolLookupKey,
@@ -82,9 +84,11 @@ from ..tool import (
     _consume_function_tool_default_failure,
     _invoke_function_tool_with_metadata,
     _is_programmatic_tool_call,
+    default_tool_error_function,
     get_function_tool_origin,
     maybe_invoke_function_tool_failure_error_function,
     resolve_computer,
+    resolve_function_tool_failure_error_function,
 )
 from ..tool_context import ToolContext
 from ..tool_guardrails import (
@@ -575,7 +579,7 @@ async def resolve_enabled_function_tools(
         attr = tool.is_enabled
         if isinstance(attr, bool):
             return attr
-        result = attr(context_wrapper, agent)
+        result = attr(context_wrapper, get_public_agent(agent))
         if inspect.isawaitable(result):
             return bool(await result)
         return bool(result)
@@ -1611,7 +1615,7 @@ class _FunctionToolBatchExecutor:
             if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
                 enabled_function_tool_ids.add(function_tool_id)
-        pending_tool_runs = list(enumerate(self.tool_runs))
+        pending_tool_runs = deque(enumerate(self.tool_runs))
         self._fill_tool_task_slots(pending_tool_runs)
 
         try:
@@ -1631,7 +1635,7 @@ class _FunctionToolBatchExecutor:
             self.tool_output_guardrail_results,
         )
 
-    def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:
+    def _fill_tool_task_slots(self, pending_tool_runs: deque[tuple[int, ToolRunFunction]]) -> None:
         max_concurrency = self.max_function_tool_concurrency
         available_slots = (
             len(pending_tool_runs)
@@ -1639,7 +1643,7 @@ class _FunctionToolBatchExecutor:
             else max_concurrency - len(self.pending_tasks)
         )
         while available_slots > 0 and pending_tool_runs:
-            order, tool_run = pending_tool_runs.pop(0)
+            order, tool_run = pending_tool_runs.popleft()
             self._create_tool_task(tool_run, order)
             available_slots -= 1
 
@@ -1657,7 +1661,7 @@ class _FunctionToolBatchExecutor:
 
     async def _drain_pending_tasks(
         self,
-        pending_tool_runs: list[tuple[int, ToolRunFunction]],
+        pending_tool_runs: deque[tuple[int, ToolRunFunction]],
     ) -> None:
         while self.pending_tasks:
             done_tasks, self.pending_tasks = await asyncio.wait(
@@ -2094,9 +2098,14 @@ class _FunctionToolBatchExecutor:
                 tool_context
             ) and not _uses_programmatic_output_schema(func_tool, tool_call)
 
+            include_error_detail = (
+                self.config.trace_include_sensitive_data
+                and resolve_function_tool_failure_error_function(func_tool, tool_context)
+                is not default_tool_error_function
+            )
             trace_error = get_trace_tool_error(
-                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
-                error_message=str(e),
+                trace_include_sensitive_data=include_error_detail,
+                error_message=str(e) if include_error_detail else "",
             )
             _error_tracing.attach_error_to_current_span(
                 SpanError(

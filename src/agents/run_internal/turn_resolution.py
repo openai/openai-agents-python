@@ -120,6 +120,7 @@ from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
+from .agent_tool_configuration import register_agent_tool_configuration
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -578,6 +579,10 @@ async def execute_handoffs(
     actual_handoff = run_handoffs[0]
     with handoff_span(from_agent=public_agent.name) as span_handoff:
         handoff = actual_handoff.handoff
+        if handoff._agent_ref is not None:
+            target_agent = handoff._agent_ref()
+            if target_agent is not None:
+                register_agent_tool_configuration(target_agent)
         context_wrapper._mark_tool_invocation_executed(
             actual_handoff.tool_call,
             invocation_role="handoff",
@@ -585,6 +590,7 @@ async def execute_handoffs(
         new_agent: Agent[Any] = await handoff.on_invoke_handoff(
             context_wrapper, actual_handoff.tool_call.arguments
         )
+        register_agent_tool_configuration(new_agent)
         span_handoff.span_data.to_agent = new_agent.name
         if multiple_handoffs:
             requested_agents = [handoff.handoff.agent_name for handoff in run_handoffs]
@@ -1224,6 +1230,12 @@ async def resolve_interrupted_turn(
     ) -> None:
         if isinstance(call_id, str) and call_id in rejected_function_call_ids:
             return
+        approval_record = (
+            function_approval_items_by_call_id.get(call_id)
+            or approval_items_by_call_id.get(call_id)
+            if call_id
+            else None
+        )
         rejection_message = REJECTION_MESSAGE
         if call_id:
             tool_namespace = get_tool_call_namespace(tool_call)
@@ -1236,10 +1248,7 @@ async def resolve_interrupted_turn(
                 call_id=call_id,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
-                existing_pending=(
-                    function_approval_items_by_call_id.get(call_id)
-                    or approval_items_by_call_id.get(call_id)
-                ),
+                existing_pending=approval_record,
             )
         rejected_function_outputs.append(
             function_rejection_item(
@@ -1248,7 +1257,11 @@ async def resolve_interrupted_turn(
                 rejection_message=rejection_message,
                 output_json_schema=function_tool.output_json_schema,
                 scope_id=tool_state_scope_id,
-                tool_origin=get_function_tool_origin(function_tool),
+                tool_origin=(
+                    approval_record.tool_origin
+                    if approval_record is not None
+                    else get_function_tool_origin(function_tool)
+                ),
             )
         )
         if isinstance(call_id, str):
@@ -2160,8 +2173,26 @@ async def resolve_interrupted_turn(
             else True
         )
         stale_function = stale_functions.get(call_id)
+        original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
         if current_function is not None:
+            current_binding = current_function.function_tool._mcp_tool_binding
+            missing_mcp_binding = (
+                original_binding is None
+                and approval_record is not None
+                and approval_record.tool_origin is not None
+                and approval_record.tool_origin.type == ToolOriginType.MCP
+            )
+            # Rejected calls cannot execute. MCP approvals must not authorize a
+            # different MCP recipient or a local replacement's approval policy.
+            if approval_status is not False and (
+                missing_mcp_binding or original_binding != current_binding
+            ):
+                raise UserError(
+                    "Cannot resume a local MCP tool call with a missing or different recipient "
+                    "binding. Restore the original MCP server configuration and tool listing, "
+                    "or start a new run."
+                )
             reconciled_functions.append(_rebind_function_run(stale_function, current_function))
             continue
 
@@ -2180,6 +2211,11 @@ async def resolve_interrupted_turn(
                 ),
             )
         if current_handoff is not None and approval_status is True:
+            if original_binding is not None:
+                raise UserError(
+                    "Cannot resume a local MCP tool call as a handoff. Restore the original "
+                    "tool configuration, or start a new run."
+                )
             if stale_function is not None:
                 _reject_nested_replacement(stale_function)
             reconciled_handoffs.append(current_handoff)
@@ -3440,6 +3476,11 @@ def process_model_response(
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],
         function_tools_not_found=function_tools_not_found,
+        mcp_tool_bindings={
+            run.tool_call.call_id: binding
+            for run in functions
+            if (binding := run.function_tool._mcp_tool_binding) is not None
+        },
     )
 
 
