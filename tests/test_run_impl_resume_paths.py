@@ -1487,6 +1487,57 @@ async def test_fresh_streamed_handoff_stops_transition_on_real_tripwire() -> Non
 
 
 @pytest.mark.asyncio
+async def test_fresh_streamed_handoff_tripwire_state_has_no_speculative_items() -> None:
+    """Sibling to test_fresh_streamed_handoff_stops_transition_on_real_tripwire: that test only
+    checks state._current_agent, not the item history to_state() actually serializes. Not
+    advancing current_agent doesn't undo the turn's bookkeeping: the handoff's function-call and
+    function-call-output items, its model response, and its raw response are all accumulated
+    into streamed_result BEFORE the guardrail's boolean result is even inspected. Left in place,
+    to_state() would still hand back a RunState carrying a completed handoff built on
+    guardrail-rejected input -- and Runner.run() always treats a RunState input as an
+    already-resumed run (a plain isinstance check), so resuming it would skip triage's own input
+    guardrails entirely and process that rejected input under delegate. The state returned by
+    to_state() after a tripwire must therefore look exactly like turn 0 never ran.
+    """
+
+    @input_guardrail(run_in_parallel=True)
+    async def slow_tripping_guardrail(
+        ctx: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.3)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        input_guardrails=[slow_tripping_guardrail],
+    )
+
+    streamed_result = Runner.run_streamed(
+        triage, "hello", run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        async for _ in streamed_result.stream_events():
+            await asyncio.sleep(0.05)
+
+    state = streamed_result.to_state()
+    # Turn 0's handoff call/output must not have leaked into the resumable state: a fresh
+    # run's pre-turn snapshot is empty, so surviving items here would BE the speculative pair.
+    assert state._generated_items == []
+    assert state._session_items == []
+    assert state._model_responses == []
+
+
+@pytest.mark.asyncio
 async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume() -> None:
     """A checkpointed handoff batch that fails to append and later settles via a separate,
     standalone resume_pending_session_write() call (the generic resume-startup path in

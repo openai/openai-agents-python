@@ -377,6 +377,45 @@ def _publish_streamed_result_agent(
     streamed_result._current_agent_output_schema = get_output_schema(agent)
 
 
+def _trim_to_owner_starts(
+    streamed_result: RunResultStreaming,
+    run_state: RunState[Any] | None,
+    owner_starts: _BlockedOutputOwnerStarts,
+) -> None:
+    """Discard everything a turn appended, back to its pre-turn snapshot.
+
+    Used when a turn's outcome is rejected after its items were already
+    accumulated into ``streamed_result`` (and ``run_state``, if resuming) --
+    currently only the handoff-branch input-guardrail tripwire above. Reuses
+    ``_BlockedOutputOwnerStarts``' pre-turn lengths (already captured for the
+    same turn's blocked-output handling) rather than introducing a second
+    snapshot mechanism; every field here is one that ``to_state()`` reads
+    directly off ``streamed_result``, so trimming these is sufficient to make
+    a rejected turn invisible to a caller who calls ``to_state()`` on the
+    failed result.
+    """
+
+    def _trim(items: list[Any], start: int | None) -> None:
+        if start is not None and 0 <= start <= len(items):
+            del items[start:]
+
+    _trim(streamed_result.new_items, owner_starts.streamed_new_items)
+    _trim(streamed_result._model_input_items, owner_starts.streamed_model_input_items)
+    _trim(streamed_result.raw_responses, owner_starts.streamed_raw_responses)
+    _trim(
+        streamed_result.tool_output_guardrail_results,
+        owner_starts.streamed_tool_output_guardrail_results,
+    )
+    if run_state is not None:
+        _trim(run_state._generated_items, owner_starts.run_state_generated_items)
+        _trim(run_state._session_items, owner_starts.run_state_session_items)
+        _trim(run_state._model_responses, owner_starts.run_state_model_responses)
+        _trim(
+            run_state._tool_output_guardrail_results,
+            owner_starts.run_state_tool_output_guardrail_results,
+        )
+
+
 async def _save_resumed_stream_items(
     *,
     session: Session | None,
@@ -1903,6 +1942,22 @@ async def start_streaming(
                             None,
                         )
                         if first_trigger is not None:
+                            # Not raising the transition doesn't undo it: this turn's model
+                            # response, generated items, and session items were already
+                            # accumulated into streamed_result (and run_state, if resuming)
+                            # ABOVE, before we knew the guardrail had rejected the original
+                            # input. Left in place, to_state() would still serialize a
+                            # speculative handoff turn built on rejected input -- and
+                            # Runner.run() always treats a RunState input as already-resumed
+                            # (a plain isinstance check), skipping the starting agent's input
+                            # guardrails entirely regardless of this turn's outcome. Trim every
+                            # owner back to its pre-turn length (the same snapshot
+                            # blocked_output_owner_starts already took for this exact turn) so
+                            # a caller who calls to_state() on the failed result gets back
+                            # exactly the state as of before this turn ran, not one turn ahead.
+                            _trim_to_owner_starts(
+                                streamed_result, run_state, blocked_output_owner_starts
+                            )
                             raise InputGuardrailTripwireTriggered(first_trigger)
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
