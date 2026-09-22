@@ -1,6 +1,6 @@
 openai-agents
 httpx2>=2.13.0
-pyjwt>=2.13.0
+pyjwt>=2.14.0
 python-multipart>=0.0.32
 urllib3>=2.7.0
 fastapi
