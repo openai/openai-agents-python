@@ -2015,6 +2015,17 @@ override the methods you need.</p>
     <div class="doc doc-contents ">
 
         <p>Called before the agent is invoked. Called each time the current agent changes.</p>
+<p>Keep <code>agent.tools</code> unchanged when sharing an agent across concurrent runs.
+Tool-list replacement while concurrent runs use the same agent raises <code>UserError</code>
+before newly resolved tools reach the model. In-place mutations of a shared list are not
+isolated. Changes to shared tool objects, including <code>FunctionTool.is_enabled</code> and
+<code>FunctionTool.needs_approval</code>, are not isolated or detected. For per-run configuration
+changes, use an independent agent, tools list, and tool objects. Copying only the list
+still shares its tool objects. Alternatively, keep the tool configuration unchanged and
+use context-based enablement and approval callbacks.</p>
+<p>When restoring a serialized <code>RunState</code>, rebuild any hook-created tools on the supplied
+agents before loading the state. Serialized state does not contain Python tool definitions,
+and start hooks are not replayed before pending approval calls are resolved.</p>
 
 
 <p><span class="doc-section-title">引数：</span></p>
@@ -2371,6 +2382,17 @@ set this on <code>agent.hooks</code> to receive events for that specific agent.<
 
         <p>Called before the agent is invoked. Called each time the running agent is changed to this
 agent.</p>
+<p>Keep <code>agent.tools</code> unchanged when sharing an agent across concurrent runs.
+Tool-list replacement while concurrent runs use the same agent raises <code>UserError</code>
+before newly resolved tools reach the model. In-place mutations of a shared list are not
+isolated. Changes to shared tool objects, including <code>FunctionTool.is_enabled</code> and
+<code>FunctionTool.needs_approval</code>, are not isolated or detected. For per-run configuration
+changes, use an independent agent, tools list, and tool objects. Copying only the list
+still shares its tool objects. Alternatively, keep the tool configuration unchanged and
+use context-based enablement and approval callbacks.</p>
+<p>When restoring a serialized <code>RunState</code>, rebuild any hook-created tools on the supplied
+agents before loading the state. Serialized state does not contain Python tool definitions,
+and start hooks are not replayed before pending approval calls are resolved.</p>
 
 
 <p><span class="doc-section-title">引数：</span></p>
