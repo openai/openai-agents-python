@@ -8,4 +8,4 @@ starlette>=1.6.0
 uvicorn[standard]
 websockets
 python-dotenv>=1.2.3
-twilio>=9,<10
+twilio>=9.11.1,<10
