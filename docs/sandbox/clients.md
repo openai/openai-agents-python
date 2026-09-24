@@ -2,10 +2,6 @@
 
 Use this page to choose where sandbox work should run. In most cases, the `SandboxAgent` definition stays the same while the sandbox client and client-specific options change in [`SandboxRunConfig`][agents.run_config.SandboxRunConfig].
 
-!!! warning "Beta feature"
-
-    Sandbox agents are in beta. Expect details of the API, defaults, and supported capabilities to change before general availability, and expect more advanced features over time.
-
 ## Decision guide
 
 <div class="sandbox-nowrap-first-column-table" markdown="1">

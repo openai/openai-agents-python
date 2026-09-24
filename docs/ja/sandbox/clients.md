@@ -6,10 +6,6 @@ search:
 
 サンドボックスでの作業を実行する場所を選択するには、このページを使用します。ほとんどの場合、`SandboxAgent` の定義はそのままで、[`SandboxRunConfig`][agents.run_config.SandboxRunConfig] 内のサンドボックスクライアントとクライアント固有のオプションのみを変更します。
 
-!!! warning "ベータ機能"
-
-    サンドボックスエージェントはベータ版です。一般提供までに API の詳細、デフォルト、サポートされる機能が変更される可能性があります。また、今後さらに高度な機能が追加される予定です。
-
 ## 選択ガイド {#decision-guide}
 
 <div class="sandbox-nowrap-first-column-table" markdown="1">

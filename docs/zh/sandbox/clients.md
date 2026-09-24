@@ -6,10 +6,6 @@ search:
 
 使用本页选择沙箱工作应在何处运行。在大多数情况下，`SandboxAgent` 定义保持不变，而沙箱客户端及其特定选项会在 [`SandboxRunConfig`][agents.run_config.SandboxRunConfig] 中更改。
 
-!!! warning "Beta 功能"
-
-    沙箱智能体目前处于 Beta 阶段。在正式发布前，API 细节、默认值和支持的功能可能会发生变化，并且后续会逐步提供更多高级功能。
-
 ## 决策指南 {#decision-guide}
 
 <div class="sandbox-nowrap-first-column-table" markdown="1">

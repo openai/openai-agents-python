@@ -147,11 +147,11 @@ For structured-output agents, the handler can return a value matching the agent'
 
 ### 0.14.0
 
-This minor release does **not** introduce a breaking change, but it adds a major new beta feature area: Sandbox Agents, plus the runtime, backend, and documentation support needed to use them across local, containerized, and hosted environments.
+This minor release does **not** introduce a breaking change, but it adds a major new feature area: Sandbox Agents, plus the runtime, backend, and documentation support needed to use them across local, containerized, and hosted environments.
 
 Highlights:
 
--   Added a new beta sandbox runtime surface centered on `SandboxAgent`, `Manifest`, and `SandboxRunConfig`, letting agents work inside persistent isolated workspaces with files, directories, Git repos, mounts, snapshots, and resume support.
+-   Added a new sandbox runtime surface centered on `SandboxAgent`, `Manifest`, and `SandboxRunConfig`, letting agents work inside persistent isolated workspaces with files, directories, Git repos, mounts, snapshots, and resume support.
 -   Added sandbox execution backends for local and containerized development via `UnixLocalSandboxClient` and `DockerSandboxClient`, plus hosted provider integrations for Blaxel, Cloudflare, Daytona, E2B, Modal, Runloop, and Vercel through optional dependency extras in the Python package.
 -   Added sandbox memory support so future runs can reuse lessons from prior runs, with progressive disclosure, multi-turn grouping, configurable isolation boundaries, and persisted-memory examples including S3-backed workflows.
 -   Added a broader workspace and resume model, including local and synthetic workspace entries, remote storage mounts for S3/R2/GCS/Azure Blob Storage/S3 Files, portable snapshots, and resume flows via `RunState`, `SandboxSessionState`, or saved snapshots.
