@@ -1208,7 +1208,7 @@
   <a href="#example-pause-approve-resume" class="md-nav__link">
     <span class="md-ellipsis">
       
-        예제: 일시 중지, 승인, 재개
+        예제: 일시 중지, 승인 및 재개
       
     </span>
   </a>
@@ -1235,13 +1235,41 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="장기 실행 승인">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#keep-approval-state-on-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        서버의 승인 상태 유지
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serialization-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        직렬화 옵션
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
   <a href="#versioning-pending-tasks" class="md-nav__link">
     <span class="md-ellipsis">
       
-        대기 중인 작업의 버전 관리
+        보류 중인 작업의 버전 관리
       
     </span>
   </a>
@@ -1742,7 +1770,7 @@
   <a href="#example-pause-approve-resume" class="md-nav__link">
     <span class="md-ellipsis">
       
-        예제: 일시 중지, 승인, 재개
+        예제: 일시 중지, 승인 및 재개
       
     </span>
   </a>
@@ -1769,13 +1797,41 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="장기 실행 승인">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#keep-approval-state-on-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        서버의 승인 상태 유지
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#serialization-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        직렬화 옵션
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
   <a href="#versioning-pending-tasks" class="md-nav__link">
     <span class="md-ellipsis">
       
-        대기 중인 작업의 버전 관리
+        보류 중인 작업의 버전 관리
       
     </span>
   </a>
@@ -1851,13 +1907,13 @@
 
 
 <h1 id="hitl">휴먼인더루프 (HITL)</h1>
-<p>휴먼인더루프 (HITL) 흐름을 사용하면 사람이 민감한 도구 호출을 승인하거나 거부할 때까지 에이전트 실행을 일시 중지할 수 있습니다. 도구는 승인이 필요한 시점을 선언하고, 실행 결과는 대기 중인 승인을 인터럽션(중단 처리)으로 표시하며, <code>RunState</code>을 사용하면 일시 중지된 실행을 직렬화하고 결정이 내려진 후 재개할 수 있습니다.</p>
-<p>이 승인 인터페이스는 현재 최상위 에이전트에만 국한되지 않고 전체 실행에 적용됩니다. 도구가 현재 에이전트, 핸드오프를 통해 도달한 에이전트 또는 중첩된 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에 속하는 경우에도 같은 패턴이 적용됩니다. 중첩된 <code>Agent.as_tool()</code>의 경우에도 인터럽션은 외부 실행에 표시되므로, 외부 <code>RunState</code>에서 승인하거나 거부한 후 원래의 최상위 실행을 재개합니다.</p>
-<p><code>Agent.as_tool()</code>에서는 두 계층에서 승인이 발생할 수 있습니다. 에이전트 도구 자체가 <code>Agent.as_tool(..., needs_approval=...)</code>를 통해 승인을 요구할 수 있고, 중첩된 실행이 시작된 후 중첩 에이전트 내부의 도구가 자체 승인을 요청할 수도 있습니다. 두 경우 모두 동일한 외부 실행 인터럽션 흐름을 통해 처리됩니다.</p>
-<p>이 페이지에서는 <code>interruptions</code>을 통한 수동 승인 흐름을 중점적으로 설명합니다. 애플리케이션이 코드에서 결정할 수 있다면 일부 도구 유형은 프로그래밍 방식의 승인 콜백도 지원하므로 실행을 일시 중지하지 않고 계속할 수 있습니다.</p>
+<p>휴먼인더루프 (HITL) 흐름을 사용하면 사람이 민감한 도구 호출을 승인하거나 거부할 때까지 에이전트 실행을 일시 중지할 수 있습니다. 도구는 승인이 필요한 시점을 선언하고, 실행 결과에는 보류 중인 승인이 인터럽션으로 노출되며, <code>RunState</code> 기능을 사용하면 일시 중지된 실행을 직렬화하고 결정이 내려진 후 재개할 수 있습니다.</p>
+<p>이 승인 범위는 현재 최상위 에이전트로 제한되지 않고 실행 전체에 적용됩니다. 도구가 현재 에이전트에 속한 경우, 핸드오프를 통해 도달한 에이전트에 속한 경우, 중첩된 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에 속한 경우에도 같은 패턴이 적용됩니다. 중첩된 <code>Agent.as_tool()</code> 사례에서도 인터럽션은 외부 실행에 노출되므로, 외부 <code>RunState</code> 항목에서 승인하거나 거부한 후 원래 최상위 실행을 재개합니다.</p>
+<p><code>Agent.as_tool()</code> 기능을 사용하면 두 계층에서 승인이 발생할 수 있습니다. 에이전트 도구 자체가 <code>Agent.as_tool(..., needs_approval=...)</code> 설정을 통해 승인을 요구할 수 있고, 중첩 실행이 시작된 후 중첩된 에이전트 내부의 도구가 자체 승인을 요청할 수도 있습니다. 두 경우 모두 동일한 외부 실행 인터럽션 흐름을 통해 처리됩니다.</p>
+<p>이 페이지에서는 <code>interruptions</code> 기능을 통한 수동 승인 흐름을 중점적으로 설명합니다. 애플리케이션이 코드에서 결정을 내릴 수 있다면 일부 도구 유형은 프로그래밍 방식의 승인 콜백도 지원하므로 실행을 일시 중지하지 않고 계속할 수 있습니다.</p>
 <h2 id="marking-tools-that-need-approval">승인이 필요한 도구 표시</h2>
-<p>항상 승인을 요구하려면 <code>needs_approval</code>을 <code>True</code>로 설정하고, 호출별로 결정하려면 비동기 함수를 제공합니다. 호출 가능한 객체는 실행 컨텍스트, 파싱된 도구 매개변수, 도구 호출 ID를 받습니다.</p>
-<p>SDK가 인수를 안전하게 검사할 수 없으면 호출 가능한 승인 규칙은 안전을 위해 승인을 요구합니다. 인수가 누락되거나 비어 있거나 공백만 포함하거나, JSON 형식이 잘못되었거나, 유효한 JSON이지만 객체가 아니거나(예: <code>null</code> 또는 목록), <code>NaN</code>, <code>Infinity</code>, <code>-Infinity</code>와 같은 비표준 상수를 포함하는 경우 호출 가능한 객체는 호출되지 않으며 해당 호출에는 수동 승인이 필요합니다. 이 동작은 Runner와 Realtime 도구 호출에서 동일합니다.</p>
+<p>항상 승인을 요구하려면 <code>needs_approval</code> 값을 <code>True</code> 값으로 설정하고, 호출별로 결정하려면 비동기 함수를 제공합니다. 호출 가능 객체는 실행 컨텍스트, 파싱된 도구 매개변수, 도구 호출 ID를 받습니다.</p>
+<p>SDK가 인수를 안전하게 검사할 수 없으면 호출 가능한 승인 규칙은 안전을 위해 승인이 필요한 것으로 처리됩니다. 인수가 없거나 비어 있는 경우, 공백만 포함된 경우, 잘못된 형식의 JSON인 경우, 유효한 JSON이지만 객체가 아닌 경우(예: <code>null</code> 또는 목록), <code>NaN</code>, <code>Infinity</code>, <code>-Infinity</code> 같은 비표준 상수를 포함하는 경우에는 호출 가능 객체가 실행되지 않으며 해당 호출에 수동 승인이 필요합니다. 이 동작은 Runner와 Realtime 도구 호출에서 동일합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
@@ -1882,7 +1938,7 @@
 </span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">cancel_order</span><span class="p">,</span> <span class="n">send_email</span><span class="p">],</span>
 </span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="p">)</span>
 </span></code></pre></div>
-<p><code>needs_approval</code>은 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a>, <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool</code></a>, <a class="autorefs autorefs-internal" title="ShellTool
+<p><code>needs_approval</code> 기능은 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a>, <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool</code></a>, <a class="autorefs autorefs-internal" title="ShellTool
 
 
   
@@ -1892,51 +1948,51 @@
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.ApplyPatchTool"><code>ApplyPatchTool</code></a>에서 사용할 수 있습니다. 로컬 MCP 서버도 <a class="autorefs autorefs-internal" title="MCPServerStdio" href="../../ref/mcp/server/#agents.mcp.server.MCPServerStdio"><code>MCPServerStdio</code></a>, <a class="autorefs autorefs-internal" title="MCPServerSse" href="../../ref/mcp/server/#agents.mcp.server.MCPServerSse"><code>MCPServerSse</code></a>, <a class="autorefs autorefs-internal" title="MCPServerStreamableHttp" href="../../ref/mcp/server/#agents.mcp.server.MCPServerStreamableHttp"><code>MCPServerStreamableHttp</code></a>의 <code>require_approval</code>을 통해 승인을 지원합니다. 호스티드 MCP 서버는 <code>tool_config={"require_approval": "always"}</code> 및 선택적 <code>on_approval_request</code> 콜백과 함께 <a class="autorefs autorefs-internal" title="HostedMCPTool
+  " href="../../ref/tool/#agents.tool.ApplyPatchTool"><code>ApplyPatchTool</code></a>에서 사용할 수 있습니다. 로컬 MCP 서버도 <a class="autorefs autorefs-internal" title="MCPServerStdio" href="../../ref/mcp/server/#agents.mcp.server.MCPServerStdio"><code>MCPServerStdio</code></a>, <a class="autorefs autorefs-internal" title="MCPServerSse" href="../../ref/mcp/server/#agents.mcp.server.MCPServerSse"><code>MCPServerSse</code></a>, <a class="autorefs autorefs-internal" title="MCPServerStreamableHttp" href="../../ref/mcp/server/#agents.mcp.server.MCPServerStreamableHttp"><code>MCPServerStreamableHttp</code></a>의 <code>require_approval</code> 설정을 통해 승인을 지원합니다. 호스티드 MCP 서버는 <code>tool_config={"require_approval": "always"}</code> 설정과 선택적 <code>on_approval_request</code> 콜백이 포함된 <a class="autorefs autorefs-internal" title="HostedMCPTool
 
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a>을 통해 승인을 지원합니다. Shell 및 apply_patch 도구는 인터럽션을 표시하지 않고 자동 승인하거나 자동 거부하려는 경우 <code>on_approval</code> 콜백을 허용합니다.</p>
+  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a> 기능을 통해 승인을 지원합니다. 셸 및 apply_patch 도구는 인터럽션을 노출하지 않고 자동으로 승인하거나 거부하려는 경우 <code>on_approval</code> 콜백을 받습니다.</p>
 <h2 id="how-the-approval-flow-works">승인 흐름의 작동 방식</h2>
 <ol>
-<li>모델이 도구 호출을 생성하면 러너가 해당 승인 규칙(<code>needs_approval</code>, <code>require_approval</code> 또는 이에 해당하는 호스티드 MCP 규칙)을 평가합니다.</li>
+<li>모델이 도구 호출을 생성하면 러너가 해당 승인 규칙(<code>needs_approval</code>, <code>require_approval</code> 또는 호스티드 MCP의 동등한 설정)을 평가합니다.</li>
 <li>해당 도구 호출에 대한 승인 결정이 이미 <a class="autorefs autorefs-internal" title="RunContextWrapper
 
 
   
       dataclass
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a>에 저장되어 있으면 러너는 승인을 요청하지 않고 계속 진행합니다. 호출별 승인은 특정 호출 ID로 범위가 제한됩니다. 동일한 도구 식별자에 대한 이후 호출에도 실행이 끝날 때까지 같은 결정을 유지하려면 <code>always_approve=True</code> 또는 <code>always_reject=True</code>을 전달합니다.</li>
-<li>승인 규칙에 따라 승인이 필요하지만 해당 도구 호출에 대한 결정이 저장되어 있지 않으면 실행이 일시 중지되고, <code>RunResult.interruptions</code>(또는 <code>RunResultStreaming.interruptions</code>)에 <code>agent.name</code>, <code>tool_name</code>, <code>arguments</code> 등의 세부 정보가 포함된 <a class="autorefs autorefs-internal" title="ToolApprovalItem
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a> 객체에 저장되어 있다면 러너는 확인을 요청하지 않고 계속 진행합니다. 호출별 승인은 특정 호출 ID에만 적용됩니다. 실행의 남은 기간 동안 동일한 도구 식별자를 사용하는 이후 호출에도 같은 결정을 유지하려면 <code>always_approve=True</code> 또는 <code>always_reject=True</code> 값을 전달합니다.</li>
+<li>승인 규칙에 따라 승인이 필요하지만 해당 도구 호출에 대한 결정이 저장되어 있지 않으면 실행이 일시 중지되고, <code>RunResult.interruptions</code> 또는 <code>RunResultStreaming.interruptions</code> 결과에 <code>agent.name</code>, <code>tool_name</code>, <code>arguments</code> 같은 세부 정보가 포함된 <a class="autorefs autorefs-internal" title="ToolApprovalItem
 
 
   
       dataclass
-  " href="../../ref/items/#agents.items.ToolApprovalItem"><code>ToolApprovalItem</code></a> 항목이 들어갑니다. 여기에는 핸드오프 후 또는 중첩된 <code>Agent.as_tool()</code> 실행 내에서 요청된 승인도 포함됩니다.</li>
-<li><code>result.to_state()</code>를 사용해 결과를 <code>RunState</code>로 변환하고, <code>state.approve(...)</code> 또는 <code>state.reject(...)</code>을 호출한 다음, <code>Runner.run(agent, state)</code> 또는 <code>Runner.run_streamed(agent, state)</code>을 사용해 재개합니다. 여기서 <code>agent</code>는 해당 실행의 원래 최상위 에이전트입니다.</li>
-<li>재개된 실행은 중단된 지점부터 계속되며, 새로운 승인이 필요하면 이 흐름에 다시 진입합니다.</li>
+  " href="../../ref/items/#agents.items.ToolApprovalItem"><code>ToolApprovalItem</code></a> 항목이 들어갑니다. 여기에는 핸드오프 후 또는 중첩된 <code>Agent.as_tool()</code> 실행 내부에서 발생한 승인도 포함됩니다.</li>
+<li><code>result.to_state()</code> 기능을 사용해 결과를 <code>RunState</code> 객체로 변환하고, <code>state.approve(...)</code> 또는 <code>state.reject(...)</code> 기능을 호출한 다음, <code>Runner.run(agent, state)</code> 또는 <code>Runner.run_streamed(agent, state)</code> 기능으로 재개합니다. 이때 <code>agent</code> 항목은 해당 실행의 원래 최상위 에이전트입니다.</li>
+<li>재개된 실행은 중단된 지점부터 계속되며, 새로운 승인이 필요하면 이 흐름으로 다시 진입합니다.</li>
 </ol>
-<p><code>always_approve=True</code> 또는 <code>always_reject=True</code>으로 생성한 지속 결정은 실행 상태에 저장되므로, 나중에 같은 일시 중지 실행을 재개할 때 <code>state.to_string()</code> / <code>RunState.from_string(...)</code> 및 <code>state.to_json()</code> / <code>RunState.from_json(...)</code>을 거쳐도 유지됩니다.</p>
+<p><code>always_approve=True</code> 또는 <code>always_reject=True</code> 기능으로 생성한 고정 결정은 실행 상태에 저장되므로, 나중에 동일한 일시 중지 실행을 재개할 때 <code>state.to_string()</code> / <code>RunState.from_string(...)</code> 및 <code>state.to_json()</code> / <code>RunState.from_json(...)</code> 과정을 거쳐도 유지됩니다.</p>
 <p><a class="autorefs autorefs-internal" title="HostedMCPTool
 
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a>의 승인 요청인 경우 Agents SDK는 <code>server_label</code>와 도구 이름의 조합으로 지속 도구 결정을 식별합니다. 한 호스티드 MCP 서버의 <code>lookup_account</code>에 대한 항상 승인 결정은 다른 서버에 있는 같은 이름의 도구를 승인하지 않습니다. Agents SDK는 호스티드 MCP 승인 요청에 비어 있지 않은 두 식별 필드가 모두 포함된 경우에만 항상 승인 또는 항상 거부 결정을 유지합니다.</p>
-<p>동일한 처리 단계에서 대기 중인 모든 승인을 해결할 필요는 없습니다. <code>interruptions</code>에는 일반 함수 도구, 호스티드 MCP 승인, 중첩된 <code>Agent.as_tool()</code> 승인이 함께 포함될 수 있습니다. 일부 항목만 승인하거나 거부한 후 다시 실행하면 해결된 호출은 계속 진행되고, 해결되지 않은 호출은 <code>interruptions</code>에 남아 실행을 다시 일시 중지합니다.</p>
+  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a> 기능의 승인 요청에서는 Agents SDK가 <code>server_label</code> 값과 도구 이름의 조합으로 고정 도구 결정을 식별합니다. 한 호스티드 MCP 서버의 <code>lookup_account</code> 도구를 항상 승인하도록 결정해도 다른 서버에서 이름이 같은 도구까지 승인되지는 않습니다. Agents SDK는 호스티드 MCP 승인 요청에 비어 있지 않은 두 식별 필드가 모두 포함된 경우에만 항상 승인 또는 항상 거부 결정을 유지합니다.</p>
+<p>보류 중인 모든 승인을 한 번의 처리에서 해결할 필요는 없습니다. <code>interruptions</code> 목록에는 일반 함수 도구, 호스티드 MCP 승인, 중첩된 <code>Agent.as_tool()</code> 승인이 함께 포함될 수 있습니다. 일부 항목만 승인하거나 거부한 후 다시 실행하면 해결된 호출은 계속 진행되고, 해결되지 않은 호출은 <code>interruptions</code> 목록에 남아 실행을 다시 일시 중지합니다.</p>
 <h2 id="custom-rejection-messages">사용자 지정 거부 메시지</h2>
-<p>기본적으로 거부된 도구 호출은 SDK의 표준 거부 텍스트를 실행에 반환합니다. 이 메시지는 두 계층에서 사용자 지정할 수 있습니다.</p>
+<p>기본적으로 거부된 도구 호출은 SDK의 표준 거부 텍스트를 실행에 다시 반환합니다. 다음 두 계층에서 이 메시지를 사용자 지정할 수 있습니다.</p>
 <ul>
-<li>실행 전체의 대체 메시지: 전체 실행에서 승인 거부 시 모델에 표시되는 기본 메시지를 제어하려면 <a class="autorefs autorefs-internal" title="tool_error_formatter
+<li>실행 전체 대체 설정: 전체 실행에서 승인 거부 시 모델에 표시되는 기본 메시지를 제어하려면 <a class="autorefs autorefs-internal" title="tool_error_formatter
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.tool_error_formatter"><code>RunConfig.tool_error_formatter</code></a>을 설정합니다.</li>
-<li>호출별 재정의: 특정 도구 호출의 거부 시 다른 메시지를 표시하려면 <code>state.reject(...)</code>에 <code>rejection_message=...</code>을 전달합니다.</li>
+  " href="../../ref/run/#agents.run.RunConfig.tool_error_formatter"><code>RunConfig.tool_error_formatter</code></a> 값을 설정합니다.</li>
+<li>호출별 재정의: 특정 도구 호출 하나가 거부될 때 다른 메시지를 표시하려면 <code>state.reject(...)</code> 기능에 <code>rejection_message=...</code> 값을 전달합니다.</li>
 </ul>
-<p>둘 다 제공되면 호출별 <code>rejection_message</code>이 실행 전체 포매터보다 우선합니다.</p>
+<p>둘 다 제공하면 호출별 <code>rejection_message</code> 값이 실행 전체 포매터보다 우선합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">ToolErrorFormatterArgs</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
@@ -1954,9 +2010,9 @@
 </span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">rejection_message</span><span class="o">=</span><span class="s2">&quot;Publish action was canceled because the reviewer denied approval.&quot;</span><span class="p">,</span>
 </span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>두 계층을 함께 사용하는 전체 예제는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/human_in_the_loop_custom_rejection.py"><code>examples/agent_patterns/human_in_the_loop_custom_rejection.py</code></a>을 참조하세요.</p>
+<p>두 계층을 함께 사용하는 전체 예제는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/human_in_the_loop_custom_rejection.py"><code>examples/agent_patterns/human_in_the_loop_custom_rejection.py</code></a>에서 확인할 수 있습니다.</p>
 <h2 id="automatic-approval-decisions">자동 승인 결정</h2>
-<p>수동 <code>interruptions</code>은 가장 일반적인 패턴이지만 유일한 패턴은 아닙니다.</p>
+<p>수동 <code>interruptions</code> 방식이 가장 일반적인 패턴이지만 유일한 방법은 아닙니다.</p>
 <ul>
 <li>로컬 <a class="autorefs autorefs-internal" title="ShellTool
 
@@ -1968,37 +2024,37 @@
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.ApplyPatchTool"><code>ApplyPatchTool</code></a>은 <code>on_approval</code>를 사용하여 코드에서 즉시 승인하거나 거부할 수 있습니다.</li>
+  " href="../../ref/tool/#agents.tool.ApplyPatchTool"><code>ApplyPatchTool</code></a> 도구는 <code>on_approval</code> 기능을 사용해 코드에서 즉시 승인하거나 거부할 수 있습니다.</li>
 <li><a class="autorefs autorefs-internal" title="HostedMCPTool
 
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a>은 동일한 종류의 프로그래밍 방식 결정을 위해 <code>on_approval_request</code>과 함께 <code>tool_config={"require_approval": "always"}</code>을 사용할 수 있습니다.</li>
-<li>일반 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a> 도구와 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a>은 이 페이지의 수동 인터럽션 흐름을 사용합니다.</li>
+  " href="../../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a> 기능은 <code>on_approval_request</code> 설정과 함께 <code>tool_config={"require_approval": "always"}</code> 기능을 사용해 같은 방식의 프로그래밍 결정을 내릴 수 있습니다.</li>
+<li>일반 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a> 도구와 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 기능은 이 페이지에서 설명하는 수동 인터럽션 흐름을 사용합니다.</li>
 </ul>
-<p>이러한 콜백이 결정을 반환하면 사람의 응답을 기다리며 일시 중지하지 않고 실행이 계속됩니다. Realtime 및 음성 세션 API에 대해서는 <a href="../realtime/guide/">Realtime 가이드</a>의 승인 흐름을 참조하세요.</p>
+<p>이러한 콜백이 결정을 반환하면 사람의 응답을 기다리기 위해 일시 중지하지 않고 실행이 계속됩니다. Realtime 및 음성 세션 API에 대해서는 <a href="../realtime/guide/">Realtime 가이드</a>의 승인 흐름을 참조하세요.</p>
 <h2 id="streaming-and-sessions">스트리밍 및 세션</h2>
-<p>동일한 인터럽션 흐름이 스트리밍 실행에서도 작동합니다. 스트리밍 실행이 일시 중지된 후 반복자가 완료될 때까지 <a class="autorefs autorefs-internal" title="stream_events
+<p>동일한 인터럽션 흐름이 스트리밍 실행에서도 작동합니다. 스트리밍 실행이 일시 중지된 후 반복자가 종료될 때까지 <a class="autorefs autorefs-internal" title="stream_events
 
 
   
       async
-  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>RunResultStreaming.stream_events()</code></a>을 계속 소비하고, <a class="autorefs autorefs-internal" title="interruptions
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>RunResultStreaming.stream_events()</code></a> 항목을 계속 소비하고, <a class="autorefs autorefs-internal" title="interruptions
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a>을 검사해 해결한 다음, 재개된 출력도 계속 스트리밍하려면 <a class="autorefs autorefs-internal" title="run_streamed
+  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> 항목을 검사해 해결한 다음, 재개된 출력도 계속 스트리밍하려면 <a class="autorefs autorefs-internal" title="run_streamed
 
 
   
       classmethod
-  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed(...)</code></a>으로 재개합니다. 이 패턴의 스트리밍 버전은 <a href="../streaming/">스트리밍</a>을 참조하세요.</p>
-<p>세션도 사용 중이라면 <code>RunState</code>에서 재개할 때 동일한 세션 인스턴스를 계속 전달하거나, 동일한 세션 ID와 백킹 스토어를 사용하도록 구성된 다른 세션 객체를 전달합니다. 그러면 재개된 턴이 동일하게 저장된 대화 기록에 추가됩니다. 세션 수명 주기에 대한 자세한 내용은 <a href="../sessions/">세션</a>을 참조하세요.</p>
-<h2 id="example-pause-approve-resume">예제: 일시 중지, 승인, 재개</h2>
-<p>아래 코드 조각은 JavaScript HITL 가이드의 흐름을 따릅니다. 도구에 승인이 필요하면 일시 중지하고, 상태를 디스크에 저장한 뒤 다시 불러오며, 결정을 수집한 후 재개합니다.</p>
+  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed(...)</code></a> 기능으로 재개합니다. 이 패턴의 스트리밍 버전은 <a href="../streaming/">스트리밍</a>을 참조하세요.</p>
+<p>세션도 사용 중이라면 <code>RunState</code> 결과에서 재개할 때 동일한 세션 인스턴스를 계속 전달하거나, 동일한 세션 ID와 백업 저장소를 사용하도록 구성된 다른 세션 객체를 전달합니다. 그러면 재개된 턴이 저장된 동일한 대화 기록에 추가됩니다. 세션 수명 주기에 관한 자세한 내용은 <a href="../sessions/">세션</a>을 참조하세요.</p>
+<h2 id="example-pause-approve-resume">예제: 일시 중지, 승인 및 재개</h2>
+<p>아래 스니펫은 JavaScript HITL 가이드와 동일한 흐름을 보여 줍니다. 도구에 승인이 필요하면 일시 중지하고, 상태를 디스크에 저장한 후 다시 불러오며, 결정을 수집한 뒤 재개합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
@@ -2060,32 +2116,45 @@
 </span><span id="__span-2-59"><a id="__codelineno-2-59" name="__codelineno-2-59" href="#__codelineno-2-59"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-2-60"><a id="__codelineno-2-60" name="__codelineno-2-60" href="#__codelineno-2-60"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p>이 예제에서 <code>prompt_approval</code>은 <code>input()</code>을 사용하고 <code>run_in_executor(...)</code>로 실행되므로 동기식입니다. 승인 소스가 이미 비동기식인 경우(예: HTTP 요청 또는 비동기 데이터베이스 쿼리) <code>async def</code> 함수를 사용하고 이를 직접 <code>await</code>할 수 있습니다.</p>
-<p>승인을 위해 일시 중지될 수 있는 실행에서 스트리밍을 사용하려면 <code>Runner.run_streamed</code>을 호출하고, 완료될 때까지 <code>result.stream_events()</code>을 소비한 다음, 위에 나온 것과 동일한 <code>result.to_state()</code> 및 재개 단계를 따릅니다.</p>
+<p>이 예제에서 <code>prompt_approval</code> 기능은 <code>input()</code> 기능을 사용하고 <code>run_in_executor(...)</code> 기능으로 실행되므로 동기식입니다. 승인 소스가 이미 비동기식이라면(예: HTTP 요청 또는 비동기 데이터베이스 쿼리) <code>async def</code> 함수를 사용하고 <code>await</code> 처리할 수 있습니다.</p>
+<p>승인을 위해 일시 중지될 수 있는 실행에서 스트리밍을 사용하려면 <code>Runner.run_streamed</code> 기능을 호출하고, 완료될 때까지 <code>result.stream_events()</code> 항목을 소비한 다음, 위에 나온 것과 동일한 <code>result.to_state()</code> 처리 및 재개 단계를 따릅니다.</p>
 <h2 id="repository-patterns-and-examples">저장소 패턴 및 코드 예제</h2>
 <ul>
-<li><strong>스트리밍 승인</strong>: <code>examples/agent_patterns/human_in_the_loop_stream.py</code>은 <code>stream_events()</code>을 모두 소비한 다음, <code>Runner.run_streamed(agent, state)</code>로 재개하기 전에 대기 중인 도구 호출을 승인하는 방법을 보여 줍니다.</li>
-<li><strong>사용자 지정 거부 텍스트</strong>: <code>examples/agent_patterns/human_in_the_loop_custom_rejection.py</code>은 승인이 거부될 때 실행 수준 <code>tool_error_formatter</code>과 호출별 <code>rejection_message</code> 재정의를 결합하는 방법을 보여 줍니다.</li>
-<li><strong>도구로서의 에이전트 승인</strong>: <code>Agent.as_tool(..., needs_approval=...)</code>은 위임된 에이전트 작업에 검토가 필요할 때 동일한 인터럽션 흐름을 적용합니다. 중첩된 인터럽션도 외부 실행에 표시되므로 중첩 에이전트가 아니라 원래의 최상위 에이전트를 재개합니다.</li>
-<li><strong>로컬 Shell 및 apply_patch 도구</strong>: <code>ShellTool</code> 및 <code>ApplyPatchTool</code>도 <code>needs_approval</code>을 지원합니다. 실행이 끝날 때까지 해당 도구의 이후 호출에 사용할 결정을 캐시하려면 <code>state.approve(interruption, always_approve=True)</code> 또는 <code>state.reject(..., always_reject=True)</code>을 사용합니다. 자동 결정에는 <code>on_approval</code>을 제공하고(<code>examples/tools/shell.py</code> 참조), 수동 결정에는 인터럽션을 처리합니다(<code>examples/tools/shell_human_in_the_loop.py</code> 참조). 호스티드 Shell 환경은 <code>needs_approval</code> 또는 <code>on_approval</code>을 지원하지 않습니다. <a href="../tools/">도구 가이드</a>를 참조하세요.</li>
-<li><strong>로컬 MCP 서버</strong>: MCP 도구 호출을 제어하려면 <code>MCPServerStdio</code> / <code>MCPServerSse</code> / <code>MCPServerStreamableHttp</code>에서 <code>require_approval</code>을 사용합니다(<code>examples/mcp/get_all_mcp_tools_example/main.py</code> 및 <code>examples/mcp/tool_filter_example/main.py</code> 참조).</li>
-<li><strong>호스티드 MCP 서버</strong>: HITL을 강제하려면 <code>HostedMCPTool</code>에서 <code>tool_config={"require_approval": "always"}</code>을 설정하고, 선택적으로 자동 승인 또는 거부를 위한 <code>on_approval_request</code>을 제공합니다(<code>examples/hosted_mcp/human_in_the_loop.py</code> 및 <code>examples/hosted_mcp/on_approval.py</code> 참조). 신뢰할 수 있는 서버에는 <code>"never"</code>을 사용합니다(<code>examples/hosted_mcp/simple.py</code>).</li>
-<li><strong>세션 및 메모리</strong>: 승인과 대화 기록이 여러 턴에 걸쳐 유지되도록 <code>Runner.run</code>에 세션을 전달합니다. SQLite 및 OpenAI Conversations 세션 변형은 <code>examples/memory/memory_session_hitl_example.py</code> 및 <code>examples/memory/openai_session_hitl_example.py</code>에 있습니다.</li>
-<li><strong>실시간 에이전트</strong>: Realtime 데모는 <code>RealtimeSession</code>의 <code>approve_tool_call</code> / <code>reject_tool_call</code>을 통해 도구 호출을 승인하거나 거부하는 WebSocket 메시지를 제공합니다. 서버 측 핸들러는 <code>examples/realtime/app/server.py</code>을, API 인터페이스는 <a href="../realtime/guide/#tool-approvals">Realtime 가이드</a>를 참조하세요.</li>
+<li><strong>스트리밍 승인</strong>: <code>examples/agent_patterns/human_in_the_loop_stream.py</code> 예제는 <code>stream_events()</code> 항목을 모두 소비한 다음, <code>Runner.run_streamed(agent, state)</code> 기능으로 재개하기 전에 보류 중인 도구 호출을 승인하는 방법을 보여 줍니다.</li>
+<li><strong>사용자 지정 거부 텍스트</strong>: <code>examples/agent_patterns/human_in_the_loop_custom_rejection.py</code> 예제는 승인이 거부될 때 실행 수준 <code>tool_error_formatter</code> 설정과 호출별 <code>rejection_message</code> 재정의를 결합하는 방법을 보여 줍니다.</li>
+<li><strong>도구로 사용하는 에이전트 승인</strong>: <code>Agent.as_tool(..., needs_approval=...)</code> 예제는 위임된 에이전트 작업에 검토가 필요할 때 동일한 인터럽션 흐름을 적용합니다. 중첩된 인터럽션도 외부 실행에 노출되므로 중첩된 에이전트가 아니라 원래 최상위 에이전트를 재개합니다.</li>
+<li><strong>로컬 셸 및 apply_patch 도구</strong>: <code>ShellTool</code> 및 <code>ApplyPatchTool</code> 도구도 <code>needs_approval</code> 기능을 지원합니다. 실행의 남은 기간 동안 해당 도구의 이후 호출에 사용할 결정을 캐시하려면 <code>state.approve(interruption, always_approve=True)</code> 또는 <code>state.reject(..., always_reject=True)</code> 값을 사용합니다. 콜백 내부에서 승인을 해결하려면 <code>on_approval</code> 값을 제공합니다. <code>examples/tools/shell.py</code> 예제는 기본적으로 operator에게 확인을 요청하는 대화형 콜백을 보여 줍니다. 모든 셸 호출을 거부하는 자동 정책을 적용하려면 <code>ShellTool</code> 객체에서 <code>needs_approval=True</code> 및 <code>on_approval=lambda _context, _item: {"approve": False, "reason": "Disabled by policy"}</code> 값을 설정합니다. 대신 애플리케이션에서 일시 중지된 실행을 검토하도록 하려면 인터럽션을 처리합니다(<code>examples/tools/shell_human_in_the_loop.py</code> 참조). 호스팅된 셸 환경은 <code>needs_approval</code> 또는 <code>on_approval</code> 기능을 지원하지 않습니다. <a href="../tools/">도구 가이드</a>를 참조하세요.</li>
+<li><strong>로컬 MCP 서버</strong>: MCP 도구 호출을 제한하려면 <code>MCPServerStdio</code> / <code>MCPServerSse</code> / <code>MCPServerStreamableHttp</code> 객체에서 <code>require_approval</code> 설정을 사용합니다(<code>examples/mcp/get_all_mcp_tools_example/main.py</code> 및 <code>examples/mcp/tool_filter_example/main.py</code> 참조).</li>
+<li><strong>호스티드 MCP 서버</strong>: HITL을 강제하려면 <code>HostedMCPTool</code> 객체에서 <code>tool_config={"require_approval": "always"}</code> 값을 설정하고, 선택적으로 자동 승인 또는 거부를 위한 <code>on_approval_request</code> 값을 제공합니다(<code>examples/hosted_mcp/human_in_the_loop.py</code> 및 <code>examples/hosted_mcp/on_approval.py</code> 참조). 신뢰할 수 있는 서버에는 <code>"never"</code> 값을 사용합니다(<code>examples/hosted_mcp/simple.py</code> 참조).</li>
+<li><strong>세션 및 메모리</strong>: 여러 턴에 걸쳐 승인 및 대화 기록을 유지하려면 <code>Runner.run</code> 기능에 세션을 전달합니다. SQLite 및 OpenAI Conversations 세션 변형은 <code>examples/memory/memory_session_hitl_example.py</code> 및 <code>examples/memory/openai_session_hitl_example.py</code> 예제에 있습니다.</li>
+<li><strong>실시간 에이전트</strong>: 실시간 데모는 <code>RealtimeSession</code> 객체의 <code>approve_tool_call</code> / <code>reject_tool_call</code> 기능을 통해 도구 호출을 승인하거나 거부하는 WebSocket 메시지를 노출합니다. 서버 측 핸들러는 <code>examples/realtime/app/server.py</code> 예제를, API 인터페이스는 <a href="../realtime/guide/#tool-approvals">Realtime 가이드</a>를 참조하세요.</li>
 </ul>
 <h2 id="long-running-approvals">장기 실행 승인</h2>
-<p><code>RunState</code>은 지속성을 갖도록 설계되었습니다. <code>state.to_json()</code> 또는 <code>state.to_string()</code>을 사용해 대기 중인 작업을 데이터베이스나 큐에 저장하고, 나중에 <code>RunState.from_json(...)</code> 또는 <code>RunState.from_string(...)</code>으로 다시 생성합니다.</p>
+<p><code>RunState</code> 기능은 지속성을 갖도록 설계되었습니다. 보류 중인 작업을 데이터베이스나 큐에 저장하려면 <code>state.to_json()</code> 또는 <code>state.to_string()</code> 기능을 사용하고, 나중에 다시 생성하려면 <code>RunState.from_json(...)</code> 또는 <code>RunState.from_string(...)</code> 기능을 사용합니다.</p>
+<h3 id="keep-approval-state-on-the-server">서버의 승인 상태 유지</h3>
+<p>직렬화된 <code>RunState</code> 데이터에는 승인 결정, 보류 중인 도구 호출, 도구 인수를 포함한 실행 상태가 들어 있습니다. SDK는 이 상태를 복원합니다. <code>RunState.from_json()</code> 및 <code>RunState.from_string()</code> 기능은 스냅샷이나 이를 제출하는 사람을 인증하지 않습니다. 신뢰할 수 있는 저장소의 스냅샷이나 애플리케이션이 완전한 무결성과 소유권을 검증한 스냅샷만 역직렬화해야 합니다. 스키마 검사나 도구 호출 지문만으로는 스냅샷을 인증할 수 없습니다.</p>
+<p>브라우저 또는 모바일 승인 인터페이스에서는 전체 스냅샷을 애플리케이션이 제어하는 서버 저장소에 보관합니다. 검토자에게는 검토 권한이 있는 도구 세부 정보와 보류 중인 결정에 대한 불투명 식별자만 전송합니다. 도구 이름과 인수는 신뢰할 수 없는 표시 콘텐츠로 취급하고 HTML을 렌더링할 때 이스케이프 처리합니다.</p>
+<p>결정이 도착하면 서버에서 다음 작업을 수행해야 합니다.</p>
+<ol>
+<li>애플리케이션의 세션 또는 인증 미들웨어를 사용해 검토자를 인증합니다. 승인 요청 본문에서 검토자의 신원을 가져오지 마세요.</li>
+<li>해당 검토자가 저장된 실행 및 선택한 보류 중 호출에 조치할 수 있도록 권한을 부여합니다. 실행 ID나 결정 ID를 보유하고 있다는 사실만으로 권한이 부여되지는 않습니다.</li>
+<li>제출된 결정 식별자와 불리언 결정을 서버에 저장된 보류 중 요청과 대조해 검증합니다. 서버 소유 스냅샷을 불러오고 <code>state.get_interruptions()</code> 기능으로 보류 중인 항목을 가져옵니다. 클라이언트에서 대체 도구 호출, 인수, 승인 기록 또는 직렬화된 상태를 받지 마세요.</li>
+<li>해당 서버 소유 항목에 <code>state.approve(...)</code> 또는 <code>state.reject(...)</code> 기능을 적용한 다음 실행을 재개합니다. 동시에 제출되거나 재전송된 요청으로 동일한 스냅샷이 두 번 재개되지 않도록 각 보류 중 요청의 소비를 저장소와 조율합니다. 공유 저장소에서는 재개된 실행을 시작하기 전에 소유자 확인을 포함한 원자적 상태 전이를 사용합니다.</li>
+</ol>
+<p><a href="https://github.com/openai/openai-agents-python/blob/main/examples/agent_patterns/human_in_the_loop_server.py">서버 측 승인 예제</a>는 CLI 클라이언트 시뮬레이션과 단일 프로세스의 단일 이벤트 루프로 제한된 저장소를 사용해 이 패턴을 보여 줍니다. 이 예제에서는 배치 내 보류 중인 모든 호출에 각각 하나의 결정이 필요합니다. 역직렬화 및 재개된 실행 전에 요청을 소비하므로 실패하거나 취소된 경우에도 요청이 소비됩니다. 프로덕션 애플리케이션에서는 인증, 요청 보호 조치, 저장소 보존, 재시도 전에 도구의 부작용을 조정하는 복구 기능을 제공해야 합니다. 이 예제는 배포 가능한 HTTP 서비스가 아닙니다.</p>
+<p><code>context</code> 값을 <code>context_override</code> 값으로 바꾸거나, <code>strict_context=True</code> 값을 설정하거나, 직렬화된 승인 기록만 제거하더라도 신뢰할 수 없는 스냅샷이 안전해지지는 않습니다. 다른 필드도 재개된 실행을 계속 제어합니다. 애플리케이션이 전체 스냅샷을 클라이언트를 통해 전송한다면 역직렬화하기 전에 무결성을 검증하고, 권한이 있는 사용자 및 실행과 연결하며, 재전송을 방지해야 합니다. 이러한 검증은 스냅샷을 암호화하거나 클라이언트에서 해당 내용을 숨기지 않습니다.</p>
+<h3 id="serialization-options">직렬화 옵션</h3>
 <p>유용한 직렬화 옵션은 다음과 같습니다.</p>
 <ul>
-<li><code>context_serializer</code>: 매핑이 아닌 컨텍스트 객체가 직렬화되는 방식을 사용자 지정합니다.</li>
-<li><code>context_deserializer</code>: <code>RunState.from_json(...)</code> 또는 <code>RunState.from_string(...)</code>으로 상태를 불러올 때 매핑이 아닌 컨텍스트 객체를 다시 구성합니다.</li>
-<li><code>strict_context=True</code>: 컨텍스트가 이미 매핑이거나 <code>context_serializer</code>을 제공한 경우가 아니면 직렬화에 실패하고, 컨텍스트가 이미 매핑이거나 <code>context_deserializer</code>을 제공한 경우가 아니면 역직렬화에 실패합니다.</li>
+<li><code>context_serializer</code>: 매핑이 아닌 컨텍스트 객체의 직렬화 방식을 사용자 지정합니다.</li>
+<li><code>context_deserializer</code>: <code>RunState.from_json(...)</code> 또는 <code>RunState.from_string(...)</code> 기능으로 상태를 불러올 때 매핑이 아닌 컨텍스트 객체를 다시 구성합니다.</li>
+<li><code>strict_context=True</code>: 컨텍스트가 이미 매핑이거나 <code>context_serializer</code> 값을 제공한 경우가 아니면 직렬화에 실패합니다. 컨텍스트가 이미 매핑이거나 <code>context_deserializer</code> 값을 제공한 경우가 아니면 역직렬화에 실패합니다.</li>
 <li><code>context_override</code>: 상태를 불러올 때 직렬화된 컨텍스트를 교체합니다. 원래 컨텍스트 객체를 복원하지 않으려는 경우 유용하지만, 이미 직렬화된 페이로드에서 해당 컨텍스트를 제거하지는 않습니다.</li>
 <li><code>include_tracing_api_key=True</code>: 재개된 작업이 동일한 자격 증명으로 트레이스를 계속 내보내야 하는 경우 직렬화된 트레이스 페이로드에 트레이싱 API 키를 포함합니다.</li>
 </ul>
-<p>직렬화된 실행 상태에는 애플리케이션 컨텍스트뿐 아니라 승인, 사용량, 직렬화된 <code>tool_input</code>, 중첩된 도구로서의 에이전트 재개 정보, 트레이스 메타데이터, 서버 관리형 대화 설정과 같은 SDK 관리 런타임 메타데이터도 포함됩니다. 직렬화된 상태를 저장하거나 전송하려면 <code>RunContextWrapper.context</code>을 영구 데이터로 취급하고, 의도적으로 상태와 함께 전달하려는 경우가 아니라면 비밀 정보를 넣지 마세요.</p>
-<h2 id="versioning-pending-tasks">대기 중인 작업의 버전 관리</h2>
-<p>승인이 장시간 대기할 수 있다면 직렬화된 상태와 함께 에이전트 정의 또는 SDK의 버전 표식을 저장합니다. 그러면 모델, 프롬프트 또는 도구 정의가 변경될 때 비호환성을 방지하도록 역직렬화를 일치하는 코드 경로로 라우팅할 수 있습니다.</p>
+<p>직렬화된 실행 상태에는 애플리케이션 컨텍스트뿐 아니라 승인, 사용량, 직렬화된 <code>tool_input</code>, 중첩된 도구형 에이전트 재개 정보, 트레이스 메타데이터, 서버 관리 대화 설정과 같은 SDK 관리 런타임 메타데이터가 포함됩니다. 직렬화된 상태를 저장하거나 전송할 계획이라면 <code>RunContextWrapper.context</code> 데이터를 영구 저장 데이터로 취급하고, 의도적으로 상태와 함께 전달하려는 경우가 아니라면 그 안에 비밀 정보를 넣지 마세요.</p>
+<h2 id="versioning-pending-tasks">보류 중인 작업의 버전 관리</h2>
+<p>승인이 장시간 보류될 수 있다면 직렬화된 상태와 함께 에이전트 정의 또는 SDK의 버전 표식을 저장합니다. 그러면 모델, 프롬프트 또는 도구 정의가 변경될 때 발생할 수 있는 비호환성을 방지하도록 일치하는 코드 경로로 역직렬화를 라우팅할 수 있습니다.</p>
 
 
 

@@ -1095,7 +1095,7 @@
   <span class="md-ellipsis">
     
   
-    ヒューマン・イン・ザ・ループ
+    ヒューマンインザループ
   
 
     
@@ -1359,7 +1359,7 @@
   <a href="#encryption-key" class="md-nav__link">
     <span class="md-ellipsis">
       
-        暗号化鍵
+        暗号化キー
       
     </span>
   </a>
@@ -1370,7 +1370,7 @@
   <a href="#ttl-time-to-live" class="md-nav__link">
     <span class="md-ellipsis">
       
-        TTL（有効期間）
+        TTL （有効期間）
       
     </span>
   </a>
@@ -1398,7 +1398,7 @@
   <a href="#with-sqlite-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        SQLite セッション
+        SQLite セッションとの併用
       
     </span>
   </a>
@@ -1409,7 +1409,7 @@
   <a href="#with-sqlalchemy-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        SQLAlchemy セッション
+        SQLAlchemy セッションとの併用
       
     </span>
   </a>
@@ -1436,7 +1436,7 @@
   <a href="#automatic-expiration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        自動期限切れ
+        自動的な期限切れ
       
     </span>
   </a>
@@ -1777,7 +1777,7 @@
   <a href="#encryption-key" class="md-nav__link">
     <span class="md-ellipsis">
       
-        暗号化鍵
+        暗号化キー
       
     </span>
   </a>
@@ -1788,7 +1788,7 @@
   <a href="#ttl-time-to-live" class="md-nav__link">
     <span class="md-ellipsis">
       
-        TTL（有効期間）
+        TTL （有効期間）
       
     </span>
   </a>
@@ -1816,7 +1816,7 @@
   <a href="#with-sqlite-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        SQLite セッション
+        SQLite セッションとの併用
       
     </span>
   </a>
@@ -1827,7 +1827,7 @@
   <a href="#with-sqlalchemy-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        SQLAlchemy セッション
+        SQLAlchemy セッションとの併用
       
     </span>
   </a>
@@ -1854,7 +1854,7 @@
   <a href="#automatic-expiration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        自動期限切れ
+        自動的な期限切れ
       
     </span>
   </a>
@@ -1963,140 +1963,149 @@
 <h2 id="features">機能</h2>
 <ul>
 <li><strong>透過的な暗号化</strong>: あらゆるセッションを Fernet 暗号化でラップします</li>
-<li><strong>セッションごとの鍵</strong>: HKDF 鍵導出を使用して、セッションごとに一意の暗号化を行います</li>
-<li><strong>自動期限切れ</strong>: TTL が切れた古い項目は通知なくスキップされます</li>
-<li><strong>そのまま置き換え可能</strong>: 既存のあらゆるセッション実装で動作します</li>
+<li><strong>セッションごとのキー</strong>: HKDF による鍵導出を使用し、セッションごとに一意の暗号化を行います</li>
+<li><strong>自動的な期限切れ</strong>: TTL が期限切れになると、古い項目は通知なくスキップされます</li>
+<li><strong>ドロップイン置換</strong>: 既存のあらゆるセッション実装で機能します</li>
 </ul>
 <h2 id="installation">インストール</h2>
 <p>暗号化セッションには <code>encrypt</code> extra が必要です。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;openai-agents[encrypt]&#39;</span>
 </span></code></pre></div>
 <h2 id="quick-start">クイックスタート</h2>
-<p>この例では、インメモリの <code>SQLiteSession</code> を使用します。組み込みセッションには、別途データベースドライバーは必要ありません。</p>
+<p>この例では、インメモリの <code>SQLiteSession</code> を使用し、実行ごとに新しい暗号化キーを生成します。組み込みセッションには、別途データベースドライバーは必要ありません。永続ストレージでは、プロセスの再起動後もキーを保持して再利用できるように、<a href="#encryption-key">暗号化キーに関するガイダンス</a>に従ってください。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
-</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">underlying_session</span> <span class="o">=</span> <span class="n">SQLiteSession</span><span class="p">(</span><span class="s2">&quot;user-123&quot;</span><span class="p">)</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>        <span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>            <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>            <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;your-secret-key-here&quot;</span><span class="p">,</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>            <span class="n">ttl</span><span class="o">=</span><span class="mi">600</span>  <span class="c1"># 10 minutes</span>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>        <span class="p">)</span>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>        <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    <span class="k">finally</span><span class="p">:</span>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>        <span class="n">underlying_session</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>
-</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">cryptography.fernet</span><span class="w"> </span><span class="kn">import</span> <span class="n">Fernet</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">encryption_key</span> <span class="o">=</span> <span class="n">Fernet</span><span class="o">.</span><span class="n">generate_key</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;ascii&quot;</span><span class="p">)</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">underlying_session</span> <span class="o">=</span> <span class="n">SQLiteSession</span><span class="p">(</span><span class="s2">&quot;user-123&quot;</span><span class="p">)</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>        <span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>            <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>            <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span><span class="p">,</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>            <span class="n">ttl</span><span class="o">=</span><span class="mi">600</span>  <span class="c1"># 10 minutes</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>        <span class="p">)</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>        <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>        <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="k">finally</span><span class="p">:</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>        <span class="n">underlying_session</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <h2 id="configuration">設定</h2>
-<h3 id="encryption-key">暗号化鍵</h3>
-<p>暗号化鍵には、Fernet 鍵または任意の文字列を使用できます。</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
+<h3 id="encryption-key">暗号化キー</h3>
+<p><a href="https://cryptography.io/en/latest/fernet/#cryptography.fernet.Fernet.generate_key"><code>Fernet.generate_key()</code></a> で生成したキーや、アプリケーションのシークレット管理システムによってプロビジョニングされた高エントロピーのランダムシークレットなど、暗号学的に安全なランダム性を持つ高エントロピーのマスターキーを使用してください。パスワード、覚えやすいフレーズ、ハードコードされたサンプル値を暗号化キーとして使用しないでください。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">cryptography.fernet</span><span class="w"> </span><span class="kn">import</span> <span class="n">Fernet</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1"># Using a Fernet key (base64-encoded)</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;your-fernet-key-here&quot;</span><span class="p">,</span>
-</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">600</span>
-</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="p">)</span>
-</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>
-</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="c1"># Using a raw string (will be derived to a key)</span>
-</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span> 
-</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
-</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;my-secret-password&quot;</span><span class="p">,</span>
-</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">600</span>
-</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="p">)</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1"># Generate once when provisioning a new key, then store the value securely.</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">encryption_key</span> <span class="o">=</span> <span class="n">Fernet</span><span class="o">.</span><span class="n">generate_key</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;ascii&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<h3 id="ttl-time-to-live">TTL（有効期間）</h3>
-<p>暗号化された項目が有効である期間を設定します。</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># Items expire after 1 hour</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;secret&quot;</span><span class="p">,</span>
-</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">3600</span>  <span class="c1"># 1 hour in seconds</span>
-</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="p">)</span>
-</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>
-</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="c1"># Items expire after 1 day</span>
-</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
-</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;secret&quot;</span><span class="p">,</span> 
-</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">86400</span>  <span class="c1"># 24 hours in seconds</span>
-</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="p">)</span>
+<p>永続ストレージでは、キーを一度だけ生成し、そのキーでデータを暗号化する前に、値をシークレットマネージャーまたはその他の安全なストアに保存してください。プロセスを起動するたびに、同じキーを読み込んでください。以下のスニペットでは、デプロイ環境から保存済みのキーが <code>SESSION_ENCRYPTION_KEY</code> として注入されることを前提としています。この環境変数名はアプリケーション側の規約であり、SDK の設定ではありません。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">encryption_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;SESSION_ENCRYPTION_KEY&quot;</span><span class="p">]</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span><span class="p">,</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">600</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>キーは秘密に保ち、暗号化されたセッションデータベースとは別に管理してください。再起動後に既存のデータを読み取るには、同じマスターキーと同じ <code>session_id</code> を使用してください。起動時に代替キーを生成すると、アプリケーションは既存のレコードを復号できなくなります。<code>encryption_key</code> を変更しても、保存済みのレコードは再暗号化されません。既存のレコードには引き続き元のキーが必要であり、TTL も引き続き適用されます。</p>
+<p><code>EncryptedSession</code> は、後方互換性のために raw 文字列を引き続き受け付けます。ただし、これはパスワードやその他の低エントロピーのシークレットの使用を推奨するものではありません。SDK はセッションごとの鍵導出に HKDF を使用しますが、パスワード強化には使用しません。セッション ID のソルトはセッションキーを分離しますが、シークレットのエントロピーを追加するものではありません。以下の<a href="#key-derivation">鍵導出</a>を参照してください。</p>
+<h3 id="ttl-time-to-live">TTL （有効期間）</h3>
+<p>暗号化された項目が有効である期間を設定します。以下のスニペットでは、上で読み込んだ <code>encryption_key</code> を再利用します。</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Items expire after 1 hour</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span><span class="p">,</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">3600</span>  <span class="c1"># 1 hour in seconds</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="p">)</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="c1"># Items expire after 1 day</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying_session</span><span class="p">,</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span><span class="p">,</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>    <span class="n">ttl</span><span class="o">=</span><span class="mi">86400</span>  <span class="c1"># 24 hours in seconds</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="usage-with-different-session-types">各種セッションタイプでの使用</h2>
-<h3 id="with-sqlite-sessions">SQLite セッション</h3>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLiteSession</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="c1"># Create encrypted SQLite session</span>
-</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">underlying</span> <span class="o">=</span> <span class="n">SQLiteSession</span><span class="p">(</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span> <span class="s2">&quot;conversations.db&quot;</span><span class="p">)</span>
-</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
-</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying</span><span class="p">,</span>
-</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;secret-key&quot;</span>
-</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="p">)</span>
+<h3 id="with-sqlite-sessions">SQLite セッションとの併用</h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLiteSession</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="c1"># Load the same securely stored key each time this database is opened.</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">encryption_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;SESSION_ENCRYPTION_KEY&quot;</span><span class="p">]</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="c1"># Create encrypted SQLite session</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">underlying</span> <span class="o">=</span> <span class="n">SQLiteSession</span><span class="p">(</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span> <span class="s2">&quot;conversations.db&quot;</span><span class="p">)</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying</span><span class="p">,</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="p">)</span>
 </span></code></pre></div>
-<h3 id="with-sqlalchemy-sessions">SQLAlchemy セッション</h3>
-<p>以下の PostgreSQL の例では、<code>encrypt</code> および <code>sqlalchemy</code> extra をインストールします。<code>sqlalchemy</code> extra には、<code>postgresql+asyncpg://</code> URL で使用される <code>asyncpg</code> ドライバーが含まれています。</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;openai-agents[encrypt,sqlalchemy]&#39;</span>
+<h3 id="with-sqlalchemy-sessions">SQLAlchemy セッションとの併用</h3>
+<p>以下の PostgreSQL の例では、<code>encrypt</code> および <code>sqlalchemy</code> extras をインストールしてください。<code>sqlalchemy</code> extra には、<code>postgresql+asyncpg://</code> URL で使用される <code>asyncpg</code> ドライバーが含まれます。</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;openai-agents[encrypt,sqlalchemy]&#39;</span>
 </span></code></pre></div>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span><span class="p">,</span> <span class="n">SQLAlchemySession</span>
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
-</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1"># Create encrypted SQLAlchemy session</span>
-</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">underlying</span> <span class="o">=</span> <span class="n">SQLAlchemySession</span><span class="o">.</span><span class="n">from_url</span><span class="p">(</span>
-</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">url</span><span class="o">=</span><span class="s2">&quot;postgresql+asyncpg://user:pass@localhost/db&quot;</span><span class="p">,</span>
-</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">create_tables</span><span class="o">=</span><span class="kc">True</span>
-</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="p">)</span>
-</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>
-</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
-</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
-</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying</span><span class="p">,</span>
-</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="s2">&quot;secret-key&quot;</span>
-</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">EncryptedSession</span><span class="p">,</span> <span class="n">SQLAlchemySession</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># Load the same securely stored key each time this database is opened.</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">encryption_key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;SESSION_ENCRYPTION_KEY&quot;</span><span class="p">]</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="c1"># Create encrypted SQLAlchemy session</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">underlying</span> <span class="o">=</span> <span class="n">SQLAlchemySession</span><span class="o">.</span><span class="n">from_url</span><span class="p">(</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    <span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    <span class="n">url</span><span class="o">=</span><span class="s2">&quot;postgresql+asyncpg://user:pass@localhost/db&quot;</span><span class="p">,</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>    <span class="n">create_tables</span><span class="o">=</span><span class="kc">True</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="p">)</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="n">session</span> <span class="o">=</span> <span class="n">EncryptedSession</span><span class="p">(</span>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>    <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a>    <span class="n">underlying_session</span><span class="o">=</span><span class="n">underlying</span><span class="p">,</span>
+</span><span id="__span-7-17"><a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a>    <span class="n">encryption_key</span><span class="o">=</span><span class="n">encryption_key</span>
+</span><span id="__span-7-18"><a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="p">)</span>
 </span></code></pre></div>
 <p><code>SQLAlchemySession.from_url()</code> によって作成されたエンジンを破棄する責任は、アプリケーションにあります。そのエンジンを使用するすべての <code>SQLAlchemySession</code> インスタンスが不要になった後、実行が失敗した場合でも、アプリケーションのクリーンアップ処理で <code>await underlying.engine.dispose()</code> を呼び出してください。</p>
 <div class="admonition warning">
 <p class="admonition-title">高度なセッション機能</p>
-<p><code>AdvancedSQLiteSession</code> のような高度なセッション実装で <code>EncryptedSession</code> を使用する場合は、次の点に注意してください。</p>
+<p><code>AdvancedSQLiteSession</code> のような高度なセッション実装で <code>EncryptedSession</code> を使用する場合は、以下の点に注意してください。</p>
 <ul>
-<li>メッセージ内容が暗号化されているため、<code>find_turns_by_content()</code> のようなメソッドは効果的に機能しません</li>
+<li>メッセージの内容が暗号化されるため、<code>find_turns_by_content()</code> のようなメソッドは効果的に機能しません</li>
 <li>内容に基づく検索は暗号化されたデータを対象とするため、その有効性が制限されます</li>
 </ul>
 </div>
 <h2 id="key-derivation">鍵導出</h2>
-<p>EncryptedSession は、HKDF（HMAC ベースの鍵導出関数）を使用して、セッションごとに一意の暗号化鍵を導出します。</p>
+<p>EncryptedSession は、HKDF （HMAC ベースの鍵導出関数）を使用して、セッションごとに一意の暗号化キーを導出します。</p>
 <ul>
-<li><strong>マスター鍵</strong>: 指定した暗号化鍵</li>
+<li><strong>マスターキー</strong>: 指定した暗号化キー</li>
 <li><strong>セッションソルト</strong>: セッション ID</li>
 <li><strong>情報文字列</strong>: <code>"agents.session-store.hkdf.v1"</code></li>
-<li><strong>出力</strong>: 32 バイトの Fernet 鍵</li>
+<li><strong>出力</strong>: 32 バイトの Fernet キー</li>
 </ul>
-<p>これにより、次のことが保証されます。
-- 各セッションに一意の暗号化鍵が割り当てられます
-- マスター鍵なしでは鍵を導出できません
-- 異なるセッション間でセッションデータを復号できません</p>
-<h2 id="automatic-expiration">自動期限切れ</h2>
+<p>高エントロピーのマスターキーを使用すると、異なるセッション ID から異なる派生キーが生成されます。同じマスターキーとセッション ID を再利用すると同じ派生キーが生成されるため、アプリケーションは以前に保存された有効期限内の項目を復号できます。</p>
+<p>HKDF を使用しても、脆弱なマスターキーがパスワード推測に耐えられるようになるわけではありません。セッション ID は秘密ではないソルトであり、追加の秘密鍵素材ではありません。鍵導出とパスワード強化の違いについては、<a href="https://cryptography.io/en/latest/hazmat/primitives/key-derivation-functions/#hkdf">cryptography の HKDF ドキュメント</a>を参照してください。</p>
+<h2 id="automatic-expiration">自動的な期限切れ</h2>
 <p>項目が TTL を超えると、取得時に自動的にスキップされます。</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Items older than TTL are silently ignored</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">items</span> <span class="o">=</span> <span class="k">await</span> <span class="n">session</span><span class="o">.</span><span class="n">get_items</span><span class="p">()</span>  <span class="c1"># Only returns non-expired items</span>
-</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
-</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># Expired items don&#39;t affect session behavior</span>
-</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Continue conversation&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># Items older than TTL are silently ignored</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">items</span> <span class="o">=</span> <span class="k">await</span> <span class="n">session</span><span class="o">.</span><span class="n">get_items</span><span class="p">()</span>  <span class="c1"># Only returns non-expired items</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="c1"># Expired items don&#39;t affect session behavior</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Continue conversation&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="api-reference">API リファレンス</h2>
 <ul>

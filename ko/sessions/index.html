@@ -1243,7 +1243,7 @@
   <a href="#resuming-interrupted-runs-with-the-same-session" class="md-nav__link">
     <span class="md-ellipsis">
       
-        동일한 세션을 사용한 인터럽션된 실행 재개
+        동일한 세션을 사용한 중단된 실행 재개
       
     </span>
   </a>
@@ -1254,7 +1254,7 @@
   <a href="#core-session-behavior" class="md-nav__link">
     <span class="md-ellipsis">
       
-        세션의 핵심 동작
+        핵심 세션 동작
       
     </span>
   </a>
@@ -1276,7 +1276,7 @@
   <a href="#limiting-retrieved-history" class="md-nav__link">
     <span class="md-ellipsis">
       
-        가져올 기록 제한
+        가져오는 기록 제한
       
     </span>
   </a>
@@ -1310,7 +1310,7 @@
   <a href="#using-pop_item-for-corrections" class="md-nav__link">
     <span class="md-ellipsis">
       
-        수정을 위한 pop_item 사용
+        수정 시 pop_item 사용
       
     </span>
   </a>
@@ -1326,19 +1326,19 @@
   <a href="#built-in-session-implementations" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기본 제공 세션 구현
+        내장 세션 구현
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="기본 제공 세션 구현">
+    <nav class="md-nav" aria-label="내장 세션 구현">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
   <a href="#choose-a-built-in-session-implementation" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기본 제공 세션 구현 선택
+        내장 세션 구현 선택
       
     </span>
   </a>
@@ -1515,7 +1515,7 @@
   <a href="#session-id-naming" class="md-nav__link">
     <span class="md-ellipsis">
       
-        세션 ID 명명법
+        세션 ID 명명 규칙
       
     </span>
   </a>
@@ -1526,7 +1526,7 @@
   <a href="#memory-persistence" class="md-nav__link">
     <span class="md-ellipsis">
       
-        메모리 영속성
+        메모리 영구 저장
       
     </span>
   </a>
@@ -1994,7 +1994,7 @@
   <a href="#resuming-interrupted-runs-with-the-same-session" class="md-nav__link">
     <span class="md-ellipsis">
       
-        동일한 세션을 사용한 인터럽션된 실행 재개
+        동일한 세션을 사용한 중단된 실행 재개
       
     </span>
   </a>
@@ -2005,7 +2005,7 @@
   <a href="#core-session-behavior" class="md-nav__link">
     <span class="md-ellipsis">
       
-        세션의 핵심 동작
+        핵심 세션 동작
       
     </span>
   </a>
@@ -2027,7 +2027,7 @@
   <a href="#limiting-retrieved-history" class="md-nav__link">
     <span class="md-ellipsis">
       
-        가져올 기록 제한
+        가져오는 기록 제한
       
     </span>
   </a>
@@ -2061,7 +2061,7 @@
   <a href="#using-pop_item-for-corrections" class="md-nav__link">
     <span class="md-ellipsis">
       
-        수정을 위한 pop_item 사용
+        수정 시 pop_item 사용
       
     </span>
   </a>
@@ -2077,19 +2077,19 @@
   <a href="#built-in-session-implementations" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기본 제공 세션 구현
+        내장 세션 구현
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="기본 제공 세션 구현">
+    <nav class="md-nav" aria-label="내장 세션 구현">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
   <a href="#choose-a-built-in-session-implementation" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기본 제공 세션 구현 선택
+        내장 세션 구현 선택
       
     </span>
   </a>
@@ -2266,7 +2266,7 @@
   <a href="#session-id-naming" class="md-nav__link">
     <span class="md-ellipsis">
       
-        세션 ID 명명법
+        세션 ID 명명 규칙
       
     </span>
   </a>
@@ -2277,7 +2277,7 @@
   <a href="#memory-persistence" class="md-nav__link">
     <span class="md-ellipsis">
       
-        메모리 영속성
+        메모리 영구 저장
       
     </span>
   </a>
@@ -2459,9 +2459,9 @@
 
 
 <h1 id="_1">세션</h1>
-<p>Agents SDK는 여러 에이전트 실행에 걸쳐 대화 기록을 자동으로 유지하는 기본 제공 세션 메모리를 지원하므로, 턴 사이에 <code>.to_input_list()</code>을 수동으로 처리할 필요가 없습니다.</p>
-<p>세션은 특정 세션의 대화 기록을 저장하므로, 명시적으로 메모리를 수동 관리하지 않아도 에이전트가 컨텍스트를 유지할 수 있습니다. 이는 에이전트가 이전 상호작용을 기억해야 하는 채팅 애플리케이션이나 멀티턴 대화를 구축할 때 특히 유용합니다.</p>
-<p>SDK가 클라이언트 측 메모리를 대신 관리하도록 하려면 세션을 사용합니다. 동일한 실행에서 세션은 실행 수준 연속 실행 옵션인 <code>conversation_id</code>, <code>previous_response_id</code>, <code>auto_previous_response_id</code>과 함께 사용할 수 없습니다. OpenAI 서버에서 관리하는 연속 실행을 사용하려면 세션과 함께 계층화하지 말고 이러한 메커니즘 중 하나를 선택합니다.</p>
+<p>Agents SDK는 여러 에이전트 실행에 걸쳐 대화 기록을 자동으로 유지하는 내장 세션 메모리를 제공하므로, 턴 사이에 <code>.to_input_list()</code>을 수동으로 처리할 필요가 없습니다.</p>
+<p>세션은 특정 세션의 대화 기록을 저장하여, 명시적으로 메모리를 수동 관리하지 않아도 에이전트가 컨텍스트를 유지할 수 있게 합니다. 이는 에이전트가 이전 상호작용을 기억해야 하는 채팅 애플리케이션이나 멀티턴 대화를 구축할 때 특히 유용합니다.</p>
+<p>SDK가 클라이언트 측 메모리를 관리하도록 하려면 세션을 사용하세요. 동일한 실행에서는 세션을 실행 수준 연속 처리 옵션인 <code>conversation_id</code>, <code>previous_response_id</code>, <code>auto_previous_response_id</code>과 함께 사용할 수 없습니다. 대신 OpenAI 서버에서 관리하는 연속 처리를 원한다면 세션을 추가로 사용하는 대신 이러한 메커니즘 중 하나를 선택하세요.</p>
 <h2 id="quick-start">빠른 시작</h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
@@ -2498,8 +2498,8 @@
 </span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="p">)</span>
 </span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># &quot;Approximately 39 million&quot;</span>
 </span></code></pre></div>
-<h2 id="resuming-interrupted-runs-with-the-same-session">동일한 세션을 사용한 인터럽션된 실행 재개</h2>
-<p>승인을 위해 실행이 일시 중지된 경우 동일한 세션 인스턴스(또는 동일한 세션 ID와 동일한 기본 스토리지 백엔드로 구성된 다른 인스턴스)를 사용하여 재개해야 재개된 턴이 저장된 동일한 대화 기록을 이어서 사용합니다.</p>
+<h2 id="resuming-interrupted-runs-with-the-same-session">동일한 세션을 사용한 중단된 실행 재개</h2>
+<p>승인을 위해 실행이 일시 중지된 경우 동일한 세션 인스턴스(또는 동일한 세션 ID와 동일한 기본 스토리지 백엔드로 구성된 다른 인스턴스)를 사용하여 재개하면, 재개된 턴에서 저장된 동일한 대화 기록을 이어갈 수 있습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Delete temporary files that are no longer needed.&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">interruptions</span><span class="p">:</span>
@@ -2508,11 +2508,11 @@
 </span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>        <span class="n">state</span><span class="o">.</span><span class="n">approve</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
 </span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">state</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="core-session-behavior">세션의 핵심 동작</h2>
-<p>세션 메모리가 활성화된 경우:</p>
+<h2 id="core-session-behavior">핵심 세션 동작</h2>
+<p>세션 메모리가 활성화되면 다음과 같이 동작합니다.</p>
 <ol>
 <li><strong>각 실행 전</strong>: 러너가 세션의 대화 기록을 자동으로 가져와 입력 항목 앞에 추가합니다.</li>
-<li><strong>각 실행 후</strong>: 실행 중에 생성된 모든 새 항목(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 세션에 자동으로 저장됩니다.</li>
+<li><strong>각 실행 후</strong>: 실행 중 생성된 모든 새 항목(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 세션에 자동으로 저장됩니다.</li>
 <li><strong>컨텍스트 보존</strong>: 동일한 세션을 사용하는 이후의 각 실행에는 전체 대화 기록이 포함되므로 에이전트가 컨텍스트를 유지할 수 있습니다.</li>
 </ol>
 <p>따라서 <code>.to_input_list()</code>을 수동으로 호출하고 실행 사이의 대화 상태를 관리할 필요가 없습니다.</p>
@@ -2528,13 +2528,13 @@
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.session_input_callback"><code>RunConfig.session_input_callback</code></a>을 사용합니다. 콜백은 다음 두 목록을 받습니다.</p>
+  " href="../../ref/run/#agents.run.RunConfig.session_input_callback"><code>RunConfig.session_input_callback</code></a>을 사용하세요. 콜백은 다음 두 목록을 받습니다.</p>
 <ul>
 <li><code>history</code>: 가져온 세션 기록(이미 입력 항목 형식으로 정규화됨)</li>
 <li><code>new_input</code>: 현재 턴의 새 입력 항목</li>
 </ul>
-<p>모델로 전송할 최종 입력 항목 목록을 반환합니다.</p>
-<p>콜백은 두 목록의 복사본을 받으므로 안전하게 변경할 수 있습니다. 반환된 목록은 해당 턴의 모델 입력을 제어하지만, SDK는 여전히 새 턴에 속하는 항목만 유지합니다. 따라서 기존 기록을 재정렬하거나 필터링해도 기존 세션 항목이 새로운 입력으로 다시 저장되지 않습니다.</p>
+<p>모델에 전송할 최종 입력 항목 목록을 반환하세요.</p>
+<p>콜백은 두 목록의 복사본을 받으므로 안전하게 변경할 수 있습니다. 반환된 목록은 해당 턴의 모델 입력을 제어하지만, SDK는 여전히 새 턴에 속하는 항목만 저장합니다. 따라서 이전 기록을 재정렬하거나 필터링해도 이전 세션 항목이 새 입력으로 다시 저장되지 않습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
@@ -2553,15 +2553,15 @@
 </span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">session_input_callback</span><span class="o">=</span><span class="n">keep_recent_history</span><span class="p">),</span>
 </span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>세션의 항목 저장 방식을 변경하지 않으면서 기록을 사용자 지정 방식으로 정리하거나 재정렬하거나 선택적으로 포함해야 할 때 사용합니다. 모델 호출 직전에 나중 단계의 최종 처리가 필요하다면 <a href="../running_agents/">에이전트 실행 가이드</a>의 <a class="autorefs autorefs-internal" title="call_model_input_filter
+<p>세션에서 항목을 저장하는 방식을 변경하지 않고 기록을 사용자 지정 방식으로 정리하거나 재정렬하거나 선택적으로 포함해야 할 때 이 기능을 사용하세요. 모델 호출 직전에 최종 처리 단계가 더 필요하다면 <a href="../running_agents/">에이전트 실행 가이드</a>의 <a class="autorefs autorefs-internal" title="call_model_input_filter
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.call_model_input_filter"><code>call_model_input_filter</code></a>을 사용합니다.</p>
-<h2 id="limiting-retrieved-history">가져올 기록 제한</h2>
-<p>각 실행 전에 가져올 기록의 양을 제어하려면 <a class="autorefs autorefs-internal" title="SessionSettings" href="../ref/memory/session_settings/#agents.memory.session_settings.SessionSettings"><code>SessionSettings</code></a>을 사용합니다.</p>
+  " href="../../ref/run/#agents.run.RunConfig.call_model_input_filter"><code>call_model_input_filter</code></a>를 사용하세요.</p>
+<h2 id="limiting-retrieved-history">가져오는 기록 제한</h2>
+<p>각 실행 전에 가져올 기록의 양을 제어하려면 <a class="autorefs autorefs-internal" title="SessionSettings" href="../ref/memory/session_settings/#agents.memory.session_settings.SessionSettings"><code>SessionSettings</code></a>을 사용하세요.</p>
 <ul>
 <li><code>SessionSettings(limit=None)</code>(기본값): 사용 가능한 모든 세션 항목을 가져옵니다</li>
 <li><code>SessionSettings(limit=N)</code>: 가장 최근의 <code>N</code>개 항목만 가져옵니다</li>
@@ -2572,7 +2572,7 @@
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.session_settings"><code>RunConfig.session_settings</code></a>을 통해 실행별로 적용할 수 있습니다.</p>
+  " href="../../ref/run/#agents.run.RunConfig.session_settings"><code>RunConfig.session_settings</code></a>를 통해 실행별로 적용할 수 있습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunConfig</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SessionSettings</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
@@ -2585,7 +2585,7 @@
 </span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">session_settings</span><span class="o">=</span><span class="n">SessionSettings</span><span class="p">(</span><span class="n">limit</span><span class="o">=</span><span class="mi">50</span><span class="p">)),</span>
 </span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>세션 구현이 기본 세션 설정을 제공하는 경우 <code>RunConfig.session_settings</code>에서 <code>None</code>이 아닌 각 값은 해당 실행의 대응하는 기본값을 재정의합니다. 이는 세션의 기본 동작을 변경하지 않으면서 긴 대화에서 가져올 기록의 크기를 제한하려는 경우 유용합니다.</p>
+<p>세션 구현이 기본 세션 설정을 제공하는 경우, <code>RunConfig.session_settings</code>의 <code>None</code>이 아닌 각 값은 해당 실행에서 대응하는 기본값을 재정의합니다. 이는 세션의 기본 동작을 변경하지 않고 가져오는 기록의 크기를 제한하려는 긴 대화에 유용합니다.</p>
 <h2 id="memory-operations">메모리 작업</h2>
 <h3 id="basic-operations">기본 작업</h3>
 <p>세션은 대화 기록을 관리하기 위한 여러 작업을 지원합니다.</p>
@@ -2610,8 +2610,8 @@
 </span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="c1"># Clear all items from a session</span>
 </span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a><span class="k">await</span> <span class="n">session</span><span class="o">.</span><span class="n">clear_session</span><span class="p">()</span>
 </span></code></pre></div>
-<h3 id="using-pop_item-for-corrections">수정을 위한 pop_item 사용</h3>
-<p><code>pop_item</code> 메서드는 대화의 마지막 항목을 실행 취소하거나 수정하려는 경우 특히 유용합니다.</p>
+<h3 id="using-pop_item-for-corrections">수정 시 pop_item 사용</h3>
+<p><code>pop_item</code> 메서드는 대화의 마지막 항목을 실행 취소하거나 수정할 때 특히 유용합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">)</span>
@@ -2637,10 +2637,10 @@
 </span><span id="__span-5-23"><a id="__codelineno-5-23" name="__codelineno-5-23" href="#__codelineno-5-23"></a><span class="p">)</span>
 </span><span id="__span-5-24"><a id="__codelineno-5-24" name="__codelineno-5-24" href="#__codelineno-5-24"></a><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Agent: </span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="built-in-session-implementations">기본 제공 세션 구현</h2>
+<h2 id="built-in-session-implementations">내장 세션 구현</h2>
 <p>SDK는 다양한 사용 사례를 위한 여러 세션 구현을 제공합니다.</p>
-<h3 id="choose-a-built-in-session-implementation">기본 제공 세션 구현 선택</h3>
-<p>아래의 자세한 예제를 읽기 전에 이 표를 사용하여 시작점을 선택합니다.</p>
+<h3 id="choose-a-built-in-session-implementation">내장 세션 구현 선택</h3>
+<p>아래의 자세한 예제를 읽기 전에 이 표를 사용하여 시작점을 선택하세요.</p>
 <table>
 <thead>
 <tr>
@@ -2653,7 +2653,7 @@
 <tr>
 <td><code>SQLiteSession</code></td>
 <td>로컬 개발 및 간단한 앱</td>
-<td>기본 제공되며 가볍고, 파일 기반 또는 인메모리 방식</td>
+<td>내장형이며 가볍고, 파일 기반 또는 인메모리 방식</td>
 </tr>
 <tr>
 <td><code>AsyncSQLiteSession</code></td>
@@ -2668,7 +2668,7 @@
 <tr>
 <td><code>SQLAlchemySession</code></td>
 <td>기존 데이터베이스를 사용하는 프로덕션 앱</td>
-<td>SQLAlchemy가 지원하는 데이터베이스와 함께 작동</td>
+<td>SQLAlchemy가 지원하는 데이터베이스와 연동</td>
 </tr>
 <tr>
 <td><code>MongoDBSession</code></td>
@@ -2692,20 +2692,20 @@
 </tr>
 <tr>
 <td><code>AdvancedSQLiteSession</code></td>
-<td>SQLite와 분기/분석 기능</td>
-<td>더 많은 기능을 제공하며 전용 페이지 참조</td>
+<td>SQLite와 브랜칭/분석</td>
+<td>더 다양한 기능 제공, 전용 페이지 참조</td>
 </tr>
 <tr>
 <td><code>EncryptedSession</code></td>
 <td>다른 세션에 암호화와 TTL 추가</td>
-<td>래퍼이므로 먼저 기본 백엔드를 선택</td>
+<td>래퍼이므로 먼저 기본 백엔드를 선택해야 함</td>
 </tr>
 </tbody>
 </table>
 <p>일부 구현에는 추가 세부 정보를 제공하는 전용 페이지가 있으며, 해당 하위 섹션에 링크되어 있습니다.</p>
-<p>ChatKit용 Python 서버를 구현하는 경우 ChatKit의 스레드 및 항목 영속성을 위해 <code>chatkit.store.Store</code> 구현을 사용합니다. <code>SQLAlchemySession</code>과 같은 Agents SDK 세션은 SDK 측 대화 기록을 관리하지만 ChatKit 스토어를 바로 대체할 수는 없습니다. <a href="https://github.com/openai/chatkit-python/blob/main/docs/guides/respond-to-user-message.md#implement-your-chatkit-data-store"><code>chatkit-python</code> ChatKit 데이터 스토어 구현 가이드</a>를 참조하세요.</p>
+<p>ChatKit용 Python 서버를 구현하는 경우 ChatKit의 스레드와 항목을 영구 저장하려면 <code>chatkit.store.Store</code> 구현을 사용하세요. <code>SQLAlchemySession</code>과 같은 Agents SDK 세션은 SDK 측 대화 기록을 관리하지만 ChatKit 저장소를 그대로 대체할 수는 없습니다. <a href="https://github.com/openai/chatkit-python/blob/main/docs/guides/respond-to-user-message.md#implement-your-chatkit-data-store"><code>chatkit-python</code> ChatKit 데이터 저장소 구현 가이드</a>를 참조하세요.</p>
 <h3 id="openai-conversations-api-sessions">OpenAI Conversations API 세션</h3>
-<p><code>OpenAIConversationsSession</code>을 통해 <a href="https://platform.openai.com/docs/api-reference/conversations">OpenAI Conversations API</a>를 사용합니다.</p>
+<p><code>OpenAIConversationsSession</code>을 통해 <a href="https://platform.openai.com/docs/api-reference/conversations">OpenAI의 Conversations API</a>를 사용하세요.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">OpenAIConversationsSession</span>
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
 </span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1"># Create agent</span>
@@ -2737,7 +2737,7 @@
 </span><span id="__span-6-29"><a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># &quot;California&quot;</span>
 </span></code></pre></div>
 <h3 id="openai-responses-compaction-sessions">OpenAI Responses 압축 세션</h3>
-<p>Responses API(<code>responses.compact</code>)를 사용하여 저장된 대화 기록을 압축하려면 <code>OpenAIResponsesCompactionSession</code>을 사용합니다. 이 구현은 기본 세션을 감싸며 <code>should_trigger_compaction</code>에 따라 각 턴 이후 자동으로 압축할 수 있습니다. <code>OpenAIConversationsSession</code>을 이 구현으로 감싸지 마세요. 두 기능은 기록을 서로 다른 방식으로 관리합니다.</p>
+<p>Responses API(<code>responses.compact</code>)를 사용하여 저장된 대화 기록을 압축하려면 <code>OpenAIResponsesCompactionSession</code>을 사용하세요. 이 세션은 기본 세션을 감싸며 <code>should_trigger_compaction</code>에 따라 각 턴 후 자동으로 압축할 수 있습니다. <code>OpenAIConversationsSession</code>을 이 세션으로 감싸지 마세요. 두 기능은 서로 다른 방식으로 기록을 관리합니다.</p>
 <h4 id="typical-usage-auto-compaction">일반적인 사용법(자동 압축)</h4>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAIResponsesCompactionSession</span>
@@ -2752,14 +2752,14 @@
 </span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
 </span></code></pre></div>
-<p>기본적으로 SDK는 각 턴 후에 압축 후보가 임계값을 충족하는지 확인하고, 충족하는 경우에만 압축합니다.</p>
-<p>자동 압축이 실행되면 SDK는 <code>Runner.run(...)</code>이 반환되거나 스트리밍된 이벤트 반복자가 닫히기 전에 압축이 완료될 때까지 기다립니다. 압축 요청에서 보고된 사용량은 해당 실행의 <a href="../usage/"><code>Usage</code></a> 합계에 포함됩니다. 기본적으로 나중에 수동으로 수행한 <code>run_compaction()</code> 호출에는 이를 포함하는 실행 컨텍스트가 없으므로 완료된 실행의 사용량 객체를 업데이트하지 않습니다.</p>
-<p><code>compaction_mode="previous_response_id"</code>은 압축 세션이 유지하는 Responses API 응답 ID를 사용하며, 해당 응답 체인을 계속 사용할 수 있을 때 가장 효과적입니다. 반면 <code>compaction_mode="input"</code>은 현재 세션 항목으로 압축 요청을 다시 구성하므로, 응답 체인을 사용할 수 없거나 세션 내용을 단일 진실 공급원으로 사용하려는 경우 유용합니다. 기본값인 <code>"auto"</code>는 사용할 수 있는 가장 안전한 옵션을 선택합니다.</p>
-<p>에이전트가 <code>ModelSettings(store=False)</code>으로 실행되는 경우 Responses API는 나중에 조회할 수 있도록 마지막 응답을 유지하지 않습니다. 이러한 무상태 설정에서는 기본 <code>"auto"</code> 모드가 <code>previous_response_id</code>에 의존하는 대신 입력 기반 압축으로 대체됩니다. 전체 예제는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py"><code>examples/memory/compaction_session_stateless_example.py</code></a>을 참조하세요.</p>
+<p>기본적으로 SDK는 각 턴 후 압축 후보가 임곗값을 충족하는지 확인하고, 충족하는 경우에만 압축합니다.</p>
+<p>자동 압축이 실행되면 SDK는 <code>Runner.run(...)</code>이 반환되거나 스트리밍된 이벤트 이터레이터가 닫히기 전에 압축이 완료될 때까지 기다립니다. 압축 요청에서 보고된 사용량은 해당 실행의 <a href="../usage/"><code>Usage</code></a> 합계에 반영됩니다. 기본적으로 나중에 실행된 수동 <code>run_compaction()</code> 호출에는 이를 포함하는 실행 컨텍스트가 없으므로 완료된 실행의 사용량 객체가 업데이트되지 않습니다.</p>
+<p><code>compaction_mode="previous_response_id"</code>은 압축 세션이 보관한 Responses API 응답 ID를 사용하며 해당 응답 체인을 계속 사용할 수 있을 때 가장 효과적입니다. 반면 <code>compaction_mode="input"</code>은 현재 세션 항목을 바탕으로 압축 요청을 다시 구성합니다. 이는 응답 체인을 사용할 수 없거나 세션 내용을 신뢰할 수 있는 기준으로 삼으려는 경우에 유용합니다. 기본 <code>"auto"</code>은 사용할 수 있는 옵션 중 가장 안전한 것을 선택합니다.</p>
+<p>에이전트가 <code>ModelSettings(store=False)</code>으로 실행되면 Responses API는 나중에 조회할 수 있도록 마지막 응답을 보관하지 않습니다. 이러한 무상태 설정에서는 기본 <code>"auto"</code> 모드가 <code>previous_response_id</code>에 의존하는 대신 입력 기반 압축으로 대체됩니다. 전체 예제는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/memory/compaction_session_stateless_example.py"><code>examples/memory/compaction_session_stateless_example.py</code></a>을 참조하세요.</p>
 <h4 id="auto-compaction-can-block-streaming">자동 압축으로 인한 스트리밍 차단</h4>
-<p>압축은 세션 기록을 지우고 다시 작성하므로 SDK는 실행이 완료된 것으로 간주하기 전에 압축이 끝날 때까지 기다립니다. 스트리밍 모드에서는 압축 작업이 많을 경우 마지막 출력 토큰 이후에도 <code>run.stream_events()</code>이 몇 초간 열린 상태로 유지될 수 있습니다.</p>
-<p><code>OpenAIResponsesCompactionSession.run_compaction()</code>은 지우고 다시 작성하는 작업을 래퍼 경계에서 복구 가능한 교체 작업으로 취급합니다. 기본 기록이 변경된 후 교체 작업이 실패하거나 취소되면 래퍼는 이전 기록의 복원을 시도하며, 원래 예외나 취소가 호출자에게 전달되기 전에 해당 복구 시도가 완료될 때까지 기다립니다. 복구 중에 기본 백엔드도 실패하면 이전 기록이 복원되지 않은 상태로 남을 수 있으며 SDK는 복구 실패를 로그에 기록합니다. 래퍼는 원격 요청과 교체 또는 복구 단계를 포함한 전체 압축 작업에 걸쳐 <code>add_items()</code>, <code>pop_item()</code>, <code>clear_session()</code>을 직렬화합니다. 동시에 발생한 래퍼 변경 작업은 압축을 기다린 다음 결과 기록에 적용되므로 덮어쓰이지 않습니다. 자동 압축은 어떤 래퍼 세대가 해당 실행에 속하는지도 기록합니다. 다른 실행이 압축 시작 전에 기록을 변경하면 SDK는 최신 기록을 교체하지 않고 오래된 압축 작업을 건너뜁니다. 압축 실행 중에 기본 세션을 직접 변경하지 마세요. 직접 변경하면 이러한 래퍼 보장이 적용되지 않습니다.</p>
-<p>지연 시간이 짧은 스트리밍이나 빠른 턴 전환이 필요하다면 자동 압축을 비활성화하고 턴 사이(또는 유휴 시간)에 <code>run_compaction()</code>을 직접 호출합니다. 자체 기준에 따라 압축을 강제로 수행할 시점을 결정할 수 있습니다.</p>
+<p>압축은 세션 기록을 지우고 다시 작성하므로 SDK는 실행이 완료된 것으로 처리하기 전에 압축이 끝날 때까지 기다립니다. 스트리밍 모드에서는 압축 작업이 많을 경우 마지막 출력 토큰 이후에도 <code>run.stream_events()</code>이 몇 초 동안 열린 상태로 유지될 수 있습니다.</p>
+<p><code>OpenAIResponsesCompactionSession.run_compaction()</code>은 래퍼 경계에서 지우고 다시 작성하는 작업을 복구 가능한 교체 작업으로 처리합니다. 기본 기록이 변경된 후 교체 작업이 실패하거나 취소되면 래퍼는 이전 기록의 복원을 시도하고, 원래 예외나 취소가 호출자에게 전달되기 전에 해당 복구 시도가 완료될 때까지 기다립니다. 복구 중 기본 백엔드에서도 오류가 발생하면 이전 기록이 복원되지 않은 상태로 남을 수 있으며 SDK는 복구 실패를 로그에 기록합니다. 래퍼는 원격 요청과 교체 또는 복구 단계를 포함한 전체 압축 작업과 함께 <code>add_items()</code>, <code>pop_item()</code>, <code>clear_session()</code>을 순차적으로 처리합니다. 동시에 발생한 래퍼 변경 작업은 압축이 완료될 때까지 기다린 다음, 덮어써지는 대신 압축 결과 기록에 적용됩니다. 또한 자동 압축은 실행에 속한 래퍼 세대를 기록합니다. 해당 압축이 시작되기 전에 다른 실행이 기록을 변경하면 SDK는 최신 기록을 교체하지 않고 오래된 압축을 건너뜁니다. 압축이 실행 중일 때 기본 세션을 직접 변경하지 마세요. 직접 변경하면 이러한 래퍼 보장이 적용되지 않습니다.</p>
+<p>지연 시간이 짧은 스트리밍이나 빠른 턴 전환이 필요하다면 자동 압축을 비활성화하고 턴 사이 또는 유휴 시간에 <code>run_compaction()</code>을 직접 호출하세요. 자체 기준에 따라 압축을 강제로 실행할 시점을 결정할 수 있습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAIResponsesCompactionSession</span>
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
@@ -2795,7 +2795,7 @@
 </span><span id="__span-9-14"><a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="async-sqlite-sessions">비동기 SQLite 세션</h3>
-<p><code>aiosqlite</code>을 기반으로 하는 SQLite 영속성이 필요한 경우 <code>AsyncSQLiteSession</code>을 사용합니다.</p>
+<p><code>aiosqlite</code> 기반의 SQLite 영구 저장소가 필요하다면 <code>AsyncSQLiteSession</code>을 사용하세요.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>pip<span class="w"> </span>install<span class="w"> </span>aiosqlite
 </span></code></pre></div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
@@ -2806,7 +2806,7 @@
 </span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="redis-sessions">Redis 세션</h3>
-<p>여러 워커 또는 서비스 간에 세션 메모리를 공유하려면 <code>RedisSession</code>을 사용합니다.</p>
+<p>여러 워커나 서비스 간에 세션 메모리를 공유하려면 <code>RedisSession</code>을 사용하세요.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents<span class="o">[</span>redis<span class="o">]</span>
 </span></code></pre></div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
@@ -2820,9 +2820,9 @@
 </span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
 </span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="k">await</span> <span class="n">session</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
 </span></code></pre></div>
-<p><code>from_url(...)</code>은 Redis 클라이언트를 생성하고 소유합니다. <code>close()</code> 이후에는 세션이 종료 상태가 되며 후속 세션 작업에서 <code>RuntimeError</code>이 발생합니다. <code>close()</code>을 반복하거나 동시에 호출해도 안전합니다. 애플리케이션에서 이미 Redis 클라이언트를 관리하는 경우 <code>redis_client=...</code>을 사용하여 <code>RedisSession(...)</code>을 직접 생성합니다. 이 경우 <code>close()</code>은 아무 작업도 하지 않으며, 호출자가 클라이언트 소유권을 유지하고 세션도 계속 사용할 수 있습니다.</p>
+<p><code>from_url(...)</code>은 Redis 클라이언트를 생성하고 소유합니다. <code>close()</code> 이후에는 세션이 종료 상태가 되며 이후 세션 작업에서 <code>RuntimeError</code>이 발생합니다. <code>close()</code>을 반복적으로 또는 동시에 호출해도 안전합니다. 애플리케이션에서 이미 Redis 클라이언트를 관리하고 있다면 <code>redis_client=...</code>을 사용하여 <code>RedisSession(...)</code>을 직접 생성하세요. 이 경우 <code>close()</code>은 아무 작업도 수행하지 않으며, 호출자가 클라이언트 소유권을 유지하고 세션도 계속 사용할 수 있습니다.</p>
 <h3 id="sqlalchemy-sessions">SQLAlchemy 세션</h3>
-<p>SQLAlchemy가 지원하는 모든 데이터베이스를 사용하는 프로덕션 환경용 Agents SDK 세션 영속성입니다.</p>
+<p>SQLAlchemy가 지원하는 모든 데이터베이스를 사용하여 프로덕션 환경에 적합한 Agents SDK 세션 영구 저장소를 제공합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLAlchemySession</span>
 </span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
 </span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="c1"># Using database URL</span>
@@ -2839,7 +2839,7 @@
 </span></code></pre></div>
 <p>자세한 문서는 <a href="sqlalchemy_session/">SQLAlchemy 세션</a>을 참조하세요.</p>
 <h3 id="dapr-sessions">Dapr 세션</h3>
-<p>이미 Dapr 사이드카를 실행하고 있거나 에이전트 코드를 변경하지 않고 구성된 상태 저장소 백엔드를 전환하려면 <code>DaprSession</code>을 사용합니다.</p>
+<p>이미 Dapr 사이드카를 실행하고 있거나 에이전트 코드를 변경하지 않고 구성된 상태 저장소 백엔드를 전환하려면 <code>DaprSession</code>을 사용하세요.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents<span class="o">[</span>dapr<span class="o">]</span>
 </span></code></pre></div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
@@ -2857,15 +2857,15 @@
 </span></code></pre></div>
 <p>참고:</p>
 <ul>
-<li><code>from_address(...)</code>은 Dapr 클라이언트를 생성하고 소유합니다. 앱에서 이미 클라이언트를 관리하는 경우 <code>dapr_client=...</code>을 사용하여 <code>DaprSession(...)</code>을 직접 생성합니다.</li>
-<li>컨텍스트를 종료하거나 <code>close()</code>을 호출하면 소유 클라이언트 세션이 종료 상태가 됩니다. 이후 세션 작업에서는 <code>RuntimeError</code>이 발생하지만 <code>close()</code>을 반복하거나 동시에 호출해도 안전합니다. 주입된 클라이언트를 사용하는 경우 <code>close()</code>은 아무 작업도 하지 않으며 세션은 계속 사용할 수 있습니다.</li>
-<li>기본 상태 저장소가 TTL을 지원하는 경우 <code>ttl=...</code>을 전달하면 세션 데이터에 TTL 만료가 자동으로 적용됩니다.</li>
-<li>상태 쓰기 및 삭제 작업에 강력한 일관성을 요청하려면 <code>consistency=DAPR_CONSISTENCY_STRONG</code>을 전달합니다(저장소에 따라 다름). 단, 유선 수준의 읽기 일관성을 사용하려면 업스트림 Dapr Python 클라이언트가 <code>get_state</code>의 일관성 설정을 지원해야 합니다.</li>
-<li>Dapr Python SDK는 HTTP 사이드카 엔드포인트도 확인합니다. 로컬 개발 환경에서는 <code>dapr_address</code>에 사용되는 gRPC 포트뿐 아니라 <code>--dapr-http-port 3500</code>을 사용하여 Dapr를 시작합니다.</li>
-<li>로컬 구성 요소와 문제 해결을 포함한 전체 설정 안내는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py"><code>examples/memory/dapr_session_example.py</code></a>을 참조하세요.</li>
+<li><code>from_address(...)</code>은 Dapr 클라이언트를 생성하고 소유합니다. 앱에서 이미 클라이언트를 관리하고 있다면 <code>dapr_client=...</code>을 사용하여 <code>DaprSession(...)</code>을 직접 생성하세요.</li>
+<li>컨텍스트를 종료하거나 <code>close()</code>을 호출하면 소유 클라이언트를 사용하는 세션이 종료 상태가 됩니다. 이후 세션 작업에서 <code>RuntimeError</code>이 발생하지만 <code>close()</code>을 반복적으로 또는 동시에 호출해도 안전합니다. 주입된 클라이언트를 사용하는 경우 <code>close()</code>은 아무 작업도 수행하지 않으며 세션은 계속 사용할 수 있습니다.</li>
+<li>기본 상태 저장소가 TTL을 지원한다면 <code>ttl=...</code>을 전달하여 세션 데이터에 TTL 만료가 자동으로 적용되도록 하세요.</li>
+<li>상태 쓰기 및 삭제에 강한 일관성을 요청하려면 <code>consistency=DAPR_CONSISTENCY_STRONG</code>을 전달하세요. 지원 여부는 저장소에 따라 달라집니다. 네트워크 수준의 읽기 일관성을 사용하려면 상위 Dapr Python 클라이언트에서 <code>get_state</code>에 일관성을 설정할 수 있어야 합니다.</li>
+<li>Dapr Python SDK는 HTTP 사이드카 엔드포인트도 확인합니다. 로컬 개발 시에는 <code>dapr_address</code>에서 사용하는 gRPC 포트와 함께 <code>--dapr-http-port 3500</code>으로 Dapr를 시작하세요.</li>
+<li>로컬 컴포넌트와 문제 해결을 포함한 전체 설정 과정은 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/memory/dapr_session_example.py"><code>examples/memory/dapr_session_example.py</code></a>을 참조하세요.</li>
 </ul>
 <h3 id="mongodb-sessions">MongoDB 세션</h3>
-<p>이미 MongoDB를 사용하거나 수평 확장이 가능한 멀티프로세스 세션 스토리지가 필요한 애플리케이션에서는 <code>MongoDBSession</code>을 사용합니다.</p>
+<p>이미 MongoDB를 사용하거나 수평 확장이 가능한 멀티프로세스 세션 스토리지가 필요한 애플리케이션에서는 <code>MongoDBSession</code>을 사용하세요.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents<span class="o">[</span>mongodb<span class="o">]</span>
 </span></code></pre></div>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
@@ -2885,13 +2885,13 @@
 </span></code></pre></div>
 <p>참고:</p>
 <ul>
-<li><code>from_uri(...)</code>은 <code>AsyncMongoClient</code>을 생성하고 소유하며 <code>session.close()</code>에서 이를 닫습니다. 소유 클라이언트 세션은 <code>close()</code> 이후 종료 상태가 되며, 후속 세션 작업에서 <code>RuntimeError</code>가 발생합니다. 애플리케이션에서 이미 클라이언트를 관리하는 경우 <code>client=...</code>을 사용하여 <code>MongoDBSession(...)</code>을 직접 생성합니다. 이 경우 <code>session.close()</code>은 아무 작업도 하지 않고, 호출자가 클라이언트 수명 주기를 관리할 책임을 유지하며, 세션도 계속 사용할 수 있습니다.</li>
-<li>다른 변경 없이 <code>mongodb+srv://user:password@cluster.example.mongodb.net</code> URI를 <code>from_uri(...)</code>에 전달하여 <a href="https://www.mongodb.com/products/platform">MongoDB Atlas</a>에 연결합니다.</li>
-<li>두 개의 컬렉션이 사용되며 두 이름 모두 <code>sessions_collection=</code>(기본값 <code>agent_sessions</code>)과 <code>messages_collection=</code>(기본값 <code>agent_messages</code>)을 통해 구성할 수 있습니다. 인덱스는 처음 사용할 때 자동으로 생성됩니다. 비어 있지 않은 각 <code>add_items()</code> 호출은 단조 증가하는 <code>seq</code>이 마지막 항목을 기준으로 배치 순서를 지정하는 논리적 배치 문서 하나를 작성합니다. 기존의 항목별 메시지 문서도 계속 읽을 수 있습니다. 논리적 배치는 MongoDB의 단일 문서 크기 제한 이내여야 하며, 크기를 초과한 배치는 일부만 저장되지 않고 원자적으로 실패합니다.</li>
-<li>첫 실행 전에 연결을 확인하려면 <code>await session.ping()</code>을 사용합니다.</li>
+<li><code>from_uri(...)</code>은 <code>AsyncMongoClient</code>을 생성하고 소유하며 <code>session.close()</code>에서 이를 닫습니다. 소유 클라이언트를 사용하는 세션은 <code>close()</code> 이후 종료 상태가 되며 이후 세션 작업에서 <code>RuntimeError</code>이 발생합니다. 애플리케이션에서 이미 클라이언트를 관리하고 있다면 <code>client=...</code>을 사용하여 <code>MongoDBSession(...)</code>을 직접 생성하세요. 이 경우 <code>session.close()</code>은 아무 작업도 수행하지 않으며, 호출자가 클라이언트 수명 주기를 관리할 책임을 유지하고 세션도 계속 사용할 수 있습니다.</li>
+<li>다른 변경 없이 <code>mongodb+srv://user:password@cluster.example.mongodb.net</code> URI를 <code>from_uri(...)</code>에 전달하여 <a href="https://www.mongodb.com/products/platform">MongoDB Atlas</a>에 연결할 수 있습니다.</li>
+<li>두 개의 컬렉션이 사용되며 두 이름 모두 <code>sessions_collection=</code>(기본값 <code>agent_sessions</code>)과 <code>messages_collection=</code>(기본값 <code>agent_messages</code>)을 통해 구성할 수 있습니다. 인덱스는 처음 사용할 때 자동으로 생성됩니다. 비어 있지 않은 각 <code>add_items()</code> 호출은 단조 증가하는 <code>seq</code>이 마지막 항목을 기준으로 배치 순서를 지정하는 논리적 배치 문서 하나를 작성합니다. 기존의 항목별 메시지 문서도 계속 읽을 수 있습니다. 논리적 배치는 MongoDB의 단일 문서 크기 제한 이내여야 하며, 크기를 초과하는 배치는 일부만 저장되지 않고 원자적으로 실패합니다.</li>
+<li>첫 실행 전에 연결을 확인하려면 <code>await session.ping()</code>을 사용하세요.</li>
 </ul>
 <h3 id="advanced-sqlite-sessions">고급 SQLite 세션</h3>
-<p>대화 분기, 사용량 분석, 구조화된 쿼리를 지원하는 향상된 SQLite 세션입니다.</p>
+<p>대화 브랜칭, 사용량 분석, 구조화된 쿼리를 지원하는 향상된 SQLite 세션입니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">AdvancedSQLiteSession</span>
 </span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>
 </span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="c1"># Create with advanced features</span>
@@ -2932,26 +2932,26 @@
 </span></code></pre></div>
 <p>자세한 문서는 <a href="encrypted_session/">암호화된 세션</a>을 참조하세요.</p>
 <h3 id="other-session-types">기타 세션 유형</h3>
-<p>몇 가지 기본 제공 옵션이 더 있습니다. <code>examples/memory/</code> 및 <code>extensions/memory/</code> 아래의 소스 코드를 참조하세요.</p>
+<p>몇 가지 내장 옵션이 더 있습니다. <code>examples/memory/</code>과 <code>extensions/memory/</code> 아래의 소스 코드를 참조하세요.</p>
 <h2 id="operational-patterns">운영 패턴</h2>
-<h3 id="session-id-naming">세션 ID 명명법</h3>
-<p>대화를 정리하는 데 도움이 되는 의미 있는 세션 ID를 사용합니다.</p>
+<h3 id="session-id-naming">세션 ID 명명 규칙</h3>
+<p>대화를 체계적으로 정리하는 데 도움이 되는 의미 있는 세션 ID를 사용하세요.</p>
 <ul>
 <li>사용자 기반: <code>"user_12345"</code></li>
 <li>스레드 기반: <code>"thread_abc123"</code></li>
 <li>컨텍스트 기반: <code>"support_ticket_456"</code></li>
 </ul>
-<h3 id="memory-persistence">메모리 영속성</h3>
+<h3 id="memory-persistence">메모리 영구 저장</h3>
 <ul>
 <li>임시 대화에는 인메모리 SQLite(<code>SQLiteSession("session_id")</code>)를 사용합니다</li>
-<li>영구 대화에는 파일 기반 SQLite(<code>SQLiteSession("session_id", "path/to/db.sqlite")</code>)를 사용합니다</li>
+<li>영구적인 대화에는 파일 기반 SQLite(<code>SQLiteSession("session_id", "path/to/db.sqlite")</code>)를 사용합니다</li>
 <li><code>aiosqlite</code> 기반 구현이 필요한 경우 비동기 SQLite(<code>AsyncSQLiteSession("session_id", db_path="...")</code>)를 사용합니다</li>
 <li>공유되는 저지연 세션 메모리에는 Redis 기반 세션(<code>RedisSession.from_url("session_id", url="redis://...")</code>)을 사용합니다</li>
 <li>SQLAlchemy가 지원하는 기존 데이터베이스를 사용하는 프로덕션 시스템에는 SQLAlchemy 기반 세션(<code>SQLAlchemySession("session_id", engine=engine, create_tables=True)</code>)을 사용합니다</li>
 <li>이미 MongoDB를 사용하거나 수평 확장이 가능한 멀티프로세스 세션 스토리지가 필요한 애플리케이션에는 MongoDB 세션(<code>MongoDBSession.from_uri("session_id", uri="mongodb://localhost:27017")</code>)을 사용합니다</li>
-<li>기본 제공 원격 측정, 트레이싱, 데이터 격리 및 30개 이상의 데이터베이스 백엔드 지원이 필요한 프로덕션 클라우드 네이티브 배포에는 Dapr 상태 저장소 세션(<code>DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")</code>)을 사용합니다</li>
-<li>OpenAI Conversations API에 기록을 저장하려는 경우 OpenAI 호스트 스토리지(<code>OpenAIConversationsSession()</code>)를 사용합니다</li>
-<li>모든 세션을 투명한 암호화와 TTL 기반 만료로 감싸려면 암호화된 세션(<code>EncryptedSession(session_id, underlying_session, encryption_key)</code>)을 사용합니다</li>
+<li>내장 텔레메트리, 트레이싱, 데이터 격리와 30개 이상의 데이터베이스 백엔드를 지원하는 프로덕션 클라우드 네이티브 배포에는 Dapr 상태 저장소 세션(<code>DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")</code>)을 사용합니다</li>
+<li>OpenAI Conversations API에 기록을 저장하려면 OpenAI 호스트형 스토리지(<code>OpenAIConversationsSession()</code>)를 사용합니다</li>
+<li>모든 세션에 투명한 암호화와 TTL 기반 만료를 추가하려면 암호화된 세션(<code>EncryptedSession(session_id, underlying_session, encryption_key)</code>)을 사용합니다</li>
 <li>더 고급 사용 사례에서는 다른 프로덕션 시스템(예: Django)을 위한 사용자 지정 세션 백엔드 구현을 고려합니다</li>
 </ul>
 <h3 id="multiple-sessions">여러 세션</h3>
@@ -2993,7 +2993,7 @@
 </span><span id="__span-22-16"><a id="__codelineno-22-16" name="__codelineno-22-16" href="#__codelineno-22-16"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="complete-example">전체 예제</h2>
-<p>다음은 세션 메모리의 실제 동작을 보여주는 전체 예제입니다.</p>
+<p>다음은 세션 메모리의 동작을 보여주는 전체 예제입니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>
@@ -3053,7 +3053,7 @@
 </span><span id="__span-23-57"><a id="__codelineno-23-57" name="__codelineno-23-57" href="#__codelineno-23-57"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <h2 id="custom-session-implementations">사용자 지정 세션 구현</h2>
-<p><a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> 프로토콜을 구조적으로 따르는 클래스를 생성하여 자체 세션 메모리를 구현할 수 있습니다. <code>SessionABC</code>에서 상속할 필요는 없습니다. <code>session_id</code>와 <code>session_settings</code>을 정의하고 네 개의 기록 메서드를 직접 구현합니다.</p>
+<p><a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> 프로토콜을 구조적으로 따르는 클래스를 생성하여 자체 세션 메모리를 구현할 수 있습니다. <code>SessionABC</code>을 상속할 필요는 없습니다. <code>session_id</code>와 <code>session_settings</code>을 정의하고 네 가지 기록 메서드를 직접 구현하세요.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SessionSettings</span>
 </span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.items</span><span class="w"> </span><span class="kn">import</span> <span class="n">TResponseInputItem</span>
 </span><span id="__span-24-3"><a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>
@@ -3098,7 +3098,7 @@
 
   
       dataclass
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a>을 사용자 지정 세션에 전달할 수 있습니다. Agents SDK가 래퍼를 전달하도록 하려면 명시적인 이름을 가지며 키워드와 호환되는 <code>wrapper</code> 매개변수를 네 개의 기록 메서드 모두에 추가합니다.</p>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a>를 사용자 지정 세션에 전달할 수 있습니다. Agents SDK가 래퍼를 전달하도록 하려면 네 가지 기록 메서드 모두에 명시적으로 이름이 지정되고 키워드와 호환되는 <code>wrapper</code> 매개변수를 추가하세요.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
 </span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>
 </span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">RunContextWrapper</span>
@@ -3132,7 +3132,7 @@
 </span><span id="__span-25-31"><a id="__codelineno-25-31" name="__codelineno-25-31" href="#__codelineno-25-31"></a>        <span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-25-32"><a id="__codelineno-25-32" name="__codelineno-25-32" href="#__codelineno-25-32"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
 </span></code></pre></div>
-<p>Agents SDK는 <code>get_items</code>, <code>add_items</code>, <code>pop_item</code>, <code>clear_session</code>이 모두 <code>wrapper</code>을 선언한 경우에만 이 통합을 활성화합니다. 일반적인 <code>**kwargs</code> 매개변수는 이 시그니처 검사를 충족하지 않습니다. <code>wrapper</code>을 생략하는 기존 세션 구현은 릴리스된 호출 형태를 유지하며 변경 없이 계속 작동합니다.</p>
+<p>Agents SDK는 <code>get_items</code>, <code>add_items</code>, <code>pop_item</code>, <code>clear_session</code>이 모두 <code>wrapper</code>을 선언하는 경우에만 이 통합을 활성화합니다. 일반적인 <code>**kwargs</code> 매개변수는 이 시그니처 검사를 충족하지 않습니다. <code>wrapper</code>을 생략하는 기존 세션 구현은 공개된 호출 형태를 유지하며 변경 없이 계속 작동합니다.</p>
 <h2 id="community-session-implementations">커뮤니티 세션 구현</h2>
 <p>커뮤니티에서 추가 세션 구현을 개발했습니다.</p>
 <table>
@@ -3149,7 +3149,7 @@
 </tr>
 </tbody>
 </table>
-<p>세션 구현을 만들었다면 여기에 추가할 수 있도록 문서 PR을 자유롭게 제출해 주세요!</p>
+<p>세션 구현을 개발했다면 여기에 추가할 수 있도록 문서 PR을 자유롭게 제출해 주세요!</p>
 <h2 id="api-reference">API 레퍼런스</h2>
 <p>자세한 API 문서는 다음을 참조하세요.</p>
 <ul>
@@ -3162,7 +3162,7 @@
 <li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/sqlalchemy_session/#agents.extensions.memory.sqlalchemy_session.SQLAlchemySession"><code>SQLAlchemySession</code></a> - SQLAlchemy 기반 구현</li>
 <li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/mongodb_session/#agents.extensions.memory.mongodb_session.MongoDBSession"><code>MongoDBSession</code></a> - MongoDB 기반 세션 구현</li>
 <li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/dapr_session/#agents.extensions.memory.dapr_session.DaprSession"><code>DaprSession</code></a> - Dapr 상태 저장소 구현</li>
-<li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/advanced_sqlite_session/#agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession"><code>AdvancedSQLiteSession</code></a> - 분기 및 분석 기능을 갖춘 향상된 SQLite</li>
+<li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/advanced_sqlite_session/#agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession"><code>AdvancedSQLiteSession</code></a> - 브랜칭 및 분석 기능을 갖춘 향상된 SQLite</li>
 <li><a class="autorefs autorefs-internal" href="../../ref/extensions/memory/encrypt_session/#agents.extensions.memory.encrypt_session.EncryptedSession"><code>EncryptedSession</code></a> - 모든 세션을 위한 암호화 래퍼</li>
 </ul>
 
