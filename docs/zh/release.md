@@ -151,11 +151,11 @@ result = Runner.run_sync(
 
 ### 0.14.0 {#0140}
 
-此次次版本发布**不会**引入破坏性变更，但新增了一个重要的功能领域：沙箱智能体，以及在本地、容器化和托管环境中使用它们所需的运行时、后端和文档支持。
+此次次版本发布**不会**引入破坏性变更，但新增了一个重要的 beta 功能领域：沙箱智能体，以及在本地、容器化和托管环境中使用它们所需的运行时、后端和文档支持。
 
 要点：
 
--   新增以 `SandboxAgent`、`Manifest` 和 `SandboxRunConfig` 为核心的沙箱运行时接口，使智能体能够在持久化的隔离工作区内处理文件、目录、Git 仓库、挂载和快照，并支持恢复。
+-   新增以 `SandboxAgent`、`Manifest` 和 `SandboxRunConfig` 为核心的 beta 沙箱运行时接口，使智能体能够在持久化的隔离工作区内处理文件、目录、Git 仓库、挂载和快照，并支持恢复。
 -   新增通过 `UnixLocalSandboxClient` 和 `DockerSandboxClient` 实现的本地及容器化开发沙箱执行后端，并通过 Python 软件包中的可选依赖 extras，为 Blaxel、Cloudflare、Daytona、E2B、Modal、Runloop 和 Vercel 提供托管提供商集成。
 -   新增沙箱记忆支持，使未来的运行能够复用以往运行中获得的经验，并提供渐进式披露、多轮分组、可配置的隔离边界，以及包括 S3 支持工作流在内的持久化记忆代码示例。
 -   新增更广泛的工作区和恢复模型，包括本地及合成工作区条目、S3/R2/GCS/Azure Blob Storage/S3 Files 的远程存储挂载、可移植快照，以及通过 `RunState`、`SandboxSessionState` 或已保存快照实现的恢复流程。
