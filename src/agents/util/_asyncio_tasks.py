@@ -106,6 +106,9 @@ async def gather_with_cancel(
             if on_child_failure is not None:
                 on_child_failure()
             raise
+    except GeneratorExit:
+        # Coroutine closure cannot suspend; the owner must tear down child tasks.
+        raise
     except BaseException:
         for task in tasks:
             if not task.done():
@@ -152,6 +155,9 @@ async def run_producer_consumer(
 
         consumer_result = await consumer_task
         return producer_result, consumer_result
+    except GeneratorExit:
+        # Coroutine closure cannot suspend; the owner must tear down child tasks.
+        raise
     except BaseException:
         for task in tasks:
             if not task.done():
