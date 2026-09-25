@@ -54,6 +54,7 @@ from ...memory.session import (
     _get_session_wrapper,
 )
 from ...memory.session_settings import SessionSettings, resolve_session_limit
+from ...memory.sqlite_session import SQLiteSession
 from ...run_context import RunContextWrapper
 
 
@@ -419,12 +420,33 @@ class EncryptedSession(SessionABC):
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> TResponseInputItem | None:
-        wrapper = _get_session_wrapper(self.underlying_session, wrapper)
+        """Remove the latest readable item, skipping expired items.
+
+        With native ``SQLiteSession`` pops, authentication runs inside the SQLite
+        transaction. An ``InvalidToken`` failure leaves the unauthenticated item's
+        ciphertext and position unchanged, including when its TTL has expired.
+
+        Other backends, wrappers, and subclasses overriding ``pop_item`` retain
+        their existing delegation behavior. They do not provide this atomic
+        authentication guarantee; use the correct encryption key before popping
+        because unreadable encrypted items can be removed by that legacy path.
+        """
+        underlying = self.underlying_session
+        wrapper = _get_session_wrapper(underlying, wrapper)
+
+        def authenticate(item: TResponseInputItem) -> None:
+            if _is_encrypted_envelope(item):
+                # Verify without TTL so authenticated expired items still drain.
+                self.cipher.extract_timestamp(item["payload"].encode("utf-8"))
+
         while True:
-            enc = await _call_session_method(
-                self.underlying_session.pop_item,
-                wrapper=wrapper,
-            )
+            if (
+                isinstance(underlying, SQLiteSession)
+                and type(underlying).pop_item is SQLiteSession.pop_item
+            ):
+                enc = await underlying._pop_item_with_validation(authenticate)
+            else:
+                enc = await _call_session_method(underlying.pop_item, wrapper=wrapper)
             if not enc:
                 return None
             item = self._unwrap(enc)
