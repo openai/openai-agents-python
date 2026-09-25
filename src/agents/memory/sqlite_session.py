@@ -469,35 +469,23 @@ class SQLiteSession(SessionABC):
         Returns:
             The most recent item if it exists, None if the session is empty
         """
+        return await self._pop_item_with_validation()
+
+    async def _pop_item_with_validation(
+        self, validate: Callable[[TResponseInputItem], None] | None = None
+    ) -> TResponseInputItem | None:
+        """Validate the claimed item before committing its removal.
+
+        A validation exception rolls back the deletion, preserving the row's ID
+        and position. The callback runs synchronously in the SQLite worker thread.
+        """
 
         def _pop_item_sync():
             with self._write_connection() as conn:
-                # Use DELETE with RETURNING to atomically delete and return the most recent item
-                cursor = conn.execute(
-                    f"""
-                    DELETE FROM {self.messages_table}
-                    WHERE id = (
-                        SELECT id FROM {self.messages_table}
-                        WHERE session_id = ?
-                        ORDER BY id DESC
-                        LIMIT 1
-                    )
-                    RETURNING message_data
-                    """,
-                    (self.session_id,),
-                )
-
-                result = cursor.fetchone()
-                conn.commit()
-
-                while result:
-                    message_data = result[0]
-                    try:
-                        item = json.loads(message_data)
-                        return item
-                    except (json.JSONDecodeError, TypeError):
-                        # Drop corrupted JSON entries and keep looking for a valid item.
-                        cursor = conn.execute(
+                while True:
+                    # Claim the tail inside the transaction that owns validation.
+                    with closing(
+                        conn.execute(
                             f"""
                             DELETE FROM {self.messages_table}
                             WHERE id = (
@@ -510,10 +498,23 @@ class SQLiteSession(SessionABC):
                             """,
                             (self.session_id,),
                         )
+                    ) as cursor:
                         result = cursor.fetchone()
-                        conn.commit()
 
-                return None
+                    if result is None:
+                        conn.commit()
+                        return None
+
+                    try:
+                        item = json.loads(result[0])
+                    except (json.JSONDecodeError, TypeError):
+                        # Drop corrupted JSON entries and keep looking for a valid item.
+                        conn.commit()
+                        continue
+                    if validate is not None:
+                        validate(item)
+                    conn.commit()
+                    return item
 
         return await _await_mutation(asyncio.to_thread(_pop_item_sync))
 

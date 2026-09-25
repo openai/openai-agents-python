@@ -631,7 +631,7 @@ def test_deferred_top_level_permanent_approval_does_not_alias_to_bare_name() -> 
     context_wrapper.approve_tool(deferred_item, always_approve=True)
 
     assert context_wrapper.is_tool_approved("get_weather", "call-weather-2") is None
-    assert "deferred_top_level:get_weather" in context_wrapper._approvals
+    assert context_wrapper.is_tool_approved("deferred_top_level:get_weather", "future") is True
     assert (
         context_wrapper.get_approval_status(
             "get_weather",
@@ -643,7 +643,7 @@ def test_deferred_top_level_permanent_approval_does_not_alias_to_bare_name() -> 
     )
 
 
-def test_deferred_top_level_legacy_permanent_approval_key_still_restores() -> None:
+def test_deferred_top_level_legacy_permanent_approval_requires_reapproval() -> None:
     agent = Agent(name="test-agent")
     context_wrapper = RunContextWrapper(context=None)
     deferred_item = make_tool_approval_item(
@@ -666,7 +666,7 @@ def test_deferred_top_level_legacy_permanent_approval_key_still_restores() -> No
             tool_namespace="get_weather",
             existing_pending=deferred_item,
         )
-        is True
+        is None
     )
 
 

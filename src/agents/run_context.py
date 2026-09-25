@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import copy
+import json
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic
+from typing import TYPE_CHECKING, Annotated, Any, Generic
 from uuid import uuid4
 
-from typing_extensions import TypeVar
+from pydantic import (
+    Field,
+    GetCoreSchemaHandler,
+    ModelWrapValidatorHandler,
+    TypeAdapter,
+    model_validator,
+)
+from pydantic_core import PydanticSerializationUnexpectedValue, core_schema
+from typing_extensions import Self, TypeVar
 
 from ._tool_identity import (
     FunctionToolLookupKey,
@@ -40,6 +50,100 @@ else:
     TResponseInputItem = Any
 
 TContext = TypeVar("TContext", default=Any)
+
+
+class _FunctionToolApprovalKey(str):
+    """An owner-bound key that transports approval state without an agent graph."""
+
+    _agent_ref: weakref.ReferenceType[Any] | None
+    tool_key: str
+    owner_token: str
+    _PREFIX = "__agents_function_approval__:"
+
+    def __new__(cls, agent: Any, tool_key: str) -> _FunctionToolApprovalKey:
+        identity = getattr(agent, "_function_approval_identity", None)
+        if identity is None or identity[0]() is not agent:
+            # A weak identity witness also detects a shallow-copied agent cache.
+            identity = (weakref.ref(agent), uuid4().hex)
+            agent._function_approval_identity = identity
+        value = cls._PREFIX + json.dumps([identity[1], tool_key], separators=(",", ":"))
+        key = super().__new__(cls, value)
+        key._agent_ref = identity[0]
+        key.tool_key = tool_key
+        key.owner_token = identity[1]
+        return key
+
+    @property
+    def agent(self) -> Any:
+        return self._agent_ref() if self._agent_ref is not None else None
+
+    def __hash__(self) -> int:
+        return hash((_FunctionToolApprovalKey, self.owner_token, self.tool_key))
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, _FunctionToolApprovalKey):
+            return False
+        if self.owner_token != other.owner_token or self.tool_key != other.tool_key:
+            return False
+        if self._agent_ref is None or other._agent_ref is None:
+            return self._agent_ref is None and other._agent_ref is None
+        owner = self.agent
+        return owner is not None and owner is other.agent
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FunctionToolApprovalKey:
+        # A checkpoint copies decisions, not the application-owned agent graph.
+        return self
+
+    @classmethod
+    def _from_serialized(cls, value: str) -> _FunctionToolApprovalKey:
+        if not value.startswith(cls._PREFIX):
+            raise ValueError("Not a function approval key")
+        identity = json.loads(value[len(cls._PREFIX) :])
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or not isinstance(identity[0], str)
+            or not isinstance(identity[1], str)
+        ):
+            raise ValueError("Invalid function approval key")
+        key = str.__new__(cls, value)
+        # A transported token can reattach only to its original live owner.
+        # Names and tool signatures cannot authorize a different capability.
+        key._agent_ref = None
+        key.tool_key = identity[1]
+        key.owner_token = identity[0]
+        return key
+
+    @staticmethod
+    def _serialize(value: Any) -> str:
+        if not isinstance(value, _FunctionToolApprovalKey):
+            # Let the approval-key union select its native/hosted MCP branch.
+            raise PydanticSerializationUnexpectedValue("Not a function approval key")
+        return str(value)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(cls),
+                core_schema.no_info_after_validator_function(
+                    cls._from_serialized, core_schema.str_schema()
+                ),
+            ],
+            serialization=core_schema.plain_serializer_function_ser_schema(cls._serialize),
+        )
+
+
+_ApprovalKey = Annotated[
+    _FunctionToolApprovalKey | str | HostedMCPApprovalKey, Field(union_mode="left_to_right")
+]
 
 
 @dataclass(eq=False)
@@ -86,7 +190,7 @@ class RunContextWrapper(Generic[TContext]):
     """
 
     turn_input: list[TResponseInputItem] = field(default_factory=list)
-    _approvals: dict[str | HostedMCPApprovalKey, _ApprovalRecord] = field(default_factory=dict)
+    _approvals: dict[_ApprovalKey, _ApprovalRecord] = field(default_factory=dict)
     _tool_invocations: dict[str, _ToolInvocationRecord] = field(
         default_factory=dict,
         init=False,
@@ -104,6 +208,64 @@ class RunContextWrapper(Generic[TContext]):
         init=False,
         repr=False,
     )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _restore_converted_tool_state(
+        cls, value: Any, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        restored = handler(value)
+        # Pydantic dumps init=False dataclass fields but does not validate them
+        # back into the instance. Preserve the invocation and resume checks that
+        # must accompany transported approval decisions without adding public
+        # constructor parameters.
+        if isinstance(value, dict):
+            if "_tool_invocations" in value:
+                restored._tool_invocations = TypeAdapter(
+                    dict[str, _ToolInvocationRecord]
+                ).validate_python(value["_tool_invocations"])
+            if "_allow_legacy_approval_binding_reconstruction" in value:
+                restored._allow_legacy_approval_binding_reconstruction = TypeAdapter(
+                    bool
+                ).validate_python(value["_allow_legacy_approval_binding_reconstruction"])
+            if "_restored_unbound_approval_call_ids" in value:
+                restored._restored_unbound_approval_call_ids = TypeAdapter(
+                    set[str]
+                ).validate_python(value["_restored_unbound_approval_call_ids"])
+        return restored
+
+    def _resolve_function_approval_owners(self, starting_agent: Any) -> None:
+        """Reattach transported decisions only to their original live agents.
+
+        Generic context converters cannot prove ownership for cloned, recreated,
+        or cross-process agents. Those agents require fresh approval decisions.
+        """
+        detached = [
+            key
+            for key in self._approvals
+            if isinstance(key, _FunctionToolApprovalKey) and key._agent_ref is None
+        ]
+        if not detached:
+            return
+        from ._public_agent import get_public_agent
+        from ._run_state_agent_identity import _iter_agent_graph
+
+        configured: dict[str, Any] = {}
+        for agent in _iter_agent_graph(starting_agent):
+            owner = get_public_agent(agent)
+            identity = getattr(owner, "_function_approval_identity", None)
+            if identity is not None and identity[0]() is owner:
+                configured[identity[1]] = owner
+        for key in detached:
+            resolved_owner = configured.get(key.owner_token)
+            # Keep unresolved records dormant for later runs with their owner.
+            # They cannot match owner-bound execution or enter this checkpoint.
+            if resolved_owner is None:
+                continue
+            record = self._approvals.pop(key)
+            resolved = _FunctionToolApprovalKey(resolved_owner, key.tool_key)
+            # A fresh live decision takes precedence over transported state.
+            self._approvals.setdefault(resolved, record)
 
     def _share_tool_state_with(self, target: RunContextWrapper[Any]) -> None:
         """Share tool approval and invocation state with a derived context wrapper."""
@@ -252,15 +414,75 @@ class RunContextWrapper(Generic[TContext]):
 
     @staticmethod
     def _approval_keys_for_scope(
-        approval_key: str | HostedMCPApprovalKey, approval_scope: str | None
-    ) -> tuple[str | HostedMCPApprovalKey, ...]:
+        approval_key: _ApprovalKey, approval_scope: str | None
+    ) -> tuple[_ApprovalKey, ...]:
         if approval_key == "apply_patch" and approval_scope is not None:
             return (f"apply_patch:{approval_scope}", approval_key)
         return (approval_key,)
 
+    @staticmethod
+    def _function_approval_key(
+        tool_key: str, approval_item: ToolApprovalItem | None
+    ) -> _FunctionToolApprovalKey | None:
+        if approval_item is None:
+            return None
+        identity = tool_invocation_call_id(approval_item.raw_item)
+        if identity is None or identity[0] != "function_call":
+            return None
+        from ._public_agent import get_public_agent
+
+        return _FunctionToolApprovalKey(get_public_agent(approval_item.agent), tool_key)
+
+    def _approval_records_for_key(
+        self,
+        tool_key: str,
+        approval_item: ToolApprovalItem | None = None,
+        *,
+        call_id: str | None = None,
+        approval_scope: str | None = None,
+    ) -> tuple[_ApprovalRecord, ...]:
+        """Resolve an owner-bound execution query or an unambiguous name-only query."""
+        scoped_key = self._function_approval_key(tool_key, approval_item)
+        records: list[_ApprovalRecord] = []
+        if scoped_key is not None:
+            scoped_record = self._approvals.get(scoped_key)
+            if scoped_record is not None:
+                records.append(scoped_record)
+        elif approval_item is None:
+            scoped_records = [
+                record
+                for key, record in self._approvals.items()
+                if isinstance(key, _FunctionToolApprovalKey) and key.tool_key == tool_key
+            ]
+            # An exact call can identify its owner even when sticky defaults cannot.
+            if len(scoped_records) > 1 and call_id is not None:
+                scoped_records = [
+                    record
+                    for record in scoped_records
+                    if self._get_per_call_approval_status_for_record(record, call_id) is not None
+                ]
+            if len(scoped_records) == 1:
+                records.extend(scoped_records)
+        legacy = (
+            self._get_approval_record_for_key(tool_key, call_id, approval_scope=approval_scope)
+            if scoped_key is None and call_id is not None
+            else self._approvals.get(tool_key)
+        )
+        if legacy is not None:
+            if scoped_key is not None:
+                # Old snapshots have no trustworthy owner for a sticky function grant.
+                # Retain only actual per-call decisions; never infer an owner on first use.
+                legacy = copy.copy(legacy)
+                legacy.approved = legacy.approved if isinstance(legacy.approved, list) else []
+                legacy.rejected = legacy.rejected if isinstance(legacy.rejected, list) else []
+                legacy.sticky_scope = None
+                legacy.sticky_rejection_message = None
+            records.append(legacy)
+        return tuple(records)
+
     def _get_or_create_approval_entry(
         self,
-        approval_key: str | HostedMCPApprovalKey,
+        approval_key: _ApprovalKey,
         *,
         approval_scope: str | None = None,
     ) -> _ApprovalRecord:
@@ -295,6 +517,7 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None = None,
         tool_name: str | None = None,
         invocation_role: str | None = None,
+        approval_item: ToolApprovalItem | None = None,
     ) -> tuple[tuple[str, str], bool, bool] | None:
         """Validate an invocation and return status when an approval decision applies."""
         status = self._tool_invocation_status(
@@ -319,6 +542,7 @@ class RunContextWrapper(Generic[TContext]):
             tool_lookup_key=tool_lookup_key,
             tool_name=tool_name,
             approval_scope=approval_scope,
+            approval_item=approval_item,
         )
         has_per_call_decision = any(
             (isinstance(record.approved, list) and call_id in record.approved)
@@ -439,7 +663,8 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None,
         tool_name: str | None = None,
         approval_scope: str,
-    ) -> frozenset[str | HostedMCPApprovalKey]:
+        approval_item: ToolApprovalItem | None = None,
+    ) -> frozenset[_ApprovalKey]:
         """Return sticky approval keys that independently authorize this tool identity."""
         if isinstance(raw_item, Mapping):
             mapping = raw_item
@@ -465,7 +690,7 @@ class RunContextWrapper(Generic[TContext]):
         tool_name = tool_name or self._to_str_or_none(mapping.get("name"))
         tool_namespace = self._to_str_or_none(mapping.get("namespace"))
         if invocation_type == "function_call":
-            approval_keys: tuple[str | HostedMCPApprovalKey, ...] = get_function_tool_approval_keys(
+            approval_keys: tuple[_ApprovalKey, ...] = get_function_tool_approval_keys(
                 tool_name=tool_name,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=tool_lookup_key,
@@ -488,16 +713,23 @@ class RunContextWrapper(Generic[TContext]):
                 }.get(invocation_type)
             approval_keys = (tool_name,) if tool_name else ()
 
-        matching_keys: set[str | HostedMCPApprovalKey] = set()
+        matching_keys: set[_ApprovalKey] = set()
         for approval_key in approval_keys:
-            for scoped_key in self._approval_keys_for_scope(approval_key, approval_scope):
-                record = self._approvals.get(scoped_key)
+            if invocation_type == "function_call":
+                if not isinstance(approval_key, str):
+                    continue
+                scoped_key = self._function_approval_key(approval_key, approval_item)
+                if scoped_key is None:
+                    continue
+                approval_key = scoped_key
+            for candidate_key in self._approval_keys_for_scope(approval_key, approval_scope):
+                record = self._approvals.get(candidate_key)
                 if (
                     record is not None
                     and (isinstance(record.approved, bool) or isinstance(record.rejected, bool))
                     and record.sticky_scope == approval_scope
                 ):
-                    matching_keys.add(scoped_key)
+                    matching_keys.add(candidate_key)
         return frozenset(matching_keys)
 
     def _mark_tool_call_completed(
@@ -623,6 +855,7 @@ class RunContextWrapper(Generic[TContext]):
             tool_lookup_key=approval_item.tool_lookup_key,
             tool_name=approval_item.tool_name,
             approval_scope=approval_scope,
+            approval_item=approval_item,
         )
         has_per_call_decision = any(
             (isinstance(record.approved, list) and call_id in record.approved)
@@ -647,7 +880,11 @@ class RunContextWrapper(Generic[TContext]):
         )
         if hosted_query_status is not None:
             return hosted_query_status
-        return self._get_approval_status_for_key(tool_name, call_id)
+        for record in self._approval_records_for_key(tool_name, call_id=call_id):
+            status = self._get_approval_status_for_record(record, call_id)
+            if status is not None:
+                return status
+        return None
 
     def _get_approval_status_for_key(
         self, approval_key: str, call_id: str, *, approval_scope: str | None = None
@@ -933,12 +1170,11 @@ class RunContextWrapper(Generic[TContext]):
                 candidates.append(pending_tool_name)
 
         for candidate in candidates:
-            approval_entry = self._get_approval_record_for_key(candidate, call_id)
-            if not approval_entry:
-                continue
-            message = self._get_rejection_message_for_key(approval_entry, call_id)
-            if message is not None:
-                return message
+            for record in self._approval_records_for_key(
+                candidate, existing_pending, call_id=call_id
+            ):
+                if self._get_approval_status_for_record(record, call_id) is not None:
+                    return self._get_rejection_message_for_key(record, call_id)
         return None
 
     def _apply_approval_decision(
@@ -1049,7 +1285,7 @@ class RunContextWrapper(Generic[TContext]):
             approval_entries = tuple(
                 (
                     self._get_or_create_approval_entry(
-                        approval_key,
+                        self._function_approval_key(approval_key, approval_item) or approval_key,
                         approval_scope=scope_identity[1] if scope_identity is not None else None,
                     ),
                     always,
@@ -1103,7 +1339,10 @@ class RunContextWrapper(Generic[TContext]):
             self._restored_unbound_approval_call_ids.discard(call_id)
 
     def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
-        """Approve a tool call, optionally for all future calls."""
+        """Approve a tool call, optionally for future calls.
+
+        Permanent function-tool decisions apply only to the approval item's agent.
+        """
         self._apply_approval_decision(
             approval_item,
             always=always_approve,
@@ -1116,7 +1355,10 @@ class RunContextWrapper(Generic[TContext]):
         always_reject: bool = False,
         rejection_message: str | None = None,
     ) -> None:
-        """Reject a tool call, optionally for all future calls."""
+        """Reject a tool call, optionally for future calls.
+
+        Permanent function-tool decisions apply only to the approval item's agent.
+        """
         self._apply_approval_decision(
             approval_item,
             always=always_reject,
@@ -1134,7 +1376,11 @@ class RunContextWrapper(Generic[TContext]):
         tool_lookup_key: FunctionToolLookupKey | None = None,
         current_invocation: ToolApprovalItem | None = None,
     ) -> bool | None:
-        """Return approval status, retrying with pending item's tool name if necessary."""
+        """Resolve an execution decision using its current or pending invocation.
+
+        Agent-owned function decisions require an invocation carrying the agent. Use
+        ``is_tool_approved`` for name-only inspection of an unambiguous function decision.
+        """
         if not isinstance(call_id, str) or not call_id:
             raise ModelBehaviorError("Approval-gated tool calls require a non-empty call ID.")
         if existing_pending is not None:
@@ -1164,6 +1410,7 @@ class RunContextWrapper(Generic[TContext]):
                     effective_invocation.raw_item,
                     tool_lookup_key=effective_invocation.tool_lookup_key,
                     tool_name=effective_invocation.tool_name,
+                    approval_item=effective_invocation,
                 )
                 return hosted_status if binding_status is not None else None
 
@@ -1228,6 +1475,7 @@ class RunContextWrapper(Generic[TContext]):
             current_invocation if current_invocation is not None else existing_pending
         )
         if selected_invocation is not None and call_id in self._tool_invocations:
+            # Changing the approval owner must not bypass invocation reuse validation.
             self._tool_invocation_status(
                 selected_invocation.raw_item,
                 tool_lookup_key=selected_invocation.tool_lookup_key,
@@ -1245,12 +1493,23 @@ class RunContextWrapper(Generic[TContext]):
         status: bool | None = None
         matched_record: _ApprovalRecord | None = None
         for candidate in candidates:
-            matched_record = self._get_approval_record_for_key(
-                candidate,
-                call_id,
-                approval_scope=scope_identity[1] if scope_identity is not None else None,
+            # Runtime name-only queries (such as native operation callbacks) must not
+            # borrow an agent-owned function decision from the inspection API.
+            records = (
+                self._approval_records_for_key(
+                    candidate,
+                    selected_invocation,
+                    call_id=call_id,
+                    approval_scope=scope_identity[1] if scope_identity is not None else None,
+                )
+                if selected_invocation is not None
+                else (self._get_approval_record_for_key(candidate, call_id),)
             )
-            status = self._get_approval_status_for_record(matched_record, call_id)
+            for record in records:
+                status = self._get_approval_status_for_record(record, call_id)
+                if status is not None:
+                    matched_record = record
+                    break
             if status is not None:
                 break
         if status is None or matched_record is None or selected_invocation is None:
@@ -1274,6 +1533,7 @@ class RunContextWrapper(Generic[TContext]):
                 selected_invocation.raw_item,
                 tool_lookup_key=selected_invocation.tool_lookup_key,
                 tool_name=selected_invocation.tool_name,
+                approval_item=selected_invocation,
             )
             return status if binding_status is not None else None
         if current_invocation is not None:
@@ -1293,6 +1553,7 @@ class RunContextWrapper(Generic[TContext]):
             selected_invocation.raw_item,
             tool_lookup_key=selected_invocation.tool_lookup_key,
             tool_name=selected_invocation.tool_name,
+            approval_item=selected_invocation,
         )
         if binding_status is None:
             current_identity = tool_invocation_identity(

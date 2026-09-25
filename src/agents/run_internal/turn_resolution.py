@@ -1252,7 +1252,14 @@ async def resolve_interrupted_turn(
                 call_id=call_id,
                 tool_namespace=tool_namespace,
                 tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
-                existing_pending=approval_record,
+                existing_pending=approval_record
+                or ToolApprovalItem(
+                    agent=public_agent,
+                    raw_item=tool_call,
+                    tool_name=function_tool.name,
+                    tool_namespace=tool_namespace,
+                    tool_lookup_key=get_function_tool_lookup_key_for_tool(function_tool),
+                ),
             )
         rejected_function_outputs.append(
             function_rejection_item(
@@ -1374,6 +1381,9 @@ async def resolve_interrupted_turn(
             tool_type="shell",
             tool_name=run.shell_tool.name,
             call_id=call_id,
+            existing_pending=ToolApprovalItem(
+                agent=public_agent, raw_item=run.tool_call, tool_name=run.shell_tool.name
+            ),
         )
         return cast(
             RunItem,
@@ -1393,6 +1403,9 @@ async def resolve_interrupted_turn(
             tool_type="apply_patch",
             tool_name=run.apply_patch_tool.name,
             call_id=call_id,
+            existing_pending=ToolApprovalItem(
+                agent=public_agent, raw_item=run.tool_call, tool_name=run.apply_patch_tool.name
+            ),
         )
         return cast(
             RunItem,
@@ -1413,6 +1426,9 @@ async def resolve_interrupted_turn(
             tool_type="custom",
             tool_name=run.custom_tool.name,
             call_id=call_id,
+            existing_pending=ToolApprovalItem(
+                agent=public_agent, raw_item=run.tool_call, tool_name=run.custom_tool.name
+            ),
         )
         raw_item = {
             "type": "custom_tool_call_output",
@@ -1855,6 +1871,29 @@ async def resolve_interrupted_turn(
             tool_output_guardrail_results=[],
             processed_response=processed_response,
         )
+
+    if allow_legacy_name_agent_match:
+        # Before schema 1.7, duplicate-name owners could restore to a sibling.
+        # Honor the validated current decision, including a fresh sticky choice,
+        # without transferring its future scope to the reconciled owner.
+        for original, stable in validated_function_approval_items.items():
+            if original.agent is stable.agent:
+                continue
+            call_id = cast(ResponseFunctionToolCall, stable.raw_item).call_id
+            status = context_wrapper.get_approval_status(
+                original.tool_name or "",
+                call_id,
+                existing_pending=original,
+            )
+            if status is True:
+                context_wrapper.approve_tool(stable)
+            elif status is False:
+                context_wrapper.reject_tool(
+                    stable,
+                    rejection_message=context_wrapper.get_rejection_message(
+                        original.tool_name or "", call_id, existing_pending=original
+                    ),
+                )
 
     function_approval_items = list(validated_function_approval_items.values())
     function_approval_items_by_call_id = {

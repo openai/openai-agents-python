@@ -979,10 +979,7 @@ class TestRunState:
 
         # Check that it's permanently rejected
         assert state._context is not None
-        approvals = state._context._approvals
-        assert "toolZ" in approvals
-        assert approvals["toolZ"].approved is False
-        assert approvals["toolZ"].rejected is True
+        assert state._context.is_tool_approved("toolZ", "future-call") is False
 
     def test_rejection_is_scoped_to_call_ids(self):
         """Test that a rejected tool call does not auto-apply to new call IDs."""
@@ -2719,6 +2716,8 @@ class TestRunState:
             state.approve(approval("exception"))
 
         serialized = state.to_json()
+        for entry in serialized["context"].pop("function_tool_approvals"):
+            serialized["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         serialized["$schemaVersion"] = "1.15"
 
         restored = await RunState.from_json(agent, serialized)
@@ -2739,6 +2738,8 @@ class TestRunState:
         state = make_state_with_interruptions(agent, [approval_item])
         state.approve(approval_item)
         json_data = state.to_json()
+        for entry in json_data["context"].pop("function_tool_approvals", []):
+            json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         json_data["$schemaVersion"] = "1.13"
         json_data["context"].pop("tool_invocations", None)
 
@@ -2786,6 +2787,8 @@ class TestRunState:
         state = make_state_with_interruptions(agent, [approval_item])
         state.approve(approval_item, always_approve=True)
         json_data = state.to_json()
+        for entry in json_data["context"].pop("function_tool_approvals"):
+            json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         json_data["$schemaVersion"] = schema_version
         json_data["context"].pop("tool_invocations", None)
 
@@ -3390,6 +3393,8 @@ class TestRunState:
         state: RunState[Any, Agent[Any]] = make_state(agent, context=RunContextWrapper(context={}))
         state.approve(ToolApprovalItem(agent=agent, raw_item=approved_call))
         serialized = state.to_json()
+        for entry in serialized["context"].pop("function_tool_approvals", []):
+            serialized["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         serialized["$schemaVersion"] = schema_version
         serialized["context"].pop("tool_invocations", None)
 
@@ -3731,6 +3736,8 @@ class TestRunState:
         state.reject(approval_item, rejection_message="Denied by reviewer")
 
         json_data = state.to_json()
+        for entry in json_data["context"].pop("function_tool_approvals", []):
+            json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         json_data["$schemaVersion"] = "1.5"
         del json_data["context"]["approvals"]["tool2"]["rejection_messages"]
 
@@ -6487,7 +6494,9 @@ class TestRunStateResumption:
 
         decided = result.to_state()
         untouched = result.to_state()
-        untouched_approvals_before = untouched.to_json()["context"]["approvals"]
+        untouched_approvals_before = untouched.to_json()["context"].get(
+            "function_tool_approvals", []
+        )
 
         decided.approve(decided.get_interruptions()[0])
 
@@ -6497,7 +6506,10 @@ class TestRunStateResumption:
         assert decided._context.context is untouched._context.context
         assert decided._context._approvals is not untouched._context._approvals
         assert decided._context._tool_invocations is not untouched._context._tool_invocations
-        assert untouched.to_json()["context"]["approvals"] == untouched_approvals_before
+        assert (
+            untouched.to_json()["context"].get("function_tool_approvals", [])
+            == untouched_approvals_before
+        )
 
         if streamed:
             untouched_result = Runner.run_streamed(agent, untouched)

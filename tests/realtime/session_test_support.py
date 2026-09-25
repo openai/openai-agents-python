@@ -66,6 +66,7 @@ class RecordingRealtimeModel(ScriptedRealtimeModel):
 @pytest.fixture
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
+    agent.name = "test_agent"
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])

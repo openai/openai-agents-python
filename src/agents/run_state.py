@@ -42,6 +42,7 @@ from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
     _build_agent_map,
+    _get_ambiguous_agent_ids,
     _iter_agent_graph,
 )
 from ._tool_identity import (
@@ -106,7 +107,7 @@ from .logger import (
     log_model_and_tool_data_warning,
     logger,
 )
-from .run_context import RunContextWrapper
+from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
     digest_input_item,
@@ -231,7 +232,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.18": (
         "Binds restored local MCP calls to their configured server and original tool name, "
-        "and preserves independent apply_patch approval scopes."
+        "preserves independent apply_patch approval scopes, and binds function-tool approval "
+        "decisions to their owning agent."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -1297,7 +1299,10 @@ class RunState(Generic[TContext, TAgent]):
         return None
 
     def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
-        """Approve a tool call and rerun with this state to continue."""
+        """Approve a tool call and rerun with this state to continue.
+
+        For function tools, ``always_approve`` applies only to the approval item's agent.
+        """
         if self._context is None:
             raise UserError("Cannot approve tool: RunState has no context")
         nested_approval = self._find_nested_approval_state(approval_item)
@@ -1320,6 +1325,7 @@ class RunState(Generic[TContext, TAgent]):
     ) -> None:
         """Reject a tool call and rerun with this state to continue.
 
+        For function tools, ``always_reject`` applies only to the approval item's agent.
         When ``rejection_message`` is provided, that exact text is sent back to the model when the
         run resumes. Otherwise the run-level tool error formatter or the SDK default message is
         used.
@@ -1341,31 +1347,66 @@ class RunState(Generic[TContext, TAgent]):
             rejection_message=rejection_message,
         )
 
+    @staticmethod
+    def _serialize_approval_record(record: _ApprovalRecord) -> dict[str, Any]:
+        decision: dict[str, Any] = {
+            "approved": record.approved
+            if isinstance(record.approved, bool)
+            else list(record.approved),
+            "rejected": record.rejected
+            if isinstance(record.rejected, bool)
+            else list(record.rejected),
+        }
+        if record.rejection_messages:
+            decision["rejection_messages"] = dict(record.rejection_messages)
+        if record.sticky_rejection_message is not None:
+            decision["sticky_rejection_message"] = record.sticky_rejection_message
+        if record.sticky_scope is not None:
+            decision["sticky_scope"] = record.sticky_scope
+        return decision
+
     def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
-        """Serialize approval records into a JSON-friendly mapping."""
+        """Serialize legacy and non-function approval records."""
         if self._context is None:
             return {}
-        approvals_dict: dict[str, dict[str, Any]] = {}
-        for tool_name, record in self._context._approvals.items():
-            if not isinstance(tool_name, str):
+        return {
+            key: self._serialize_approval_record(record)
+            for key, record in self._context._approvals.items()
+            if isinstance(key, str) and not isinstance(key, _FunctionToolApprovalKey)
+        }
+
+    def _serialize_function_tool_approvals(
+        self, agent_identity_keys_by_id: Mapping[int, str] | None
+    ) -> list[dict[str, Any]]:
+        """Serialize agent-owned decisions using the same identities as pending items."""
+        if self._context is None:
+            return []
+        serialized: list[dict[str, Any]] = []
+        ambiguous_owners = (
+            _get_ambiguous_agent_ids(cast(Agent[Any], self._starting_agent))
+            if self._starting_agent is not None
+            else set()
+        )
+        for key, record in self._context._approvals.items():
+            if not isinstance(key, _FunctionToolApprovalKey):
                 continue
-            approvals_dict[tool_name] = {
-                "approved": record.approved
-                if isinstance(record.approved, bool)
-                else list(record.approved),
-                "rejected": record.rejected
-                if isinstance(record.rejected, bool)
-                else list(record.rejected),
-            }
-            if record.rejection_messages:
-                approvals_dict[tool_name]["rejection_messages"] = dict(record.rejection_messages)
-            if record.sticky_rejection_message is not None:
-                approvals_dict[tool_name]["sticky_rejection_message"] = (
-                    record.sticky_rejection_message
-                )
-            if record.sticky_scope is not None:
-                approvals_dict[tool_name]["sticky_scope"] = record.sticky_scope
-        return approvals_dict
+            owner = key.agent
+            if (
+                agent_identity_keys_by_id is None
+                or id(owner) not in agent_identity_keys_by_id
+                or id(owner) in ambiguous_owners
+            ):
+                # Only uniquely identifiable owners in this graph can carry
+                # approval authority into a checkpoint.
+                continue
+            serialized.append(
+                {
+                    "agent": _serialize_agent_reference(owner, agent_identity_keys_by_id),
+                    "tool_key": key.tool_key,
+                    "decision": self._serialize_approval_record(record),
+                }
+            )
+        return serialized
 
     def _serialize_tool_invocations(self) -> dict[str, dict[str, Any]]:
         """Serialize the run-owned canonical tool invocation ledger."""
@@ -1410,20 +1451,7 @@ class RunState(Generic[TContext, TAgent]):
                     "tool_name": identity[1],
                     "request_id": identity[2],
                 }
-            decision: dict[str, Any] = {
-                "approved": record.approved
-                if isinstance(record.approved, bool)
-                else list(record.approved),
-                "rejected": record.rejected
-                if isinstance(record.rejected, bool)
-                else list(record.rejected),
-            }
-            if record.rejection_messages:
-                decision["rejection_messages"] = dict(record.rejection_messages)
-            if record.sticky_rejection_message is not None:
-                decision["sticky_rejection_message"] = record.sticky_rejection_message
-            if record.sticky_scope is not None:
-                decision["sticky_scope"] = record.sticky_scope
+            decision = self._serialize_approval_record(record)
             serialized.append({"identity": identity_data, "decision": decision})
         return serialized
 
@@ -1842,6 +1870,9 @@ class RunState(Generic[TContext, TAgent]):
             if self._starting_agent is not None
             else None
         )
+        function_tool_approvals = self._serialize_function_tool_approvals(agent_identity_keys_by_id)
+        if function_tool_approvals:
+            context_entry["function_tool_approvals"] = function_tool_approvals
         current_agent_entry = _serialize_agent_reference(
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -4146,6 +4177,42 @@ async def _build_run_state_from_json(
     )
     if (schema_major, schema_minor) >= (hosted_mcp_major, hosted_mcp_minor):
         context._rebuild_hosted_mcp_approvals(context_data.get("hosted_mcp_approvals", []))
+    function_tool_approvals = context_data.get("function_tool_approvals", [])
+    if function_tool_approvals and (schema_major, schema_minor) < (1, 18):
+        raise validation_error_factory(
+            "Agent-owned function approvals require RunState schema 1.18.", UserError
+        )
+    if not isinstance(function_tool_approvals, list):
+        raise validation_error_factory(
+            "RunState function_tool_approvals must be a list.", UserError
+        )
+    ambiguous_approval_owners = (
+        _get_ambiguous_agent_ids(initial_agent) if function_tool_approvals else set()
+    )
+    for entry in function_tool_approvals:
+        if (
+            not isinstance(entry, Mapping)
+            or not isinstance(entry.get("tool_key"), str)
+            or not isinstance(entry.get("decision"), Mapping)
+        ):
+            raise validation_error_factory(
+                "Invalid agent-owned function approval record.", UserError
+            )
+        owner = _resolve_agent_from_data(
+            entry.get("agent"),
+            agent_map,
+            agent_identity_map,
+            validation_error_factory=validation_error_factory,
+        )
+        if owner is None:
+            raise validation_error_factory(
+                "Function approval owner is absent from the restored graph.", UserError
+            )
+        # Traversal-derived suffixes cannot authorize indistinguishable owners.
+        if id(owner) in ambiguous_approval_owners:
+            continue
+        key = _FunctionToolApprovalKey(owner, entry["tool_key"])
+        context._approvals[key] = context._restore_approval_record(entry["decision"])
     if (schema_major, schema_minor) >= (1, 15):
         context._mark_restored_unbound_approval_call_ids()
     serialized_tool_input = context_data.get("tool_input")

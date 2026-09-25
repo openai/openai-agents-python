@@ -218,6 +218,8 @@ async def test_legacy_pending_mcp_call_requires_new_run():
     state = result.to_state()
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
+    for entry in snapshot["context"].pop("function_tool_approvals", []):
+        snapshot["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     snapshot["$schemaVersion"] = "1.17"
     del snapshot["last_processed_response"]["mcp_tool_bindings"]
     restored = await RunState.from_json(agent, snapshot)
@@ -287,6 +289,9 @@ async def test_completed_mcp_sibling_does_not_block_function_approval(schema_ver
     state = result.to_state()
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
+    if schema_version != "1.18":
+        for entry in snapshot["context"].pop("function_tool_approvals", []):
+            snapshot["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     snapshot["$schemaVersion"] = schema_version
     if schema_version != "1.18":
         snapshot["last_processed_response"].pop("mcp_tool_bindings", None)
@@ -319,6 +324,8 @@ async def test_legacy_mcp_call_missing_during_restore_cannot_rebind(streaming: b
     state = result.to_state()
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
+    for entry in snapshot["context"].pop("function_tool_approvals", []):
+        snapshot["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     snapshot["$schemaVersion"] = "1.17"
     del snapshot["last_processed_response"]["mcp_tool_bindings"]
 
@@ -545,6 +552,8 @@ async def test_legacy_approval_cannot_authorize_local_replacement_of_mcp(
     state = first.to_state()
     state.approve(first.interruptions[0])
     snapshot = state.to_json()
+    for entry in snapshot["context"].pop("function_tool_approvals", []):
+        snapshot["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     snapshot["$schemaVersion"] = "1.17"
     del snapshot["last_processed_response"]["mcp_tool_bindings"]
     agent.tools = [search]
