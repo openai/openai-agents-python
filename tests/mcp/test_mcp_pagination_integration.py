@@ -16,7 +16,7 @@ PAGINATED_SERVER_PATH = Path(__file__).parent / "servers" / "paginated.py"
 pytestmark = pytest.mark.review_optional
 
 
-def create_paginated_server() -> MCPServerStdio:
+def create_paginated_server(max_list_pages: int | None = None) -> MCPServerStdio:
     return MCPServerStdio(
         name="paginated-test-server",
         params={
@@ -24,12 +24,14 @@ def create_paginated_server() -> MCPServerStdio:
             "args": [str(PAGINATED_SERVER_PATH)],
         },
         cache_tools_list=True,
+        max_list_pages=max_list_pages,
     )
 
 
 @pytest.mark.asyncio
-async def test_stdio_server_auto_paginates_tools_and_prompts():
-    async with create_paginated_server() as server:
+@pytest.mark.parametrize("max_list_pages", [None, 2])
+async def test_stdio_server_auto_paginates_tools_and_prompts(max_list_pages: int | None):
+    async with create_paginated_server(max_list_pages) as server:
         tools = await server.list_tools()
         prompts = await server.list_prompts()
         protocol_version = getattr(server.session, "protocol_version", None)

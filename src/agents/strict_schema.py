@@ -167,6 +167,9 @@ def _ensure_strict_json_schema(
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
 
+    # Remember author-supplied closure before strict normalization adds its own.
+    explicitly_closed = json_schema.get("additionalProperties") is False
+
     # Bound the total number of nodes we expand so a malicious `$ref` fan-out cannot expand
     # exponentially and exhaust CPU and memory.
     if budget is None:
@@ -337,6 +340,9 @@ def _ensure_strict_json_schema(
                     inside_nested_resource=inside_nested_resource,
                 )
             json_schema.pop("allOf")
+            if not explicitly_closed:
+                # Close the final merged object below, after any remaining allOf is expanded.
+                json_schema.pop("additionalProperties", None)
             merged = _merge_single_all_of(entry=strict_entry, parent=json_schema)
             json_schema.clear()
             json_schema.update(merged)
@@ -468,6 +474,14 @@ def _merge_single_all_of(
 ) -> dict[str, Any]:
     merged = dict(entry)
     incompatible_overlaps: list[str] = []
+    if (
+        parent.get("additionalProperties") is False
+        and ("properties" not in parent or parent["properties"] == {})
+        and is_dict(entry.get("properties"))
+        and entry["properties"] != {}
+    ):
+        # additionalProperties only sees properties declared in its own schema, not allOf.
+        incompatible_overlaps.append("properties")
     for key, parent_value in parent.items():
         if key not in merged:
             merged[key] = parent_value

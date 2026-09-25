@@ -78,6 +78,7 @@ from agents.sandbox.errors import (
     WorkspaceArchiveWriteError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
+from agents.sandbox.manifest import Environment
 from agents.sandbox.materialization import MaterializationResult, MaterializedFile
 from agents.sandbox.remote_mount_policy import (
     REMOTE_MOUNT_POLICY,
@@ -5189,9 +5190,11 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     assert '(allow file-write* (subpath "/opt/homebrew"))' not in profile
 
 
+@pytest.mark.parametrize("absolute_command", [False, True])
 def test_unix_local_confined_exec_command_allows_python_virtual_environment_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    absolute_command: bool,
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -5216,7 +5219,7 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
     def _fake_which(name: str, path: str | None = None) -> str | None:
         if name == "sandbox-exec":
             return "/usr/bin/sandbox-exec"
-        if name == "python":
+        if name in ("python", str(python_executable)):
             assert path == path_env
             return str(python_executable)
         return None
@@ -5226,7 +5229,7 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
     monkeypatch.setenv("PATH", path_env)
 
     command = session._confined_exec_command(
-        command_parts=["python", "-V"],
+        command_parts=[str(python_executable) if absolute_command else "python", "-V"],
         workspace_root=workspace_root,
         env={"PATH": path_env},
     )
@@ -5240,6 +5243,113 @@ def test_unix_local_confined_exec_command_allows_python_virtual_environment_root
         not in profile_lines
     )
     assert f'(allow file-write* (subpath "{virtual_env_root}"))' not in profile_lines
+
+
+def test_unix_local_confined_exec_command_omits_host_paths_removed_from_child_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    virtual_env_root = tmp_path / "host-project" / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    session = UnixLocalSandboxSession.from_state(
+        UnixLocalSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=_unix_local_manifest(root=str(workspace_root)),
+            snapshot=NoopSnapshot(id="darwin-child-path"),
+            workspace_root_owned=False,
+        )
+    )
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "sh":
+            assert path == "/usr/bin:/bin"
+            return "/bin/sh"
+        return None
+
+    monkeypatch.setattr(unix_local_module.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local_module.shutil, "which", _fake_which)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(virtual_env_bin), str(host_bin), "/usr/bin"]))
+
+    command = session._confined_exec_command(
+        command_parts=["sh", "-c", "true"],
+        workspace_root=workspace_root,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    profile = command[2]
+
+    assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    for excluded_path in (virtual_env_root, virtual_env_bin, host_bin):
+        assert f'(subpath "{excluded_path}")' not in profile
+        assert f'(subpath "{excluded_path.resolve()}")' not in profile
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("inherit_path", [False, True])
+async def test_unix_local_virtual_environment_grants_follow_client_path_inheritance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    inherit_path: bool,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    virtual_env_root = tmp_path / "host-project" / ".venv"
+    virtual_env_bin = virtual_env_root / "bin"
+    virtual_env_bin.mkdir(parents=True)
+    (virtual_env_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    path_env = str(virtual_env_bin)
+    monkeypatch.setenv("PATH", path_env)
+    manifest = Manifest(
+        root=str(workspace_root),
+        environment=Environment(value={"PATH": path_env}),
+    )
+    client = UnixLocalSandboxClient(
+        inherit_host_environment=False,
+        host_environment_allowlist={"PATH"} if inherit_path else set(),
+    )
+    if resume:
+        original = await UnixLocalSandboxClient().create(
+            manifest=manifest, snapshot=NoopSnapshot(id="original")
+        )
+        session = await client.resume(original.state)
+    else:
+        session = await client.create(manifest=manifest, snapshot=NoopSnapshot(id="created"))
+    inner = session._inner
+    assert isinstance(inner, UnixLocalSandboxSession)
+    env, _cwd = await inner._resolved_exec_context()
+    assert env["PATH"] == path_env
+
+    def _fake_which(name: str, path: str | None = None) -> str | None:
+        if name == "sandbox-exec":
+            return "/usr/bin/sandbox-exec"
+        if name == "sh":
+            assert path == path_env
+            return "/bin/sh"
+        return None
+
+    monkeypatch.setattr(unix_local_module.sys, "platform", "darwin")
+    monkeypatch.setattr(unix_local_module.shutil, "which", _fake_which)
+    command = inner._confined_exec_command(
+        command_parts=["sh", "-c", "true"],
+        workspace_root=workspace_root,
+        env=env,
+    )
+    profile_lines = set(command[2].splitlines())
+
+    assert (
+        f'(allow file-read-data file-read-metadata (subpath "{virtual_env_bin}"))' in profile_lines
+    )
+    root_grant = f'(allow file-read-data file-read-metadata (subpath "{virtual_env_root}"))'
+    assert (root_grant in profile_lines) is inherit_path
 
 
 def test_unix_local_confined_exec_command_does_not_expand_manifest_virtual_environment(
@@ -6802,3 +6912,283 @@ async def test_runner_keeps_public_agent_identity_for_hooks_and_streaming() -> N
     assert all(item.agent is streamed_agent for item in streamed_result.new_items)
     assert run_item_events
     assert all(event.item.agent is streamed_agent for event in run_item_events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("enablement_source", ["context", "agent"])
+async def test_start_hook_state_controls_prepared_sandbox_tools(
+    streamed: bool, enablement_source: str
+) -> None:
+    from agents.decorators import tool
+
+    def is_enabled(context, agent) -> bool:
+        if enablement_source == "context":
+            return context.context["enabled"]
+        return agent.name == "sandbox"
+
+    @tool(is_enabled=is_enabled)
+    async def optional_tool() -> str:
+        return "optional"
+
+    class DisableToolHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            assert agent is public_agent
+            context.context["enabled"] = False
+            agent.name = "sandbox-disabled"
+
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
+    session = _FakeSession(Manifest())
+    public_agent = SandboxAgent(name="sandbox", model=model, tools=[optional_tool])
+    config = _sandbox_run_config(_FakeClient(session))
+    if streamed:
+        result = Runner.run_streamed(
+            public_agent,
+            "go",
+            context={"enabled": True},
+            hooks=DisableToolHooks(),
+            run_config=config,
+        )
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(
+            public_agent,
+            "go",
+            context={"enabled": True},
+            hooks=DisableToolHooks(),
+            run_config=config,
+        )
+    assert result.final_output == "done"
+    assert result.last_agent is public_agent
+    assert all(tool.name != "optional_tool" for tool in model.calls[0].tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("hook_kind", ["run", "agent"])
+@pytest.mark.parametrize("replace_tools", [False, True])
+@pytest.mark.parametrize("call_removed", [False, True])
+async def test_start_hooks_refresh_sandbox_application_tools(
+    streamed: bool, hook_kind: str, replace_tools: bool, call_removed: bool
+) -> None:
+    from agents import ModelBehaviorError
+    from agents.decorators import tool
+
+    effects: list[str] = []
+    hook_calls: list[Agent[Any]] = []
+    enabled_agents: list[Agent[Any]] = []
+    capability_tools: list[Tool] = []
+    session = _FakeSession(Manifest())
+
+    @tool
+    async def removed() -> str:
+        effects.append("removed")
+        return "removed"
+
+    async def added_is_enabled(context, agent) -> bool:
+        await asyncio.sleep(0)
+        enabled_agents.append(agent)
+        return agent.name == "sandbox-ready"
+
+    @tool(is_enabled=added_is_enabled)
+    async def added() -> str:
+        effects.append("added")
+        return "added"
+
+    class BoundCapability(_RecordingCapability):
+        def tools(self) -> list[Tool]:
+            bound_session = self.bound_session
+            assert bound_session is not None
+
+            @tool
+            async def bound_tool() -> str:
+                assert self.bound_session is bound_session
+                effects.append("bound")
+                return "bound"
+
+            capability_tools.append(bound_tool)
+            return [bound_tool]
+
+    async def update(context, agent) -> None:
+        await asyncio.sleep(0)
+        assert agent is public_agent
+        hook_calls.append(agent)
+        agent.name = "sandbox-ready"
+        if replace_tools:
+            agent.tools = [added]
+        else:
+            agent.tools.clear()
+
+    class UpdateRunHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await update(context, agent)
+
+    class UpdateAgentHooks(AgentHooks):
+        async def on_start(self, context, agent) -> None:
+            await update(context, agent)
+
+    model = ScriptedModel()
+    if call_removed:
+        model.enqueue([get_function_tool_call("removed", "{}")])
+    else:
+        if replace_tools:
+            model.enqueue([get_function_tool_call("added", "{}")])
+        model.enqueue([get_function_tool_call("bound_tool", "{}", call_id="bound_call")])
+        model.enqueue([get_final_output_message("done")])
+    public_agent = SandboxAgent(
+        name="sandbox",
+        model=model,
+        tools=[removed],
+        capabilities=[BoundCapability(provided_tools=[])],
+        hooks=UpdateAgentHooks() if hook_kind == "agent" else None,
+    )
+    run_hooks = UpdateRunHooks() if hook_kind == "run" else None
+    config = _sandbox_run_config(_FakeClient(session))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(public_agent, "go", hooks=run_hooks, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(public_agent, "go", hooks=run_hooks, run_config=config)
+        assert result.final_output == "done"
+        assert result.last_agent is public_agent
+
+    if call_removed:
+        with pytest.raises(ModelBehaviorError, match="removed"):
+            await run()
+        assert effects == []
+    else:
+        await run()
+        assert effects == (["added", "bound"] if replace_tools else ["bound"])
+    assert hook_calls == [public_agent]
+    assert all(agent is public_agent for agent in enabled_agents)
+    assert len(capability_tools) == 1
+    expected_tools = ([added] if replace_tools else []) + capability_tools
+    assert model.calls
+    assert all(call.tools == expected_tools for call in model.calls)
+    assert all(call.tools[-1] is capability_tools[0] for call in model.calls)
+    assert public_agent.tools == ([added] if replace_tools else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("hook_kind", ["run", "agent"])
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_start_hooks_control_sandbox_mcp_filters(
+    streamed: bool, hook_kind: str, allowed: bool
+) -> None:
+    from agents import ModelBehaviorError
+    from agents.mcp import ToolFilterContext
+
+    from ..mcp.helpers import FakeMCPServer
+
+    filter_agents: list[Agent[Any]] = []
+
+    async def tool_filter(context: ToolFilterContext, tool) -> bool:
+        await asyncio.sleep(0)
+        filter_agents.append(context.agent)
+        return context.agent.name == "allowed"
+
+    async def update(agent) -> None:
+        await asyncio.sleep(0)
+        assert agent is public_agent
+        agent.name = "allowed" if allowed else "blocked"
+
+    class UpdateRunHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await update(agent)
+
+    class UpdateAgentHooks(AgentHooks):
+        async def on_start(self, context, agent) -> None:
+            await update(agent)
+
+    server = FakeMCPServer(tool_filter=tool_filter, server_name="docs")
+    server.add_tool("lookup", {})
+    model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("mcp_docs__lookup", "{}")],
+            [get_final_output_message("done")],
+        ]
+    )
+    public_agent = SandboxAgent(
+        name="blocked" if allowed else "allowed",
+        model=model,
+        capabilities=[],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+        hooks=UpdateAgentHooks() if hook_kind == "agent" else None,
+    )
+    run_hooks = UpdateRunHooks() if hook_kind == "run" else None
+    config = _sandbox_run_config(_FakeClient(_FakeSession(Manifest())))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(public_agent, "go", hooks=run_hooks, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(public_agent, "go", hooks=run_hooks, run_config=config)
+        assert result.final_output == "done"
+        assert result.last_agent is public_agent
+
+    if allowed:
+        await run()
+    else:
+        with pytest.raises(ModelBehaviorError, match="mcp_docs__lookup"):
+            await run()
+
+    assert filter_agents
+    assert all(agent is public_agent for agent in filter_agents)
+    assert model.calls
+    for call in model.calls:
+        assert [tool.name for tool in call.tools] == (["mcp_docs__lookup"] if allowed else [])
+    assert server.tool_calls == (["lookup"] if allowed else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_sandbox_mcp_names_remain_distinct_from_conditional_handoffs(streamed: bool) -> None:
+    from agents import handoff
+
+    from ..mcp.helpers import FakeMCPServer
+
+    class RenameHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await asyncio.sleep(0)
+            agent.name = "after"
+
+    server = FakeMCPServer(server_name="docs")
+    server.add_tool("lookup", {})
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
+    agent = SandboxAgent(
+        name="before",
+        model=model,
+        capabilities=[],
+        mcp_servers=[server],
+        mcp_config={"include_server_in_tool_names": True},
+        handoffs=[
+            handoff(
+                Agent(name="target", model=model),
+                tool_name_override="mcp_docs__lookup",
+                is_enabled=lambda context, current_agent: current_agent.name == "before",
+            )
+        ],
+    )
+    config = _sandbox_run_config(_FakeClient(_FakeSession(Manifest())))
+    config.tool_name_collision_policy = "error"
+    if streamed:
+        result = Runner.run_streamed(agent, "go", hooks=RenameHooks(), run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", hooks=RenameHooks(), run_config=config)
+
+    assert result.final_output == "done"
+    assert len(model.calls) == 1
+    call = model.calls[0]
+    assert len(call.tools) == 1
+    assert call.tools[0].name.startswith("mcp_docs__lookup")
+    assert call.tools[0].name not in {item.tool_name for item in call.handoffs}

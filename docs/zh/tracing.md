@@ -4,27 +4,27 @@ search:
 ---
 # 追踪
 
-Agents SDK内置追踪功能，可在智能体运行期间收集全面的事件记录，包括 LLM 生成、工具调用、任务转移、安全防护措施，乃至发生的自定义事件。借助[追踪控制面板](https://platform.openai.com/traces)，你可以在开发和生产环境中调试、可视化和监控工作流。
+Agents SDK 内置追踪功能，可收集智能体运行期间发生的全面事件记录：LLM 生成、工具调用、任务转移、安全防护措施，甚至自定义事件。通过[追踪仪表板](https://platform.openai.com/traces)，你可以在开发和生产环境中调试、可视化并监控工作流。
 
 !!!note
 
-    追踪默认启用。你可以通过以下三种常用方式禁用它：
+    追踪默认启用。你可以通过三种常见方式将其禁用：
 
     1. 设置环境变量 `OPENAI_AGENTS_DISABLE_TRACING=1`，在全局范围内禁用追踪
     2. 使用 [`set_tracing_disabled(True)`][agents.set_tracing_disabled]，在代码中全局禁用追踪
-    3. 将 [`agents.run.RunConfig.tracing_disabled`][] 设置为 `True`，为单次运行禁用追踪
+    3. 将 [`agents.run.RunConfig.tracing_disabled`][] 设置为 `True`，针对单次运行禁用追踪
 
-***对于根据零数据保留（ZDR）政策使用OpenAI API 的组织，追踪功能不可用。***
+***对于根据零数据保留（ZDR）政策使用 OpenAI API 的组织，追踪功能不可用。***
 
 ## 追踪与跨度 {#traces-and-spans}
 
--   **追踪**表示一次“工作流”的端到端操作。它们由跨度组成。追踪具有以下属性：
+-   **追踪**表示一次“工作流”的端到端操作。它们由多个跨度组成。追踪具有以下属性：
     -   `workflow_name`：逻辑工作流或应用的名称，例如“代码生成”或“客户服务”。
-    -   `trace_id`：追踪的唯一 ID。如果未传入，则会自动生成。格式必须为 `trace_<32_alphanumeric>`。
-    -   `group_id`：可选的组 ID，用于关联来自同一对话的多个追踪。例如，你可以使用聊天线程 ID。
+    -   `trace_id`：追踪的唯一 ID。如果未传入，则自动生成。格式必须为 `trace_<32_alphanumeric>`。
+    -   `group_id`：可选的组 ID，用于关联同一对话中的多个追踪。例如，可以使用聊天线程 ID。
     -   `disabled`：如果为 True，则不会记录该追踪。
     -   `metadata`：追踪的可选元数据。
--   **跨度**表示具有开始和结束时间的操作。跨度具有以下属性：
+-   **跨度**表示具有开始和结束时间的操作。跨度具有：
     -   `started_at` 和 `ended_at` 时间戳。
     -   `trace_id`，表示它们所属的追踪
     -   `parent_id`，指向此跨度的父跨度（如果有）
@@ -34,21 +34,21 @@ Agents SDK内置追踪功能，可在智能体运行期间收集全面的事件�
 
 默认情况下，SDK 会追踪以下内容：
 
--   整个 `Runner.{run, run_sync, run_streamed}()` 都封装在一个 `trace()` 中。
--   每次运行器调用都封装在一个 `task_span()` 中。
--   每个模型轮次都封装在一个 `turn_span()` 中。
--   每次智能体运行时，都会封装在 `agent_span()` 中
--   LLM 生成封装在 `generation_span()` 中
--   每次函数工具调用都分别封装在 `function_span()` 中
--   安全防护措施封装在 `guardrail_span()` 中
--   任务转移封装在 `handoff_span()` 中
--   音频输入（语音转文本）封装在一个 `transcription_span()` 中
--   音频输出（文本转语音）封装在一个 `speech_span()` 中
--   SDK 可能会将相关的音频跨度归入一个 `speech_group_span()` 之下
+-   整个 `Runner.{run, run_sync, run_streamed}()` 包装在一个 `trace()` 中。
+-   每次 runner 调用都包装在一个 `task_span()` 中。
+-   每个模型轮次都包装在一个 `turn_span()` 中。
+-   每次智能体运行时，都会包装在 `agent_span()` 中
+-   LLM 生成包装在 `generation_span()` 中
+-   每次函数工具调用都分别包装在 `function_span()` 中
+-   安全防护措施包装在 `guardrail_span()` 中
+-   任务转移包装在 `handoff_span()` 中
+-   音频输入（语音转文本）包装在一个 `transcription_span()` 中
+-   音频输出（文本转语音）包装在一个 `speech_span()` 中
+-   SDK 可能会将相关音频跨度置于一个 `speech_group_span()` 下
 
-默认情况下，追踪名称是字面字符串 `Agent workflow`。使用 `trace` 时可以设置此名称，也可以通过 [`RunConfig`][agents.run.RunConfig] 配置名称及其他属性。
+默认情况下，追踪名称是字面字符串 `Agent workflow`。如果使用 `trace`，你可以设置此名称；也可以使用 [`RunConfig`][agents.run.RunConfig] 配置名称和其他属性。
 
-如果你希望采用更紧凑的层级结构，可以为某次运行禁用自动生成的任务跨度和轮次跨度。智能体、生成、函数、安全防护措施、任务转移和自定义跨度仍会被记录。
+如果希望使用更紧凑的层级结构，请针对一次运行禁用自动任务跨度和轮次跨度。智能体、生成、函数、安全防护措施、任务转移和自定义跨度仍会被记录。
 
 ```python
 from agents import RunConfig, Runner
@@ -60,13 +60,13 @@ result = await Runner.run(
 )
 ```
 
-此外，你还可以设置[自定义追踪处理器](#custom-tracing-processors)，将追踪推送到其他目标位置（作为替代目标或次要目标）。
+此外，你可以设置[自定义追踪处理器](#custom-tracing-processors)，将追踪推送到其他目标位置（作为替代或辅助目标位置）。
 
 ## 长时间运行的工作进程与即时导出 {#long-running-workers-and-immediate-exports}
 
-默认的 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] 每隔几秒在后台导出一次追踪；如果内存队列达到大小触发阈值，则会更早导出；进程退出时还会执行最后一次刷新。对于 Celery、RQ、Dramatiq 或 FastAPI 后台任务等长时间运行的工作进程，这意味着追踪通常无需任何额外代码即可自动导出，但它们可能不会在每项作业完成后立即显示在追踪控制面板中。
+默认的 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] 每隔几秒在后台导出追踪；当内存队列达到其大小触发阈值时，也会提前导出；进程退出时还会执行最后一次刷新。在 Celery、RQ、Dramatiq 或 FastAPI 后台任务等长时间运行的工作进程中，这意味着追踪通常无需任何额外代码即可自动导出，但每项作业结束后，它们可能不会立即显示在追踪仪表板中。
 
-如果需要保证在一个工作单元结束时立即交付，请在追踪上下文退出后调用 [`flush_traces()`][agents.tracing.flush_traces]。
+如果需要保证在工作单元结束时立即交付，请在退出追踪上下文后调用 [`flush_traces()`][agents.tracing.flush_traces]。
 
 ```python
 from agents import Runner, flush_traces, trace
@@ -103,13 +103,13 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
     return {"status": "queued"}
 ```
 
-[`flush_traces()`][agents.tracing.flush_traces] 会阻塞，直到当前已缓冲的追踪和跨度完成导出，因此应在 `trace()` 关闭后调用它，以避免刷新尚未构建完整的追踪。如果默认导出延迟可以接受，则可以跳过此调用。
+[`flush_traces()`][agents.tracing.flush_traces] 会阻塞，直到当前缓冲的追踪和跨度全部导出。因此，请在 `trace()` 关闭后调用它，以免刷新尚未构建完成的追踪。如果默认导出延迟可以接受，则可以跳过此调用。
 
-禁用追踪会阻止默认提供程序创建新的追踪和跨度，但不会丢弃其处理器已缓冲的数据。通过 `set_tracing_disabled(True)` 或 `OPENAI_AGENTS_DISABLE_TRACING=1` 禁用追踪后，[`flush_traces()`][agents.tracing.flush_traces] 仍会继续刷新这些已缓冲的数据。
+禁用追踪会阻止默认提供程序创建新的追踪和跨度，但不会丢弃其处理器已缓冲的数据。通过 `set_tracing_disabled(True)` 或 `OPENAI_AGENTS_DISABLE_TRACING=1` 禁用追踪后，[`flush_traces()`][agents.tracing.flush_traces] 仍会继续刷新这些缓冲数据。
 
-## 高层级追踪 {#higher-level-traces}
+## 更高级别的追踪 {#higher-level-traces}
 
-有时，你可能希望对 `run()` 的多次调用都属于同一个追踪。为此，可以将整个代码封装在一个 `trace()` 中。
+有时，你可能希望多次调用 `run()` 都属于同一个追踪。为此，可以将整个代码包装在一个 `trace()` 中。
 
 ```python
 from agents import Agent, Runner, trace
@@ -124,20 +124,20 @@ async def main():
         print(f"Rating: {second_result.final_output}")
 ```
 
-1. 由于对 `Runner.run` 的两次调用都封装在一个 `with trace()` 中，因此两次运行会成为同一个整体追踪的一部分，而不是各自创建单独的追踪。
+1. 由于两次 `Runner.run` 调用都包装在一个 `with trace()` 中，因此这两次运行会成为同一个整体追踪的一部分，而不是各自创建单独的追踪。
 
 ## 追踪的创建 {#creating-traces}
 
-你可以使用 [`trace()`][agents.tracing.trace] 函数创建追踪。追踪需要启动和结束。你有以下两种方式：
+你可以使用 [`trace()`][agents.tracing.trace] 函数创建追踪。追踪需要启动和结束。可以通过以下两种方式实现：
 
-1. **推荐**：将追踪用作上下文管理器，即 `with trace(...) as my_trace`。这样会在正确的时机自动启动和结束追踪。
-2. 你也可以手动调用 [`trace.start()`][agents.tracing.Trace.start] 和 [`trace.finish()`][agents.tracing.Trace.finish]。
+1. **推荐**：将追踪用作上下文管理器，即 `with trace(...) as my_trace`。这会在适当的时间自动启动和结束追踪。
+2. 也可以手动调用 [`trace.start()`][agents.tracing.Trace.start] 和 [`trace.finish()`][agents.tracing.Trace.finish]。
 
-当前追踪通过 Python 的 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 进行跟踪。这意味着它可自动处理并发。如果手动启动和结束追踪，请将 `mark_as_current` 传给 `start()`，并将 `reset_current` 传给 `finish()`，以更新当前追踪。
+当前追踪通过 Python 的 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 进行跟踪。这意味着它可以自动支持并发。如果手动启动和结束追踪，请将 `mark_as_current` 传给 `start()`，并将 `reset_current` 传给 `finish()`，以更新当前追踪。
 
 ## 跨度的创建 {#creating-spans}
 
-你可以使用各种 [`*_span()`][agents.tracing.create] 方法创建跨度。通常无需手动创建跨度。你可以使用 [`custom_span()`][agents.tracing.custom_span] 函数跟踪自定义跨度信息。
+你可以使用各种 [`*_span()`][agents.tracing.create] 方法创建跨度。通常不需要手动创建跨度。可以使用 [`custom_span()`][agents.tracing.custom_span] 函数跟踪自定义跨度信息。
 
 跨度会自动成为当前追踪的一部分，并嵌套在最近的当前跨度下；当前跨度通过 Python 的 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 进行跟踪。
 
@@ -147,30 +147,40 @@ async def main():
 
 `generation_span()` 会存储 LLM 生成的输入和输出，`function_span()` 会存储函数调用的输入和输出。这些内容可能包含敏感数据，因此可以通过 [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] 禁止捕获这些数据。
 
-对于需要审批的函数工具，暂停以等待审批的跨度不会将 SDK 的内部结果包装器存储为工具输出。如果应用使用自定义拒绝消息来拒绝调用，则仅当 `trace_include_sensitive_data` 为 `True` 时，函数跨度才会将该消息存储为输出和错误文本。当该设置为 `False` 时，跨度会省略输出，并使用通用错误文本 `Tool execution rejected`。
+对于需要审批的函数工具，因等待审批而暂停的跨度不会将 SDK 的内部结果包装器存储为工具输出。如果应用使用自定义拒绝消息拒绝调用，则仅当 `trace_include_sensitive_data` 为 `True` 时，函数跨度才会将该消息存储为输出和错误文本。当此设置为 `False` 时，跨度会省略输出，并使用通用错误文本 `Tool execution rejected`。
 
-同样，音频跨度默认包含输入和输出音频的 base64 编码 PCM 数据。你可以通过配置 [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data] 禁止捕获这些音频数据。
+同样，默认情况下，音频跨度会包含输入和输出音频的 base64 编码 PCM 数据。你可以通过配置 [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data]，禁止捕获这些音频数据。
 
 默认情况下，`trace_include_sensitive_data` 为 `True`。你可以在运行应用前，将 `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` 环境变量导出为 `true/1` 或 `false/0`，从而无需编写代码即可设置默认值。
 
-当 `trace_include_sensitive_data` 为 `False` 时，Responses 模型跨度会省略请求输入和响应输出。对于对OpenAI官方端点的调用，跨度仍会包含 Responses API 的 `response_id` 作为关联元数据。对于自定义端点，SDK 会从经过脱敏的跨度中省略该标识符。
+当 `trace_include_sensitive_data` 为 `False` 时，Responses 模型跨度会省略请求输入和响应输出。对于对 OpenAI 官方端点的调用，跨度仍会包含 Responses API 的 `response_id`，作为关联元数据。对于自定义端点，SDK 会从经过隐去处理的跨度中省略该标识符。
 
 ## 自定义追踪处理器 {#custom-tracing-processors}
 
-追踪的高层级架构如下：
+追踪的高级架构如下：
 
 -   初始化时，我们会创建一个全局 [`TraceProvider`][agents.tracing.provider.TraceProvider]，负责创建追踪。
--   我们为 `TraceProvider` 配置一个 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor]，它会将追踪和跨度分批发送给 [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter]，后者再将跨度和追踪分批导出到OpenAI后端。
+-   我们使用 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] 配置 `TraceProvider`，后者将追踪和跨度分批发送到 [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter]，由其将跨度和追踪分批导出到 OpenAI 后端。
 
-如果要自定义此默认设置，将追踪发送到替代或额外的后端，或者修改导出器行为，你有以下两种选择：
+若要自定义此默认设置、将追踪发送到替代或额外的后端，或者修改导出器行为，可以使用以下两种方式：
 
-1. [`add_trace_processor()`][agents.tracing.add_trace_processor] 允许添加一个**额外的**追踪处理器，在追踪和跨度准备就绪时接收它们。这样，你可以在将追踪发送到OpenAI后端的同时执行自己的处理。
-2. [`set_trace_processors()`][agents.tracing.set_trace_processors] 允许使用你自己的追踪处理器**替换**默认处理器。这意味着，除非你包含一个能够执行发送操作的 `TracingProcessor`，否则追踪不会发送到OpenAI后端。
+1. [`add_trace_processor()`][agents.tracing.add_trace_processor] 允许添加一个**额外的**追踪处理器，它将在追踪和跨度准备就绪时接收它们。这样，除了将追踪发送到 OpenAI 后端外，你还可以执行自己的处理。
+2. [`set_trace_processors()`][agents.tracing.set_trace_processors] 允许使用自己的追踪处理器**替换**默认处理器。这意味着，除非包含一个执行该操作的 `TracingProcessor`，否则追踪不会发送到 OpenAI 后端。
+
+### 导出前的数据隐去 {#redaction-before-export}
+
+追踪处理器是彼此独立的观察者。默认提供程序会捕获某个处理器的回调异常，并继续调用其他已注册的处理器。因此，即使在导出器之前注册了隐去处理器，如果隐去失败，也不会阻止该导出器接收数据。使用 `add_trace_processor()` 添加处理器时，默认 OpenAI 导出器也会保持注册状态。
+
+当导出依赖于成功隐去数据时，应将数据隐去和交付保留在同一个由应用拥有的导出器内。使用 `set_trace_processors()`，将默认处理器替换为使用该导出器配置的 `BatchTraceProcessor`。导出器应复制序列化后的有效载荷，对副本执行隐去处理，并且仅将隐去后的结果传递到目标位置。如果序列化、复制或隐去失败，请在调用目标位置之前丢弃该批次。记录一条固定的失败消息，其中不得包含有效载荷、异常文本或追踪回溯。
+
+[追踪数据隐去代码示例](https://github.com/openai/openai-agents-python/blob/main/examples/basic/trace_redaction.py)演示了如何使用现有追踪 API 实现这种组合。该代码示例仅将事件类别及追踪/跨度关联 ID 输出到本地控制台，不会进行任何 API 调用。其允许列表省略了名称、元数据、错误和跨度数据。调用方提供的 ID 不得包含任何敏感信息，否则应用必须将这些 ID 映射为安全值。此诊断输出并非 OpenAI 追踪数据摄取模式；向后端发送数据的应用必须提供与该后端兼容的数据隐去策略和目标位置。
+
+数据隐去器和目标位置属于受信任的应用代码。它们不得单独记录或发送原始数据。批处理器可能会在后台导出、显式刷新或关闭期间调用导出器，因此回调必须能够在这些执行上下文中安全使用。失败的批次会被丢弃，后续批次仍可继续导出。替换操作会影响未来的处理器回调，但不会清除此前注册的处理器已缓冲的数据。请在创建追踪或运行智能体之前配置替换项。
 
 
-## 非OpenAI模型的追踪 {#tracing-with-non-openai-models}
+## 非 OpenAI 模型的追踪 {#tracing-with-non-openai-models}
 
-使用非OpenAI模型时，可以向追踪导出器提供OpenAI API 密钥，从而无需禁用追踪，即可在OpenAI追踪控制面板中免费使用追踪功能。有关适配器选择和设置注意事项，请参阅模型指南中的[第三方适配器](models/index.md#third-party-adapters)部分。
+使用非 OpenAI 模型时，可以向追踪导出器提供 OpenAI API 密钥，从而在不禁用追踪的情况下，在 OpenAI 追踪仪表板中免费使用追踪。有关适配器选择和设置注意事项，请参阅模型指南中的[第三方适配器](models/index.md#third-party-adapters)部分。
 
 ```python
 import os
@@ -204,12 +214,14 @@ await Runner.run(
 ```
 
 ## 补充说明 {#additional-notes}
-- 在OpenAI追踪控制面板中查看免费追踪。
+- 可在 OpenAI 追踪仪表板中查看免费追踪。
 
 
 ## 生态系统集成 {#ecosystem-integrations}
 
-以下社区和供应商集成支持OpenAI Agents SDK的追踪 API 接口。
+以下社区和供应商集成支持 OpenAI Agents SDK 的追踪 API 接口。
+
+这些集成由其维护者提供支持。列入此列表并不代表 OpenAI 对其进行背书或安全认证。如需申请新增条目，请遵循[集成收录标准](https://github.com/openai/openai-agents-python/blob/main/CONTRIBUTING.md#tracing-integration-listings)。
 
 ### 外部追踪处理器列表 {#external-tracing-processors-list}
 
@@ -217,7 +229,7 @@ await Runner.run(
 -   [Arize Phoenix](https://arize.com/docs/phoenix/integrations/llm-providers/openai/openai-agents-sdk-tracing)
 -   [Future AGI](https://docs.futureagi.com/docs/tracing/auto/openai_agents/)
 -   [MLflow（自托管/OSS）](https://mlflow.org/docs/latest/tracing/integrations/openai-agent)
--   [MLflow（Databricks 托管）](https://docs.databricks.com/aws/en/mlflow3/genai/tracing/integrations/openai-agent)
+-   [MLflow（由 Databricks 托管）](https://docs.databricks.com/aws/en/mlflow3/genai/tracing/integrations/openai-agent)
 -   [Braintrust](https://www.braintrust.dev/docs/integrations/agent-frameworks/openai-agents-sdk)
 -   [Pydantic Logfire](https://pydantic.dev/docs/logfire/integrations/llms/openai/#openai-agents)
 -   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
@@ -242,3 +254,5 @@ await Runner.run(
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
 -   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
+-   [Laminar](https://laminar.sh/docs/tracing/integrations/openai-agents-sdk)
+-   [Noveum](https://github.com/Noveum/noveum-trace/blob/main/docs/OPENAI_AGENTS_INTEGRATION.md)

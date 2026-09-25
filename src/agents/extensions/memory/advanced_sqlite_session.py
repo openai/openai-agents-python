@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -958,6 +959,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 "file_search_call",
                 "web_search_call",
                 "code_interpreter_call",
+                "shell_call",
+                "apply_patch_call",
                 "tool_search_call",
                 "tool_search_output",
             }:
@@ -1140,8 +1143,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         if not branch_id or not branch_id.strip():
             raise ValueError("Branch ID cannot be empty")
 
-        branch_id = branch_id.strip()
-
         # Protect main branch
         if branch_id == "main":
             raise ValueError("Cannot delete the 'main' branch")
@@ -1153,6 +1154,13 @@ class AdvancedSQLiteSession(SQLiteSession):
                     f"Cannot delete current branch '{branch_id}'. Use force=True or switch branches first"  # noqa: E501
                 )
             else:
+                # Confirm the branch is known before switching away from it; the delete
+                # below raises for an unknown branch, which would otherwise leave the
+                # session pointing at 'main'.
+                if not any(
+                    branch["branch_id"] == branch_id for branch in await self.list_branches()
+                ):
+                    raise ValueError(f"Branch '{branch_id}' does not exist")
                 # Switch to main before deleting
                 await self.switch_to_branch("main")
 
@@ -1582,6 +1590,11 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _search_sync():
             """Synchronous helper to search turns by content."""
+            encoded_term = json.dumps(search_term)[1:-1]
+            for char in ("\\", "%", "_"):
+                encoded_term = encoded_term.replace(char, "\\" + char)
+            # Preserve SQLite LIKE's ASCII-only case-insensitive matching.
+            search_pattern = re.compile(re.escape(search_term), re.IGNORECASE | re.ASCII)
             with self._locked_connection() as conn:
                 resolved_branch_id = self._resolve_read_branch(conn, branch_id)
                 with closing(conn.cursor()) as cursor:
@@ -1595,10 +1608,10 @@ class AdvancedSQLiteSession(SQLiteSession):
                         JOIN {self.messages_table} am ON ms.message_id = am.id
                         WHERE ms.session_id = ? AND ms.branch_id = ?
                         AND ms.message_type = 'user'
-                        AND am.message_data LIKE ?
+                        AND am.message_data LIKE ? ESCAPE '\\'
                         ORDER BY ms.branch_turn_number
                     """,
-                        (self.session_id, resolved_branch_id, f"%{search_term}%"),
+                        (self.session_id, resolved_branch_id, f"%{encoded_term}%"),
                     )
 
                     matches = []
@@ -1606,6 +1619,14 @@ class AdvancedSQLiteSession(SQLiteSession):
                         turn_num, message_data, created_at = row
                         try:
                             content = json.loads(message_data).get("content", "")
+                            # An encoded match can start inside a literal JSON escape.
+                            texts = (
+                                [content]
+                                if isinstance(content, str)
+                                else [part.get("text", "") for part in content]
+                            )
+                            if not any(search_pattern.search(text) for text in texts):
+                                continue
                             matches.append(
                                 {
                                     "turn": turn_num,
@@ -1678,12 +1699,17 @@ class AdvancedSQLiteSession(SQLiteSession):
                         """
                         SELECT tool_name, SUM(usage_count), user_turn_number
                         FROM (
-                            SELECT tool_name, 1 AS usage_count, user_turn_number
+                            SELECT COALESCE(
+                                tool_name,
+                                CASE WHEN message_type IN ('shell_call', 'apply_patch_call')
+                                    THEN message_type END
+                            ) AS tool_name, 1 AS usage_count, user_turn_number
                             FROM message_structure
                             WHERE session_id = ? AND branch_id = ? AND message_type IN (
                                 'tool_call', 'function_call', 'computer_call', 'file_search_call',
                                 'web_search_call', 'code_interpreter_call', 'tool_search_call',
-                                'custom_tool_call', 'mcp_call', 'mcp_approval_request'
+                                'custom_tool_call', 'mcp_call', 'mcp_approval_request',
+                                'shell_call', 'apply_patch_call'
                             )
 
                             UNION ALL

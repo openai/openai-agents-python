@@ -7,7 +7,7 @@ import json
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseTextDeltaEvent
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import McpApprovalRequest
 from pydantic import BaseModel, Field
@@ -48,7 +48,7 @@ from agents.agent_tool_state import (
 )
 from agents.run_context import _ApprovalRecord
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
-from agents.testing import ScriptedModel
+from agents.testing import ModelStep, ScriptedModel
 from agents.tool_context import ToolContext
 from tests.mcp.helpers import FakeMCPServer
 from tests.mcp.model_compat import create_mcp_error
@@ -645,6 +645,7 @@ async def test_agent_as_tool_fallback_uses_current_run_items_only(
     class DummyResult:
         def __init__(self) -> None:
             self.final_output = ""
+            self.output_guardrail_results: list[Any] = []
             self.new_items = [
                 ToolCallOutputItem(
                     agent=agent,
@@ -738,6 +739,7 @@ async def test_agent_as_tool_fallback_returns_most_recent_current_run_output(
     class DummyResult:
         def __init__(self) -> None:
             self.final_output = ""
+            self.output_guardrail_results: list[Any] = []
             self.new_items = [
                 MessageOutputItem(agent=agent, raw_item=older_message),
                 ToolCallOutputItem(
@@ -1347,7 +1349,7 @@ async def test_agent_as_tool_rejects_invalid_builder_output() -> None:
     )
     result = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
 
-    assert "Agent tool called with invalid input" in result
+    assert result == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio
@@ -2856,6 +2858,9 @@ async def test_agent_as_tool_streaming_reraises_parent_cancellation_without_wait
             ]
             self.run_loop_task = asyncio.create_task(asyncio.sleep(0))
 
+        def cancel(self) -> None:
+            self.run_loop_task.cancel()
+
         async def stream_events(self):
             yield stream_event
             await asyncio.sleep(60)
@@ -3540,6 +3545,9 @@ async def test_agent_as_tool_streaming_propagates_base_exception_without_hanging
             self.final_output = "streamed"
             self.current_agent = agent
 
+        def cancel(self) -> None:
+            pass
+
         async def stream_events(self):
             yield stream_event
             try:
@@ -3607,6 +3615,9 @@ async def test_agent_as_tool_streaming_drains_emitted_events_before_stream_error
             self.final_output = "streamed"
             self.current_agent = agent
 
+        def cancel(self) -> None:
+            pass
+
         async def stream_events(self):
             yield stream_event
             await handler_started.wait()
@@ -3670,3 +3681,551 @@ async def test_agent_as_tool_streaming_drains_emitted_events_before_stream_error
         await asyncio.gather(invoke_task, return_exceptions=True)
 
     assert handled_events == [stream_event]
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_agent_as_tool_rejects_nonpositive_stream_backlog_limit(limit: int) -> None:
+    with pytest.raises(UserError, match="on_stream_max_pending_events must be a positive integer"):
+        Agent(name="streamer").as_tool(None, None, on_stream_max_pending_events=limit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("limit", "error_policy"),
+    [(None, "raise"), (2, "custom"), (2, "default")],
+    ids=["default-limit", "custom-limit-and-error", "default-error"],
+)
+async def test_agent_as_tool_stream_backlog_overflow_stops_nested_run(
+    monkeypatch: pytest.MonkeyPatch, limit: int | None, error_policy: str
+) -> None:
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    handler_cleanup_started = asyncio.Event()
+    release_handler_cleanup = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    observed_results: list[RunResultStreaming] = []
+    errors: list[Exception] = []
+    extracted: list[RunResult | RunResultStreaming] = []
+    expected_limit = 1024 if limit is None else limit
+
+    async def model_events(call):
+        await handler_started.wait()
+        try:
+            for index in range(expected_limit + 1):
+                yield ResponseTextDeltaEvent(
+                    type="response.output_text.delta",
+                    delta="synthetic delta",
+                    item_id="msg_synthetic",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=index,
+                    logprobs=[],
+                )
+            await asyncio.Event().wait()
+        finally:
+            model_cancelled.set()
+
+    agent = Agent(name="streamer", model=ScriptedModel([ModelStep.stream(model_events)]))
+    original_run_streamed = Runner.run_streamed
+
+    def capture_run(*args, **kwargs):
+        result = original_run_streamed(*args, **kwargs)
+        observed_results.append(result)
+        return result
+
+    monkeypatch.setattr(Runner, "run_streamed", capture_run)
+
+    async def handler(payload: AgentToolStreamEvent) -> None:
+        handler_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            handler_cleanup_started.set()
+            await release_handler_cleanup.wait()
+            handler_cancelled.set()
+
+    def handle_error(context: RunContextWrapper[Any], error: Exception) -> str:
+        errors.append(error)
+        return "stream callback overloaded"
+
+    async def extract(result: RunResult | RunResultStreaming) -> str:
+        extracted.append(result)
+        return "must not succeed"
+
+    options: dict[str, Any] = {}
+    if limit is not None:
+        options["on_stream_max_pending_events"] = limit
+    if error_policy == "raise":
+        options["failure_error_function"] = None
+    elif error_policy == "custom":
+        options["failure_error_function"] = handle_error
+    tool = agent.as_tool(None, None, on_stream=handler, custom_output_extractor=extract, **options)
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_overflow",
+        tool_arguments='{"input":"go"}',
+    )
+    invocation = asyncio.create_task(tool.on_invoke_tool(context, '{"input":"go"}'))
+    try:
+        await asyncio.wait_for(handler_cleanup_started.wait(), timeout=2)
+        await asyncio.wait_for(model_cancelled.wait(), timeout=2)
+        assert not invocation.done()
+    finally:
+        release_handler_cleanup.set()
+    if error_policy == "raise":
+        with pytest.raises(UserError, match=f"on_stream_max_pending_events={expected_limit}"):
+            await asyncio.wait_for(invocation, timeout=2)
+    else:
+        output = await asyncio.wait_for(invocation, timeout=2)
+        if error_policy == "custom":
+            assert output == "stream callback overloaded"
+            assert len(errors) == 1
+            assert isinstance(errors[0], UserError)
+        else:
+            assert output == "An error occurred while running the tool. Please try again."
+        assert "synthetic delta" not in output
+
+    assert handler_cancelled.is_set()
+    assert model_cancelled.is_set()
+    assert extracted == []
+    assert len(observed_results) == 1
+    result = observed_results[0]
+    assert result.is_complete
+    assert result.run_loop_task is not None and result.run_loop_task.done()
+    assert result._event_queue.empty()
+    assert result._active_stream_consumers == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_parent", [True, False], ids=["parent", "handler"])
+async def test_agent_as_tool_cancellation_with_backlog_stops_nested_run(
+    monkeypatch: pytest.MonkeyPatch, cancel_parent: bool
+) -> None:
+    model_started = asyncio.Event()
+    model_stopped = asyncio.Event()
+    handler_stopped = asyncio.Event()
+    observed_results: list[RunResultStreaming] = []
+
+    async def model_events(call):
+        model_started.set()
+        try:
+            for index in range(10):
+                yield ResponseTextDeltaEvent(
+                    type="response.output_text.delta",
+                    delta="synthetic delta",
+                    item_id="msg_synthetic",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=index,
+                    logprobs=[],
+                )
+            await asyncio.Event().wait()
+        finally:
+            model_stopped.set()
+
+    original_run_streamed = Runner.run_streamed
+
+    def capture_run(*args, **kwargs):
+        result = original_run_streamed(*args, **kwargs)
+        observed_results.append(result)
+        return result
+
+    monkeypatch.setattr(Runner, "run_streamed", capture_run)
+
+    async def handler(payload: AgentToolStreamEvent) -> None:
+        if payload["event"].type == "raw_response_event":
+            try:
+                if cancel_parent:
+                    invocation.cancel()
+                    await asyncio.Event().wait()
+                else:
+                    raise asyncio.CancelledError()
+            finally:
+                handler_stopped.set()
+
+    agent = Agent(name="streamer", model=ScriptedModel([ModelStep.stream(model_events)]))
+    tool = agent.as_tool(
+        None, None, on_stream=handler, on_stream_max_pending_events=1, failure_error_function=None
+    )
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_cancel_backlog",
+        tool_arguments='{"input":"go"}',
+    )
+    invocation = asyncio.create_task(tool.on_invoke_tool(context, '{"input":"go"}'))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invocation, timeout=2)
+        assert model_started.is_set()
+        assert model_stopped.is_set()
+        assert handler_stopped.is_set()
+        result = observed_results[0]
+        assert result.is_complete
+        assert result.run_loop_task is not None and result.run_loop_task.done()
+        assert result._event_queue.empty()
+        assert result._active_stream_consumers == 0
+    finally:
+        for result in observed_results:
+            result.cancel()
+            if result.run_loop_task is not None:
+                await asyncio.gather(result.run_loop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_parent", [True, False], ids=["cancellation", "overflow"])
+@pytest.mark.parametrize("close_error_type", [RuntimeError, asyncio.CancelledError])
+async def test_agent_as_tool_preserves_primary_failure_when_stream_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cancel_parent: bool,
+    close_error_type: type[BaseException],
+) -> None:
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", True)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
+    model_stopped = asyncio.Event()
+    stream_closed = asyncio.Event()
+    results: list[RunResultStreaming] = []
+    reported_errors: list[Exception] = []
+    observed_cancellations: list[asyncio.CancelledError] = []
+    close_error = close_error_type("synthetic private cleanup details")
+    original_stream_events = RunResultStreaming.stream_events
+
+    async def failing_stream_events(result: RunResultStreaming):
+        # Inject a close failure at the iterator boundary while retaining real run cleanup.
+        results.append(result)
+        events = original_stream_events(result)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
+            stream_closed.set()
+            raise close_error
+
+    monkeypatch.setattr(RunResultStreaming, "stream_events", failing_stream_events)
+
+    async def model_events(call):
+        try:
+            for index in range(10):
+                yield ResponseTextDeltaEvent(
+                    type="response.output_text.delta",
+                    delta="synthetic delta",
+                    item_id="msg_synthetic",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=index,
+                    logprobs=[],
+                )
+            await asyncio.Event().wait()
+        finally:
+            model_stopped.set()
+
+    async def handler(payload: AgentToolStreamEvent) -> None:
+        if payload["event"].type == "raw_response_event":
+            if cancel_parent:
+                invocation.cancel("primary cancellation")
+            await asyncio.Event().wait()
+
+    def handle_error(context: RunContextWrapper[Any], error: Exception) -> str:
+        reported_errors.append(error)
+        return "tool failed"
+
+    agent = Agent(name="streamer", model=ScriptedModel([ModelStep.stream(model_events)]))
+    tool = agent.as_tool(
+        None,
+        None,
+        on_stream=handler,
+        on_stream_max_pending_events=1,
+        failure_error_function=handle_error,
+    )
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_close_failure",
+        tool_arguments='{"input":"go"}',
+    )
+
+    async def invoke_tool() -> Any:
+        try:
+            return await tool.on_invoke_tool(context, '{"input":"go"}')
+        except asyncio.CancelledError as error:
+            # Observe identity before Task forwarding, which may lose messages on Python 3.10.
+            observed_cancellations.append(error)
+            raise
+
+    invocation = asyncio.create_task(invoke_tool())
+    if cancel_parent:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invocation, timeout=2)
+        assert reported_errors == []
+        assert len(observed_cancellations) == 1
+        assert observed_cancellations[0] is not close_error
+    else:
+        assert await asyncio.wait_for(invocation, timeout=2) == "tool failed"
+        assert observed_cancellations == []
+        assert len(reported_errors) == 1
+        assert isinstance(reported_errors[0], UserError)
+        assert "on_stream_max_pending_events=1" in str(reported_errors[0])
+
+    assert stream_closed.is_set()
+    assert model_stopped.is_set()
+    assert len(results) == 1
+    assert results[0].run_loop_task is not None and results[0].run_loop_task.done()
+    assert results[0]._active_stream_consumers == 0
+    assert results[0]._event_queue.empty()
+    assert "Error while closing an agent tool stream after failure" in caplog.text
+    assert "synthetic private cleanup details" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [2, None], ids=["exact-custom-limit", "unlimited"])
+async def test_agent_as_tool_stream_backlog_delivers_all_pending_events(
+    monkeypatch: pytest.MonkeyPatch, limit: int | None
+) -> None:
+    agent = Agent(name="streamer")
+    pending_count = 2 if limit == 2 else 1100
+    events = [
+        RawResponsesStreamEvent(data=cast(Any, {"index": i})) for i in range(pending_count + 1)
+    ]
+    handler_started = asyncio.Event()
+    backlog_ready = asyncio.Event()
+    release_handler = asyncio.Event()
+    delivered: list[AgentToolStreamEvent] = []
+
+    class StreamingResult:
+        final_output = "complete"
+        current_agent = agent
+
+        async def stream_events(self):
+            yield events[0]
+            await handler_started.wait()
+            for event in events[1:]:
+                yield event
+            backlog_ready.set()
+
+    monkeypatch.setattr(Runner, "run_streamed", lambda *args, **kwargs: StreamingResult())
+
+    async def handler(payload: AgentToolStreamEvent) -> None:
+        if not delivered:
+            handler_started.set()
+            await release_handler.wait()
+        delivered.append(payload)
+
+    tool = agent.as_tool(None, None, on_stream=handler, on_stream_max_pending_events=limit)
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_backlog",
+        tool_arguments='{"input":"go"}',
+    )
+    invocation = asyncio.create_task(tool.on_invoke_tool(context, '{"input":"go"}'))
+    try:
+        await asyncio.wait_for(backlog_ready.wait(), timeout=2)
+        assert not invocation.done()
+        assert delivered == []
+        release_handler.set()
+        assert await asyncio.wait_for(invocation, timeout=2) == "complete"
+    finally:
+        release_handler.set()
+        if not invocation.done():
+            invocation.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await invocation
+    assert [payload["event"] for payload in delivered] == events
+    assert all(payload["agent"] is agent for payload in delivered)
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_stream_backlog_allows_ready_handler_to_drain_burst(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    events = [RawResponsesStreamEvent(data=cast(Any, {"index": i})) for i in range(10)]
+    delivered = []
+
+    class StreamingResult:
+        final_output = "complete"
+        current_agent = agent
+
+        async def stream_events(self):
+            for event in events:
+                yield event
+
+    monkeypatch.setattr(Runner, "run_streamed", lambda *args, **kwargs: StreamingResult())
+    tool = agent.as_tool(
+        None,
+        None,
+        on_stream=lambda payload: delivered.append(payload["event"]),
+        on_stream_max_pending_events=1,
+        failure_error_function=None,
+    )
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call_burst",
+        tool_arguments='{"input":"go"}',
+    )
+    assert await tool.on_invoke_tool(context, '{"input":"go"}') == "complete"
+    assert delivered == events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancel_parent", [False, True], ids=["source-error", "parent-cancellation"]
+)
+async def test_agent_as_tool_stream_full_backlog_finishes_without_sentinel_deadlock(
+    monkeypatch: pytest.MonkeyPatch, cancel_parent: bool
+) -> None:
+    agent = Agent(name="streamer")
+    started = asyncio.Event()
+    source_finished = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+    handled = []
+    events = [RawResponsesStreamEvent(data=cast(Any, {"index": index})) for index in range(2)]
+
+    class StreamingResult:
+        current_agent = agent
+        final_output = "ok"
+
+        def cancel(self) -> None:
+            pass
+
+        async def stream_events(self):
+            yield events[0]
+            await started.wait()
+            yield events[1]
+            source_finished.set()
+            raise RuntimeError("source failed")
+
+    monkeypatch.setattr(Runner, "run_streamed", lambda *args, **kwargs: StreamingResult())
+
+    async def handler(payload):
+        started.set()
+        try:
+            await release.wait()
+            handled.append(payload["event"])
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    tool = agent.as_tool(
+        None, None, on_stream=handler, on_stream_max_pending_events=1, failure_error_function=None
+    )
+    context = ToolContext(
+        context=None, tool_name=tool.name, tool_call_id="call_full", tool_arguments='{"input":"go"}'
+    )
+    task = asyncio.create_task(tool.on_invoke_tool(context, '{"input":"go"}'))
+    try:
+        await asyncio.wait_for(source_finished.wait(), timeout=1)
+        assert not task.done()
+        assert not cancelled.is_set()
+        if cancel_parent:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+            assert cancelled.is_set()
+        else:
+            release.set()
+            with pytest.raises(RuntimeError, match="source failed"):
+                await asyncio.wait_for(task, timeout=1)
+            assert handled == events
+            assert not cancelled.is_set()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await task
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.asyncio
+async def test_fresh_runs_isolate_nested_agent_tool_approvals(streamed: bool) -> None:
+    """Matching provider calls in fresh runs must not reuse another run's nested pause."""
+    executed: list[tuple[dict[str, str], str, Usage]] = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def confirm(ctx: RunContextWrapper[dict[str, str]], value: str) -> str:
+        executed.append((ctx.context, value, ctx.usage))
+        return value
+
+    inner_model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("confirm", '{"value":"first"}', call_id="inner")],
+            [get_function_tool_call("confirm", '{"value":"second"}', call_id="inner")],
+            [get_text_message("second confirmed")],
+            [get_text_message("first confirmed")],
+        ]
+    )
+    inner = Agent(name="inner", model=inner_model, tools=[confirm])
+
+    async def on_stream(_event: AgentToolStreamEvent) -> None:
+        pass
+
+    delegate = inner.as_tool(
+        tool_name="delegate",
+        tool_description="Delegate",
+        on_stream=on_stream if streamed else None,
+    )
+    outer_model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("delegate", '{"input":"go"}', call_id="outer")],
+            [get_function_tool_call("delegate", '{"input":"go"}', call_id="outer")],
+            [get_text_message("second done")],
+            [get_text_message("first done")],
+        ]
+    )
+    outer = Agent(name="outer", model=outer_model, tools=[delegate])
+
+    async def run(input_value: Any, context: dict[str, str]) -> RunResult | RunResultStreaming:
+        if not streamed:
+            return await Runner.run(outer, input_value, context=context)
+        result = Runner.run_streamed(outer, input_value, context=context)
+        async for _event in result.stream_events():
+            pass
+        return result
+
+    first_context = {"user": "first"}
+    second_context = {"user": "second"}
+    first = await run("go", first_context)
+    # Keep the first result alive and paused while a second fresh run uses the same call fields.
+    second = await run("go", second_context)
+    assert len(first.interruptions) == len(second.interruptions) == 1
+    first_call = first.interruptions[0].raw_item
+    second_call = second.interruptions[0].raw_item
+    assert isinstance(first_call, ResponseFunctionToolCall)
+    assert isinstance(second_call, ResponseFunctionToolCall)
+    assert json.loads(first_call.arguments) == {"value": "first"}
+    assert json.loads(second_call.arguments) == {"value": "second"}
+    assert executed == []
+
+    second_state = second.to_state()
+    second_state.approve(second.interruptions[0])
+    second_done = await run(second_state, second_context)
+    assert second_done.final_output == "second done"
+    assert second_done.interruptions == []
+    assert [(context, value) for context, value, _usage in executed] == [(second_context, "second")]
+    assert executed[0][0] is second_context
+    assert executed[0][2] is second_done.context_wrapper.usage
+
+    # Completing the newer run must not consume the older run's pending approval or arguments.
+    still_pending = await run(first.to_state(), first_context)
+    assert len(still_pending.interruptions) == 1
+    assert len(executed) == 1
+    first_state = still_pending.to_state()
+    first_state.approve(still_pending.interruptions[0])
+    first_done = await run(first_state, first_context)
+    assert first_done.final_output == "first done"
+    assert first_done.interruptions == []
+    assert [(context, value) for context, value, _usage in executed] == [
+        (second_context, "second"),
+        (first_context, "first"),
+    ]
+    assert executed[1][0] is first_context
+    assert executed[1][2] is first_done.context_wrapper.usage
+    inner_model.assert_complete()
+    outer_model.assert_complete()

@@ -27,6 +27,7 @@ from .agents import WELCOME_MESSAGE, get_starting_agent
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("twilio_sip_example")
+LOG_TRANSCRIPTS = os.getenv("TWILIO_SIP_LOG_TRANSCRIPTS") == "1"
 
 
 def _get_env(name: str) -> str:
@@ -83,21 +84,17 @@ async def accept_call(call_id: str) -> None:
             )
             return
 
-        detail = exc.message
-        if exc.response is not None:
-            try:
-                detail = exc.response.text
-            except Exception:  # noqa: BLE001
-                detail = str(exc.response)
+        logger.error("Failed to accept call %s (HTTP %s)", call_id, exc.status_code)
+    else:
+        logger.info("Accepted call %s", call_id)
+        return
 
-        logger.error("Failed to accept call %s: %s %s", call_id, exc.status_code, detail)
-        raise HTTPException(status_code=500, detail="Failed to accept call") from exc
-
-    logger.info("Accepted call %s", call_id)
+    # Do not attach the provider response or exception chain to the HTTP error.
+    raise HTTPException(status_code=500, detail="Failed to accept call")
 
 
 async def observe_call(call_id: str) -> None:
-    """Attach to the realtime session and log conversation events."""
+    """Attach to the realtime session, with transcript logging explicitly opt-in."""
 
     runner = RealtimeRunner(assistant_agent, model=OpenAIRealtimeSIPModel())
 
@@ -136,7 +133,7 @@ async def observe_call(call_id: str) -> None:
             )
 
             async for event in session:
-                if event.type == "history_added":
+                if event.type == "history_added" and LOG_TRANSCRIPTS:
                     item = event.item
                     if isinstance(item, UserMessageItem):
                         for user_content in item.content:
@@ -158,14 +155,14 @@ async def observe_call(call_id: str) -> None:
                                     assistant_content.transcript,
                                 )
                 elif event.type == "error":
-                    logger.error("Realtime session error: %s", event.error)
+                    logger.error("Realtime session error for call %s", call_id)
 
     except websockets.exceptions.ConnectionClosedError:
         # Callers hanging up causes the WebSocket to close without a frame; log at info level so it
         # does not surface as an error.
         logger.info("Realtime WebSocket closed for call %s", call_id)
-    except Exception as exc:  # noqa: BLE001 - demo logging only
-        logger.exception("Error while observing call %s", call_id, exc_info=exc)
+    except Exception:  # noqa: BLE001 - keep the background observer failure contained
+        logger.error("Error while observing call %s", call_id)
     finally:
         logger.info("Call %s ended", call_id)
         active_call_tasks.pop(call_id, None)

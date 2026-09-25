@@ -7,24 +7,36 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
 
-permissions:
-  contents: write # This allows pushing to gh-pages
+permissions: {}
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: false
+  queue: max
 
 jobs:
-  deploy_docs:
+  build_docs:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.docs-deploy.outputs.run }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Determine docs-only push
-        id: docs-only
+        with:
+          persist-credentials: false
+      - name: Determine docs deployment changes
+        id: docs-deploy
         env:
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: ./.github/scripts/detect-changes.sh docs-only
+        run: ./.github/scripts/detect-changes.sh docs-deploy
       - name: Setup uv
-        if: steps.docs-only.outputs.run == 'true'
+        if: steps.docs-deploy.outputs.run == 'true'
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
@@ -32,8 +44,52 @@ jobs:
           prune-cache: true
           python-version: "3.14"
       - name: Install dependencies
-        if: steps.docs-only.outputs.run == 'true'
+        if: steps.docs-deploy.outputs.run == 'true'
+        env:
+          UV_FROZEN: "1"
         run: make sync
-      - name: Deploy docs
-        if: steps.docs-only.outputs.run == 'true'
-        run: make deploy-docs
+      - name: Build docs
+        if: steps.docs-deploy.outputs.run == 'true'
+        env:
+          UV_FROZEN: "1"
+        run: make build-docs
+      - name: Upload site
+        if: steps.docs-deploy.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-site
+          path: site/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy_docs:
+    needs: build_docs
+    if: needs.build_docs.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout published branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: gh-pages
+          path: published
+      - name: Download site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-site
+          path: site
+      - name: Publish static files
+        shell: bash
+        run: |
+          # Copy only static files; keep checkout metadata outside the artifact.
+          rsync --recursive --delete --exclude=.git site/ published/
+          touch published/.nojekyll
+          git -C published config user.name 'github-actions[bot]'
+          git -C published config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C published add --all
+          if ! git -C published diff --cached --quiet; then
+            git -C published commit -m "Deploy docs for $GITHUB_SHA"
+            git -C published push origin HEAD:gh-pages
+          fi

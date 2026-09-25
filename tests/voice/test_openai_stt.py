@@ -13,14 +13,16 @@ import httpx2
 import numpy as np
 import numpy.typing as npt
 import pytest
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Omit, omit
 
 import agents._debug as _debug
 from agents import trace
 from agents.exceptions import UserError
-from tests.testing_processor import fetch_span_errors
+from tests.testing_processor import fetch_events, fetch_ordered_spans, fetch_span_errors
 
 try:
+    from websockets.asyncio.server import ServerConnection, serve
+
     from agents.voice import (
         AudioInput,
         OpenAISTTModel,
@@ -42,6 +44,160 @@ except ImportError:
 
 
 # ===== Helpers =====
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracing_disabled", [False, True])
+async def test_close_during_setup_finishes_transcription_consumer(
+    tracing_disabled: bool,
+) -> None:
+    # A real socket controls the setup boundary without replacing SDK lifecycle tasks.
+    setup_reached = asyncio.Event()
+    socket_closed = asyncio.Event()
+
+    async def handle_connection(socket: ServerConnection) -> None:
+        try:
+            await socket.send(json.dumps({"type": "session.created"}))
+            update = json.loads(await socket.recv())
+            assert update["type"] == "session.update"
+            setup_reached.set()
+            await socket.wait_closed()
+        finally:
+            socket_closed.set()
+
+    async with serve(handle_connection, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with AsyncOpenAI(
+            api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1"
+        ) as client:
+            session = await OpenAISTTModel("gpt-4o-mini-transcribe", client).create_session(
+                StreamedAudioInput(), STTModelSettings(), False, False
+            )
+            assert isinstance(session, OpenAISTTTranscriptionSession)
+
+            async def consume() -> list[str]:
+                return [turn async for turn in session.transcribe_turns()]
+
+            with trace("close during STT setup", disabled=tracing_disabled):
+                consumer = asyncio.create_task(consume())
+                try:
+                    await asyncio.wait_for(setup_reached.wait(), 2)
+                    owned_tasks = [session._connection_task, session._listener_task]
+                    await asyncio.wait_for(session.close(), 2)
+                    await asyncio.wait_for(socket_closed.wait(), 2)
+                    assert all(task is not None and task.done() for task in owned_tasks)
+                    assert await asyncio.wait_for(asyncio.shield(consumer), 2) == []
+
+                    # The iterator also closes in finally; repeated close must not add markers.
+                    await session.close()
+                    await session.close()
+                    assert session._output_queue.empty()
+                    await asyncio.wait_for(session._output_queue.join(), 2)
+                finally:
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                    await session.close()
+            if not tracing_disabled:
+                assert fetch_events().count("trace_start") == 1
+                assert fetch_events().count("trace_end") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["close", "server_close", "error", "cancel"])
+async def test_transcription_terminal_paths_after_setup(outcome: str) -> None:
+    # Scripted STT bypasses the provider's socket and cannot exercise this close boundary.
+    transcript_received = asyncio.Event()
+    finish_server = asyncio.Event()
+    socket_closed = asyncio.Event()
+
+    async def handle_connection(socket: ServerConnection) -> None:
+        try:
+            await socket.send(json.dumps({"type": "session.created"}))
+            assert json.loads(await socket.recv())["type"] == "session.update"
+            await socket.send(json.dumps({"type": "session.updated"}))
+            assert json.loads(await socket.recv())["type"] == "input_audio_buffer.append"
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": "hello",
+                    }
+                )
+            )
+            await finish_server.wait()
+            if outcome == "error":
+                await socket.send(json.dumps({"type": "error", "error": "test provider error"}))
+            elif outcome == "server_close":
+                await socket.close()
+            await socket.wait_closed()
+        finally:
+            socket_closed.set()
+
+    async with serve(handle_connection, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with AsyncOpenAI(
+            api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1"
+        ) as client:
+            audio_input = StreamedAudioInput()
+            await audio_input.add_audio(np.array([1, 2], dtype=np.int16))
+            session = await OpenAISTTModel("gpt-4o-mini-transcribe", client).create_session(
+                audio_input, STTModelSettings(), False, False
+            )
+            assert isinstance(session, OpenAISTTTranscriptionSession)
+            transcripts: list[str] = []
+
+            async def consume() -> None:
+                async for turn in session.transcribe_turns():
+                    transcripts.append(turn)
+                    transcript_received.set()
+
+            with trace("STT terminal paths"):
+                consumer = asyncio.create_task(consume())
+                try:
+                    await asyncio.wait_for(transcript_received.wait(), 2)
+                    owned_tasks = [
+                        session._connection_task,
+                        session._listener_task,
+                        session._process_events_task,
+                        session._stream_audio_task,
+                    ]
+                    finish_server.set()
+                    if outcome == "close":
+                        await asyncio.wait_for(session.close(), 2)
+                    elif outcome == "cancel":
+                        consumer.cancel()
+
+                    if outcome == "error":
+                        with pytest.raises(
+                            STTWebsocketConnectionError, match="Error parsing events"
+                        ):
+                            await asyncio.wait_for(asyncio.shield(consumer), 2)
+                        assert session._stored_exception is not None
+                        assert "test provider error" in str(session._stored_exception.__cause__)
+                    elif outcome == "cancel":
+                        with pytest.raises(asyncio.CancelledError):
+                            await asyncio.wait_for(asyncio.shield(consumer), 2)
+                    else:
+                        await asyncio.wait_for(asyncio.shield(consumer), 2)
+                        await session.close()
+                        assert session._output_queue.empty()
+                        await asyncio.wait_for(session._output_queue.join(), 2)
+
+                    assert transcripts == ["hello"]
+                    assert all(task is not None and task.done() for task in owned_tasks)
+                    await asyncio.wait_for(socket_closed.wait(), 2)
+                finally:
+                    finish_server.set()
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                    await session.close()
+
+            events = fetch_events()
+            assert events.count("span_start") == events.count("span_end")
+            assert events[-1] == "trace_end"
+            assert all(span.ended_at is not None for span in fetch_ordered_spans())
 
 
 def create_mock_websocket(messages: list[str]) -> AsyncMock:
@@ -455,7 +611,19 @@ async def test_non_json_messages_should_crash():
 
 
 @pytest.mark.asyncio
-async def test_session_connects_and_configures_successfully():
+@pytest.mark.parametrize(
+    ("session_header", "expected_session_headers"),
+    [
+        (None, {}),
+        ("0", {"openai-log-session": "0"}),
+        ("1", {"openai-log-session": "1"}),
+        (omit, {}),
+    ],
+    ids=["default", "explicit-zero", "explicit-one", "omitted"],
+)
+async def test_session_connects_and_configures_successfully(
+    session_header: str | Omit | None, expected_session_headers: dict[str, str]
+):
     """
     Test that the session:
     1) Connects to the correct URL with correct headers.
@@ -470,42 +638,53 @@ async def test_session_connects_and_configures_successfully():
             json.dumps({"type": "transcription_session.updated"}),
         ]
     )
-    with patch("websockets.connect", return_value=mock_ws) as mock_connect:
-        # Instantiate the session
-        input_audio = await StreamedAudioInputFactory.get(count=2)
-        stt_settings = STTModelSettings()
+    # Exercise real client header materialization without opening a network connection.
+    default_headers = {} if session_header is None else {"openai-log-session": session_header}
+    async with AsyncOpenAI(
+        api_key="FAKE_KEY", base_url="https://api.openai.com/v1", default_headers=default_headers
+    ) as client:
+        with patch("websockets.connect", return_value=mock_ws) as mock_connect:
+            # Instantiate the session
+            input_audio = await StreamedAudioInputFactory.get(count=2)
+            stt_settings = STTModelSettings()
 
-        session = OpenAISTTTranscriptionSession(
-            input=input_audio,
-            client=create_mock_openai_client(),
-            model="whisper-1",
-            settings=stt_settings,
-            trace_include_sensitive_data=False,
-            trace_include_sensitive_audio_data=False,
-        )
+            session = OpenAISTTTranscriptionSession(
+                input=input_audio,
+                client=client,
+                model="whisper-1",
+                settings=stt_settings,
+                trace_include_sensitive_data=False,
+                trace_include_sensitive_audio_data=False,
+            )
 
-        # Start reading from transcribe_turns, which triggers _process_websocket_connection
-        turns = session.transcribe_turns()
+            try:
+                # Start reading from transcribe_turns, which triggers _process_websocket_connection
+                turns = session.transcribe_turns()
 
-        async for _ in turns:
-            pass
+                async for _ in turns:
+                    pass
 
-        # Check connect call
-        args, kwargs = mock_connect.call_args
-        assert "wss://api.openai.com/v1/realtime?intent=transcription" in args[0]
-        headers = kwargs.get("additional_headers", {})
-        assert headers.get("Authorization") == "Bearer FAKE_KEY"
-        assert kwargs["logger"].isEnabledFor(logging.DEBUG) is False
-        assert headers.get("OpenAI-Beta") is None
-        assert headers.get("OpenAI-Log-Session") == "1"
+                # Check connect call
+                args, kwargs = mock_connect.call_args
+                assert "wss://api.openai.com/v1/realtime?intent=transcription" in args[0]
+                headers = kwargs.get("additional_headers", {})
+                assert headers.get("Authorization") == "Bearer FAKE_KEY"
+                assert kwargs["logger"].isEnabledFor(logging.DEBUG) is False
+                assert headers.get("OpenAI-Beta") is None
+                assert {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower() == "openai-log-session"
+                } == expected_session_headers
 
-        # Check that we sent a 'session.update' message
-        sent_messages = [call.args[0] for call in mock_ws.send.call_args_list]
-        assert any('"type": "session.update"' in msg for msg in sent_messages), (
-            f"Expected 'session.update' in {sent_messages}"
-        )
+                # Check that we sent a 'session.update' message
+                sent_messages = [call.args[0] for call in mock_ws.send.call_args_list]
+                assert any('"type": "session.update"' in msg for msg in sent_messages), (
+                    f"Expected 'session.update' in {sent_messages}"
+                )
 
-        await session.close()
+            finally:
+                await session.close()
 
 
 @pytest.mark.asyncio
@@ -671,6 +850,48 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
         # We expect an exception once the generator tries to connect + wait for event
         with pytest.raises(STTWebsocketConnectionError) as exc_info:
             async for _ in turns:
+                pass
+
+        assert "Timeout waiting for transcription_session.created event" in str(exc_info.value)
+
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_event_raises_builtin_timeout_error_on_real_clock() -> None:
+    """The asyncio timeout inside _wait_for_event must surface as the builtin TimeoutError.
+
+    On Python 3.10 asyncio.wait_for raises asyncio.TimeoutError, a different class from
+    the builtin; the callers only catch the builtin. This test uses the real clock so the
+    asyncio timeout path runs, unlike the deadline test that patches monotonic.
+    """
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+
+    with pytest.raises(TimeoutError, match="Timeout waiting for event"):
+        await _wait_for_event(queue, ["session.created"], timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_real_clock_session_creation_timeout_is_wrapped(monkeypatch: pytest.MonkeyPatch):
+    """A session.created that never arrives is reported as STTWebsocketConnectionError
+    when the timeout comes from asyncio.wait_for rather than the patched deadline clock.
+    """
+    monkeypatch.setattr("agents.voice.models.openai_stt.SESSION_CREATION_TIMEOUT", 0.01)
+    mock_ws = create_mock_websocket([])
+
+    with patch("websockets.connect", return_value=mock_ws):
+        audio_input = await StreamedAudioInputFactory.get(count=2)
+        session = OpenAISTTTranscriptionSession(
+            input=audio_input,
+            client=create_mock_openai_client(),
+            model="whisper-1",
+            settings=STTModelSettings(),
+            trace_include_sensitive_data=False,
+            trace_include_sensitive_audio_data=False,
+        )
+
+        with pytest.raises(STTWebsocketConnectionError) as exc_info:
+            async for _ in session.transcribe_turns():
                 pass
 
         assert "Timeout waiting for transcription_session.created event" in str(exc_info.value)

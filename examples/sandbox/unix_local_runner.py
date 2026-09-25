@@ -3,6 +3,10 @@ Start here if you want the simplest Unix-local sandbox example.
 
 This file mirrors the Docker example, but the sandbox runs as a temporary local
 workspace on macOS or Linux instead of inside a Docker container.
+
+Use this example for trusted local development or within externally provided isolation.
+Linux commands run without OS confinement added by this backend. macOS commands use
+sandbox-exec filesystem restrictions, which do not provide network isolation.
 """
 
 import argparse

@@ -27,11 +27,14 @@ def sanitize_url_for_trace(url: object) -> str:
 
 def model_config_for_trace(
     model_settings: ModelSettings,
+    tracing: ModelTracing,
     *,
     base_url: object | None = None,
     extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = model_settings.to_traceable_dict()
+    if not tracing.include_data():
+        config.pop("metadata", None)
     if base_url is not None:
         config["base_url"] = sanitize_url_for_trace(base_url)
     if extra_config:

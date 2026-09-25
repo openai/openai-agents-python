@@ -164,6 +164,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     Unix-only session implementation that runs commands on the host and uses the host filesystem
     as the workspace (rooted at `self.state.manifest.root`).
 
+    On Linux, commands run without OS-level confinement added by this backend. On macOS,
+    commands use sandbox-exec filesystem restrictions, which do not provide network isolation.
+    Workspace paths and SDK file API guards do not confine arbitrary Linux shell commands.
+    Use this backend for trusted local execution or within externally provided isolation.
+
     User-scoped listing and writing require sudo access to a system python3 and its standard
     library. These operations run a trusted file worker in Python isolated mode, independently
     of the application's interpreter or virtual environment.
@@ -780,18 +785,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 seen.add(key)
                 allowed.append(root)
 
-        for path_entry in env.get("PATH", "").split(os.pathsep):
+        child_path_entries = env.get("PATH", "").split(os.pathsep)
+        for path_entry in child_path_entries:
             if path_entry:
                 _append(path_entry)
 
         executable = shutil.which(command_parts[0], path=env.get("PATH"))
         _append(executable)
 
-        # Only host-controlled PATH entries may widen a bin grant to its virtual environment
-        # root. Manifest environment overrides must not authorize broader host filesystem reads.
-        for path_entry in os.environ.get("PATH", "").split(os.pathsep):
-            if path_entry:
-                _append(path_entry, allow_virtual_environment_root=True)
+        # The client must permit PATH inheritance before retained host entries can widen a bin
+        # grant to its virtual environment root. Matching manifest values cannot grant authority.
+        if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
+            for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+                if path_entry and path_entry in child_path_entries:
+                    _append(path_entry, allow_virtual_environment_root=True)
         return allowed
 
     def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:
@@ -1183,6 +1190,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
 
 class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | None]):
+    """Create local host sessions for trusted development or externally isolated execution.
+
+    Linux sessions add no OS-level command confinement. macOS sessions apply filesystem
+    restrictions through sandbox-exec, but do not provide network isolation. Separate
+    workspaces and host environment filtering do not establish an OS isolation boundary.
+    For untrusted commands, including commands influenced by untrusted inputs, use an
+    appropriately configured Docker or hosted backend, or provide external isolation.
+    """
+
     backend_id = "unix_local"
     supports_default_options = True
     _instrumentation: Instrumentation
@@ -1225,7 +1241,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         manifest = manifest if manifest is not None else Manifest()
         _assert_unix_local_host_path_grants_unsupported(manifest)
         self._validate_manifest_for_create(manifest)
-        # For local execution, runner-created sessions should always get an isolated temp root
+        # For local execution, runner-created sessions should always get a dedicated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
         if manifest.root == _DEFAULT_MANIFEST_ROOT:

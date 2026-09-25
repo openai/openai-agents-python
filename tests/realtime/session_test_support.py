@@ -82,6 +82,7 @@ def _set_default_timeout_fields(tool: Mock) -> Mock:
     tool.timeout_seconds = None
     tool.timeout_behavior = "error_as_result"
     tool.timeout_error_function = None
+    tool.tool_output_guardrails = []
     return tool
 
 
