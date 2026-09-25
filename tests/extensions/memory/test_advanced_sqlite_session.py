@@ -1322,6 +1322,33 @@ def _pop_item_in_process(
         session.close()
 
 
+@pytest.mark.parametrize("branch_name", ["", "   ", "\t"])
+@pytest.mark.parametrize("from_content", [False, True])
+async def test_create_branch_rejects_blank_name(branch_name: str, from_content: bool):
+    session = AdvancedSQLiteSession(session_id="blank_branch_name", create_tables=True)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+    ]
+
+    try:
+        await session.add_items(items)
+        branches_before = await session.list_branches()
+
+        with pytest.raises(ValueError, match="Branch name cannot be empty"):
+            if from_content:
+                await session.create_branch_from_content("Second question", branch_name)
+            else:
+                await session.create_branch_from_turn(2, branch_name)
+
+        assert await session.list_branches() == branches_before
+        assert session._current_branch_id == "main"
+        assert await session.get_items() == items
+    finally:
+        session.close()
+
+
 @pytest.mark.parametrize("branch_id", ["main", "existing_branch"])
 async def test_create_branch_rejects_populated_branch_id(branch_id: str):
     """Creating a branch must not append history to a populated branch."""

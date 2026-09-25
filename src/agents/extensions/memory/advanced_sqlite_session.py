@@ -1012,8 +1012,10 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         Raises:
             ValueError: If turn doesn't exist, doesn't contain a user message, or
-                `branch_name` has already been used in this session
+                `branch_name` is blank or has already been used in this session.
         """
+        if branch_name is not None and not branch_name.strip():
+            raise ValueError("Branch name cannot be empty")
 
         async def _create_and_switch() -> tuple[str, Any, str]:
             # Copying the branch is the first durable side effect. Keep the
@@ -1066,8 +1068,8 @@ class AdvancedSQLiteSession(SQLiteSession):
             The branch_id of the newly created branch.
 
         Raises:
-            ValueError: If no matching turns are found or `branch_name` has already been used
-                in this session.
+            ValueError: If no matching turns are found or `branch_name` is blank or has
+                already been used in this session.
         """
         matching_turns = await self.find_turns_by_content(search_term)
         if not matching_turns:
