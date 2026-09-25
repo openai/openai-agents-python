@@ -48,6 +48,7 @@ from ....sandbox.errors import (
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
@@ -954,6 +955,24 @@ class RunloopSandboxSession(BaseSandboxSession):
                 context={"backend": "runloop", "detail": "invalid_tunnel_url"},
                 cause=e,
             ) from e
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        normalized_path = await self._validate_path_access(path)
+        try:
+            async with self._sdk.api.devboxes.with_streaming_response.download_file(
+                self.devbox_id,
+                path=sandbox_path_str(normalized_path),
+                timeout=self.state.timeouts.file_download_s,
+            ) as response:
+                return await collect_bounded(response.iter_bytes(chunk_size=65536), max_bytes)
+        except Exception as error:
+            if _is_runloop_not_found(error):
+                raise WorkspaceReadNotFoundError(path=path) from None
+            if _is_runloop_provider_error(error):
+                raise WorkspaceArchiveReadError(
+                    path=path, retryable=_runloop_provider_retryability(error)
+                ) from None
+            raise
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         """Read a file via Runloop's binary file API."""

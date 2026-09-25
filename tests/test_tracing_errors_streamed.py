@@ -195,8 +195,7 @@ async def test_multi_turn_no_handoffs():
 
 @pytest.mark.asyncio
 async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
-    # Opt in to tool payload logging so the friendly "parsing tool arguments" message,
-    # which depends on inspecting the chained JSONDecodeError, is preserved.
+    # Local diagnostics do not opt model feedback or default error spans into exception details.
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     model = ScriptedModel(emit_traces=True)
@@ -220,8 +219,7 @@ async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
 
     tool_outputs = [item for item in result.new_items if item.type == "tool_call_output_item"]
     assert tool_outputs, "Expected a tool output item for invalid JSON"
-    assert "An error occurred while parsing tool arguments" in str(tool_outputs[0].output)
-    assert "valid JSON" in str(tool_outputs[0].output)
+    assert tool_outputs[0].output == ("An error occurred while running the tool. Please try again.")
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -241,19 +239,20 @@ async def test_tool_call_error(monkeypatch: pytest.MonkeyPatch):
                             {
                                 "type": "function",
                                 "error": {
-                                    "message": "Error running tool",
+                                    "message": "Error running tool (non-fatal)",
                                     "data": {
                                         "tool_name": "foo",
-                                        "error": "Expecting value: line 1 column 1 (char 0)",
+                                        "error": (
+                                            "Tool execution failed. Error details are redacted."
+                                        ),
                                     },
                                 },
                                 "data": {
                                     "name": "foo",
                                     "input": "bad_json",
                                     "output": (
-                                        "An error occurred while parsing tool arguments. "
-                                        "Please try again with valid JSON. Error: Expecting "
-                                        "value: line 1 column 1 (char 0)"
+                                        "An error occurred while running the tool. "
+                                        "Please try again."
                                     ),
                                 },
                             },

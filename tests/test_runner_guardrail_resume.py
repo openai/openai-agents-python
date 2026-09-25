@@ -416,18 +416,8 @@ async def test_runner_resume_preserves_guardrail_results(monkeypatch: pytest.Mon
     async def fake_run_output_guardrails(*_: object, **__: object) -> list[object]:
         return []
 
-    async def fake_get_all_tools(*_: object, **__: object) -> list[object]:
-        return []
-
-    async def fake_initialize_computer_tools(
-        *args: object, tools: list[object], **kwargs: object
-    ) -> list[object]:
-        return tools
-
     monkeypatch.setattr(run_module, "run_single_turn", fake_run_single_turn)
     monkeypatch.setattr(run_module, "run_output_guardrails", fake_run_output_guardrails)
-    monkeypatch.setattr(run_module, "get_all_tools", fake_get_all_tools)
-    monkeypatch.setattr(run_module, "initialize_computer_tools", fake_initialize_computer_tools)
 
     result = await Runner.run(agent, run_state)
 
@@ -546,17 +536,7 @@ async def test_runner_resume_preserves_guardrail_results_on_reinterruption(
             tool_output_guardrail_results=[new_tool_output_result],
         )
 
-    async def fake_get_all_tools(*_: object, **__: object) -> list[object]:
-        return []
-
-    async def fake_initialize_computer_tools(
-        *args: object, tools: list[object], **kwargs: object
-    ) -> list[object]:
-        return tools
-
     monkeypatch.setattr(run_module, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
-    monkeypatch.setattr(run_module, "get_all_tools", fake_get_all_tools)
-    monkeypatch.setattr(run_module, "initialize_computer_tools", fake_initialize_computer_tools)
 
     result = await Runner.run(agent, run_state)
 

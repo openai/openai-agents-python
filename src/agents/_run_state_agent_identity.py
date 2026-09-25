@@ -433,6 +433,17 @@ def _agent_identity_sort_key(
     )
 
 
+def _get_ambiguous_agent_ids(initial_agent: Agent[Any]) -> set[int]:
+    """Find owners distinguishable only by graph traversal order."""
+    groups: dict[tuple[str, int, str], list[int]] = {}
+    for agent in _iter_agent_graph(initial_agent):
+        priority, signature, _ = _agent_identity_sort_key(
+            agent, root_agent=initial_agent, original_index=0
+        )
+        groups.setdefault((agent.name, priority, signature), []).append(id(agent))
+    return {agent_id for group in groups.values() if len(group) > 1 for agent_id in group}
+
+
 def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
     """Build a stable identity map that preserves duplicate agent names."""
     ordered_agents = list(_iter_agent_graph(initial_agent))

@@ -87,6 +87,47 @@ class TestToolCallExecution:
             await session.__aexit__(None, None, None)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("approve", [False, True])
+    async def test_sticky_decisions_remain_with_agent_after_update(self, mock_model, approve):
+        first = RealtimeAgent(
+            name="same-name",
+            tools=[_named_function_tool("operate", "first", needs_approval=True)],
+        )
+        second = RealtimeAgent(
+            name="same-name",
+            tools=[_named_function_tool("operate", "second", needs_approval=True)],
+        )
+        session = RealtimeSession(mock_model, first, None, run_config={"async_tool_calls": False})
+        await session.__aenter__()
+        try:
+            await session._handle_tool_call(
+                RealtimeModelToolCallEvent(name="operate", call_id="first", arguments="{}")
+            )
+            if approve:
+                await session.approve_tool_call("first", always=True)
+            else:
+                await session.reject_tool_call("first", always=True, rejection_message="deny first")
+            await session.update_agent(second)
+            await session._handle_tool_call(
+                RealtimeModelToolCallEvent(name="operate", call_id="second", arguments="{}")
+            )
+            assert list(session._pending_tool_calls) == ["second"]
+            await session.reject_tool_call("second", always=True, rejection_message="deny second")
+            await session.update_agent(first)
+            await session._handle_tool_call(
+                RealtimeModelToolCallEvent(name="operate", call_id="first-again", arguments="{}")
+            )
+            assert session._pending_tool_calls == {}
+            first_output = "first" if approve else "deny first"
+            assert _sent_tool_output_strings(mock_model) == [
+                first_output,
+                "deny second",
+                first_output,
+            ]
+        finally:
+            await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
     async def test_function_tool_needs_approval_emits_event(
         self, mock_model, mock_agent, mock_function_tool
     ):
@@ -554,7 +595,7 @@ class TestToolCallExecution:
             )
             is None
         )
-        assert "crm.lookup_account" in session._context_wrapper._approvals
+        assert session._context_wrapper.is_tool_approved("crm.lookup_account", "future") is not None
         assert "lookup_account" not in session._context_wrapper._approvals
         assert sorted(session._pending_tool_calls) == [second_call.call_id]
         assert len(mock_model.sent_tool_outputs) == 1
@@ -833,7 +874,7 @@ class TestToolCallExecution:
         )
         await session._handle_tool_call(second_call)
 
-        assert "crm.lookup_account" in session._context_wrapper._approvals
+        assert session._context_wrapper.is_tool_approved("crm.lookup_account", "future") is not None
         assert "lookup_account" not in session._context_wrapper._approvals
         assert session._pending_tool_calls == {}
         assert [output for _call, output, _start in mock_model.sent_tool_outputs] == [

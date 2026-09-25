@@ -1,6 +1,15 @@
+"""Run approved commands on the host, without sandbox isolation.
+
+Use only with a trusted operator who reviews every command. Approved commands can
+read or modify host files and access the network; a restricted child environment
+does not prevent those actions. For isolated execution, see
+examples/tools/container_shell_inline_skill.py or examples/sandbox/docker/.
+"""
+
 import argparse
 import asyncio
 import os
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -18,12 +27,11 @@ from agents import (
 from agents.items import ToolApprovalItem
 from agents.run_context import RunContextWrapper
 from agents.tool import ShellOnApprovalFunctionResult
-
-SHELL_AUTO_APPROVE = os.environ.get("SHELL_AUTO_APPROVE") == "1"
+from examples.auto_mode import is_auto_mode
 
 
 class ShellExecutor:
-    """Executes shell commands; approval is handled via ShellTool."""
+    """Executes host shell commands after the caller obtains approval."""
 
     def __init__(self, cwd: Path | None = None):
         self.cwd = Path(cwd or Path.cwd())
@@ -36,7 +44,9 @@ class ShellExecutor:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=self.cwd,
-                env=os.environ.copy(),
+                # Do not pass API keys or shell startup hooks to model-generated commands.
+                env={key: os.environ[key] for key in ("PATH", "SystemRoot") if key in os.environ},
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -76,35 +86,40 @@ class ShellExecutor:
 
 
 async def prompt_shell_approval(commands: Sequence[str]) -> bool:
-    """Simple CLI prompt for shell approvals."""
-    if SHELL_AUTO_APPROVE:
-        return True
-    print("Shell command approval required:")
+    """Require an explicit interactive decision for each command batch."""
+    if not commands or is_auto_mode() or not sys.stdin.isatty():
+        return False
+    print("These commands will run on your host without sandbox isolation:")
     for entry in commands:
-        print(" ", entry)
-    response = input("Proceed? [y/N] ").strip().lower()
+        # Escape terminal control characters so a command cannot hide the approval text.
+        print(" ", ascii(entry))
+    try:
+        response = input("Proceed? [y/N] ").strip().lower()
+    except EOFError:
+        return False
     return response in {"y", "yes"}
+
+
+async def on_shell_approval(
+    _context: RunContextWrapper, approval_item: ToolApprovalItem
+) -> ShellOnApprovalFunctionResult:
+    raw = approval_item.raw_item
+    commands: Sequence[str] = ()
+    if isinstance(raw, dict):
+        action = raw.get("action", {})
+        if isinstance(action, dict):
+            commands = action.get("commands", [])
+    else:
+        action_obj = getattr(raw, "action", None)
+        if action_obj and hasattr(action_obj, "commands"):
+            commands = action_obj.commands
+    approved = await prompt_shell_approval(commands)
+    return {"approve": approved, "reason": "user rejected" if not approved else "approved"}
 
 
 async def main(prompt: str, model: str) -> None:
     with trace("shell_example"):
         print(f"[info] Using model: {model}")
-
-        async def on_shell_approval(
-            _context: RunContextWrapper, approval_item: ToolApprovalItem
-        ) -> ShellOnApprovalFunctionResult:
-            raw = approval_item.raw_item
-            commands: Sequence[str] = ()
-            if isinstance(raw, dict):
-                action = raw.get("action", {})
-                if isinstance(action, dict):
-                    commands = action.get("commands", [])
-            else:
-                action_obj = getattr(raw, "action", None)
-                if action_obj and hasattr(action_obj, "commands"):
-                    commands = action_obj.commands
-            approved = await prompt_shell_approval(commands)
-            return {"approve": approved, "reason": "user rejected" if not approved else "approved"}
 
         agent = Agent(
             name="Shell Assistant",

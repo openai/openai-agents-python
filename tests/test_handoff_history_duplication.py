@@ -2219,6 +2219,8 @@ async def test_first_nested_handoff_after_restore_uses_explicit_occurrence_linea
     state._session_items.insert(0, _create_message_item(first_agent, text="session only"))
     state_json = state.to_json()
     if legacy_snapshot:
+        for entry in state_json["context"].pop("function_tool_approvals", []):
+            state_json["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         state_json["$schemaVersion"] = "1.12"
         state_json.pop("nested_history_owned_session_item_refs")
         state_json.pop("generated_session_item_indexes")

@@ -232,7 +232,11 @@ class SandboxRunConfig:
     """Explicit sandbox session state to resume from when not using `RunState` payloads."""
 
     manifest: Manifest | None = None
-    """Optional sandbox manifest override for fresh session creation."""
+    """Optional sandbox manifest override for fresh session creation.
+
+    Dictionary inputs cannot authorize local host sources or extra path grants. Configure
+    these on a trusted `Manifest` instance after validating the host paths in application code.
+    """
 
     snapshot: SnapshotSpec | SnapshotBase | None = None
     """Optional sandbox snapshot used for fresh session creation."""
@@ -375,6 +379,12 @@ class RunConfig:
     """Opt-in beta: compact prior run history into ordered assistant summary segments while
     preserving lossless message items in their original positions. This is disabled by default
     while we stabilize nested handoffs; set to True to enable the compacted transcript behavior.
+    Nesting does not redact sensitive data: tool arguments and outputs can remain in summary text.
+    An explicit `Handoff.input_filter` or `RunConfig.handoff_input_filter` replaces automatic
+    nesting, even when this setting is True. To filter and nest history, the custom filter must
+    call `agents.handoffs.nest_handoff_history` itself. Sanitize `input_history`,
+    `pre_handoff_items`, and `new_items` before that call, or sanitize its returned `input_history`.
+    The helper ignores an existing `input_items` override when building nested history.
     Server-managed conversations
     (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) automatically
     disable this behavior with a warning.

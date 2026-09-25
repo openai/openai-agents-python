@@ -59,6 +59,11 @@ from typing_extensions import (
 
 from . import _debug
 from ._config_coercion import coerce_pydantic_config
+from ._function_tool_arguments import (
+    PreparedFunctionArguments,
+    arguments_unchanged,
+    can_prepare_without_user_code,
+)
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -498,7 +503,12 @@ class FunctionTool:
     and the tool call will need to be approved using RunState.approve() or rejected using
     RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
     function that takes (run_context, tool_parameters, call_id) and returns whether this
-    specific call needs approval."""
+    specific call needs approval. For decorated Python tools, callable policies receive raw
+    parsed arguments only when validation preserves their values, types, and dictionary order.
+    Defaults, transformations, or arguments that cannot be inspected require manual approval.
+    Application models, custom validators, and custom default factories require manual approval
+    before validation runs. Invalid arguments also require manual approval; validation errors
+    follow the tool's failure policy only after approval, without invoking its body."""
 
     # Keep timeout fields after needs_approval to preserve positional constructor compatibility.
     timeout_seconds: float | None = None
@@ -579,6 +589,11 @@ class FunctionTool:
     _emit_tool_origin: bool = field(default=True, kw_only=True, repr=False)
     """Whether runtime item generation should emit tool origin metadata for this tool."""
 
+    _mcp_tool_binding: tuple[str, str, int | None] | None = field(
+        default=None, kw_only=True, repr=False
+    )
+    """Original MCP server name, raw tool name, and configured server position for resume."""
+
     @property
     def qualified_name(self) -> str:
         """Return the public qualified name used to identify this function tool."""
@@ -657,6 +672,10 @@ class _FailureHandlingFunctionToolInvoker:
         if getattr(self, _SYNC_FUNCTION_TOOL_MARKER, False):
             setattr(bound_invoker, _SYNC_FUNCTION_TOOL_MARKER, True)
         return bound_invoker
+
+    def prepare_arguments(self, input: str, tool_name: str) -> PreparedFunctionArguments | None:
+        prepare = getattr(self._invoke_tool_impl, "__agents_prepare_arguments__", None)
+        return prepare(input, tool_name) if prepare is not None else None
 
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
         try:
@@ -1875,16 +1894,20 @@ def _build_handled_function_tool_error_handler(
         input_json: str,
         context: ToolContext[Any],
     ) -> None:
-        json_decode_error = _extract_tool_argument_json_error(error)
+        trace_include_sensitive_data = (
+            context.run_config is None or context.run_config.trace_include_sensitive_data
+        ) and resolve_function_tool_failure_error_function(
+            function_tool, context
+        ) is not default_tool_error_function
+        json_decode_error = (
+            _extract_tool_argument_json_error(error) if trace_include_sensitive_data else None
+        )
         if json_decode_error is not None and span_message_for_json_decode_error is not None:
             resolved_span_message = span_message_for_json_decode_error
             span_error_detail = str(json_decode_error)
         else:
             resolved_span_message = span_message
-            span_error_detail = str(error)
-        trace_include_sensitive_data = (
-            context.run_config is None or context.run_config.trace_include_sensitive_data
-        )
+            span_error_detail = str(error) if trace_include_sensitive_data else ""
         trace_error = get_trace_tool_error(
             trace_include_sensitive_data=trace_include_sensitive_data,
             error_message=span_error_detail,
@@ -1950,15 +1973,11 @@ def _log_function_tool_invocation(*, tool_name: str, input_json: str) -> None:
 
 
 def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
-    """The default tool error function, which just returns a generic error message."""
-    json_decode_error = _extract_tool_argument_json_error(error)
-    if json_decode_error is not None:
-        return (
-            "An error occurred while parsing tool arguments. "
-            "Please try again with valid JSON. "
-            f"Error: {json_decode_error}"
-        )
-    return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
+    """Return a fixed error response without exposing the exception to the model.
+
+    Provide a custom ``failure_error_function`` to return application-approved error details.
+    """
+    return "An error occurred while running the tool. Please try again."
 
 
 _FUNCTION_TOOL_TIMEOUT_BEHAVIORS: tuple[ToolTimeoutBehavior, ...] = (
@@ -2701,17 +2720,18 @@ def function_tool(
             output_json_schema=output_json_schema,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
-            tool_name = ctx.tool_name
+        def _prepare_arguments(
+            input: str, tool_name: str, *, inspect_approval: bool = False
+        ) -> PreparedFunctionArguments:
             json_data = _parse_function_tool_json_input(tool_name=tool_name, input_json=input)
-            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
-
+            # Keep mutable policy input separate from prepared execution values.
+            validation_input = copy.deepcopy(json_data) if inspect_approval else json_data
             base_message = f"Invalid JSON input for tool {tool_name}"
             validation_failed = False
             try:
                 parsed = (
-                    schema.params_pydantic_model(**json_data)
-                    if json_data
+                    schema.params_pydantic_model(**validation_input)
+                    if validation_input
                     else schema.params_pydantic_model()
                 )
             except ValidationError as e:
@@ -2723,6 +2743,24 @@ def function_tool(
                 raise ModelBehaviorError(base_message)
 
             args, kwargs_dict = schema.to_call_args(parsed)
+            return PreparedFunctionArguments(
+                owner=_prepare_arguments,
+                arguments=input,
+                args=args,
+                kwargs=kwargs_dict,
+                unchanged=inspect_approval and arguments_unchanged(parsed, json_data),
+            )
+
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+            tool_name = ctx.tool_name
+            prepared = ctx._function_tool_arguments
+            ctx._function_tool_arguments = None
+            if prepared is None:
+                prepared = _prepare_arguments(input, tool_name)
+            elif prepared.owner is not _prepare_arguments or prepared.arguments != input:
+                raise UserError("Prepared function arguments do not match this invocation.")
+            _log_function_tool_invocation(tool_name=tool_name, input_json=input)
+            args, kwargs_dict = prepared.args, prepared.kwargs
 
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug("Tool call args: %s, kwargs: %s", args, kwargs_dict)
@@ -2757,6 +2795,21 @@ def function_tool(
 
             return result
 
+        def _prepare_for_approval(input: str, tool_name: str) -> PreparedFunctionArguments:
+            if not can_prepare_without_user_code(schema.params_pydantic_model):
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+            try:
+                return _prepare_arguments(input, tool_name, inspect_approval=True)
+            except Exception:
+                # Failed inspection cannot authorize the invocation's error handler.
+                # Revalidate through the ordinary invocation path after approval.
+                return PreparedFunctionArguments(
+                    owner=_prepare_arguments, arguments=input, args=[], kwargs={}
+                )
+
+        cast(Any, _on_invoke_tool_impl).__agents_prepare_arguments__ = _prepare_for_approval
         setattr(
             _on_invoke_tool_impl,
             _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,

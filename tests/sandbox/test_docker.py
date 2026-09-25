@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import cast
 
 import docker.errors  # type: ignore[import-untyped]
@@ -56,7 +56,7 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.files import EntryKind, FileEntry
-from agents.sandbox.manifest import Manifest
+from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
@@ -1926,7 +1926,7 @@ async def test_docker_labels_roundtrip_through_run_state() -> None:
     serialized = run_state.to_json()
     restored = await RunState.from_json(agent, serialized)
 
-    assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.17"
+    assert serialized["$schemaVersion"] == CURRENT_SCHEMA_VERSION
     assert restored._sandbox is not None
     restored_session_state = restored._sandbox["session_state"]
     assert isinstance(restored_session_state, dict)
@@ -1970,9 +1970,11 @@ async def test_docker_create_persists_configured_labels(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["/workspace", "/mnt/sibling/../workspace"])
 async def test_docker_create_container_mounts_explicit_host_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    root: str,
 ) -> None:
     host_path = tmp_path / "shared-data"
     host_path.mkdir()
@@ -1980,13 +1982,14 @@ async def test_docker_create_container_mounts_explicit_host_path(
     docker_client = _FakeCreateDockerClient(container)
     client = DockerSandboxClient(docker_client=cast(object, docker_client))
     manifest = Manifest(
+        root=root,
         extra_path_grants=(
             SandboxPathGrant(
                 path="/mnt/shared-data",
                 host_path=str(host_path),
                 read_only=True,
             ),
-        )
+        ),
     )
 
     monkeypatch.setattr(client, "image_exists", lambda _image: True)
@@ -2006,6 +2009,158 @@ async def test_docker_create_container_mounts_explicit_host_path(
             "ReadOnly": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "resume"])
+@pytest.mark.parametrize(
+    "storage_mount",
+    [
+        AzureBlobMount(
+            account="account",
+            container="container",
+            mount_strategy=InContainerMountStrategy(pattern=FuseMountPattern()),
+        ),
+        S3Mount(
+            bucket="bucket",
+            mount_strategy=InContainerMountStrategy(pattern=MountpointMountPattern()),
+        ),
+        S3Mount(
+            bucket="bucket", mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern())
+        ),
+        S3Mount(
+            bucket="bucket",
+            mount_strategy=InContainerMountStrategy(pattern=RcloneMountPattern(mode="nfs")),
+        ),
+        S3FilesMount(
+            file_system_id="fs-1234567890abcdef0",
+            mount_strategy=InContainerMountStrategy(pattern=S3FilesMountPattern()),
+        ),
+    ],
+    ids=["fuse", "mountpoint", "rclone-fuse", "rclone-nfs", "s3-files"],
+)
+async def test_docker_rejects_read_only_host_grant_with_privileged_storage_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    storage_mount: Mount,
+) -> None:
+    container = _StartedContainer()
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        entries={"nested": Dir(children={"data": storage_mount})},
+        extra_path_grants=(
+            SandboxPathGrant(path="/mnt/shared-data", host_path=str(tmp_path), read_only=True),
+        ),
+    )
+    if isinstance(storage_mount.mount_strategy.pattern, MountpointMountPattern):
+        manifest = manifest.with_in_container_mount_credential_exposure_acknowledged("nested/data")
+    else:
+        manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledged(
+            "nested/data"
+        )
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="existing-container",
+        workspace_root_ready=True,
+    )
+    original_session_id = state.session_id
+
+    def unexpected_provider_access(*args: object, **kwargs: object) -> None:
+        pytest.fail("incompatible grants must fail before Docker access or cleanup")
+
+    async def unexpected_environment_resolution(self: Environment) -> dict[str, str]:
+        pytest.fail("incompatible grants must fail before environment resolution")
+
+    monkeypatch.setattr(client, "image_exists", unexpected_provider_access)
+    monkeypatch.setattr(client, "get_container", unexpected_provider_access)
+    monkeypatch.setattr(client, "_cleanup_failed_create_resources", unexpected_provider_access)
+    monkeypatch.setattr(Environment, "resolve", unexpected_environment_resolution)
+
+    with pytest.raises(MountConfigError, match="read-only host_path grants.*SYS_ADMIN"):
+        if operation == "create":
+            await client.create(
+                manifest=manifest,
+                options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+            )
+        else:
+            await client.resume(state)
+
+    assert docker_client.containers.calls == []
+    assert container.start_calls == 0
+    assert state.session_id == original_session_id
+    assert state.container_id == "existing-container"
+    assert state.workspace_root_ready is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("storage", "explicit_host_path", "read_only"),
+    [
+        ("none", True, True),
+        ("in-container", True, False),
+        ("in-container", False, True),
+        ("docker-volume", True, True),
+    ],
+    ids=["ordinary-read-only-bind", "writable-bind", "path-only-grant", "external-storage"],
+)
+async def test_docker_create_preserves_compatible_host_grants_and_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage: str,
+    explicit_host_path: bool,
+    read_only: bool,
+) -> None:
+    container = _StartedContainer()
+    docker_client = _FakeCreateDockerClient(container)
+    client = DockerSandboxClient(docker_client=cast(object, docker_client))
+    manifest = Manifest(
+        extra_path_grants=(
+            SandboxPathGrant(
+                path="/mnt/shared-data",
+                host_path=str(tmp_path) if explicit_host_path else None,
+                read_only=read_only,
+            ),
+        ),
+    )
+    if storage != "none":
+        manifest.entries["data"] = S3Mount(
+            bucket="bucket",
+            mount_strategy=(
+                InContainerMountStrategy(pattern=RcloneMountPattern())
+                if storage == "in-container"
+                else DockerVolumeMountStrategy(driver="rclone")
+            ),
+        )
+    monkeypatch.setattr(client, "image_exists", lambda _image: True)
+
+    session = await client.create(
+        manifest=manifest,
+        options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+    )
+
+    assert isinstance(session._inner, DockerSandboxSession)
+    assert container.start_calls == 1
+    kwargs = docker_client.containers.calls[0]
+    mounts = cast(list[dict[str, object]], kwargs.get("mounts", []))
+    binds = [mount for mount in mounts if mount["Type"] == "bind"]
+    assert binds == (
+        [
+            {
+                "Target": "/mnt/shared-data",
+                "Source": str(tmp_path),
+                "Type": "bind",
+                "ReadOnly": read_only,
+            }
+        ]
+        if explicit_host_path
+        else []
+    )
+    assert kwargs.get("cap_add") == (["SYS_ADMIN"] if storage == "in-container" else None)
+    assert any(mount["Type"] == "volume" for mount in mounts) == (storage == "docker-volume")
 
 
 @pytest.mark.asyncio
@@ -2065,14 +2220,33 @@ async def test_docker_rejects_duplicate_target_shared_by_split_and_path_only_gra
     [
         ("/workspace", "/workspace/shared-data"),
         ("/workspace/project", "/workspace"),
+        ("/mnt/sibling/..", "/mnt/shared-data"),
+        ("/mnt/sibling/../shared-data", "/mnt/shared-data"),
+        ("/outside/../workspace/project", "/workspace"),
+        ("/mnt/sibling/..", PureWindowsPath("/mnt/shared-data")),
+        ("//mnt/sibling/..", "/mnt/shared-data"),
+        ("/mnt/sibling/..", "//mnt/shared-data"),
+        ("//mnt/sibling/../shared-data", "/mnt/shared-data"),
+        ("/outside/../mnt/shared-data/project", "//mnt/shared-data"),
     ],
-    ids=["target-inside-workspace", "target-contains-workspace"],
+    ids=[
+        "target-inside-workspace",
+        "target-contains-workspace",
+        "normalized-root-contains-target",
+        "normalized-root-equals-target",
+        "target-contains-normalized-root",
+        "windows-path-target",
+        "double-slash-root",
+        "double-slash-target",
+        "double-slash-root-equals-target",
+        "double-slash-target-contains-root",
+    ],
 )
 async def test_docker_rejects_host_path_target_overlapping_workspace_before_image_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     root: str,
-    target: str,
+    target: str | PureWindowsPath,
 ) -> None:
     client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
     image_lookups = 0
@@ -2088,13 +2262,13 @@ async def test_docker_rejects_host_path_target_overlapping_workspace_before_imag
         ValueError,
         match="host_path target must be outside the workspace root",
     ):
-        await client._create_container(
-            DEFAULT_PYTHON_SANDBOX_IMAGE,
+        await client.create(
+            options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
             manifest=Manifest(
                 root=root,
                 extra_path_grants=(
                     SandboxPathGrant(
-                        path=target,
+                        path=cast(str, target),
                         host_path=str(tmp_path),
                     ),
                 ),
@@ -2102,6 +2276,54 @@ async def test_docker_rejects_host_path_target_overlapping_workspace_before_imag
         )
 
     assert image_lookups == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "resume"])
+@pytest.mark.parametrize("host_grant", [False, True])
+async def test_docker_path_grant_validation_does_not_probe_host_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    host_grant: bool,
+) -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    manifest = Manifest(
+        root="//container-only/sibling/../workspace",
+        extra_path_grants=(
+            (SandboxPathGrant(path="/mnt/shared-data", host_path=str(tmp_path)),)
+            if host_grant
+            else ()
+        ),
+    )
+    state = DockerSandboxSessionState(
+        manifest=manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+    )
+
+    def unexpected_exists(path: Path) -> bool:
+        pytest.fail("Docker path comparison must not probe the host filesystem")
+
+    def provider_lookup(_container_id: str) -> None:
+        raise RuntimeError("provider reached")
+
+    async def provider_create(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("provider reached")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "exists", unexpected_exists)
+        patch.setattr(client, "get_container", provider_lookup)
+        patch.setattr(client, "_create_container", provider_create)
+        with pytest.raises(RuntimeError, match="provider reached"):
+            if operation == "create":
+                await client.create(
+                    manifest=manifest,
+                    options=DockerSandboxClientOptions(image=DEFAULT_PYTHON_SANDBOX_IMAGE),
+                )
+            else:
+                await client.resume(state)
 
 
 @pytest.mark.asyncio
@@ -4164,19 +4386,66 @@ async def test_docker_resume_reconnects_serialized_credentialless_state() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["/mnt/sibling/..", "//mnt/sibling/.."])
+async def test_docker_resume_rejects_host_grant_inside_normalized_persisted_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: str,
+) -> None:
+    client = DockerSandboxClient(docker_client=cast(object, _FakeDockerClient()))
+    trusted_manifest = Manifest(
+        extra_path_grants=(SandboxPathGrant(path="/mnt/shared-data", host_path=str(tmp_path)),),
+    )
+    state = DockerSandboxSessionState(
+        manifest=trusted_manifest,
+        snapshot=NoopSnapshot(id="snapshot"),
+        image=DEFAULT_PYTHON_SANDBOX_IMAGE,
+        container_id="container",
+        workspace_root_ready=True,
+    )
+    payload = client.serialize_session_state(state)
+    manifest_payload = payload["manifest"]
+    assert isinstance(manifest_payload, dict)
+    manifest_payload["root"] = root
+    restored = client.deserialize_session_state(payload).rebind_persisted_path_grants(
+        trusted_manifest
+    )
+    assert isinstance(restored, DockerSandboxSessionState)
+
+    def unexpected_lookup(_container_id: str) -> None:
+        pytest.fail("overlapping host grants must be rejected before Docker lookup")
+
+    async def unexpected_create(*args: object, **kwargs: object) -> None:
+        pytest.fail("overlapping host grants must be rejected before Docker creation")
+
+    monkeypatch.setattr(client, "get_container", unexpected_lookup)
+    monkeypatch.setattr(client, "_create_container", unexpected_create)
+
+    with pytest.raises(ValueError, match="host_path target must be outside the workspace root"):
+        await client.resume(restored)
+
+    assert restored.container_id == state.container_id
+    assert restored.session_id == state.session_id
+    assert restored.workspace_root_ready is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["/workspace", "/mnt/sibling/../workspace"])
 async def test_docker_resume_requires_existing_host_mount_to_match_trusted_state(
     tmp_path: Path,
+    root: str,
 ) -> None:
     host_path = tmp_path / "shared-data"
     host_path.mkdir()
     manifest = Manifest(
+        root=root,
         extra_path_grants=(
             SandboxPathGrant(
                 path="/mnt/shared-data",
                 host_path=str(host_path),
                 read_only=True,
             ),
-        )
+        ),
     )
     matching_client = DockerSandboxClient(
         docker_client=_ResumeDockerClient(

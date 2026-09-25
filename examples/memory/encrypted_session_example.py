@@ -9,6 +9,8 @@ The EncryptedSession wrapper provides transparent encryption over any underlying
 import asyncio
 from typing import cast
 
+from cryptography.fernet import Fernet
+
 from agents import Agent, Runner, SQLiteSession
 from agents.extensions.memory import EncryptedSession
 from agents.extensions.memory.encrypt_session import EncryptedEnvelope
@@ -21,6 +23,11 @@ async def main():
         instructions="Reply very concisely.",
     )
 
+    # This example uses an in-memory store and a fresh key for each execution.
+    # For persistent storage, securely provision and retain a high-entropy key;
+    # reuse that key and the session ID after every restart.
+    encryption_key = Fernet.generate_key().decode("ascii")
+
     # Create an underlying session (SQLiteSession in this example)
     session_id = "conversation_123"
     underlying_session = SQLiteSession(session_id)
@@ -29,7 +36,7 @@ async def main():
     session = EncryptedSession(
         session_id=session_id,
         underlying_session=underlying_session,
-        encryption_key="my-secret-encryption-key",
+        encryption_key=encryption_key,
         ttl=3600,  # 1 hour TTL for messages
     )
 

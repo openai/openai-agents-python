@@ -1,9 +1,5 @@
 # Concepts
 
-!!! warning "Beta feature"
-
-    Sandbox agents are in beta. Expect details of the API, defaults, and supported capabilities to change before general availability, and expect more advanced features over time.
-
 Modern agents work best when they can operate on real files in a filesystem. **Sandbox Agents** can make use of specialized tools and shell commands to search over and manipulate large document sets, edit files, generate artifacts, and run commands. The sandbox provides the model with a persistent workspace that the agent can use to do work on your behalf. Sandbox Agents in the Agents SDK help you easily run agents paired with a sandbox environment, making it easy to get the right files on the filesystem and orchestrate the sandboxes to make it easy to start, stop, and resume tasks at scale.
 
 You define the workspace around the data the agent needs. It can start from GitHub repos, local files and directories, synthetic task files, remote filesystems such as S3 or Azure Blob Storage, and other sandbox inputs you provide.

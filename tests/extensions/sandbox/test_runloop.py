@@ -36,6 +36,7 @@ from agents.sandbox.materialization import MaterializedFile
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.session.sandbox_client import BaseSandboxClientOptions
+from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExposedPortEndpoint
 from tests.utils.factories import make_run_state
@@ -1277,9 +1278,28 @@ def _load_runloop_module(monkeypatch: pytest.MonkeyPatch) -> Any:
         "runloop_api_client.types.shared.launch_parameters",
         fake_launch_parameters_module,
     )
-    sys.modules.pop("agents.extensions.sandbox.runloop.sandbox", None)
-    sys.modules.pop("agents.extensions.sandbox.runloop", None)
-    return importlib.import_module("agents.extensions.sandbox.runloop.sandbox")
+    # Re-importing an adapter also replaces its registered model classes.
+    # Record undo before clearing these entries for fresh class registration;
+    # unrelated registrations must survive teardown.
+    monkeypatch.setitem(
+        SandboxSessionState._subclass_registry,
+        "runloop",
+        SandboxSessionState._subclass_registry.get("runloop", SandboxSessionState),
+    )
+    del SandboxSessionState._subclass_registry["runloop"]
+    module_names = (
+        "agents.extensions.sandbox.runloop.sandbox",
+        "agents.extensions.sandbox.runloop",
+    )
+    for name in module_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    module: Any = importlib.import_module("agents.extensions.sandbox.runloop.sandbox")
+    # Track the fresh imports too, so teardown removes them before restoring
+    # any original modules alongside the real provider SDK.
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, sys.modules.pop(name))
+    return module
 
 
 def _build_tar_bytes(files: dict[str, bytes]) -> bytes:

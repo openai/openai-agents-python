@@ -15,7 +15,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 import agents._debug as _debug
-from agents import Agent, function_tool
+from agents import Agent, Runner, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.extensions.experimental.codex import (
     Codex,
@@ -32,6 +32,7 @@ from agents.run_context import RunContextWrapper
 from agents.run_internal.agent_bindings import bind_public_agent
 from agents.run_internal.run_steps import ToolRunFunction
 from agents.run_internal.tool_execution import execute_function_tool_calls
+from agents.testing import ScriptedModel, function_call
 from agents.tool_context import ToolContext
 from agents.tracing import function_span, trace
 from tests.test_responses import get_function_tool_call
@@ -2296,3 +2297,161 @@ async def test_codex_tool_streaming_drains_events_before_stream_error() -> None:
         await asyncio.gather(invoke_task, return_exceptions=True)
 
     assert handled_event_types == ["turn.started", "turn.failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_sensitive_data", [False, True, None])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_codex_command_spans_respect_run_tracing_policy(
+    monkeypatch: pytest.MonkeyPatch, include_sensitive_data: bool | None, failed: bool
+) -> None:
+    # None exercises the existing direct-call contract without a RunConfig.
+    command = "SYNTHETIC_PRIVATE_COMMAND"
+    outputs = ["SYNTHETIC_START_OUTPUT", "SYNTHETIC_UPDATE_OUTPUT", "SYNTHETIC_FINAL_OUTPUT"]
+    response = "SYNTHETIC_APPLICATION_RESPONSE"
+    state = CodexMockState()
+    for index, event_type in enumerate(["item.started", "item.updated", "item.completed"]):
+        state.events.append(
+            {
+                "type": event_type,
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": command,
+                    "aggregated_output": outputs[index],
+                    "status": ("failed" if failed else "completed")
+                    if index == 2
+                    else "in_progress",
+                    "exit_code": (1 if failed else 0) if index == 2 else None,
+                },
+            }
+        )
+    state.events.append(
+        {
+            "type": "item.completed",
+            "item": {"id": "message-1", "type": "agent_message", "text": response},
+        }
+    )
+    command_spans: list[Any] = []
+    snapshots: list[dict[str, Any]] = []
+    original_start = SPAN_PROCESSOR_TESTING.on_span_start
+
+    def on_span_start(span: Any) -> None:
+        original_start(span)
+        if span.span_data.type == "custom" and span.span_data.name == "Codex command execution":
+            command_spans.append(span)
+            snapshots.append(copy.deepcopy(span.export()))
+
+    monkeypatch.setattr(SPAN_PROCESSOR_TESTING, "on_span_start", on_span_start)
+
+    async def run_streamed(_self: Any, _input: Any, _options: Any) -> Any:
+        async def events() -> Any:
+            for event in state.events:
+                yield event
+                if command_spans:
+                    snapshots.append(copy.deepcopy(command_spans[0].export()))
+
+        return SimpleNamespace(events=events())
+
+    monkeypatch.setattr(FakeThread, "run_streamed", run_streamed)
+    callbacks: list[CodexToolStreamEvent] = []
+    tool = codex_tool(codex=cast(Codex, FakeCodex(state)), on_stream=callbacks.append)
+    arguments = {"inputs": [{"type": "text", "text": "Run the test task"}]}
+    if include_sensitive_data is None:
+        with trace("direct-codex"):
+            result = await tool.on_invoke_tool(
+                ToolContext(
+                    None,
+                    tool_name=tool.name,
+                    tool_call_id="call-1",
+                    tool_arguments=json.dumps(arguments),
+                ),
+                json.dumps(arguments),
+            )
+        assert result.response == response
+    else:
+        agent = Agent(
+            name="test",
+            tools=[tool],
+            tool_use_behavior="stop_on_first_tool",
+            model=ScriptedModel([[function_call(tool.name, arguments, call_id="call-1")]]),
+        )
+        result = await Runner.run(
+            agent,
+            "Run the test task",
+            run_config=RunConfig(trace_include_sensitive_data=include_sensitive_data),
+        )
+        assert json.loads(result.final_output)["response"] == response
+
+    assert len(command_spans) == 1
+    assert len(snapshots) == 5
+    final_span = command_spans[0].export()
+    assert final_span is not None
+    assert final_span["span_data"]["data"]["status"] == ("failed" if failed else "completed")
+    assert final_span["span_data"]["data"]["exit_code"] == (1 if failed else 0)
+    if include_sensitive_data is False:
+        all_exports = [span.export() for span in SPAN_PROCESSOR_TESTING.get_ordered_spans()]
+        serialized = json.dumps([snapshots, all_exports])
+        for secret in [command, *outputs, response]:
+            assert secret not in serialized
+        for snapshot in snapshots:
+            assert "command" not in snapshot["span_data"]["data"]
+            assert "output" not in snapshot["span_data"]["data"]
+        if failed:
+            assert final_span["error"]["data"] == {"exit_code": 1}
+    else:
+        assert snapshots[0]["span_data"]["data"]["command"] == command
+        for output, snapshot in zip(outputs, snapshots[1:4], strict=False):
+            assert snapshot["span_data"]["data"]["output"] == output
+        if failed:
+            assert final_span["error"]["data"]["output"] == outputs[-1]
+    assert [payload.event.item.aggregated_output for payload in callbacks[:3]] == outputs
+    assert callbacks[-1].event.item.text == response
+
+
+@pytest.mark.asyncio
+async def test_codex_command_tracing_disabled_with_caller_trace() -> None:
+    state = CodexMockState()
+    state.events = [
+        {
+            "type": event_type,
+            "item": {
+                "id": "command-1",
+                "type": "command_execution",
+                "command": "SYNTHETIC_COMMAND",
+                "aggregated_output": "SYNTHETIC_OUTPUT",
+                "status": status,
+            },
+        }
+        for event_type, status in [
+            ("item.started", "in_progress"),
+            ("item.updated", "in_progress"),
+            ("item.completed", "completed"),
+        ]
+    ]
+    tool = codex_tool(codex=cast(Codex, FakeCodex(state)))
+    agent = Agent(
+        name="test",
+        tools=[tool],
+        tool_use_behavior="stop_on_first_tool",
+        model=ScriptedModel(
+            [
+                [
+                    function_call(
+                        tool.name,
+                        {"inputs": [{"type": "text", "text": "Run the task"}]},
+                        call_id="call-1",
+                    )
+                ]
+            ]
+        ),
+    )
+    with trace("caller-owned"):
+        result = await Runner.run(
+            agent, "Run the task", run_config=RunConfig(tracing_disabled=True)
+        )
+    assert json.loads(result.final_output)["response"] == "Codex task completed with inputs."
+    assert not any(
+        span.span_data.type == "custom" and span.span_data.name == "Codex command execution"
+        for span in SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    )

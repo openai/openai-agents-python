@@ -246,6 +246,16 @@ Local runtime tools require you to supply implementations:
 
 Shell action timeouts use positive integer milliseconds for a finite timeout. The SDK treats both `0` and `None` as no explicit timeout before calling a local `ShellTool` executor because zero does not have a portable meaning across executor implementations; other values are rejected before executor invocation. This is specific to the timeout field: `max_output_length=0` remains a supported request for empty captured output.
 
+### Approval for local shell and file edits
+
+Local `ShellTool` and `ApplyPatchTool` default to `needs_approval=False`. With this setting, the SDK can invoke your executor or editor without requesting approval. Your implementation determines where commands run or files change and must enforce the intended resource permissions and isolation; SDK approval does not provide a sandbox.
+
+For commands or file edits that require review, set `needs_approval=True` on the tool, or provide a callable policy that returns `True` for calls that require approval. Without an `on_approval` callback, the run pauses before invoking the executor or editor and returns pending requests in `result.interruptions`. Approve or reject those requests through `RunState`, then resume the run as described in the [human-in-the-loop guide](human_in_the_loop.md).
+
+To decide immediately in application code, set both `needs_approval` and `on_approval`. The SDK invokes `on_approval` only when the call requires approval and has no existing approval decision; setting the callback alone does not enable approval. See `examples/tools/shell.py` for a CLI prompt and `examples/tools/shell_human_in_the_loop.py` for manual interruption handling. The `examples/tools/apply_patch.py` example instead prompts inside its editor before changing files.
+
+Keep `needs_approval=False` when your application intentionally authorizes automatic execution, for example through an executor that enforces your sandbox policy. Hosted shell environments do not support the SDK's local `needs_approval` or `on_approval` settings.
+
 ### ComputerTool and the Responses computer tool
 
 `ComputerTool` is still a local harness: you provide a [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.

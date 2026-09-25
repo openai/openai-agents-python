@@ -44,6 +44,7 @@ from ....sandbox.errors import (
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.pty_output import collect_pty_output
@@ -505,6 +506,25 @@ class BlaxelSandboxSession(BaseSandboxSession):
                 context={"reason": "mkdir_failed"},
                 cause=e,
             ) from e
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        workspace_path = await self._validate_path_access(path)
+        filesystem = self._sandbox.fs
+        client = filesystem.get_client()
+        path_arg = filesystem.format_path(sandbox_path_str(workspace_path))
+        async with client.stream(
+            "GET",
+            f"{filesystem.url}/filesystem/{path_arg}",
+            headers={"Accept": "application/octet-stream"},
+        ) as response:
+            if response.status_code == 404:
+                raise WorkspaceReadNotFoundError(path=path)
+            if response.status_code != 200:
+                raise WorkspaceArchiveReadError(
+                    path=path,
+                    retryable=True if response.status_code in TRANSIENT_HTTP_STATUS_CODES else None,
+                )
+            return await collect_bounded(response.aiter_bytes(chunk_size=65536), max_bytes)
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))

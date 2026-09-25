@@ -5,6 +5,10 @@ This example demonstrates how to:
 2. Handle interruptions when tool approval is needed
 3. Serialize/deserialize run state to continue execution later
 4. Approve or reject tool calls based on user input
+
+The saved file must remain under trusted application control. Do not replace it
+with a snapshot supplied by a browser or another untrusted client. For a client
+approval interface, see human_in_the_loop_server.py.
 """
 
 import asyncio

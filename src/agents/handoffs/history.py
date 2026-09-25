@@ -85,7 +85,17 @@ def nest_handoff_history(
     *,
     history_mapper: HandoffHistoryMapper | None = None,
 ) -> HandoffInputData:
-    """Summarize the previous transcript for the next agent."""
+    """Summarize the previous transcript for the next agent without redacting sensitive data.
+
+    The transcript is built from ``input_history``, ``pre_handoff_items``, and ``new_items``.
+    Any existing ``input_items`` override is ignored. Tool arguments and outputs from those
+    source fields can therefore remain in the generated summary text.
+
+    Sanitize all three source fields before calling this function, or sanitize the returned
+    ``input_history`` before forwarding the nested result. Sanitizing the returned history
+    allows the original ``new_items`` to remain available for session history. Filtering only
+    ``input_items`` does not prevent sensitive content from entering nested history.
+    """
 
     nested, _ = _nest_handoff_history_with_provenance(
         handoff_input_data,

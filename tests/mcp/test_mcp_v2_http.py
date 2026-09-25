@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import traceback
 from typing import Any
 
 import httpx
@@ -14,7 +15,7 @@ from mcp.types import ListToolsResult, TextContent, Tool
 
 from agents.exceptions import UserError
 from agents.mcp import MCPServerStreamableHttp
-from agents.mcp._compat import MCP_V2, create_v2_client
+from agents.mcp._compat import MCP_V2, MCPError, create_v2_client
 from agents.mcp.server import (
     _configure_v2_session_id_hook,
     _create_default_streamable_http_client,
@@ -100,6 +101,30 @@ async def test_v2_response_hook_only_captures_legacy_initialize_session():
         content=json.dumps({"jsonrpc": "2.0", "id": 3, "method": "initialize"}),
     )
     assert captured == ["legacy-session"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_v2_response_hook_raises_5xx_for_a_request_that_is_not_a_transport_message():
+    def handle_request(request):
+        return httpx2.Response(503, request=request)
+
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle_request))
+    _configure_v2_session_id_hook(client, on_session_id=None)
+
+    # An OAuth dynamic client registration body is JSON, but it is not a transport message, so
+    # its failures stay on the HTTP error path instead of MCP's body-bearing OAuth exceptions.
+    with pytest.raises(httpx2.HTTPStatusError):
+        await client.post(
+            "https://example.test/register",
+            content=json.dumps(
+                {
+                    "client_name": "example",
+                    "redirect_uris": ["https://example.test/callback"],
+                }
+            ),
+        )
+
     await client.aclose()
 
 
@@ -261,34 +286,68 @@ async def test_v2_streamable_http_retries_connect_error_on_isolated_session():
     assert all(client.is_closed for client in clients)
 
 
-@pytest.mark.asyncio
-async def test_v2_streamable_http_retries_5xx_on_isolated_session():
-    clients: list[Any] = []
-    observed_statuses: list[int] = []
+def _first_tool_call_returns_503_factory(clients: list[Any], tool_call_statuses: list[int]):
+    """Build clients whose server answers only the first `tools/call` with HTTP 503."""
 
     def factory(headers=None, timeout=None, auth=None):
-        tool_status_code = 503 if not clients else None
-
         async def handler(request):
-            return _v2_response_for_request(request, tool_status_code=tool_status_code)
-
-        async def observe_response(response):
-            observed_statuses.append(response.status_code)
+            payload = json.loads(request.content) if request.content else {}
+            if payload.get("method") == "tools/call":
+                status_code = 503 if not tool_call_statuses else 200
+                tool_call_statuses.append(status_code)
+                if status_code == 503:
+                    return _v2_response_for_request(request, tool_status_code=503)
+            return _v2_response_for_request(request)
 
         client = httpx2.AsyncClient(
             transport=httpx2.MockTransport(handler),
             headers=headers,
             timeout=timeout,
             auth=auth,
-            event_hooks={"response": [observe_response]},
         )
         clients.append(client)
         return client
 
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_v2_streamable_http_5xx_fails_only_that_request():
+    clients: list[Any] = []
+    tool_call_statuses: list[int] = []
     server = MCPServerStreamableHttp(
         params={
             "url": "https://example.test/mcp",
-            "httpx_client_factory": factory,
+            "httpx_client_factory": _first_tool_call_returns_503_factory(
+                clients, tool_call_statuses
+            ),
+        },
+    )
+
+    async with server:
+        with pytest.raises(MCPError):
+            await asyncio.wait_for(server.call_tool("test", {}), timeout=2)
+        result = await asyncio.wait_for(server.call_tool("test", {}), timeout=2)
+        tools = await asyncio.wait_for(server.list_tools(), timeout=2)
+
+    assert isinstance(result.content[0], TextContent)
+    assert result.content[0].text == "ok"
+    assert [tool.name for tool in tools] == ["test"]
+    assert tool_call_statuses == [503, 200]
+    assert len(clients) == 1
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+async def test_v2_streamable_http_retries_5xx_on_shared_session():
+    clients: list[Any] = []
+    tool_call_statuses: list[int] = []
+    server = MCPServerStreamableHttp(
+        params={
+            "url": "https://example.test/mcp",
+            "httpx_client_factory": _first_tool_call_returns_503_factory(
+                clients, tool_call_statuses
+            ),
         },
         max_retry_attempts=1,
         retry_backoff_seconds_base=0,
@@ -299,9 +358,165 @@ async def test_v2_streamable_http_retries_5xx_on_isolated_session():
 
     assert isinstance(result.content[0], TextContent)
     assert result.content[0].text == "ok"
-    assert len(clients) == 2
-    assert 503 in observed_statuses
+    assert tool_call_statuses == [503, 200]
+    assert len(clients) == 1
     assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+async def test_v2_streamable_http_initialized_notification_5xx_keeps_session_usable():
+    clients: list[Any] = []
+
+    def factory(headers=None, timeout=None, auth=None):
+        async def handler(request):
+            payload = json.loads(request.content) if request.content else {}
+            if payload.get("method") == "notifications/initialized":
+                return httpx2.Response(503, request=request)
+            return _v2_response_for_request(request)
+
+        client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler),
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+        clients.append(client)
+        return client
+
+    server = MCPServerStreamableHttp(
+        params={
+            "url": "https://example.test/mcp",
+            "httpx_client_factory": factory,
+        },
+    )
+
+    async with server:
+        result = await asyncio.wait_for(server.call_tool("test", {}), timeout=2)
+        tools = await asyncio.wait_for(server.list_tools(), timeout=2)
+
+    assert isinstance(result.content[0], TextContent)
+    assert result.content[0].text == "ok"
+    assert [tool.name for tool in tools] == ["test"]
+    assert len(clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_streamable_http_handshake_5xx_fails_connect_without_legacy_fallback():
+    methods: list[str | None] = []
+
+    def factory(headers=None, timeout=None, auth=None):
+        async def handler(request):
+            payload = json.loads(request.content) if request.content else {}
+            methods.append(payload.get("method"))
+            if payload.get("method") == "server/discover":
+                return httpx2.Response(503, request=request)
+            return _v2_response_for_request(request)
+
+        return httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler),
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+
+    server = MCPServerStreamableHttp(
+        params={
+            "url": "https://example.test/mcp",
+            "httpx_client_factory": factory,
+        },
+    )
+
+    with pytest.raises(UserError, match="HTTP error 503"):
+        await server.connect()
+
+    assert methods == ["server/discover"]
+    assert server.session is None
+
+
+@pytest.mark.asyncio
+async def test_v2_streamable_http_oauth_subrequest_5xx_keeps_http_error_mapping():
+    from mcp.client.auth.extensions.client_credentials import ClientCredentialsOAuthProvider
+
+    response_body_marker = "synthetic-authorization-server-body"
+
+    class _UnauthenticatedStorage:
+        async def get_tokens(self):
+            return None
+
+        async def set_tokens(self, tokens):
+            return None
+
+        async def get_client_info(self):
+            return None
+
+        async def set_client_info(self, client_information):
+            return None
+
+    def factory(headers=None, timeout=None, auth=None):
+        async def handler(request):
+            path = request.url.path
+            if path == "/token":
+                return httpx2.Response(503, text=response_body_marker, request=request)
+            if path.startswith("/.well-known/oauth-protected-resource"):
+                return httpx2.Response(
+                    200,
+                    json={
+                        "resource": "https://example.test/mcp",
+                        "authorization_servers": ["https://example.test"],
+                    },
+                    request=request,
+                )
+            if path.startswith("/.well-known/oauth-authorization-server"):
+                return httpx2.Response(
+                    200,
+                    json={
+                        "issuer": "https://example.test",
+                        "authorization_endpoint": "https://example.test/authorize",
+                        "token_endpoint": "https://example.test/token",
+                        "response_types_supported": ["code"],
+                    },
+                    request=request,
+                )
+            if "authorization" not in request.headers:
+                return httpx2.Response(
+                    401,
+                    headers={
+                        "www-authenticate": (
+                            "Bearer resource_metadata="
+                            '"https://example.test/.well-known/oauth-protected-resource/mcp"'
+                        )
+                    },
+                    request=request,
+                )
+            return _v2_response_for_request(request)
+
+        return httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler),
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+
+    server = MCPServerStreamableHttp(
+        params={
+            "url": "https://example.test/mcp",
+            "auth": ClientCredentialsOAuthProvider(
+                server_url="https://example.test/mcp",
+                storage=_UnauthenticatedStorage(),
+                client_id="placeholder-client-id",
+                client_secret="placeholder-client-secret",
+            ),
+            "httpx_client_factory": factory,
+        },
+    )
+
+    with pytest.raises(UserError, match="HTTP error 503") as exc_info:
+        await server.connect()
+
+    error = exc_info.value
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert response_body_marker not in rendered
+    assert server.session is None
 
 
 @pytest.mark.asyncio

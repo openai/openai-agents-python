@@ -507,6 +507,8 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
     if invalid == "old-schema":
+        for entry in payload["context"].pop("function_tool_approvals", []):
+            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
         payload["$schemaVersion"] = "1.16"
     else:
         payload["pending_session_write"]["items"] = "not an item batch"
@@ -1106,12 +1108,17 @@ async def test_resumed_approval_does_not_duplicate_session_items() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "decision",
+    ["approve", "reject", "always_approve", "always_reject", "legacy_approve", "legacy_reject"],
+)
+@pytest.mark.parametrize(
     ("schema_version", "expect_execution"),
     [("1.6", True), ("1.7", False)],
 )
 async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_approval_agents(
     schema_version: str,
     expect_execution: bool,
+    decision: str,
 ) -> None:
     calls: list[str] = []
 
@@ -1174,13 +1181,29 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
     interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
     assert interruption_agent_data["identity"] == current_agent_data["identity"]
     interruption_agent_data.pop("identity")
+    if schema_version != "1.18":
+        for entry in json_data["context"].pop("function_tool_approvals", []):
+            json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = schema_version
+    if decision.startswith("legacy_"):
+        json_data["context"]["approvals"]["needs_ok"] = {
+            "approved": decision == "legacy_approve",
+            "rejected": decision == "legacy_reject",
+            "sticky_rejection_message": "Old unowned rejection",
+        }
 
     restored = await RunState.from_json(root, json_data)
     assert restored._schema_version == schema_version
     assert restored._current_agent is resumed_duplicate
     restored_approval = restored.get_interruptions()[0]
-    restored.approve(restored_approval)
+    if decision in ("approve", "always_approve"):
+        restored.approve(restored_approval, always_approve=decision == "always_approve")
+    elif decision in ("reject", "always_reject"):
+        restored.reject(
+            restored_approval,
+            always_reject=decision == "always_reject",
+            rejection_message="Legacy exact rejection",
+        )
     assert restored._context is not None
     assert restored._last_processed_response is not None
 
@@ -1196,11 +1219,18 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
         run_state=restored,
     )
 
-    if expect_execution:
+    if expect_execution and decision in ("approve", "always_approve"):
         assert isinstance(result.next_step, NextStepRunAgain)
         assert calls == ["one"]
         assert any(
             isinstance(item, ToolCallOutputItem) and item.output == "one"
+            for item in result.new_step_items
+        )
+    elif expect_execution and decision in ("reject", "always_reject"):
+        assert isinstance(result.next_step, NextStepRunAgain)
+        assert calls == []
+        assert any(
+            isinstance(item, ToolCallOutputItem) and item.output == "Legacy exact rejection"
             for item in result.new_step_items
         )
     else:
@@ -1209,6 +1239,19 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+    if schema_version == "1.6" and decision.startswith("legacy_"):
+        assert isinstance(result.next_step, NextStepInterruption)
+
+    future = ToolApprovalItem(
+        agent=resumed_duplicate,
+        raw_item=get_function_tool_call("needs_ok", json.dumps({"text": "two"}), call_id="future"),
+    )
+    # Reconciliation honors the current decision without moving future scope.
+    assert (
+        restored._context.get_approval_status("needs_ok", "future", current_invocation=future)
+        is None
+    )
 
 
 async def _approved_handoff_session_state(streamed: bool):
@@ -1507,6 +1550,8 @@ async def test_terminal_marker_rejects_an_older_schema_label() -> None:
         await _run_session_resume(agent, state, session, False)
 
     payload = state.to_json()
+    for entry in payload["context"].pop("function_tool_approvals", []):
+        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     payload["$schemaVersion"] = "1.16"
     with pytest.raises(UserError, match="terminal marker is invalid"):
         await RunState.from_json(agent, payload)

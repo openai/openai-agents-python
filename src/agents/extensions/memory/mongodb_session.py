@@ -137,7 +137,12 @@ class MongoDBSession(SessionABC):
             session_settings: Optional session configuration. When ``None`` a
                 default [`SessionSettings`][agents.memory.session_settings.SessionSettings]
                 is used (no item limit).
+
+        Raises:
+            TypeError: If ``session_id`` is not a string.
         """
+        if not isinstance(session_id, str):
+            raise TypeError("session_id must be a string")
         self.session_id = session_id
         self.session_settings = (
             coerce_session_settings(session_settings)
@@ -190,7 +195,12 @@ class MongoDBSession(SessionABC):
         Returns:
             A [`MongoDBSession`][agents.extensions.memory.mongodb_session.MongoDBSession]
                 connected to the specified MongoDB server.
+
+        Raises:
+            TypeError: If ``session_id`` is not a string.
         """
+        if not isinstance(session_id, str):
+            raise TypeError("session_id must be a string")
         client_kwargs = client_kwargs or {}
         client_kwargs.setdefault("driver", _DRIVER_INFO)
         client: AsyncMongoClient[Any] = AsyncMongoClient(uri, **client_kwargs)

@@ -12,6 +12,7 @@ from typing import Any
 from openai.types.responses import ResponseComputerToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 
+from .._function_tool_arguments import FunctionToolApproval
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -69,6 +70,7 @@ class ToolRunHandoff:
 class ToolRunFunction:
     tool_call: ResponseFunctionToolCall
     function_tool: FunctionTool
+    _approval_evaluation: FunctionToolApproval | None = dataclasses.field(default=None, repr=False)
 
 
 @dataclass
@@ -129,6 +131,10 @@ class ProcessedResponse:
         default_factory=list
     )
     custom_tool_calls: list[ToolRunCustom] = dataclasses.field(default_factory=list)
+    mcp_tool_bindings: dict[str, tuple[str, str, int | None]] = dataclasses.field(
+        default_factory=dict
+    )
+    # Original invocation recipients, independent of the currently available callables.
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing

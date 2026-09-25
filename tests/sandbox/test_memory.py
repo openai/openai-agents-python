@@ -31,7 +31,7 @@ from agents import (
     SQLiteSession,
     TResponseInputItem,
 )
-from agents.exceptions import UserError
+from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import (
     CompactionItem,
     MessageOutputItem,
@@ -57,6 +57,7 @@ from agents.sandbox.memory.manager import (
     get_or_create_memory_generation_manager,
 )
 from agents.sandbox.memory.phase_one import render_phase_one_prompt
+from agents.sandbox.memory.phase_two import run_phase_two
 from agents.sandbox.memory.prompts import (
     render_memory_consolidation_prompt,
     render_rollout_extraction_prompt,
@@ -1666,6 +1667,123 @@ async def test_sandbox_memory_caps_phase_two_selection_and_surfaces_removed_roll
         assert f"rollout_id={selected_rollout_ids[0]}" in prompt
     finally:
         await _cleanup_session(client, session, close=not closed)
+
+
+@pytest.mark.asyncio
+async def test_phase_two_enforces_configured_turn_limit() -> None:
+    client = FilesystemTestSandboxClient()
+    session = await client.create(manifest=Manifest())
+    model = ScriptedModel(
+        steps=[
+            [_patch_update_call("first-turn", "memories/MEMORY.md", "entry")],
+            [get_final_output_message("done")],
+        ]
+    )
+    try:
+        memory_file = Path(session.state.manifest.root) / "memories" / "MEMORY.md"
+        memory_file.parent.mkdir(parents=True)
+        memory_file.write_text("")
+        with pytest.raises(MaxTurnsExceeded):
+            await run_phase_two(
+                config=MemoryGenerateConfig(phase_two_model=model, phase_two_max_turns=1),
+                memory_root="memories",
+                selection=_empty_phase_two_selection(),
+                run_config=_run_config_for_session(session),
+            )
+        assert len(model.calls) == 1
+    finally:
+        await _cleanup_session(client, session)
+
+
+def test_memory_generate_config_preserves_positional_arguments_and_default_turn_limit() -> None:
+    phase_one_settings = ModelSettings(temperature=0.1)
+    phase_two_settings = ModelSettings(temperature=0.2)
+    config = MemoryGenerateConfig(
+        123, "phase-one", phase_one_settings, "phase-two", phase_two_settings, "guidance"
+    )
+    assert config.max_raw_memories_for_consolidation == 123
+    assert config.phase_one_model == "phase-one"
+    assert config.phase_one_model_settings is phase_one_settings
+    assert config.phase_two_model == "phase-two"
+    assert config.phase_two_model_settings is phase_two_settings
+    assert config.extra_prompt == "guidance"
+    assert config.phase_two_max_turns == 500
+
+
+@pytest.mark.parametrize("turn_limit", [1, 2, None], ids=["exhausted", "completed", "default"])
+@pytest.mark.asyncio
+async def test_sandbox_memory_consolidation_turn_budget_on_session_close(
+    turn_limit: int | None,
+) -> None:
+    client = FilesystemTestSandboxClient()
+    session = await client.create(manifest=Manifest())
+    phase_two_model = ScriptedModel(
+        steps=[
+            [_patch_update_call("memory-md", "memories/MEMORY.md", "consolidated entry")],
+            [get_final_output_message("done")],
+        ]
+    )
+    memory = _memory_config(phase_two_model=phase_two_model)
+    assert memory.generate is not None
+    if turn_limit is not None:
+        memory.generate.phase_two_max_turns = turn_limit
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        capabilities=[memory],
+    )
+    root = Path(session.state.manifest.root)
+    try:
+        result = await Runner.run(
+            agent, "hello", max_turns=1, run_config=_run_config_for_session(session)
+        )
+        assert result.final_output == "done"
+        manager = get_or_create_memory_generation_manager(session=session, memory=memory)
+        selection_path = root / "memories" / "phase_two_selection.json"
+        previous_selection = '{"selected": []}\n'
+        selection_path.write_text(previous_selection)
+
+        await session.aclose()
+
+        assert len(phase_two_model.calls) == (1 if turn_limit == 1 else 2)
+        assert (root / "memories" / "MEMORY.md").read_text() == "consolidated entry\n"
+        if turn_limit == 1:
+            assert selection_path.read_text() == previous_selection
+            assert len(manager._pending_phase_two_rollout_ids) == 1
+        else:
+            assert len(json.loads(selection_path.read_text())["selected"]) == 1
+            assert manager._pending_phase_two_rollout_ids == []
+        assert manager._worker_task is None
+        assert manager._queue.empty()
+        assert memory_manager_module._MEMORY_GENERATION_MANAGERS.get(session) is None
+    finally:
+        await client.delete(session)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_memory_turn_exhaustion_releases_runner_owned_session() -> None:
+    client = _DeleteTrackingFilesystemTestSandboxClient()
+    phase_two_model = ScriptedModel(
+        steps=[
+            [_patch_update_call("first-turn", "memories/MEMORY.md", "entry")],
+            [get_final_output_message("done")],
+        ]
+    )
+    memory = _memory_config(phase_two_model=phase_two_model)
+    assert memory.generate is not None
+    memory.generate.phase_two_max_turns = 1
+    agent = SandboxAgent(
+        name="worker",
+        model=ScriptedModel(steps=[[get_final_output_message("done")]]),
+        capabilities=[memory],
+    )
+    result = await Runner.run(
+        agent, "hello", max_turns=1, run_config=RunConfig(sandbox=SandboxRunConfig(client=client))
+    )
+    assert result.final_output == "done"
+    assert len(phase_two_model.calls) == 1
+    assert len(client.deleted_roots) == 1
+    assert not client.deleted_roots[0].exists()
 
 
 @pytest.mark.asyncio

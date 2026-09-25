@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing_extensions import assert_never
@@ -46,6 +47,59 @@ logger = logging.getLogger(__name__)
 logger.setLevel(_log_level)
 
 STATIC_DIR = Path(__file__).with_name("static")
+# Local demo limits, not Realtime API limits.
+MAX_SESSIONS = 4
+MAX_MESSAGE_BYTES = 1024 * 1024
+MAX_AUDIO_SAMPLES = 24_000
+MAX_IMAGE_CHARS = 4 * 1024 * 1024
+MAX_IMAGE_CHUNKS = 128
+
+
+def validate_client_message(data: str) -> dict[str, Any]:
+    """Validate the demo's untrusted browser protocol before forwarding or buffering."""
+    if len(data.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise WebSocketException(code=1009, reason="Message too large")
+    message: Any = None
+    try:
+        message = json.loads(data)
+    except (ValueError, RecursionError):
+        logger.debug("Invalid JSON payload received from client", exc_info=True)
+        message = None
+    if not isinstance(message, dict):
+        raise WebSocketException(code=1008, reason="Expected a JSON object")
+
+    message_type = message.get("type")
+    if message_type == "audio":
+        samples = message.get("data")
+        if not isinstance(samples, list) or not samples or len(samples) > MAX_AUDIO_SAMPLES:
+            raise WebSocketException(code=1008, reason="Invalid audio sample count")
+        if any(type(sample) is not int or not -32768 <= sample <= 32767 for sample in samples):
+            raise WebSocketException(code=1008, reason="Expected int16 audio samples")
+    elif message_type in ("image", "image_start", "image_chunk", "image_end"):
+        if message_type != "image":
+            image_id = message.get("id")
+            if not isinstance(image_id, str) or not image_id or len(image_id) > 128:
+                raise WebSocketException(code=1008, reason="Invalid image ID")
+        if message_type in ("image", "image_start"):
+            if "text" in message and not isinstance(message["text"], str):
+                raise WebSocketException(code=1008, reason="Invalid image prompt")
+        if message_type in ("image", "image_chunk"):
+            image_data = message.get("data_url" if message_type == "image" else "chunk")
+            if not isinstance(image_data, str) or not image_data or not image_data.isascii():
+                raise WebSocketException(code=1008, reason="Invalid image data")
+            if len(image_data) > MAX_IMAGE_CHARS:
+                raise WebSocketException(code=1009, reason="Image too large")
+    elif message_type == "tool_approval_decision":
+        if not isinstance(message.get("call_id"), str) or not message["call_id"]:
+            raise WebSocketException(code=1008, reason="Invalid tool call ID")
+        if (
+            type(message.get("approve")) is not bool
+            or type(message.get("always", False)) is not bool
+        ):
+            raise WebSocketException(code=1008, reason="Invalid approval decision")
+    elif message_type not in ("commit_audio", "interrupt"):
+        raise WebSocketException(code=1008, reason="Unknown message type")
+    return message
 
 
 class RealtimeWebSocketManager:
@@ -56,8 +110,11 @@ class RealtimeWebSocketManager:
         self.event_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
+        if len(self.websockets) >= MAX_SESSIONS:
+            raise WebSocketException(code=1008, reason="Demo session limit reached")
+        # Reserve before the first await, including sessions still connecting upstream.
         self.websockets[session_id] = websocket
+        await websocket.accept()
 
         agent = get_starting_agent()
         runner = RealtimeRunner(agent)
@@ -429,12 +486,26 @@ app = FastAPI(lifespan=lifespan)
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    # Origin is a browser boundary, not authentication for a public service.
+    if (
+        len(websocket.headers.getlist("host")) != 1
+        or websocket.url.hostname not in {"localhost", "127.0.0.1"}
+        or websocket.headers.getlist("origin") != [f"http://{websocket.url.netloc}"]
+    ):
+        raise WebSocketException(code=1008, reason="Use the local demo page")
+    # The URL label is client-controlled and must not select another socket's resources.
+    session_id = uuid4().hex
     try:
         await manager.connect(websocket, session_id)
         image_buffers: dict[str, dict[str, Any]] = {}
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
+            frame = await websocket.receive()
+            if frame["type"] == "websocket.disconnect":
+                break
+            data = frame.get("text")
+            if data is None:
+                raise WebSocketException(code=1003, reason="Expected a text message")
+            message = validate_client_message(data)
 
             if message["type"] == "audio":
                 # Convert int16 array to bytes
@@ -487,30 +558,40 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 # Force close the current input audio turn
                 await manager.send_client_event(session_id, {"type": "input_audio_buffer.commit"})
             elif message["type"] == "image_start":
-                img_id = str(message.get("id"))
+                if image_buffers:
+                    raise WebSocketException(code=1008, reason="Finish the pending image first")
+                img_id = message["id"]
                 image_buffers[img_id] = {
                     "text": message.get("text") or "Please describe this image.",
                     "chunks": [],
+                    "size": 0,
                 }
                 await websocket.send_text(
                     json.dumps({"type": "client_info", "info": "image_start_ack", "id": img_id})
                 )
             elif message["type"] == "image_chunk":
-                img_id = str(message.get("id"))
-                chunk = message.get("chunk", "")
-                if img_id in image_buffers:
-                    image_buffers[img_id]["chunks"].append(chunk)
-                    if len(image_buffers[img_id]["chunks"]) % 10 == 0:
-                        await websocket.send_text(
-                            json.dumps(
-                                {
-                                    "type": "client_info",
-                                    "info": "image_chunk_ack",
-                                    "id": img_id,
-                                    "count": len(image_buffers[img_id]["chunks"]),
-                                }
-                            )
+                img_id = message["id"]
+                chunk = message["chunk"]
+                if img_id not in image_buffers:
+                    raise WebSocketException(code=1008, reason="Unknown image ID")
+                buffer = image_buffers[img_id]
+                if buffer["size"] + len(chunk) > MAX_IMAGE_CHARS:
+                    raise WebSocketException(code=1009, reason="Image too large")
+                if len(buffer["chunks"]) >= MAX_IMAGE_CHUNKS:
+                    raise WebSocketException(code=1009, reason="Too many image chunks")
+                buffer["size"] += len(chunk)
+                image_buffers[img_id]["chunks"].append(chunk)
+                if len(image_buffers[img_id]["chunks"]) % 10 == 0:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "client_info",
+                                "info": "image_chunk_ack",
+                                "id": img_id,
+                                "count": len(image_buffers[img_id]["chunks"]),
+                            }
                         )
+                    )
             elif message["type"] == "image_end":
                 img_id = str(message.get("id"))
                 buf = image_buffers.pop(img_id, None)
@@ -599,8 +680,10 @@ if __name__ == "__main__":
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
-        # Increased WebSocket frame size to comfortably handle image data URLs.
-        ws_max_size=16 * 1024 * 1024,
+        # Select the backend that enforces these limits before application parsing.
+        ws="websockets",
+        ws_max_size=MAX_MESSAGE_BYTES,
+        ws_max_queue=4,
     )

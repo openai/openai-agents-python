@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DETECTOR = ROOT / ".github/scripts/detect-changes.sh"
 ZERO_SHA = "0" * 40
 MISSING_SHA = "1" * 40
+# Git for Windows can take longer to start on a busy CI worker.
+SUBPROCESS_TIMEOUT_SECONDS = 60
 
 
 def _environment() -> dict[str, str]:
@@ -33,7 +35,7 @@ def _git(repo: Path, *args: str) -> str:
         capture_output=True,
         text=True,
         env=_environment(),
-        timeout=10,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
     ).stdout.strip()
 
 
@@ -84,7 +86,7 @@ def _detect(
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     value = output.read_text(encoding="utf-8")

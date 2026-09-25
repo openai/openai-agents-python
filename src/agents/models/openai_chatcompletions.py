@@ -235,7 +235,9 @@ class OpenAIChatCompletionsModel(Model):
         with (
             generation_span(
                 model=str(self.model),
-                model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
+                model_config=model_config_for_trace(
+                    model_settings, tracing, base_url=self._client.base_url
+                ),
                 disabled=tracing.is_disabled(),
             ) as span_generation,
             model_span_errors(
@@ -447,7 +449,9 @@ class OpenAIChatCompletionsModel(Model):
         with (
             generation_span(
                 model=str(self.model),
-                model_config=model_config_for_trace(model_settings, base_url=self._client.base_url),
+                model_config=model_config_for_trace(
+                    model_settings, tracing, base_url=self._client.base_url
+                ),
                 disabled=tracing.is_disabled(),
             ) as span_generation,
             model_span_errors(

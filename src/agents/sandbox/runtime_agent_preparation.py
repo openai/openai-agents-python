@@ -130,6 +130,7 @@ def prepare_sandbox_agent(
         tools=[*agent.tools, *capability_tools],
         capabilities=capabilities,
     )
+    cast(SandboxAgent[TContext], prepared_agent)._sandbox_capability_tools = capability_tools
     set_public_agent(prepared_agent, agent)
     return prepared_agent
 
@@ -188,7 +189,7 @@ def build_sandbox_instructions(
         current_agent: Agent[TContext],
     ) -> str | None:
         parts: list[str] = []
-        public_agent = cast(Agent[TContext], get_public_agent(current_agent))
+        public_agent = get_public_agent(current_agent)
         base: str | None
 
         if base_instructions is None:

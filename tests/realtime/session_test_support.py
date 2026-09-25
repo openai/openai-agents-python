@@ -66,6 +66,7 @@ class RecordingRealtimeModel(ScriptedRealtimeModel):
 @pytest.fixture
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
+    agent.name = "test_agent"
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])
@@ -82,6 +83,7 @@ def _set_default_timeout_fields(tool: Mock) -> Mock:
     tool.timeout_seconds = None
     tool.timeout_behavior = "error_as_result"
     tool.timeout_error_function = None
+    tool.tool_output_guardrails = []
     return tool
 
 

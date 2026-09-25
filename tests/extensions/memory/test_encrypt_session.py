@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import tempfile
+import threading
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,7 +15,7 @@ import pytest
 
 pytest.importorskip("cryptography")  # Skip tests if cryptography is not installed
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from agents import (
     Agent,
@@ -189,7 +192,7 @@ async def test_runner_encrypts_items_around_compaction(
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("mode", ["input", "previous_response_id"])
-async def test_runner_compacts_encrypted_history(
+async def test_encrypted_compaction_replaces_complete_logical_history_after_expiry(
     streamed: bool,
     mode: OpenAIResponsesCompactionMode,
     encryption_key: str,
@@ -462,9 +465,14 @@ async def test_clear_revokes_encrypted_deferred_compaction(
 
         paused = False
 
-        async def get_items(self, limit=None):
+        async def get_items(
+            self,
+            limit: int | None = None,
+            *,
+            wrapper: RunContextWrapper[Any] | None = None,
+        ) -> list[TResponseInputItem]:
             # Preserve the public Session call shape without opting into run context.
-            items = await super().get_items(limit)
+            items = await super().get_items(limit, wrapper=wrapper)
             if not self.paused and any(
                 item.get("type") == "function_call_output" for item in items
             ):
@@ -769,6 +777,264 @@ async def test_encrypted_session_pop_item(encryption_key: str, underlying_sessio
     underlying_session.close()
 
 
+@pytest.mark.parametrize("expired", [False, True])
+async def test_encrypted_pop_wrong_key_preserves_recoverable_history(
+    underlying_session: SQLiteSession, set_fernet_time, expired: bool
+):
+    set_fernet_time(1_000)
+    correct = EncryptedSession("test_session", underlying_session, "correct-key", ttl=10)
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key", ttl=10)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First"},
+        {"role": "assistant", "content": "Second"},
+    ]
+    try:
+        await correct.add_items(items)
+        ciphertext = await underlying_session.get_items()
+        if expired:
+            set_fernet_time(1_020)
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == ciphertext
+        recovery = EncryptedSession("test_session", underlying_session, "correct-key", ttl=60)
+        assert await recovery.get_items() == items
+        assert await recovery.pop_item() == items[-1]
+        assert await recovery.get_items() == items[:-1]
+    finally:
+        underlying_session.close()
+
+
+async def test_encrypted_pop_rechecks_authentication_after_expired_tail(
+    underlying_session: SQLiteSession, set_fernet_time
+):
+    set_fernet_time(1_000)
+    correct = EncryptedSession("test_session", underlying_session, "correct-key", ttl=10)
+    wrong = EncryptedSession("test_session", underlying_session, "wrong-key", ttl=10)
+    item: TResponseInputItem = {"role": "user", "content": "Recoverable history"}
+    try:
+        await correct.add_items([item])
+        ciphertext = await underlying_session.get_items()
+        await wrong.add_items([{"role": "assistant", "content": "Expired tail"}])
+        set_fernet_time(1_020)
+
+        with pytest.raises(InvalidToken):
+            await wrong.pop_item()
+
+        assert await underlying_session.get_items() == ciphertext
+        recovery = EncryptedSession("test_session", underlying_session, "correct-key", ttl=60)
+        assert await recovery.get_items() == [item]
+    finally:
+        underlying_session.close()
+
+
+@pytest.mark.parametrize("operation", ["append", "clear"])
+async def test_encrypted_pop_authentication_is_atomic_with_concurrent_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    other_backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
+    writer = EncryptedSession("test_session", other_backend, "correct-key")
+    entered = threading.Event()
+    release = threading.Event()
+    started = asyncio.Event()
+    authenticate = wrong.cipher.extract_timestamp
+    saved: TResponseInputItem = {"role": "user", "content": "saved"}
+    newer: TResponseInputItem = {"role": "assistant", "content": "newer"}
+
+    def paused_authenticate(token: bytes) -> int:
+        entered.set()
+        assert release.wait(timeout=10)
+        return authenticate(token)
+
+    async def mutate() -> None:
+        started.set()
+        if operation == "append":
+            await writer.add_items([newer])
+        else:
+            await writer.clear_session()
+
+    monkeypatch.setattr(wrong.cipher, "extract_timestamp", paused_authenticate)
+    tasks: list[asyncio.Task[Any]] = []
+    try:
+        await correct.add_items([saved])
+        # A separate connection bypasses SQLiteSession's process-local lock.
+        with closing(sqlite3.connect(tmp_path / "history.db", timeout=0)) as observer:
+            original_rows = observer.execute("SELECT * FROM agent_messages").fetchall()
+            # A separate event loop also permits this probe on the old code,
+            # which authenticated synchronously on the calling loop.
+            pop = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(wrong.pop_item())))
+            tasks.append(pop)
+            assert await asyncio.to_thread(entered.wait, 5)
+            mutation = asyncio.create_task(mutate())
+            tasks.append(mutation)
+            await started.wait()
+            assert observer.execute("SELECT * FROM agent_messages").fetchall() == original_rows
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                observer.execute("BEGIN IMMEDIATE")
+            release.set()
+            with pytest.raises(InvalidToken):
+                await asyncio.wait_for(pop, 5)
+            await asyncio.wait_for(mutation, 5)
+
+        if operation == "append":
+            assert await correct.get_items() == [saved, newer]
+            assert await correct.pop_item() == newer
+            assert await correct.pop_item() == saved
+        else:
+            assert await correct.get_items() == []
+        assert await correct.pop_item() is None
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        backend.close()
+        other_backend.close()
+
+
+async def test_encrypted_pop_wrong_key_preserves_row_identity(tmp_path: Path) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
+    try:
+        await correct.add_items([{"role": "user", "content": "saved"}])
+        with closing(sqlite3.connect(tmp_path / "history.db")) as observer:
+            original_rows = observer.execute("SELECT * FROM agent_messages").fetchall()
+            for _ in range(2):
+                with pytest.raises(InvalidToken):
+                    await wrong.pop_item()
+                assert observer.execute("SELECT * FROM agent_messages").fetchall() == original_rows
+    finally:
+        backend.close()
+
+
+async def test_encrypted_pop_cancellation_waits_for_authentication_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    correct = EncryptedSession("test_session", backend, "correct-key")
+    wrong = EncryptedSession("test_session", backend, "wrong-key")
+    entered = threading.Event()
+    release = threading.Event()
+    authenticate = wrong.cipher.extract_timestamp
+
+    def paused_authenticate(token: bytes) -> int:
+        entered.set()
+        assert release.wait(timeout=10)
+        return authenticate(token)
+
+    monkeypatch.setattr(wrong.cipher, "extract_timestamp", paused_authenticate)
+    pop = None
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "saved"}
+        await correct.add_items([saved])
+        ciphertext = await backend.get_items()
+        pop = asyncio.create_task(wrong.pop_item())
+        assert await asyncio.to_thread(entered.wait, 5)
+        pop.cancel()
+        await asyncio.sleep(0)
+        pop.cancel()
+        await asyncio.sleep(0)
+        assert not pop.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pop, 5)
+        assert await backend.get_items() == ciphertext
+        assert await correct.pop_item() == saved
+    finally:
+        release.set()
+        if pop is not None:
+            await asyncio.gather(pop, return_exceptions=True)
+        backend.close()
+
+
+async def test_encrypted_pop_delegates_to_overridden_sqlite_pop(tmp_path: Path) -> None:
+    class CustomPopSession(SQLiteSession):
+        pop_calls = 0
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            self.pop_calls += 1
+            return await super().pop_item()
+
+    backend = CustomPopSession("test_session", tmp_path / "history.db")
+    session = EncryptedSession("test_session", backend, "correct-key")
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "saved"}
+        await session.add_items([saved])
+        assert await session.pop_item() == saved
+        assert backend.pop_calls == 1
+        assert await session.get_items() == []
+    finally:
+        backend.close()
+
+
+async def test_encrypted_pop_preserves_plaintext_and_inherited_sqlite_behavior(
+    tmp_path: Path,
+) -> None:
+    class InheritedSession(SQLiteSession):
+        pass
+
+    backend = InheritedSession("test_session", tmp_path / "history.db")
+    session = EncryptedSession("test_session", backend, "correct-key")
+    try:
+        saved: TResponseInputItem = {"role": "user", "content": "legacy plaintext"}
+        await backend.add_items([saved])
+        assert await session.pop_item() == saved
+        assert await session.pop_item() is None
+    finally:
+        backend.close()
+
+
+async def test_encrypted_pop_preserves_sqlalchemy_history(encryption_key: str) -> None:
+    pytest.importorskip("sqlalchemy")
+    from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+
+    backend = SQLAlchemySession.from_url(
+        "test_session", url="sqlite+aiosqlite:///:memory:", create_tables=True
+    )
+    session = EncryptedSession("test_session", backend, encryption_key)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First"},
+        {"role": "assistant", "content": "Second"},
+    ]
+    try:
+        await session.add_items(items)
+        assert await session.pop_item() == items[-1]
+        assert await session.get_items() == items[:-1]
+        assert await session.pop_item() == items[0]
+        assert await session.pop_item() is None
+    finally:
+        await backend.engine.dispose()
+
+
+async def test_encrypted_pop_preserves_compaction_wrapper(
+    encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("test_session", tmp_path / "history.db")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[]))
+    compaction = OpenAIResponsesCompactionSession(
+        "test_session", backend, client=client, compaction_mode="input"
+    )
+    session = EncryptedSession("test_session", compaction, encryption_key)
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Retained"},
+        {"role": "assistant", "content": "Removed"},
+    ]
+    try:
+        await session.add_items(items)
+        assert await session.get_items() == items
+        assert await session.pop_item() == items[-1]
+        assert await session.get_items() == items[:-1]
+        await session.run_compaction({"force": True})
+        compaction_call = client.responses.compact.await_args
+        assert compaction_call is not None
+        assert compaction_call.kwargs["input"] == items[:-1]
+    finally:
+        backend.close()
+
+
 async def test_encrypted_session_clear(encryption_key: str, underlying_session: SQLiteSession):
     """Test clear_session functionality."""
     session = EncryptedSession(
@@ -793,8 +1059,12 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
         def __init__(self) -> None:
             self.session_id = "test_session"
             self.session_settings = None
-            self.items: list[TResponseInputItem] = []
-            self.wrappers: list[RunContextWrapper[Any] | None] = []
+            self.items: dict[str, list[TResponseInputItem]] = {}
+
+        def history(self, wrapper: RunContextWrapper[Any] | None) -> list[TResponseInputItem]:
+            if wrapper is None:
+                raise ValueError("Tenant context is required.")
+            return self.items.setdefault(wrapper.context["tenant"], [])
 
         async def get_items(
             self,
@@ -802,8 +1072,8 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> list[TResponseInputItem]:
-            self.wrappers.append(wrapper)
-            return list(self.items if limit is None else self.items[-limit:])
+            items = self.history(wrapper)
+            return list(items if limit is None else items[-limit:])
 
         async def add_items(
             self,
@@ -811,24 +1081,22 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> None:
-            self.wrappers.append(wrapper)
-            self.items.extend(items)
+            self.history(wrapper).extend(items)
 
         async def pop_item(
             self,
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> TResponseInputItem | None:
-            self.wrappers.append(wrapper)
-            return self.items.pop() if self.items else None
+            items = self.history(wrapper)
+            return items.pop() if items else None
 
         async def clear_session(
             self,
             *,
             wrapper: RunContextWrapper[Any] | None = None,
         ) -> None:
-            self.wrappers.append(wrapper)
-            self.items.clear()
+            self.history(wrapper).clear()
 
     underlying = ContextAwareUnderlying()
     session = EncryptedSession(
@@ -837,13 +1105,20 @@ async def test_encrypted_session_forwards_wrapper_to_all_underlying_operations(
         encryption_key=encryption_key,
     )
     wrapper = RunContextWrapper(context={"tenant": "a"})
+    other_wrapper = RunContextWrapper(context={"tenant": "b"})
 
     await session.add_items([{"role": "user", "content": "hello"}], wrapper=wrapper)
+    await session.add_items([{"role": "user", "content": "other tenant"}], wrapper=other_wrapper)
     assert await session.get_items(wrapper=wrapper) == [{"role": "user", "content": "hello"}]
     assert await session.pop_item(wrapper=wrapper) == {"role": "user", "content": "hello"}
+    assert await session.get_items(wrapper=wrapper) == []
+    await session.add_items([{"role": "user", "content": "clear me"}], wrapper=wrapper)
     await session.clear_session(wrapper=wrapper)
 
-    assert underlying.wrappers == [wrapper, wrapper, wrapper, wrapper]
+    assert await session.get_items(wrapper=wrapper) == []
+    assert await session.get_items(wrapper=other_wrapper) == [
+        {"role": "user", "content": "other tenant"}
+    ]
 
 
 async def test_encrypted_session_ttl_expiration(
@@ -1048,6 +1323,223 @@ async def test_encrypted_session_get_items_session_settings_limit_skips_invalid_
     assert [item.get("content") for item in items] == ["valid 0", "valid 1", "valid 2"]
 
     underlying_session.close()
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+async def test_encrypted_session_rejects_nonpositive_scan_budget(
+    budget: int, encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    try:
+        with pytest.raises(ValueError, match="max_scan_items must be positive"):
+            EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=budget)
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("use_settings", [False, True])
+async def test_encrypted_session_scan_budget_rejects_negative_limit_before_read(
+    use_settings: bool, encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key)
+    items: list[TResponseInputItem] = [{"role": "user", "content": "retained history"}]
+    try:
+        await session.add_items(items)
+        if use_settings:
+            session.session_settings = SessionSettings(limit=-1)
+        limit = None if use_settings else -1
+        # Without a budget, SQLite retains its historical unlimited negative-limit read.
+        assert await session.get_items(limit=limit) == items
+        bounded = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=10)
+        read = AsyncMock(wraps=backend.get_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await bounded.get_items(limit=limit)
+        read.assert_not_awaited()
+        # An explicit supported limit overrides an inherited negative default.
+        assert await bounded.get_items(limit=1) == items
+        read.assert_awaited_once_with(1)
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_does_not_turn_redis_negative_limit_into_history(
+    encryption_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fakeredis = pytest.importorskip("fakeredis.aioredis")
+    from agents.extensions.memory.redis_session import RedisSession
+
+    client = fakeredis.FakeRedis()
+    backend = RedisSession(
+        "budget", redis_client=client, session_settings=SessionSettings(limit=-1)
+    )
+    session = EncryptedSession(backend.session_id, backend, encryption_key)
+    try:
+        await session.add_items([{"role": "user", "content": "retained history"}])
+        assert await session.get_items() == []
+        bounded = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=10)
+        read = AsyncMock(wraps=backend.get_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await bounded.get_items()
+        read.assert_not_awaited()
+    finally:
+        await backend.close()
+        await client.aclose()
+
+
+async def test_encrypted_session_scan_budget_counts_overlapping_expired_windows(
+    encryption_key: str, tmp_path: Path, set_fernet_time: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=13)
+    try:
+        await session.add_items([{"role": "user", "content": f"old {i}"} for i in range(20)])
+        set_fernet_time(1_020)
+        stored = await backend.get_items()
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        unwrap = MagicMock(wraps=session._unwrap)
+        monkeypatch.setattr(backend, "get_items", read)
+        monkeypatch.setattr(session, "_unwrap", unwrap)
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+                await session.get_items(limit=2)
+            assert [call.args[0] for call in read.call_args_list] == [2, 4, 7]
+            assert unwrap.call_count == 13
+            read.reset_mock()
+            unwrap.reset_mock()
+        assert await read_items() == stored
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_backfills_in_chronological_order(
+    encryption_key: str, tmp_path: Path, set_fernet_time: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=6)
+    try:
+        await session.add_items([{"role": "user", "content": "expires"}])
+        expired = await backend.get_items()
+        await backend.clear_session()
+        set_fernet_time(1_020)
+        valid: list[TResponseInputItem] = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+        await session.add_items(valid)
+        # A delayed stored envelope can expire before it is appended.
+        await backend.add_items(expired + [_invalid_encrypted_envelope()])
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+
+        session.session_settings = SessionSettings(limit=2)
+        assert await session.get_items() == valid
+        assert [call.args[0] for call in read.call_args_list] == [2, 4]
+        default = EncryptedSession(backend.session_id, backend, encryption_key, 10)
+        assert await default.get_items(limit=2) == valid
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("limit", [None, 100])
+async def test_encrypted_session_scan_budget_rejects_incomplete_full_window(
+    limit: int | None, encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=3)
+    try:
+        await session.add_items([{"role": "user", "content": f"item {i}"} for i in range(3)])
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+            await session.get_items(limit=limit)
+        read.assert_awaited_once_with(3)
+    finally:
+        backend.close()
+
+
+async def test_encrypted_session_scan_budget_accepts_short_empty_and_zero_reads(
+    encryption_key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SQLiteSession("budget", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, max_scan_items=3)
+    try:
+        assert await session.get_items() == []
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+        await session.add_items(items)
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        assert await session.get_items() == items
+        assert await session.get_items(limit=100) == items
+        assert await session.get_items(limit=0) == []
+        assert [call.args[0] for call in read.call_args_list] == [3, 3, 0]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_encrypted_scan_budget_with_session_settings(
+    streamed: bool,
+    encryption_key: str,
+    tmp_path: Path,
+    set_fernet_time: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = SQLiteSession(
+        "budget", tmp_path / "history.db", session_settings=SessionSettings(limit=100)
+    )
+    session = EncryptedSession(backend.session_id, backend, encryption_key, 10, max_scan_items=2)
+    model = ScriptedModel([[get_text_message("answer")]])
+    agent = Agent(name="test", model=model)
+    config = RunConfig(tracing_disabled=True, session_settings=SessionSettings(limit=2))
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(agent, "next", session=session, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "next", session=session, run_config=config)
+
+    try:
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"item {i}"} for i in range(5)
+        ]
+        await session.add_items(items)
+        read_items = backend.get_items
+        read = AsyncMock(wraps=read_items)
+        monkeypatch.setattr(backend, "get_items", read)
+        await run()
+        assert model.calls[0].input == items[-2:] + [{"role": "user", "content": "next"}]
+        read.assert_awaited_once_with(2)
+        stored = await read_items()
+        read.reset_mock()
+        set_fernet_time(1_020)
+        with pytest.raises(RuntimeError, match="max_scan_items exhausted"):
+            await run()
+        read.assert_awaited_once_with(2)
+        assert len(model.calls) == 1
+        assert await read_items() == stored
+
+        read.reset_mock()
+        config.session_settings = SessionSettings(limit=-1)
+        with pytest.raises(ValueError, match="limit must be non-negative.*max_scan_items"):
+            await run()
+        read.assert_not_awaited()
+        assert len(model.calls) == 1
+        assert await read_items() == stored
+    finally:
+        backend.close()
 
 
 async def test_encrypted_session_unicode_content(

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, cast
 
 import pytest
@@ -1280,3 +1280,264 @@ async def test_manager_restores_one_shot_iterable_servers_after_a_failed_connect
     # drop_failed_servers=False keeps failed servers active, so the restored list must match
     # what an equivalent list argument produces.
     assert manager.active_servers == [server]
+
+
+@pytest.mark.asyncio
+async def test_worker_task_cancellation_stops_worker_and_fails_caller() -> None:
+    # This test pins an exact cancellation boundary: a connect that hangs until the
+    # worker task itself is cancelled. The scripted utilities cannot model a worker
+    # task receiving an external cancel, so a local double is used here.
+    class HangingConnectServer:
+        def __init__(self) -> None:
+            self.connect_started = asyncio.Event()
+
+        async def connect(self) -> None:
+            self.connect_started.set()
+            await asyncio.sleep(3600)
+
+        async def cleanup(self) -> None:
+            return None
+
+    server = HangingConnectServer()
+    worker = manager_module._ServerWorker(cast(Any, server), lambda: None)
+
+    caller = asyncio.create_task(worker.connect(timeout_seconds=None))
+    await asyncio.wait_for(server.connect_started.wait(), timeout=TEST_TIMEOUT_SECONDS)
+
+    worker._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=TEST_TIMEOUT_SECONDS)
+
+    assert worker._task.done()
+    assert worker._task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_worker_survives_server_raised_cancelled_error_and_serves_next_command() -> None:
+    # This test pins the CancelledServer contract: a server raising CancelledError on
+    # its own must reach the caller through the command future without ending the
+    # worker, because later lifecycle commands still rely on that worker.
+    class SelfCancellingThenOkServer:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                raise asyncio.CancelledError()
+
+        async def cleanup(self) -> None:
+            return None
+
+    server = SelfCancellingThenOkServer()
+    worker = manager_module._ServerWorker(cast(Any, server), lambda: None)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(worker.connect(timeout_seconds=None), timeout=TEST_TIMEOUT_SECONDS)
+
+    assert not worker.is_done
+
+    await asyncio.wait_for(worker.connect(timeout_seconds=None), timeout=TEST_TIMEOUT_SECONDS)
+    assert server.connect_calls == 2
+
+    await asyncio.wait_for(worker.cleanup(timeout_seconds=None), timeout=TEST_TIMEOUT_SECONDS)
+    assert worker.is_done
+
+
+@pytest.mark.asyncio
+async def test_worker_cancel_settles_commands_queued_behind_the_in_flight_one() -> None:
+    # An external cancel ends the worker, so commands still queued behind the
+    # in-flight one will never run. Their futures must be settled on the way out,
+    # or the callers awaiting those futures hang forever.
+    class BlockingConnectServer:
+        def __init__(self) -> None:
+            self.connect_started = asyncio.Event()
+            self.cleanup_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_started.set()
+            await asyncio.sleep(3600)
+
+        async def cleanup(self) -> None:
+            self.cleanup_calls += 1
+
+    server = BlockingConnectServer()
+    worker = manager_module._ServerWorker(cast(Any, server), lambda: None)
+
+    connect_caller = asyncio.create_task(worker.connect(timeout_seconds=None))
+    await asyncio.wait_for(server.connect_started.wait(), timeout=TEST_TIMEOUT_SECONDS)
+    cleanup_caller = asyncio.create_task(worker.cleanup(timeout_seconds=None))
+    await asyncio.sleep(0)
+
+    worker._task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(cleanup_caller, timeout=TEST_TIMEOUT_SECONDS)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(connect_caller, timeout=TEST_TIMEOUT_SECONDS)
+
+    assert worker._task.done()
+    assert worker._task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_worker_cancel_cleans_up_partially_acquired_connection() -> None:
+    # An external cancel during a blocking connect must not leak the partially
+    # acquired connection: the worker owns it and is the only task allowed to
+    # clean it up, so the cleanup has to run in that task before the worker
+    # terminates.
+    class BlockingPartialConnectServer(TaskBoundServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = asyncio.Event()
+            self.cleanup_calls = 0
+
+        async def connect(self) -> None:
+            self._connect_task = asyncio.current_task()
+            self.connect_started.set()
+            await asyncio.sleep(3600)
+
+        async def cleanup(self) -> None:
+            self.cleanup_calls += 1
+            await super().cleanup()
+
+    server = BlockingPartialConnectServer()
+    manager = MCPServerManager([server], connect_in_parallel=True)
+
+    connect_all = asyncio.create_task(manager.connect_all())
+    await asyncio.wait_for(server.connect_started.wait(), timeout=TEST_TIMEOUT_SECONDS)
+    manager._workers[server]._task.cancel()
+    await asyncio.wait_for(connect_all, timeout=TEST_TIMEOUT_SECONDS)
+
+    assert server.cleaned is True
+    assert server.cleanup_calls == 1
+    await asyncio.wait_for(manager.cleanup_all(), timeout=TEST_TIMEOUT_SECONDS)
+    assert server.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_emergency_cleanup_uses_the_cleanup_timeout() -> None:
+    # An external cancel during a connect must bound the emergency cleanup by
+    # the manager cleanup timeout, not by the interrupted connect command's own
+    # timeout: when connect_timeout_seconds is None the command carries no
+    # bound, and an unbounded emergency cleanup can hang the worker (and loop
+    # shutdown) forever, while a shorter connect timeout could cut a legitimate
+    # cleanup short.
+    class HangingCleanupServer:
+        def __init__(self) -> None:
+            self.connect_started = asyncio.Event()
+            self.cleanup_started = asyncio.Event()
+            self.cleanup_cancelled = False
+
+        async def connect(self) -> None:
+            self.connect_started.set()
+            await asyncio.sleep(3600)
+
+        async def cleanup(self) -> None:
+            self.cleanup_started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.cleanup_cancelled = True
+                raise
+
+    server = HangingCleanupServer()
+    worker = manager_module._ServerWorker(cast(Any, server), lambda: 0.2)
+
+    caller = asyncio.create_task(worker.connect(timeout_seconds=None))
+    await asyncio.wait_for(server.connect_started.wait(), timeout=TEST_TIMEOUT_SECONDS)
+    worker._task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=TEST_TIMEOUT_SECONDS)
+    # the caller settles only after the emergency cleanup is bounded and done,
+    # so the worker must already be terminated here; awaiting a cancelled task
+    # would re-raise CancelledError in the test task instead
+    assert worker._task.done()
+    assert worker._task.cancelled()
+    assert server.cleanup_started.is_set()
+    assert server.cleanup_cancelled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["raise", "timeout"])
+async def test_manager_reconnect_does_not_retry_after_failed_emergency_cleanup(
+    mode: str,
+) -> None:
+    # A manager-level regression for the emergency cleanup result: an external
+    # cancel during a partially started connect runs the emergency cleanup in
+    # the worker task, and when that cleanup raises or times out the failure
+    # must reach the existing cleanup result mechanism. The done callback then
+    # keeps the worker instead of discarding it, a later reconnect surfaces the
+    # failure in manager errors, and the still-uncleaned server is never
+    # started again as a second connection.
+    class EmergencyCleanupFailingServer(TaskBoundServer):
+        def __init__(self, mode: str) -> None:
+            super().__init__()
+            self.connect_started = asyncio.Event()
+            self.mode = mode
+            self.connect_calls = 0
+            self.cleanup_calls = 0
+
+        async def connect(self) -> None:
+            self._connect_task = asyncio.current_task()
+            self.connect_calls += 1
+            self.connect_started.set()
+            await asyncio.sleep(3600)
+
+        async def cleanup(self) -> None:
+            self.cleanup_calls += 1
+            await super().cleanup()
+            if self.mode == "raise":
+                raise RuntimeError("emergency cleanup failed")
+            await asyncio.sleep(3600)
+
+    server = EmergencyCleanupFailingServer(mode)
+    manager = MCPServerManager([server], connect_in_parallel=True, cleanup_timeout_seconds=0.2)
+
+    connect_all = asyncio.create_task(manager.connect_all())
+    await asyncio.wait_for(server.connect_started.wait(), timeout=TEST_TIMEOUT_SECONDS)
+    manager._workers[server]._task.cancel()
+    await asyncio.wait_for(connect_all, timeout=TEST_TIMEOUT_SECONDS)
+
+    assert server.connect_calls == 1
+    assert server.cleanup_calls == 1
+
+    await manager.reconnect()
+
+    assert server.connect_calls == 1
+    assert manager.failed_servers == [server]
+    assert manager.active_servers == []
+    if mode == "raise":
+        assert str(manager.errors[server]) == "emergency cleanup failed"
+    else:
+        assert isinstance(manager.errors[server], asyncio.TimeoutError)
+    worker = manager._workers[server]
+    assert worker.is_done
+    assert worker.cleanup_error is not None
+
+
+@pytest.mark.asyncio
+async def test_worker_task_is_created_through_the_loop_task_factory() -> None:
+    # Worker creation must honor the event loop's task factory so applications
+    # supervising or instrumenting tasks through set_task_factory can discover
+    # the connection worker.
+    loop = asyncio.get_running_loop()
+    created: list[asyncio.Task[object]] = []
+
+    def factory(
+        loop_: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, object], **kwargs: object
+    ) -> asyncio.Task[object]:
+        task = asyncio.Task(coro, loop=loop_, **kwargs)  # type: ignore[arg-type]
+        created.append(task)
+        return task
+
+    loop.set_task_factory(factory)
+    try:
+        server = TaskBoundServer()
+        manager = MCPServerManager([server], connect_in_parallel=True)
+        await asyncio.wait_for(manager.connect_all(), timeout=TEST_TIMEOUT_SECONDS)
+        worker = manager._workers[server]
+        assert worker._task in created
+    finally:
+        loop.set_task_factory(None)

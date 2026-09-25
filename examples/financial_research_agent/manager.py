@@ -13,7 +13,12 @@ from agents import Runner, RunResult, RunResultStreaming, custom_span, gen_trace
 from examples.web_search_utils import extract_url_citations, extract_web_search_source_urls
 
 from .agents.financials_agent import financials_agent
-from .agents.planner_agent import FinancialSearchItem, FinancialSearchPlan, planner_agent
+from .agents.planner_agent import (
+    MAX_SEARCHES,
+    FinancialSearchItem,
+    FinancialSearchPlan,
+    planner_agent,
+)
 from .agents.risk_agent import risk_agent
 from .agents.search_agent import FinancialSearchSummary, search_agent
 from .agents.verifier_agent import VerificationResult, verifier_agent
@@ -122,7 +127,7 @@ class FinancialResearchManager:
         result = await Runner.run(planner_agent, f"Query: {query}")
         self.printer.update_item(
             "planning",
-            f"Will perform {len(result.final_output.searches)} searches",
+            f"Will perform {min(len(result.final_output.searches), MAX_SEARCHES)} searches",
             is_done=True,
         )
         return result.final_output_as(FinancialSearchPlan)
@@ -132,7 +137,11 @@ class FinancialResearchManager:
     ) -> Sequence[FinancialSearchEvidence]:
         with custom_span("Search the web"):
             self.printer.update_item("searching", "Searching...")
-            tasks = [asyncio.create_task(self._search(item)) for item in search_plan.searches]
+            # Enforce the host's search budget before scheduling model-generated work.
+            tasks = [
+                asyncio.create_task(self._search(item))
+                for item in search_plan.searches[:MAX_SEARCHES]
+            ]
             results: list[FinancialSearchEvidence] = []
             num_completed = 0
             num_succeeded = 0

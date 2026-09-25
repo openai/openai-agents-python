@@ -27,7 +27,7 @@ from agents.sandbox.entries import (
     RcloneMountPattern,
     S3Mount,
 )
-from agents.sandbox.entries.mounts.base import InContainerMountAdapter
+from agents.sandbox.entries.mounts.base import InContainerMountAdapter, MountStrategyBase
 from agents.sandbox.errors import (
     ConfigurationError,
     ErrorCode,
@@ -45,6 +45,7 @@ from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.session.manager import Instrumentation
+from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.session.sinks import CallbackSink
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import User
@@ -545,11 +546,35 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setitem(sys.modules, "vercel", fake_vercel)
     monkeypatch.setitem(sys.modules, "vercel.sandbox", fake_vercel_sandbox)
-    sys.modules.pop("agents.extensions.sandbox.vercel.mounts", None)
-    sys.modules.pop("agents.extensions.sandbox.vercel.sandbox", None)
-    sys.modules.pop("agents.extensions.sandbox.vercel", None)
+    # Re-importing an adapter also replaces its registered model classes.
+    # Record undo before clearing these entries for fresh class registration;
+    # unrelated registrations must survive teardown.
+    monkeypatch.setitem(
+        SandboxSessionState._subclass_registry,
+        "vercel",
+        SandboxSessionState._subclass_registry.get("vercel", SandboxSessionState),
+    )
+    del SandboxSessionState._subclass_registry["vercel"]
+    monkeypatch.setitem(
+        MountStrategyBase._subclass_registry,
+        "vercel_cloud_bucket",
+        MountStrategyBase._subclass_registry.get("vercel_cloud_bucket", MountStrategyBase),
+    )
+    del MountStrategyBase._subclass_registry["vercel_cloud_bucket"]
+    module_names = (
+        "agents.extensions.sandbox.vercel.sandbox",
+        "agents.extensions.sandbox.vercel.mounts",
+        "agents.extensions.sandbox.vercel",
+    )
+    for name in module_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
 
-    return importlib.import_module("agents.extensions.sandbox.vercel.sandbox")
+    module: Any = importlib.import_module("agents.extensions.sandbox.vercel.sandbox")
+    # Track the fresh imports too, so teardown removes them before restoring
+    # any original modules alongside the real provider SDK.
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, sys.modules.pop(name))
+    return module
 
 
 async def _noop_sleep(*_args: object, **_kwargs: object) -> None:

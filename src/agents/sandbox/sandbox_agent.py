@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from .._config_coercion import coerce_pydantic_config
+from .._public_agent import get_public_agent
 from ..agent import Agent
 from ..run_context import RunContextWrapper, TContext
 from .capabilities import Capability
@@ -35,7 +36,11 @@ class SandboxAgent(Agent[TContext]):
     """
 
     default_manifest: Manifest | None = None
-    """Default sandbox manifest for new sessions created by `Runner` sandbox execution."""
+    """Default sandbox manifest for new sessions created by `Runner` sandbox execution.
+
+    Dictionary inputs cannot authorize local host sources or extra path grants. Configure
+    these on a trusted `Manifest` instance after validating the host paths in application code.
+    """
 
     base_instructions: (
         str
@@ -53,6 +58,9 @@ class SandboxAgent(Agent[TContext]):
     """User identity used for model-facing sandbox tools such as shell, file reads, and patches."""
 
     _sandbox_concurrency_guard: object | None = field(default=None, init=False, repr=False)
+    _sandbox_capability_tools: list[Tool] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     if TYPE_CHECKING:
 
@@ -97,6 +105,13 @@ class SandboxAgent(Agent[TContext]):
             capabilities: Sequence[Capability] = ...,
             run_as: User | dict[str, Any] | str | None = None,
         ) -> None: ...
+
+    async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
+        if self._sandbox_capability_tools is not None:
+            # Refresh application tools without recreating the session-bound capability tools.
+            public_agent = get_public_agent(self)
+            self.tools = [*public_agent.tools, *self._sandbox_capability_tools]
+        return await super().get_all_tools(run_context)
 
     def __post_init__(self) -> None:
         super().__post_init__()
