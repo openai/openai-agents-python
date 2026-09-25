@@ -7,6 +7,7 @@ import sys
 if sys.platform == "win32":  # pragma: no cover
     raise ImportError("UnixLocal file operations are not supported on Windows.")
 
+import errno
 import grp
 import io
 import json
@@ -51,9 +52,41 @@ class _FileOps:
         finally:
             os.close(fd)
 
+    def _open_regular_file(self, path: Path, *, for_write: bool = False) -> int:
+        with self.parent(path, for_write=for_write, create_parents=for_write) as (parent_fd, name):
+            try:
+                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass  # Let open report missing reads or create a regular file for writes.
+            else:
+                # Avoid invoking a stable device node's open handler. Symlinks and
+                # directories retain the errors from O_NOFOLLOW/open below.
+                if not (
+                    stat.S_ISREG(entry.st_mode)
+                    or stat.S_ISDIR(entry.st_mode)
+                    or stat.S_ISLNK(entry.st_mode)
+                ):
+                    raise OSError(errno.EINVAL, "Not a regular file", str(path))
+            flags = os.O_WRONLY | os.O_CREAT if for_write else os.O_RDONLY
+            # A workspace process can replace the entry after stat. A FIFO must not
+            # block open, and nothing may truncate or write before descriptor validation.
+            fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666, dir_fd=parent_fd)
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISDIR(mode):
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(path))
+            if not stat.S_ISREG(mode):
+                raise OSError(errno.EINVAL, "Not a regular file", str(path))
+            os.set_blocking(fd, True)
+            if for_write:
+                os.ftruncate(fd, 0)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
     def read(self, path: Path) -> io.IOBase:
-        with self.parent(path) as (parent_fd, name):
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        fd = self._open_regular_file(path)
         try:
             return os.fdopen(fd, "rb")
         except BaseException:
@@ -61,13 +94,7 @@ class _FileOps:
             raise
 
     def write(self, path: Path, stream: io.IOBase) -> None:
-        with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
-            fd = os.open(
-                name,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-                0o666,
-                dir_fd=parent_fd,
-            )
+        fd = self._open_regular_file(path, for_write=True)
         try:
             out = os.fdopen(fd, "wb")
         except BaseException:
