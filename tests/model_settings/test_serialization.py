@@ -1,6 +1,7 @@
 import json
 from dataclasses import fields
 
+import httpx2
 import pytest
 from openai.types.shared import Reasoning
 from pydantic import TypeAdapter
@@ -208,6 +209,20 @@ def test_traceable_serialization_omits_request_extras() -> None:
     assert "extra_body" not in traceable
     assert "extra_args" not in traceable
     assert "preserve_raw_usage" not in traceable
+
+
+def test_traceable_serialization_keeps_provider_native_request_extras() -> None:
+    """Untraced request extras must not have to be JSON serializable."""
+    model_settings = ModelSettings(
+        temperature=0.5,
+        extra_args={"timeout": httpx2.Timeout(30.0)},
+    )
+
+    traceable = model_settings.to_traceable_dict()
+
+    assert traceable["temperature"] == 0.5
+    assert "extra_args" not in traceable
+    assert json.dumps(traceable)
 
 
 def test_extra_args_resolve() -> None:

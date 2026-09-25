@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ...._tool_invocation import tool_invocation_approval_scope
 from ....editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from ....run_context import RunContextWrapper
 from ....tool import (
@@ -239,6 +240,10 @@ class SandboxApplyPatchTool(CustomTool):
             # model gets a recoverable tool error instead of aborting during approval pre-checks.
             return False
 
+        scope_identity = tool_invocation_approval_scope(
+            {"type": "custom_tool_call", "name": self.name},
+        )
+        assert scope_identity is not None
         for operation in operations:
             needs_approval = await evaluate_needs_approval_setting(
                 self.needs_approval,
@@ -246,7 +251,11 @@ class SandboxApplyPatchTool(CustomTool):
                 operation,
                 call_id,
             )
-            approval_status = ctx_wrapper.get_approval_status(self.name, call_id)
+            approval_status = ctx_wrapper._get_approval_status_for_key(
+                self.name,
+                call_id,
+                approval_scope=scope_identity[1],
+            )
             if approval_status is not None or needs_approval:
                 return needs_approval
         return False

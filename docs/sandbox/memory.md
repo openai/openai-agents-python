@@ -2,10 +2,6 @@
 
 Memory lets future sandbox-agent runs learn from prior runs. It is separate from the SDK's conversational [`Session`](../sessions/index.md) memory, which stores message history. Memory distills lessons from prior runs into files in the sandbox workspace.
 
-!!! warning "Beta feature"
-
-    Sandbox agents are in beta. Expect details of the API, defaults, and supported capabilities to change before general availability, and expect more advanced features over time.
-
 Memory can reduce three kinds of cost for future runs:
 
 1. Agent cost: If the agent took a long time to complete a workflow, the next run should need less exploration. This can reduce token usage and time to completion.

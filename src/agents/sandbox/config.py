@@ -80,6 +80,15 @@ class MemoryGenerateConfig:
     evidence you actually want it to summarize.
     """
 
+    phase_two_max_turns: int = 500
+    """Maximum agent turns for the separate phase-2 consolidation run.
+
+    The application's outer ``Runner`` turn limit does not apply to this run. This limit
+    counts model turns, not elapsed time, tokens, or monetary cost. Exhaustion uses the
+    runner's ``MaxTurnsExceeded`` error; the memory manager logs the failure and does not
+    record the consolidation selection as successful. Earlier tool writes are not rolled back.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -90,6 +99,7 @@ class MemoryGenerateConfig:
             phase_two_model: str | Model = "gpt-5.5",
             phase_two_model_settings: ModelSettings | dict[str, Any] | None = ...,
             extra_prompt: str | None = None,
+            phase_two_max_turns: int = 500,
         ) -> None: ...
 
     def __post_init__(self) -> None:

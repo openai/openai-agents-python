@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import os
+import posixpath
 import re
 import socket
 import tarfile
@@ -15,7 +16,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Final, Literal, cast
 
 import docker.errors  # type: ignore[import-untyped]
@@ -30,6 +31,7 @@ from typing_extensions import Self
 
 from .._mount_security import (
     _manifest_has_configured_mount_authority,
+    _mark_mount_validation_error,
     redact_mount_error_data,
 )
 from ..entries import (
@@ -47,6 +49,7 @@ from ..errors import (
     ExecTimeoutError,
     ExecTransportError,
     ExposedPortUnavailableError,
+    MountConfigError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
 )
@@ -1856,16 +1859,33 @@ def _build_docker_volume_mounts(
     return mounts
 
 
+def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:
+    """Compare Linux mount paths lexically, including leading-slash aliases."""
+    # POSIX normpath preserves exactly two leading slashes, but Linux treats them as one.
+    return PurePosixPath(posixpath.normpath(re.sub(r"^/+", "/", sandbox_path_str(path))))
+
+
 def _validate_docker_path_grants(manifest: Manifest) -> None:
-    root = coerce_posix_path(manifest.root)
+    if any(
+        grant.host_path is not None and grant.read_only for grant in manifest.extra_path_grants
+    ) and (_manifest_requires_fuse(manifest) or _manifest_requires_sys_admin(manifest)):
+        # SYS_ADMIN can allow sandbox processes to remount a read-only host bind writable.
+        error = MountConfigError(
+            message="Docker read-only host_path grants cannot be combined with in-container "
+            "storage mounts that require SYS_ADMIN; remove the host grant or use a "
+            "storage strategy that does not require container mount privileges"
+        )
+        _mark_mount_validation_error(error)
+        raise error
+    root = _docker_mount_path_identity(manifest.root)
     seen_targets: set[str] = set()
     explicit_targets: set[str] = set()
     volume_targets = {
-        coerce_posix_path(mount_path).as_posix()
+        _docker_mount_path_identity(mount_path).as_posix()
         for _artifact, mount_path in _docker_volume_mounts_for_manifest(manifest)
     }
     for grant in manifest.extra_path_grants:
-        target = coerce_posix_path(grant.path)
+        target = _docker_mount_path_identity(grant.path)
         target_str = target.as_posix()
         if target_str in seen_targets and (
             grant.host_path is not None or target_str in explicit_targets

@@ -11,6 +11,7 @@ from typing import Any
 from ..config import MemoryLayoutConfig
 from ..errors import WorkspaceReadNotFoundError
 from ..session.base_sandbox_session import BaseSandboxSession
+from ..workspace_paths import sandbox_path_str
 
 
 def decode_payload(payload: object) -> str:
@@ -106,7 +107,7 @@ class SandboxMemoryStorage:
 
     async def ensure_text_file(self, path: Path) -> None:
         absolute = self._session.normalize_path(path)
-        exists = await self._session.exec("test", "-f", str(absolute), shell=False)
+        exists = await self._session.exec("test", "-f", sandbox_path_str(absolute), shell=False)
         if exists.ok():
             return
         await self._session.write(path, io.BytesIO(b""))

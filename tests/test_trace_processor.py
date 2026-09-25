@@ -284,6 +284,22 @@ def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
     assert seen_deadlines[0] is not None
 
 
+@patch("httpx2.Client")
+def test_batch_trace_processor_timed_shutdown_retries_final_drain(mock_client) -> None:
+    transient = MagicMock(status_code=503, headers={})
+    success = MagicMock(status_code=200, headers={})
+    mock_client.return_value.post.side_effect = [transient, success]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.001)
+    processor = BatchTraceProcessor(exporter=exporter)
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=1.0)
+
+    assert mock_client.return_value.post.call_count == 2
+    exporter.close()
+
+
 def test_batch_trace_processor_survives_exporter_exception():
     """A failing exporter must not kill the background worker thread.
 
@@ -565,6 +581,101 @@ def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog
 
 
 @patch("httpx2.Client")
+@pytest.mark.parametrize("status_code", [408, 409, 429])
+def test_backend_span_exporter_retries_transient_client_errors(mock_client, status_code: int):
+    """A rate limit, timeout, or conflict is transient, as the OpenAI client treats it;
+    dropping the batch on the first response loses every trace in it."""
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.headers = {}
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 3
+    assert wait_for_retry.call_count == 2
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_rate_limit_obeys_x_should_retry_false(mock_client, caplog):
+    """An explicit `x-should-retry: false` wins over the status classification, as in the
+    OpenAI client."""
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.headers = {"x-should-retry": "false", "retry-after": "1"}
+    mock_response.text = "rate limited"
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with (
+        patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry,
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        exporter.export([get_span(mock_processor())])
+
+    mock_client.return_value.post.assert_called_once()
+    wait_for_retry.assert_not_called()
+    assert "Tracing client error 429" in caplog.text
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_rate_limit_recovers_after_retry(mock_client):
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    limited_response = MagicMock()
+    limited_response.status_code = 429
+    limited_response.headers = {}
+    mock_client.return_value.post.side_effect = [limited_response, ok_response]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False):
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 2
+    exporter.close()
+
+
+@patch("httpx2.Client")
+@pytest.mark.parametrize(
+    ("headers", "expected_wait"),
+    [
+        ({"retry-after": "3"}, 3.0),
+        ({"retry-after-ms": "1500"}, 1.5),
+        # Larger than max_delay: bounded so the export thread cannot stall.
+        ({"retry-after": "600"}, 5.0),
+        # Unparsable or negative values fall back to exponential backoff.
+        ({"retry-after": "soon"}, None),
+        ({"retry-after": "-1"}, None),
+    ],
+)
+def test_backend_span_exporter_rate_limit_honours_retry_after(
+    mock_client, headers: dict[str, str], expected_wait: float | None
+):
+    limited_response = MagicMock()
+    limited_response.status_code = 429
+    limited_response.headers = headers
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    mock_client.return_value.post.side_effect = [limited_response, ok_response]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=5.0)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 2
+    waited = wait_for_retry.call_args.args[0]
+    if expected_wait is None:
+        assert 0.1 <= waited <= 0.11
+    else:
+        assert waited == pytest.approx(expected_wait)
+    exporter.close()
+
+
+@patch("httpx2.Client")
 def test_backend_span_exporter_5xx_retry(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 500
@@ -584,13 +695,33 @@ def test_backend_span_exporter_5xx_retry(mock_client):
 
 
 @patch("httpx2.Client")
+def test_backend_span_exporter_5xx_obeys_x_should_retry_false(mock_client, caplog):
+    mock_response = MagicMock()
+    mock_response.status_code = 503
+    mock_response.headers = {"x-should-retry": "false"}
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with (
+        patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry,
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        exporter.export([get_span(mock_processor())])
+
+    mock_client.return_value.post.assert_called_once()
+    wait_for_retry.assert_not_called()
+    assert "server forbade retry for 503" in caplog.text
+    exporter.close()
+
+
+@patch("httpx2.Client")
 def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 504
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
-    with patch("time.sleep") as sleep_for_retry:
+    with patch("agents.tracing.processors.time.sleep") as sleep_for_retry:
         exporter._export_with_deadline(
             [get_span(mock_processor())], deadline=time.monotonic() + 0.01
         )

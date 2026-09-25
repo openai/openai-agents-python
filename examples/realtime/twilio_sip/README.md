@@ -49,6 +49,16 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 3. The triage agent greets the caller, then either keeps the conversation or hands off to:
    - **FAQ Agent** – answers common questions via `faq_lookup_tool`.
    - **Records Agent** – writes short notes using `update_customer_record`.
-4. The background task attaches to the call and logs transcripts plus basic events in the console.
+4. The background task attaches to the call and logs basic lifecycle events in the console. The example's logs omit conversation content and raw error details by default.
+
+## Transcript Debugging
+
+To deliberately log caller text, assistant text, and assistant audio transcripts, set `TWILIO_SIP_LOG_TRANSCRIPTS=1` before starting the server:
+
+```bash
+TWILIO_SIP_LOG_TRANSCRIPTS=1 uv run uvicorn examples.realtime.twilio_sip.server:app --host 0.0.0.0 --port 8000
+```
+
+Use this option only with test conversations whose content you intend to store in logs. Unset the variable and restart the server to disable transcript logging. Only the exact value `1` enables this option; changing the general log level does not enable it. Raw provider errors and exception tracebacks remain omitted from the example's logs even when transcript logging is enabled. This setting controls only this example's transcript logging, not SDK tracing or logging configured separately for dependencies.
 
 You can edit `server.py` to change instructions, add tools, or integrate with internal systems once the SIP session is active.

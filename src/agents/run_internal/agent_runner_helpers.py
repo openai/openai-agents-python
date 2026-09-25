@@ -205,19 +205,24 @@ def _extract_tool_call_id(raw: Any) -> str | None:
     return candidate if isinstance(candidate, str) else None
 
 
+def _latest_response_tool_call_ids(run_state: RunState[Any]) -> set[str]:
+    """Return the call or item identifiers carried by the most recent model response."""
+    if not run_state._model_responses:
+        return set()
+    return {
+        call_id
+        for item in run_state._model_responses[-1].output
+        if (call_id := _extract_tool_call_id(item)) is not None
+    }
+
+
 def get_unsent_tool_call_ids_for_interrupted_state(run_state: RunState[Any] | None) -> set[str]:
     """Return tool call IDs whose local outputs have not reached a server conversation."""
     if run_state is None:
         return set()
 
     if isinstance(run_state._current_step, NextStepRunAgain):
-        if not run_state._model_responses:
-            return set()
-        return {
-            call_id
-            for item in run_state._model_responses[-1].output
-            if (call_id := _extract_tool_call_id(item)) is not None
-        }
+        return _latest_response_tool_call_ids(run_state)
 
     if not isinstance(run_state._current_step, NextStepInterruption):
         return set()
@@ -226,7 +231,14 @@ def get_unsent_tool_call_ids_for_interrupted_state(run_state: RunState[Any] | No
     if processed_response is None:
         return set()
 
-    tool_call_ids: set[str] = set()
+    # An interrupted turn stops before its next model request, so every tool output it built
+    # locally is still unsent. Some of those outputs have no pending tool run left to enumerate
+    # below, such as the error synthesized for a call to a tool that does not exist, and that
+    # classification is not part of the serialized `RunState`. The latest model response is the
+    # source of truth that survives both cases. Seeding from it stays safe because
+    # `hydrate_from_state` records everything that response reported as server-owned before it
+    # consults this set, so a server-owned item is never resent.
+    tool_call_ids = _latest_response_tool_call_ids(run_state)
     tool_run_groups = (
         processed_response.handoffs,
         processed_response.functions,

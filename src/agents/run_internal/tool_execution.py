@@ -11,6 +11,7 @@ import dataclasses
 import functools
 import inspect
 import json
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -21,6 +22,8 @@ from openai.types.responses.response_input_item_param import (
 from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .. import _debug
+from .._function_tool_arguments import FunctionToolApproval
+from .._public_agent import get_public_agent
 from .._tool_identity import (
     FunctionToolLookupKey,
     NamedToolLookupKey,
@@ -81,9 +84,11 @@ from ..tool import (
     _consume_function_tool_default_failure,
     _invoke_function_tool_with_metadata,
     _is_programmatic_tool_call,
+    default_tool_error_function,
     get_function_tool_origin,
     maybe_invoke_function_tool_failure_error_function,
     resolve_computer,
+    resolve_function_tool_failure_error_function,
 )
 from ..tool_context import ToolContext
 from ..tool_guardrails import (
@@ -94,7 +99,7 @@ from ..tool_guardrails import (
 )
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
-from ..util._approvals import evaluate_needs_approval_setting, parse_function_tool_arguments
+from ..util._approvals import evaluate_function_tool_approval
 from ..util._asyncio_tasks import gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
@@ -574,7 +579,7 @@ async def resolve_enabled_function_tools(
         attr = tool.is_enabled
         if isinstance(attr, bool):
             return attr
-        result = attr(context_wrapper, agent)
+        result = attr(context_wrapper, get_public_agent(agent))
         if inspect.isawaitable(result):
             return bool(await result)
         return bool(result)
@@ -1301,21 +1306,11 @@ async def function_needs_approval(
     function_tool: FunctionTool,
     context_wrapper: RunContextWrapper[Any],
     tool_call: ResponseFunctionToolCall,
-) -> bool:
-    """Evaluate a function tool's needs_approval setting with parsed args."""
-    parsed_args: dict[str, Any] = {}
-    if callable(function_tool.needs_approval):
-        parsed_args_result = parse_function_tool_arguments(tool_call.arguments)
-        if parsed_args_result is None:
-            return True
-        parsed_args = parsed_args_result
-    needs_approval = await evaluate_needs_approval_setting(
-        function_tool.needs_approval,
-        context_wrapper,
-        parsed_args,
-        tool_call.call_id,
+) -> FunctionToolApproval:
+    """Prepare and evaluate a single function invocation without executing it."""
+    return await evaluate_function_tool_approval(
+        function_tool, context_wrapper, tool_call.arguments, tool_call.call_id
     )
-    return bool(needs_approval)
 
 
 def _classify_hosted_mcp_pending_request(
@@ -1620,7 +1615,7 @@ class _FunctionToolBatchExecutor:
             if function_tool_id not in enabled_function_tool_ids:
                 self.available_function_tools.append(tool_run.function_tool)
                 enabled_function_tool_ids.add(function_tool_id)
-        pending_tool_runs = list(enumerate(self.tool_runs))
+        pending_tool_runs = deque(enumerate(self.tool_runs))
         self._fill_tool_task_slots(pending_tool_runs)
 
         try:
@@ -1640,7 +1635,7 @@ class _FunctionToolBatchExecutor:
             self.tool_output_guardrail_results,
         )
 
-    def _fill_tool_task_slots(self, pending_tool_runs: list[tuple[int, ToolRunFunction]]) -> None:
+    def _fill_tool_task_slots(self, pending_tool_runs: deque[tuple[int, ToolRunFunction]]) -> None:
         max_concurrency = self.max_function_tool_concurrency
         available_slots = (
             len(pending_tool_runs)
@@ -1648,7 +1643,7 @@ class _FunctionToolBatchExecutor:
             else max_concurrency - len(self.pending_tasks)
         )
         while available_slots > 0 and pending_tool_runs:
-            order, tool_run = pending_tool_runs.pop(0)
+            order, tool_run = pending_tool_runs.popleft()
             self._create_tool_task(tool_run, order)
             available_slots -= 1
 
@@ -1666,7 +1661,7 @@ class _FunctionToolBatchExecutor:
 
     async def _drain_pending_tasks(
         self,
-        pending_tool_runs: list[tuple[int, ToolRunFunction]],
+        pending_tool_runs: deque[tuple[int, ToolRunFunction]],
     ) -> None:
         while self.pending_tasks:
             done_tasks, self.pending_tasks = await asyncio.wait(
@@ -1824,6 +1819,8 @@ class _FunctionToolBatchExecutor:
                     tool_call=tool_call,
                     raw_tool_call=raw_tool_call,
                     span_fn=span_fn,
+                    tool_context=tool_context,
+                    approval_evaluation=task_state.tool_run._approval_evaluation,
                 )
                 if approval_result is not None:
                     result = approval_result
@@ -1850,6 +1847,9 @@ class _FunctionToolBatchExecutor:
                 if isinstance(e, AgentsException):
                     raise
                 raise UserError(f"Error running tool {func_tool.name}: {e}") from e
+            finally:
+                tool_context._function_tool_arguments = None
+                task_state.tool_run._approval_evaluation = None
 
             if self.config.trace_include_sensitive_data:
                 # Approval short-circuits return the FunctionToolResult wrapper rather than the
@@ -1867,6 +1867,8 @@ class _FunctionToolBatchExecutor:
         tool_call: ResponseFunctionToolCall,
         raw_tool_call: ResponseFunctionToolCall,
         span_fn: Span[Any],
+        tool_context: ToolContext[Any],
+        approval_evaluation: FunctionToolApproval | None,
     ) -> Any | None:
         tool_namespace = get_tool_call_namespace(raw_tool_call)
         if tool_namespace is None and is_deferred_top_level_function_tool(func_tool):
@@ -1893,12 +1895,16 @@ class _FunctionToolBatchExecutor:
             tool_lookup_key=tool_lookup_key,
             current_invocation=current_approval_item,
         )
+        if approval_evaluation is not None:
+            approval_evaluation.check_invocation(func_tool, tool_call.arguments)
+            if approval_status is not False:
+                tool_context._function_tool_arguments = approval_evaluation.prepared
         if approval_status is None:
-            needs_approval_result = await function_needs_approval(
-                func_tool,
-                self.context_wrapper,
-                tool_call,
+            evaluation = approval_evaluation or await function_needs_approval(
+                func_tool, self.context_wrapper, tool_call
             )
+            evaluation.check_invocation(func_tool, tool_call.arguments)
+            tool_context._function_tool_arguments = evaluation.prepared
             approval_status = self.context_wrapper.get_approval_status(
                 func_tool.name,
                 tool_call.call_id,
@@ -1906,7 +1912,7 @@ class _FunctionToolBatchExecutor:
                 tool_lookup_key=tool_lookup_key,
                 current_invocation=current_approval_item,
             )
-            if approval_status is None and not needs_approval_result:
+            if approval_status is None and evaluation.outcome == "invoke":
                 return None
 
         if approval_status is None:
@@ -2092,9 +2098,14 @@ class _FunctionToolBatchExecutor:
                 tool_context
             ) and not _uses_programmatic_output_schema(func_tool, tool_call)
 
+            include_error_detail = (
+                self.config.trace_include_sensitive_data
+                and resolve_function_tool_failure_error_function(func_tool, tool_context)
+                is not default_tool_error_function
+            )
             trace_error = get_trace_tool_error(
-                trace_include_sensitive_data=self.config.trace_include_sensitive_data,
-                error_message=str(e),
+                trace_include_sensitive_data=include_error_detail,
+                error_message=str(e) if include_error_detail else "",
             )
             _error_tracing.attach_error_to_current_span(
                 SpanError(

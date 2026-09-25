@@ -118,6 +118,7 @@ from agents.tool import (
     LocalShellTool,
     ProgrammaticToolCallingTool,
     ShellTool,
+    Tool,
     function_tool,
     tool_namespace,
 )
@@ -235,6 +236,48 @@ def record_pending_nested_agent_tool_state(
             ),
         ),
     )
+
+
+def make_tool_calls_then_final_model(
+    *,
+    tool_calls: list[tuple[str, str]],
+    final_text: str,
+    call_prefix: str,
+    expected_calls: int = 2,
+) -> ScriptedModel:
+    """Request the given tool calls, then finish once a tool output is present in the input."""
+
+    def _has_function_call_output(input_data: str | list[TResponseInputItem]) -> bool:
+        if not isinstance(input_data, list):
+            return False
+        return any(
+            (item.get("type") if isinstance(item, dict) else getattr(item, "type", None))
+            == "function_call_output"
+            for item in input_data
+        )
+
+    def _respond(call: ModelCall) -> ModelResponse:
+        if _has_function_call_output(call.input):
+            return ModelResponse(
+                output=[get_text_message(final_text)],
+                usage=Usage(),
+                response_id=f"{call_prefix}-done",
+            )
+        return ModelResponse(
+            output=[
+                ResponseFunctionToolCall(
+                    type="function_call",
+                    name=tool_name,
+                    call_id=f"{call_prefix}-{tool_name}",
+                    arguments=tool_arguments,
+                )
+                for tool_name, tool_arguments in tool_calls
+            ],
+            usage=Usage(),
+            response_id=f"{call_prefix}-call",
+        )
+
+    return ScriptedModel(ModelStep.respond(_respond) for _ in range(expected_calls))
 
 
 def set_last_processed_response(
@@ -5866,6 +5909,181 @@ class TestDeserializeHelpers:
         inner_model.assert_complete()
         outer_model.assert_complete()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "approve_nested_tool",
+        [True, False],
+        ids=["approve", "reject"],
+    )
+    @pytest.mark.parametrize(
+        "agent_graph",
+        ["inner_shares_outer_name", "sibling_agents_share_name", "cloned_sibling_agents"],
+    )
+    async def test_nested_agent_tool_hitl_resume_with_duplicate_agent_names(
+        self,
+        agent_graph: str,
+        approve_nested_tool: bool,
+    ) -> None:
+        """Nested decisions should reach the agent tool's own agent when agent names repeat."""
+        tool_calls: list[str] = []
+
+        def _make_sensitive_tool(label: str) -> FunctionTool:
+            @function_tool(name_override="inner_sensitive_tool", needs_approval=True)
+            async def inner_sensitive_tool(text: str) -> str:
+                tool_calls.append(f"{label}:{text}")
+                return f"approved:{text}"
+
+            return inner_sensitive_tool
+
+        def _make_inner_model(label: str) -> ScriptedModel:
+            return make_tool_calls_then_final_model(
+                tool_calls=[("inner_sensitive_tool", json.dumps({"text": "hello"}))],
+                final_text=f"{label}-complete",
+                call_prefix=label,
+            )
+
+        target_model = _make_inner_model("target")
+        target_tools: list[Tool] = [_make_sensitive_tool("target")]
+        outer_name = "OuterAgent"
+        sibling_agent: Agent[Any] | None = None
+        if agent_graph == "inner_shares_outer_name":
+            outer_name = "Assistant"
+            target_agent = Agent(name="Assistant", model=target_model, tools=target_tools)
+        elif agent_graph == "sibling_agents_share_name":
+            sibling_agent = Agent(
+                name="Worker",
+                model=_make_inner_model("sibling"),
+                tools=[_make_sensitive_tool("sibling")],
+            )
+            target_agent = Agent(name="Worker", model=target_model, tools=target_tools)
+        else:
+            base_agent = Agent(name="Worker")
+            sibling_agent = base_agent.clone(
+                model=_make_inner_model("sibling"),
+                tools=[_make_sensitive_tool("sibling")],
+            )
+            target_agent = base_agent.clone(model=target_model, tools=target_tools)
+
+        # The sibling is registered first so that the target needs a suffixed identity key.
+        outer_tools: list[Tool] = []
+        if sibling_agent is not None:
+            outer_tools.append(
+                sibling_agent.as_tool(
+                    tool_name="sibling_agent_tool",
+                    tool_description="Sibling agent tool",
+                )
+            )
+        outer_tools.append(
+            target_agent.as_tool(
+                tool_name="target_agent_tool",
+                tool_description="Target agent tool",
+            )
+        )
+        outer_model = make_tool_calls_then_final_model(
+            tool_calls=[("target_agent_tool", json.dumps({"input": "hello"}))],
+            final_text="outer-complete",
+            call_prefix="outer",
+        )
+        outer_agent = Agent(name=outer_name, model=outer_model, tools=outer_tools)
+
+        first_result = await Runner.run(outer_agent, "start")
+        assert first_result.final_output is None
+        assert len(first_result.interruptions) == 1
+
+        state_json = json.loads(json.dumps(first_result.to_state().to_json()))
+        del first_result
+        gc.collect()
+
+        restored_state = await RunState.from_json(outer_agent, state_json)
+        restored_interruptions = restored_state.get_interruptions()
+        assert len(restored_interruptions) == 1
+        assert restored_interruptions[0].agent is target_agent
+        if approve_nested_tool:
+            restored_state.approve(restored_interruptions[0])
+        else:
+            restored_state.reject(restored_interruptions[0])
+
+        resumed_result = await Runner.run(outer_agent, restored_state)
+
+        assert resumed_result.final_output == "outer-complete"
+        assert resumed_result.interruptions == []
+        assert tool_calls == (["target:hello"] if approve_nested_tool else [])
+        target_model.assert_complete()
+        outer_model.assert_complete()
+
+    async def test_multiple_nested_agent_tool_hitl_resumes_with_duplicate_agent_names(
+        self,
+    ) -> None:
+        """Pending nested states of same-name agent tools should keep separate decisions."""
+        tool_calls: list[str] = []
+
+        def _make_worker(label: str) -> tuple[Agent[Any], ScriptedModel]:
+            @function_tool(name_override="inner_sensitive_tool", needs_approval=True)
+            async def inner_sensitive_tool(text: str) -> str:
+                tool_calls.append(f"{label}:{text}")
+                return f"approved:{text}"
+
+            model = make_tool_calls_then_final_model(
+                tool_calls=[("inner_sensitive_tool", json.dumps({"text": "hello"}))],
+                final_text=f"{label}-complete",
+                call_prefix=label,
+            )
+            return Agent(name="Worker", model=model, tools=[inner_sensitive_tool]), model
+
+        first_worker, first_model = _make_worker("first")
+        second_worker, second_model = _make_worker("second")
+        outer_model = make_tool_calls_then_final_model(
+            tool_calls=[
+                ("first_agent_tool", json.dumps({"input": "hello"})),
+                ("second_agent_tool", json.dumps({"input": "hello"})),
+            ],
+            final_text="outer-complete",
+            call_prefix="outer",
+        )
+        outer_agent = Agent(
+            name="OuterAgent",
+            model=outer_model,
+            tools=[
+                first_worker.as_tool(
+                    tool_name="first_agent_tool",
+                    tool_description="First agent tool",
+                ),
+                second_worker.as_tool(
+                    tool_name="second_agent_tool",
+                    tool_description="Second agent tool",
+                ),
+            ],
+        )
+
+        first_result = await Runner.run(outer_agent, "start")
+        assert first_result.final_output is None
+        assert len(first_result.interruptions) == 2
+
+        state_json = json.loads(json.dumps(first_result.to_state().to_json()))
+        del first_result
+        gc.collect()
+
+        restored_state = await RunState.from_json(outer_agent, state_json)
+        restored_interruptions = restored_state.get_interruptions()
+        assert {id(interruption.agent) for interruption in restored_interruptions} == {
+            id(first_worker),
+            id(second_worker),
+        }
+        for interruption in restored_interruptions:
+            if interruption.agent is second_worker:
+                restored_state.approve(interruption)
+            else:
+                restored_state.reject(interruption)
+
+        resumed_result = await Runner.run(outer_agent, restored_state)
+
+        assert resumed_result.final_output == "outer-complete"
+        assert resumed_result.interruptions == []
+        assert tool_calls == ["second:hello"]
+        first_model.assert_complete()
+        second_model.assert_complete()
+        outer_model.assert_complete()
+
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
         agent = Agent(name="TestAgent")
@@ -8611,6 +8829,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.14",
                 "1.15",
                 "1.16",
+                "1.17",
                 CURRENT_SCHEMA_VERSION,
             }
         )
@@ -11582,3 +11801,117 @@ async def test_schema_1_13_hosted_mcp_orphaned_call_decisions_require_reapproval
         )
         == "legacy exact denial"
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_guardrail_models_survive_state_serialization() -> None:
+    from agents.testing import assistant_message
+
+    class Verdict(BaseModel):
+        allowed: bool
+        reason: str
+
+    class Answer(BaseModel):
+        text: str
+
+    async def check(*args: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=Verdict(allowed=True, reason="approved"),
+            tripwire_triggered=False,
+        )
+
+    agent = Agent(
+        name="Audit",
+        model=ScriptedModel([[assistant_message('{"text":"hello"}')]]),
+        output_type=Answer,
+        input_guardrails=[InputGuardrail(check)],
+        output_guardrails=[OutputGuardrail(check)],
+    )
+    result = await Runner.run(agent, "hello", run_config=RunConfig(tracing_disabled=True))
+    restored = await RunState.from_json(agent, json.loads(result.to_state().to_string()))
+
+    assert restored._input_guardrail_results[0].output.output_info == {
+        "allowed": True,
+        "reason": "approved",
+    }
+    assert restored._output_guardrail_results[0].output.output_info == {
+        "allowed": True,
+        "reason": "approved",
+    }
+    assert restored._output_guardrail_results[0].agent_output == {"text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_tool_guardrail_dataclasses_survive_state_serialization() -> None:
+    @dataclass
+    class Verdict:
+        allowed: bool
+        reason: str
+
+    verdict = Verdict(allowed=True, reason="approved")
+    output = ToolGuardrailFunctionOutput(
+        output_info={"checks": [verdict]}, behavior=AllowBehavior(type="allow")
+    )
+    agent = Agent(name="Audit")
+    state = make_state(agent, context=RunContextWrapper(context=None))
+    state._tool_input_guardrail_results = [
+        ToolInputGuardrailResult(
+            guardrail=ToolInputGuardrail(lambda data: output, name="input"),
+            output=output,
+        )
+    ]
+    state._tool_output_guardrail_results = [
+        ToolOutputGuardrailResult(
+            guardrail=ToolOutputGuardrail(lambda data: output, name="output"),
+            output=output,
+        )
+    ]
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    expected = {"checks": [{"allowed": True, "reason": "approved"}]}
+    assert restored._tool_input_guardrail_results[0].output.output_info == expected
+    assert restored._tool_output_guardrail_results[0].output.output_info == expected
+
+
+@pytest.mark.asyncio
+async def test_guardrail_state_keeps_fallback_when_model_serializer_raises() -> None:
+    class Diagnostic(BaseModel):
+        reason: str
+
+        @model_serializer
+        def serialize(self) -> dict[str, Any]:
+            raise ValueError("Serializer unavailable.")
+
+    diagnostic = Diagnostic(reason="approved")
+    output = GuardrailFunctionOutput(output_info=diagnostic, tripwire_triggered=False)
+    agent = Agent(name="Audit")
+    state = make_state(agent, context=RunContextWrapper(context=None))
+    state._input_guardrail_results = [
+        InputGuardrailResult(guardrail=InputGuardrail(lambda *args: output), output=output)
+    ]
+    state._output_guardrail_results = [
+        OutputGuardrailResult(
+            guardrail=OutputGuardrail(lambda *args: output),
+            agent=agent,
+            agent_output=diagnostic,
+            output=output,
+        )
+    ]
+    tool_output = ToolGuardrailFunctionOutput(
+        output_info=diagnostic, behavior=AllowBehavior(type="allow")
+    )
+    state._tool_input_guardrail_results = [
+        ToolInputGuardrailResult(
+            guardrail=ToolInputGuardrail(lambda data: tool_output), output=tool_output
+        )
+    ]
+    state._tool_output_guardrail_results = [
+        ToolOutputGuardrailResult(
+            guardrail=ToolOutputGuardrail(lambda data: tool_output), output=tool_output
+        )
+    ]
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    assert restored._input_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._output_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._output_guardrail_results[0].agent_output == "reason='approved'"
+    assert restored._tool_input_guardrail_results[0].output.output_info == "reason='approved'"
+    assert restored._tool_output_guardrail_results[0].output.output_info == "reason='approved'"

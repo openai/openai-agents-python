@@ -24,7 +24,7 @@ from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 import aiohttp
@@ -1128,7 +1128,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
         process_count = 0
 
         try:
-            ws = await self._session().ws_connect(self._ws_pty_url())
+            ws = cast(
+                "aiohttp.ClientWebSocketResponse[Any]",
+                await self._session().ws_connect(self._ws_pty_url()),
+            )
 
             ready_deadline = time.monotonic() + 30.0
             while True:

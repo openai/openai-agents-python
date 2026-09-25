@@ -7,7 +7,7 @@ import queue
 import random
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, cast
 
@@ -52,6 +52,9 @@ class BackendSpanExporter(TracingExporter):
         }
     )
     _OPENAI_TRACING_USAGE_SPAN_TYPES = frozenset({"generation"})
+    # 4xx statuses that are transient, mirroring the OpenAI client's own retry policy:
+    # request timeout, conflict, and rate limiting.
+    _RETRYABLE_CLIENT_STATUS_CODES = frozenset({408, 409, 429})
     _UNSERIALIZABLE = object()
 
     def __init__(
@@ -96,16 +99,25 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
-        # Clear the cached property if it exists
-        if "api_key" in self.__dict__:
-            del self.__dict__["api_key"]
-
-        # Update the private attribute
         self._api_key = api_key
 
-    @cached_property
+    @property
     def api_key(self):
-        return self._api_key or os.environ.get("OPENAI_API_KEY")
+        # Keep a key from the environment once it is found, but do not remember a missing one, so a
+        # key that appears after an export without one, such as from a later `load_dotenv()`, is
+        # still used. A lookup that finds nothing writes nothing, so it cannot discard a key that
+        # `set_api_key()` stores while the lookup runs.
+        api_key = self._api_key
+        if not api_key:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                self._api_key = api_key
+        return api_key
+
+    @api_key.setter
+    def api_key(self, api_key: str | None):
+        # Assigning the attribute worked while it was a cached property, and callers rely on it.
+        self._api_key = api_key
 
     @cached_property
     def organization(self):
@@ -158,7 +170,9 @@ class BackendSpanExporter(TracingExporter):
             # Exponential backoff loop
             attempt = 0
             delay = self.base_delay
+            retry_after: float | None = None
             while True:
+                retry_after = None
                 request_timeout = self._timeout_for_deadline(deadline)
                 if deadline is not None and request_timeout is None:
                     logger.warning(
@@ -182,8 +196,18 @@ class BackendSpanExporter(TracingExporter):
                         logger.debug("Exported %s items", len(grouped))
                         break
 
-                    # If the response is a client error (4xx), we won't retry
-                    if 400 <= response.status_code < 500:
+                    allows_retry = self._server_allows_retry(response)
+                    # A rate limit, request timeout, or conflict is transient: retry it
+                    # like a server error, waiting at least the advertised Retry-After,
+                    # unless the server says outright not to retry.
+                    if response.status_code in self._RETRYABLE_CLIENT_STATUS_CODES and allows_retry:
+                        retry_after = self._retry_after_seconds(response)
+                        logger.warning(
+                            "[non-fatal] Tracing: client error %s, retrying.",
+                            response.status_code,
+                        )
+                    # Any other client error (4xx) won't be retried
+                    elif 400 <= response.status_code < 500:
                         if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
                             logger.error(
                                 "[non-fatal] Tracing client error %s. Response data is redacted.",
@@ -196,11 +220,18 @@ class BackendSpanExporter(TracingExporter):
                                 response.text,
                             )
                         break
-
-                    # For 5xx or other unexpected codes, treat it as transient and retry
-                    logger.warning(
-                        "[non-fatal] Tracing: server error %s, retrying.", response.status_code
-                    )
+                    elif not allows_retry:
+                        logger.error(
+                            "[non-fatal] Tracing: server forbade retry for %s.",
+                            response.status_code,
+                        )
+                        break
+                    else:
+                        # For 5xx or other unexpected codes, treat it as transient and retry
+                        logger.warning(
+                            "[non-fatal] Tracing: server error %s, retrying.",
+                            response.status_code,
+                        )
                 except httpx2.RequestError as exc:
                     # Network or other I/O error, we'll retry
                     log_model_and_tool_action_warning(
@@ -216,9 +247,39 @@ class BackendSpanExporter(TracingExporter):
 
                 # Exponential backoff + jitter
                 sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
+                if retry_after is not None:
+                    # Honour the server's wait, bounded by max_delay so a large
+                    # Retry-After cannot stall the export thread.
+                    sleep_time = min(max(sleep_time, retry_after), self.max_delay)
                 if not self._sleep_before_retry(sleep_time, deadline):
                     break
                 delay = min(delay * 2, self.max_delay)
+
+    def _server_allows_retry(self, response: httpx2.Response) -> bool:
+        # Mirror the OpenAI client: an explicit `x-should-retry: false` wins over the
+        # status code classification.
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return True
+        should_retry = headers.get("x-should-retry")
+        if not isinstance(should_retry, str):
+            return True
+        return should_retry.strip().lower() != "false"
+
+    def _retry_after_seconds(self, response: httpx2.Response) -> float | None:
+        # Imported lazily: the models package pulls in the OpenAI client, which must not
+        # become an import-time dependency of tracing.
+        from ..models._retry_runtime import parse_retry_after_ms, parse_retry_after_value
+
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        retry_after = parse_retry_after_ms(headers.get("retry-after-ms"))
+        if retry_after is None:
+            retry_after = parse_retry_after_value(headers.get("retry-after"))
+        if retry_after is None or not math.isfinite(retry_after):
+            return None
+        return retry_after
 
     def _timeout_for_deadline(self, deadline: float | None) -> httpx2.Timeout | None:
         if deadline is None:
@@ -232,34 +293,35 @@ class BackendSpanExporter(TracingExporter):
         return httpx2.Timeout(remaining, connect=connect_timeout)
 
     def _sleep_before_retry(self, sleep_time: float, deadline: float | None) -> bool:
-        if deadline is None:
-            if self._shutdown_event.wait(sleep_time):
-                logger.warning(
-                    "[non-fatal] Tracing: shutdown requested during retry backoff, giving up."
-                )
-                return False
-            return not self._shutdown_event.is_set()
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
             logger.warning("[non-fatal] Tracing: export deadline reached before retry, giving up.")
             return False
 
-        if sleep_time >= remaining:
-            time.sleep(remaining)
+        wait_for = sleep_time if remaining is None else min(sleep_time, remaining)
+        if deadline is None and self._shutdown_event.wait(wait_for):
             logger.warning(
-                "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
+                "[non-fatal] Tracing: shutdown requested during retry backoff, giving up."
             )
             return False
-
-        time.sleep(sleep_time)
+        if deadline is not None:
+            # The final drain runs after shutdown is requested; its deadline bounds retries.
+            time.sleep(wait_for)
+            if remaining is not None and (sleep_time >= remaining or time.monotonic() >= deadline):
+                logger.warning(
+                    "[non-fatal] Tracing: export deadline reached during retry backoff, giving up."
+                )
+                return False
         return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
         return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
-        """Drop or truncate span fields known to be rejected by traces ingest."""
+        """Omit reasoning from generation data and enforce traces ingest field limits.
+
+        Original spans remain available to custom processors and exporters.
+        """
         span_data = payload_item.get("span_data")
         if not isinstance(span_data, dict):
             return payload_item
@@ -270,7 +332,10 @@ class BackendSpanExporter(TracingExporter):
         for field_name in ("input", "output"):
             if field_name not in span_data:
                 continue
-            sanitized_field = self._truncate_span_field_value(span_data[field_name])
+            field_value = span_data[field_name]
+            if span_data.get("type") == "generation":
+                field_value = self._omit_generation_reasoning(field_value)
+            sanitized_field = self._truncate_span_field_value(field_value)
             if sanitized_field is span_data[field_name]:
                 continue
             if not did_mutate:
@@ -317,6 +382,46 @@ class BackendSpanExporter(TracingExporter):
         sanitized_payload_item = dict(payload_item)
         sanitized_payload_item["span_data"] = sanitized_span_data
         return sanitized_payload_item
+
+    def _omit_generation_reasoning(self, value: Any) -> Any:
+        """Filter SDK generation message shapes without traversing arbitrary user data."""
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+            return value
+
+        def omit_message_reasoning(item: Any) -> Any:
+            if not isinstance(item, Mapping):
+                return item
+            item = dict(item)
+            if item.get("role") == "assistant":
+                for key in ("reasoning", "reasoning_content", "thinking_blocks", "thinking"):
+                    item.pop(key, None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    # Legacy thinking replay uses inline Anthropic content blocks.
+                    item["content"] = [
+                        part
+                        for part in content
+                        if not isinstance(part, dict)
+                        or part.get("type") not in ("thinking", "redacted_thinking")
+                    ]
+            return item
+
+        def omit_items(items: Sequence[Any]) -> list[Any]:
+            # Third-party reasoning_content is also normalized into summary text.
+            return [
+                omit_message_reasoning(item)
+                for item in items
+                if not isinstance(item, Mapping) or item.get("type") != "reasoning"
+            ]
+
+        return [
+            {**item, "output": omit_items(item["output"])}
+            if isinstance(item, Mapping)
+            and item.get("object") == "response"
+            and isinstance(item.get("output"), list)
+            else item
+            for item in omit_items(value)
+        ]
 
     def _value_json_size_bytes(self, value: Any) -> int:
         try:

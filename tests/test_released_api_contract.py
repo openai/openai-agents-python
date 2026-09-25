@@ -3979,6 +3979,24 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "names": ["max_results", "caption"],
         },
         {
+            "class_name": "ImageGenerationToolConfig",
+            "module": "agents",
+            "names": [
+                "type",
+                "action",
+                "background",
+                "input_fidelity",
+                "input_image_mask",
+                "model",
+                "moderation",
+                "output_compression",
+                "output_format",
+                "partial_images",
+                "quality",
+                "size",
+            ],
+        },
+        {
             "class_name": "ModelStepSpec",
             "module": "agents.testing.model",
             "names": [

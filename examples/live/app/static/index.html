@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GPT Live + Agents SDK</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+      body { max-width: 1050px; margin: 40px auto; padding: 0 24px; }
+      h1 { letter-spacing: -0.04em; margin-bottom: 12px; }
+      p { line-height: 1.6; }
+      button { padding: 10px 18px; margin: 0 8px 12px 0; cursor: pointer; }
+      button:disabled { cursor: default; }
+      #status { min-height: 1.5em; font-weight: 600; }
+      .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+      section { border: 1px solid #8886; border-radius: 12px; padding: 20px; min-width: 0; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+      .hint { color: light-dark(#555, #bbb); font-size: 0.9rem; }
+      @media (max-width: 700px) { .panels { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <h1>GPT Live + Agents SDK</h1>
+    <p>Ask about fictional orders <strong>A0042</strong> and <strong>A0043</strong>.
+      GPT Live handles the conversation; an Agents SDK specialist looks up the order.</p>
+    <button id="start">Start conversation</button>
+    <button id="stop" disabled>End conversation</button>
+    <button id="mute" disabled>Mute microphone</button>
+    <audio id="audio" autoplay controls></audio>
+    <p id="status" role="status">Ready to connect.</p>
+    <div class="panels">
+      <section>
+        <h2>Conversation</h2>
+        <p class="hint">Transcripts are shown independently for each speaker and may overlap.</p>
+        <h3>You</h3><pre id="user"></pre>
+        <h3>Assistant</h3><pre id="assistant"></pre>
+      </section>
+      <section>
+        <h2>Specialist activity</h2>
+        <p class="hint">A submitted result does not mean it has been spoken or heard.</p>
+        <pre id="activity"></pre>
+      </section>
+    </div>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
