@@ -1051,6 +1051,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#approval-for-local-shell-and-file-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Approval for local shell and file edits
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#computertool-and-the-responses-computer-tool" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -5235,6 +5246,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#approval-for-local-shell-and-file-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Approval for local shell and file edits
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#computertool-and-the-responses-computer-tool" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -5805,6 +5827,11 @@
 <li>Local shell skills are available with <code>ShellTool(environment={"type": "local", "skills": [...]})</code>.</li>
 </ul>
 <p>Shell action timeouts use positive integer milliseconds for a finite timeout. The SDK treats both <code>0</code> and <code>None</code> as no explicit timeout before calling a local <code>ShellTool</code> executor because zero does not have a portable meaning across executor implementations; other values are rejected before executor invocation. This is specific to the timeout field: <code>max_output_length=0</code> remains a supported request for empty captured output.</p>
+<h3 id="approval-for-local-shell-and-file-edits">Approval for local shell and file edits</h3>
+<p>Local <code>ShellTool</code> and <code>ApplyPatchTool</code> default to <code>needs_approval=False</code>. With this setting, the SDK can invoke your executor or editor without requesting approval. Your implementation determines where commands run or files change and must enforce the intended resource permissions and isolation; SDK approval does not provide a sandbox.</p>
+<p>For commands or file edits that require review, set <code>needs_approval=True</code> on the tool, or provide a callable policy that returns <code>True</code> for calls that require approval. Without an <code>on_approval</code> callback, the run pauses before invoking the executor or editor and returns pending requests in <code>result.interruptions</code>. Approve or reject those requests through <code>RunState</code>, then resume the run as described in the <a href="../human_in_the_loop/">human-in-the-loop guide</a>.</p>
+<p>To decide immediately in application code, set both <code>needs_approval</code> and <code>on_approval</code>. The SDK invokes <code>on_approval</code> only when the call requires approval and has no existing approval decision; setting the callback alone does not enable approval. See <code>examples/tools/shell.py</code> for a CLI prompt and <code>examples/tools/shell_human_in_the_loop.py</code> for manual interruption handling. The <code>examples/tools/apply_patch.py</code> example instead prompts inside its editor before changing files.</p>
+<p>Keep <code>needs_approval=False</code> when your application intentionally authorizes automatic execution, for example through an executor that enforces your sandbox policy. Hosted shell environments do not support the SDK's local <code>needs_approval</code> or <code>on_approval</code> settings.</p>
 <h3 id="computertool-and-the-responses-computer-tool">ComputerTool and the Responses computer tool</h3>
 <p><code>ComputerTool</code> is still a local harness: you provide a <a class="autorefs autorefs-internal" title="Computer" href="../ref/computer/#agents.computer.Computer"><code>Computer</code></a> or <a class="autorefs autorefs-internal" title="AsyncComputer" href="../ref/computer/#agents.computer.AsyncComputer"><code>AsyncComputer</code></a> implementation, and the SDK maps that harness onto the OpenAI Responses API computer surface.</p>
 <p>When an <a class="autorefs autorefs-internal" title="Agent

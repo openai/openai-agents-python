@@ -5265,6 +5265,7 @@
   
       dataclass
   " href="../ref/tool/#agents.tool.HostedMCPTool"><code>HostedMCPTool</code></a> with <code>tool_config={"require_approval": "always"}</code> and an optional <code>on_approval_request</code> callback. Shell and apply_patch tools accept an <code>on_approval</code> callback if you want to auto-approve or auto-reject without surfacing an interruption.</p>
+<p>For local <code>ShellTool</code> and <code>ApplyPatchTool</code>, approval is opt-in: <code>needs_approval</code> defaults to <code>False</code>. An <code>on_approval</code> callback alone does not enable approval. Set <code>needs_approval=True</code> or a callable approval policy as well; the SDK invokes the callback only for calls that require approval and have no existing approval decision. See <a href="../tools/#approval-for-local-shell-and-file-edits">approval for local shell and file edits</a> for execution responsibilities and example configurations.</p>
 <h2 id="how-the-approval-flow-works">How the approval flow works</h2>
 <ol>
 <li>When the model emits a tool call, the runner evaluates its approval rule (<code>needs_approval</code>, <code>require_approval</code>, or the hosted MCP equivalent).</li>
