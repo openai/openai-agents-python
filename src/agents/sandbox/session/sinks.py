@@ -144,9 +144,9 @@ class WorkspaceJsonlSink(EventSink):
     """
     Append events to a JSONL file inside the session workspace (under manifest.root).
 
-    This sink uses the session's bounded-read API and file-write API to replace
-    the outbox. SDK backends limit acquisition from the source. Legacy custom
-    backends use their existing `read()` API; any data acquired inside that method
+    This sink reads and replaces the outbox through the session's file APIs.
+    With a finite `max_bytes`, SDK backends limit acquisition from the source.
+    Legacy custom backends use their existing `read()` API; data acquired inside that method
     is outside this sink's size limit. Backends own read deadlines and cleanup;
     this sink does not impose an additional timeout. Workspace logs are
     workload-modifiable and are not authoritative audit records. Use
@@ -162,7 +162,7 @@ class WorkspaceJsonlSink(EventSink):
         on_error: OnErrorPolicy = "log",
         payload_policy: EventPayloadPolicy | None = None,
         flush_every: int = 1,
-        max_bytes: int = 8 * 1024 * 1024,
+        max_bytes: int | None = None,
     ) -> None:
         """
         Args:
@@ -173,16 +173,17 @@ class WorkspaceJsonlSink(EventSink):
 
                 Example:
                     Path("logs/events-{session_id}.jsonl")
-            max_bytes: Maximum replacement-file and pending-buffer size in bytes.
-                The default 8 MiB is a defensive SDK budget, not a provider limit.
-                Must be positive. Exceeding either budget clears pending events
+            max_bytes: Optional maximum replacement-file and pending-buffer size in bytes.
+                The default `None` preserves unlimited delivery and whole-file reads.
+                Set a positive budget to bound acquisition of workload-modifiable logs.
+                Exceeding either budget clears pending events
                 and permanently stops this sink, reporting one error through
                 `on_error`. Subsequent events are ignored, including after rebind.
                 Create a new sink for a new outbox or with a larger finite budget,
                 or use a host/HTTP sink for longer-lived logs. No file is truncated
                 or rotated when the budget is exceeded.
         """
-        if max_bytes <= 0:
+        if max_bytes is not None and max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
         self.max_bytes = max_bytes
         self._disabled = False
@@ -222,7 +223,7 @@ class WorkspaceJsonlSink(EventSink):
 
     def _buffer_event(self, event: SandboxSessionEvent) -> bool:
         line = event_to_json_line(event).encode("utf-8")
-        if len(self._buf) + len(line) > self.max_bytes:
+        if self.max_bytes is not None and len(self._buf) + len(line) > self.max_bytes:
             self._stop_at_limit()
         self._buf.extend(line)
         self._seen += 1
@@ -258,7 +259,7 @@ class WorkspaceJsonlSink(EventSink):
         relpath = self._resolved_workspace_relpath or self.workspace_relpath
         existing = await self._read_existing_outbox(relpath)
         pending = bytes(self._buf)
-        if len(existing) + len(pending) > self.max_bytes:
+        if self.max_bytes is not None and len(existing) + len(pending) > self.max_bytes:
             self._stop_at_limit()
         await self._session.write(relpath, io.BytesIO(existing + pending))
         self._buf.clear()
@@ -276,6 +277,13 @@ class WorkspaceJsonlSink(EventSink):
             return b""
 
         try:
+            if self.max_bytes is None:
+                existing = await self._session.read(relpath)
+                try:
+                    payload = existing.read()
+                finally:
+                    existing.close()
+                return payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
             return await self._session.read_bounded(relpath, max_bytes=self.max_bytes + 1)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
             return b""

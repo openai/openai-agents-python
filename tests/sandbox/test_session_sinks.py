@@ -88,7 +88,12 @@ async def test_workspace_jsonl_sink_legacy_backend_delivers(
     tmp_path: Path, history_kind: str
 ) -> None:
     inner = _LegacyReadSession(_build_filesystem_test_session(tmp_path).state)
-    sink = WorkspaceJsonlSink(workspace_relpath=Path("out.jsonl"), mode="sync", on_error="raise")
+    sink = WorkspaceJsonlSink(
+        max_bytes=8 * 1024 * 1024,
+        workspace_relpath=Path("out.jsonl"),
+        mode="sync",
+        on_error="raise",
+    )
     instrumentation = Instrumentation(sinks=[sink])
     SandboxSession(inner, instrumentation=instrumentation)
     old = "日本語\n".encode() if history_kind == "text" else b"\x00\xff\n"
@@ -141,7 +146,12 @@ async def test_workspace_jsonl_sink_legacy_backend_read_failure_closes_stream(
     tmp_path: Path,
 ) -> None:
     inner = _LegacyReadSession(_build_filesystem_test_session(tmp_path).state)
-    sink = WorkspaceJsonlSink(workspace_relpath=Path("out.jsonl"), mode="sync", on_error="raise")
+    sink = WorkspaceJsonlSink(
+        max_bytes=8 * 1024 * 1024,
+        workspace_relpath=Path("out.jsonl"),
+        mode="sync",
+        on_error="raise",
+    )
     instrumentation = Instrumentation(sinks=[sink])
     SandboxSession(inner, instrumentation=instrumentation)
     stream = io.BytesIO(b"original\n")
@@ -321,7 +331,9 @@ async def test_workspace_jsonl_sink_preserves_bytes_and_reports_failure(
 @pytest.mark.asyncio
 async def test_workspace_jsonl_sink_failed_read_without_writing(tmp_path: Path) -> None:
     inner = _build_bounded_read_session(tmp_path)
-    sink = WorkspaceJsonlSink()
+    sink = WorkspaceJsonlSink(
+        max_bytes=8 * 1024 * 1024,
+    )
     sink.bind(inner)
     async with inner:
         with (
@@ -349,7 +361,7 @@ async def test_workspace_jsonl_sink_errors_have_no_pending_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     inner = _build_bounded_read_session(tmp_path)
-    sink = WorkspaceJsonlSink(mode="sync", on_error=policy)
+    sink = WorkspaceJsonlSink(max_bytes=8 * 1024 * 1024, mode="sync", on_error=policy)
     instrumentation = Instrumentation(sinks=[sink])
     SandboxSession(inner, instrumentation=instrumentation)
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", redact)
@@ -386,6 +398,34 @@ async def test_workspace_jsonl_sink_errors_have_no_pending_payload(
 def test_workspace_jsonl_sink_requires_positive_budget() -> None:
     with pytest.raises(ValueError, match="max_bytes must be positive"):
         WorkspaceJsonlSink(max_bytes=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_none", [False, True])
+async def test_workspace_jsonl_sink_default_keeps_delivering_after_eight_mib(
+    tmp_path: Path, explicit_none: bool
+) -> None:
+    inner = _build_filesystem_test_session(tmp_path)
+    relpath = Path("out.jsonl")
+    sink = (
+        WorkspaceJsonlSink(workspace_relpath=relpath, mode="sync", on_error="raise", max_bytes=None)
+        if explicit_none
+        else WorkspaceJsonlSink(workspace_relpath=relpath, mode="sync", on_error="raise")
+    )
+    instrumentation = Instrumentation(sinks=[sink])
+    SandboxSession(inner, instrumentation=instrumentation)
+    old = b'{"old":"' + b"x" * (8 * 1024 * 1024) + b'"}\n'
+    async with inner:
+        await inner.write(relpath, io.BytesIO(old))
+        await instrumentation.emit(_outbox_event(inner))
+        await instrumentation.emit(_outbox_event(inner, op="stop"))
+        content = inner.normalize_path(relpath).read_bytes()
+    assert content.startswith(old)
+    assert [json.loads(line)["op"] for line in content[len(old) :].splitlines()] == [
+        "write",
+        "stop",
+    ]
+    assert not sink._buf
 
 
 def _build_unix_local_session(
@@ -1378,7 +1418,9 @@ async def test_sandbox_session_aclose_flushes_best_effort_sink_tasks(tmp_path: P
 @pytest.mark.asyncio
 async def test_workspace_jsonl_sink_wire_budget_stops_delivery(tmp_path: Path) -> None:
     inner = _build_bounded_read_session(tmp_path)
-    sink = WorkspaceJsonlSink()
+    sink = WorkspaceJsonlSink(
+        max_bytes=8 * 1024 * 1024,
+    )
     sink.bind(inner)
     async with inner:
         with (
@@ -1404,7 +1446,9 @@ async def test_workspace_sink_waits_for_backend_read_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     inner = _build_bounded_read_session(tmp_path)
-    sink = WorkspaceJsonlSink(workspace_relpath=Path("out.jsonl"), on_error="raise")
+    sink = WorkspaceJsonlSink(
+        max_bytes=8 * 1024 * 1024, workspace_relpath=Path("out.jsonl"), on_error="raise"
+    )
     sink.bind(inner)
     inner.running = AsyncMock(return_value=True)  # type: ignore[method-assign]
     loop = asyncio.get_running_loop()

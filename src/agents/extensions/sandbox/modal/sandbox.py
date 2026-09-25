@@ -1253,14 +1253,14 @@ class ModalSandboxSession(BaseSandboxSession):
             workspace_path = await self._validate_path_access(path)
             await self._ensure_sandbox()
             assert self._sandbox is not None
-            # The pinned Modal SDK exposes a provider-owned file descriptor. Read
-            # in small requests to respect its per-request size limit.
+            # Each read starts a remote operation. Use Modal's 100 MiB per-read
+            # ceiling while respecting the caller's remaining byte budget.
             stream = await self._sandbox.open.aio(sandbox_path_str(workspace_path), "rb")
             completed = False
             try:
                 result = bytearray()
                 while len(result) < max_bytes:
-                    chunk = await stream.read.aio(min(65536, max_bytes - len(result)))
+                    chunk = await stream.read.aio(min(100 * 1024 * 1024, max_bytes - len(result)))
                     if not chunk:
                         break
                     result.extend(chunk)

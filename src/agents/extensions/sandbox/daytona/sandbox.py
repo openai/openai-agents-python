@@ -34,6 +34,7 @@ from ....sandbox.errors import (
     ExecTransportError,
     ExposedPortUnavailableError,
     InvalidManifestPathError as InvalidManifestPathError,
+    SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -945,20 +946,26 @@ class DaytonaSandboxSession(BaseSandboxSession):
         workspace_path = await self._validate_path_access(path)
         # The high-level download buffers the response. The generated toolbox
         # client exposes the same endpoint without preloading its body.
-        response = await self._sandbox.fs._api_client.download_file_without_preload_content(
-            path=sandbox_path_str(workspace_path),
-            _request_timeout=float(self.state.timeouts.file_download_s),
-        )
         try:
-            if response.status == 404:
-                raise WorkspaceReadNotFoundError(path=path)
-            if response.status != 200:
-                raise WorkspaceArchiveReadError(
-                    path=path, retryable=_DAYTONA_HTTP_STATUS_RETRYABLE.get(response.status)
-                )
-            return await collect_bounded(response.content.iter_chunked(65536), max_bytes)
-        finally:
-            response.close()
+            response = await self._sandbox.fs._api_client.download_file_without_preload_content(
+                path=sandbox_path_str(workspace_path),
+                _request_timeout=float(self.state.timeouts.file_download_s),
+            )
+            try:
+                if response.status == 404:
+                    raise WorkspaceReadNotFoundError(path=path)
+                if response.status != 200:
+                    raise WorkspaceArchiveReadError(
+                        path=path, retryable=_DAYTONA_HTTP_STATUS_RETRYABLE.get(response.status)
+                    )
+                return await collect_bounded(response.content.iter_chunked(65536), max_bytes)
+            finally:
+                response.close()
+        except SandboxError:
+            raise
+        except Exception as error:
+            retryable, _ = _daytona_provider_retryability(error)
+            raise WorkspaceArchiveReadError(path=path, retryable=retryable) from None
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         error_path = posix_path_as_path(coerce_posix_path(path))

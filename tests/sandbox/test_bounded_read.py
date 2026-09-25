@@ -264,6 +264,85 @@ async def test_modal_bounded_read_closes_provider_descriptor(close_error: Except
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "limit,expected_requests",
+    [
+        (4 * 1024 * 1024, [4 * 1024 * 1024]),
+        (8 * 1024 * 1024 + 1, [8 * 1024 * 1024 + 1, 4 * 1024 * 1024 + 1]),
+        (101 * 1024 * 1024, [100 * 1024 * 1024, 97 * 1024 * 1024]),
+    ],
+)
+async def test_modal_bounded_read_uses_large_bounded_requests(
+    limit: int, expected_requests: list[int]
+) -> None:
+    pytest.importorskip("modal")
+    from agents.extensions.sandbox.modal.sandbox import ModalSandboxSession
+
+    session = object.__new__(ModalSandboxSession)
+    session._validate_path_access = AsyncMock(return_value=Path("/workspace/out.jsonl"))
+    session._ensure_sandbox = AsyncMock()
+    history = b"x" * (4 * 1024 * 1024)
+    remaining = history
+
+    async def read(size: int) -> bytes:
+        nonlocal remaining
+        chunk, remaining = remaining[:size], remaining[size:]
+        return chunk
+
+    stream = SimpleNamespace(
+        read=SimpleNamespace(aio=AsyncMock(side_effect=read)),
+        close=SimpleNamespace(aio=AsyncMock()),
+    )
+    session._sandbox = SimpleNamespace(open=SimpleNamespace(aio=AsyncMock(return_value=stream)))
+    assert await session.read_bounded(Path("out.jsonl"), max_bytes=limit) == history
+    requests = [call.args[0] for call in stream.read.aio.await_args_list]
+    assert requests == expected_requests
+    assert all(size <= 100 * 1024 * 1024 for size in requests)
+    stream.close.aio.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["acquisition", "body"])
+async def test_daytona_bounded_read_timeout_preserves_retryability(phase: str) -> None:
+    pytest.importorskip("daytona")
+    from agents.extensions.sandbox.daytona.sandbox import DaytonaSandboxSessionState
+    from agents.sandbox.manifest import Manifest
+    from agents.sandbox.snapshot import NoopSnapshot
+
+    class TimeoutContent(_Content):
+        async def chunks(self, chunk_size: int = 3) -> AsyncIterator[bytes]:
+            yield b"x"
+            raise asyncio.TimeoutError("synthetic-private-response")
+
+    content = TimeoutContent(b"fixture")
+    inner = _session("daytona", content)
+    inner.state = DaytonaSandboxSessionState(
+        sandbox_id="test", manifest=Manifest(), snapshot=NoopSnapshot(id="test")
+    )
+    if phase == "acquisition":
+        inner._sandbox.fs._api_client.download_file_without_preload_content.side_effect = (
+            asyncio.TimeoutError("synthetic-private-response")
+        )
+    events: list[SandboxSessionEvent] = []
+    wrapper = SandboxSession(
+        inner,
+        instrumentation=Instrumentation(
+            sinks=[CallbackSink(lambda event, _: events.append(event), mode="sync")]
+        ),
+    )
+    with pytest.raises(WorkspaceArchiveReadError) as caught:
+        await wrapper.read_bounded(Path("out.jsonl"), max_bytes=5)
+    assert caught.value.retryable is True
+    assert caught.value.cause is caught.value.__cause__ is caught.value.__context__ is None
+    assert "synthetic-private-response" not in str(caught.value)
+    assert content.closed is (phase == "body")
+    finish = next(event for event in events if event.op == "read" and event.phase == "finish")
+    assert isinstance(finish, SandboxSessionFinishEvent)
+    assert finish.error_retryable is True
+    assert "synthetic-private-response" not in finish.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "provider,retryable",
     [
         (provider, retryable)
