@@ -2003,6 +2003,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             response_id="response_1",
         )
         model._interrupted_audio_response_ids.add("response_1")
+        playback_tracker = RealtimePlaybackTracker()
+        playback_tracker.on_play_ms("audio_item", 0, 100)
+        model._playback_tracker = playback_tracker
         close_error = RuntimeError("close failed")
         model._websocket = AsyncMock()
         model._websocket.close.side_effect = close_error
@@ -2013,6 +2016,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert exc_info.value is close_error
         assert model._audio_state_tracker.get_audio_items_for_response("response_1") == ()
         assert model._interrupted_audio_response_ids == set()
+        assert playback_tracker.get_state()["current_item_id"] is None
 
     @pytest.mark.asyncio
     async def test_close_resets_per_connection_item_and_session_state(self, model):
@@ -2040,7 +2044,10 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._created_session is None
 
     @pytest.mark.asyncio
-    async def test_reconnect_after_close_does_not_act_on_previous_session_items(self, monkeypatch):
+    @pytest.mark.parametrize("use_playback_tracker", [False, True])
+    async def test_reconnect_after_close_does_not_act_on_previous_session_items(
+        self, monkeypatch, use_playback_tracker
+    ):
         """A second connection on the same model instance must start with no memory of
         the first one's items. The runner reuses one model across runs, so this is the
         ordinary path for every application that runs more than one session."""
@@ -2089,7 +2096,12 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             },
         }
 
-        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        config: RealtimeModelConfig = {"api_key": "test-key", "initial_model_settings": {}}
+        playback_tracker = RealtimePlaybackTracker() if use_playback_tracker else None
+        if playback_tracker is not None:
+            config["playback_tracker"] = playback_tracker
+
+        await model.connect(config)
         await model._handle_ws_event(session_created)
         await model._handle_ws_event(
             {
@@ -2105,10 +2117,13 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         await model._handle_ws_event(
             {"type": "response.done", "event_id": "event_2", "response": {"id": "response_old"}}
         )
+        if playback_tracker is not None:
+            # Fully played audio still leaves the caller's tracker pointing at the item.
+            playback_tracker.on_play_ms("item_old", 0, 100)
         await model.close()
         listener.on_event.reset_mock()
 
-        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        await model.connect(config)
         await model._handle_ws_event(session_created)
         await model._handle_ws_event(
             {
@@ -2147,8 +2162,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         ] == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_playback_tracker", [False, True])
     async def test_cancelled_close_before_transport_teardown_keeps_connection_state(
-        self, monkeypatch
+        self, monkeypatch, use_playback_tracker
     ):
         """close() cancelled while it is still cancelling response.create tasks has not
         touched the transport: the websocket and its listener live on, so the item,
@@ -2187,7 +2203,11 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
 
         monkeypatch.setattr(model, "_create_websocket_connection", fake_create_websocket_connection)
 
-        await model.connect({"api_key": "test-key", "initial_model_settings": {}})
+        config: RealtimeModelConfig = {"api_key": "test-key", "initial_model_settings": {}}
+        playback_tracker = RealtimePlaybackTracker() if use_playback_tracker else None
+        if playback_tracker is not None:
+            config["playback_tracker"] = playback_tracker
+        await model.connect(config)
         await model._handle_ws_event(
             {
                 "type": "session.created",
@@ -2217,6 +2237,8 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         )
         created_session = model._created_session
         assert created_session is not None
+        if playback_tracker is not None:
+            playback_tracker.on_play_ms("item_live", 0, 50)
 
         cancellation_started = asyncio.Event()
 
@@ -2235,6 +2257,12 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert model._current_item_id == "item_live"
         assert model._created_session is created_session
         assert model._audio_state_tracker.get_last_audio_item() == ("item_live", 0)
+        if playback_tracker is not None:
+            assert playback_tracker.get_state() == {
+                "current_item_id": "item_live",
+                "current_item_content_index": 0,
+                "elapsed_ms": 50,
+            }
 
         listener.on_event.reset_mock()
         await model._handle_ws_event(

@@ -1310,6 +1310,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._audio_state_tracker = ModelAudioTracker()
         self._current_item_id = None
         self._created_session = None
+        if self._playback_tracker is not None:
+            self._playback_tracker.on_interrupted()
 
     def _retire_response_audio(self, response_id: str) -> None:
         self._interrupted_audio_response_ids.discard(response_id)
