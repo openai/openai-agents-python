@@ -781,7 +781,11 @@ async def check_for_final_output_from_tools(
     elif callable(agent.tool_use_behavior):
         result = agent.tool_use_behavior(context_wrapper, tool_results)
         if inspect.isawaitable(result):
-            return await result
+            result = await result
+        if not isinstance(result, ToolsToFinalOutputResult):
+            raise UserError(
+                "Agent tool_use_behavior callable must return ToolsToFinalOutputResult."
+            )
         return result
 
     logger.error("Invalid tool_use_behavior: %s", agent.tool_use_behavior)
