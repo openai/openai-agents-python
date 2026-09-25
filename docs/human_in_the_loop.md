@@ -42,6 +42,8 @@ agent = Agent(
 
 `needs_approval` is available on [`function_tool`][agents.tool.function_tool], [`Agent.as_tool`][agents.agent.Agent.as_tool], [`ShellTool`][agents.tool.ShellTool], and [`ApplyPatchTool`][agents.tool.ApplyPatchTool]. Local MCP servers also support approvals through `require_approval` on [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. Hosted MCP servers support approvals via [`HostedMCPTool`][agents.tool.HostedMCPTool] with `tool_config={"require_approval": "always"}` and an optional `on_approval_request` callback. Shell and apply_patch tools accept an `on_approval` callback if you want to auto-approve or auto-reject without surfacing an interruption.
 
+For local `ShellTool` and `ApplyPatchTool`, approval is opt-in: `needs_approval` defaults to `False`. An `on_approval` callback alone does not enable approval. Set `needs_approval=True` or a callable approval policy as well; the SDK invokes the callback only for calls that require approval and have no existing approval decision. See [approval for local shell and file edits](tools.md#approval-for-local-shell-and-file-edits) for execution responsibilities and example configurations.
+
 ## How the approval flow works
 
 1. When the model emits a tool call, the runner evaluates its approval rule (`needs_approval`, `require_approval`, or the hosted MCP equivalent).
