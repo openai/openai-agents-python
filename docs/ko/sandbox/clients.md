@@ -6,10 +6,6 @@ search:
 
 이 페이지를 사용하여 샌드박스 작업을 실행할 위치를 선택합니다. 대부분의 경우 `SandboxAgent` 정의는 그대로 유지하고 [`SandboxRunConfig`][agents.run_config.SandboxRunConfig]에서 샌드박스 클라이언트와 클라이언트별 옵션만 변경합니다.
 
-!!! warning "베타 기능"
-
-    샌드박스 에이전트는 베타 버전입니다. 정식 출시 전까지 API의 세부 사항, 기본값, 지원 기능이 변경될 수 있으며, 시간이 지나면서 더 고급 기능이 추가될 수 있습니다.
-
 ## 선택 가이드 {#decision-guide}
 
 <div class="sandbox-nowrap-first-column-table" markdown="1">

@@ -18,9 +18,11 @@ from openai import AsyncOpenAI, Omit, omit
 import agents._debug as _debug
 from agents import trace
 from agents.exceptions import UserError
-from tests.testing_processor import fetch_span_errors
+from tests.testing_processor import fetch_events, fetch_ordered_spans, fetch_span_errors
 
 try:
+    from websockets.asyncio.server import ServerConnection, serve
+
     from agents.voice import (
         AudioInput,
         OpenAISTTModel,
@@ -42,6 +44,160 @@ except ImportError:
 
 
 # ===== Helpers =====
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracing_disabled", [False, True])
+async def test_close_during_setup_finishes_transcription_consumer(
+    tracing_disabled: bool,
+) -> None:
+    # A real socket controls the setup boundary without replacing SDK lifecycle tasks.
+    setup_reached = asyncio.Event()
+    socket_closed = asyncio.Event()
+
+    async def handle_connection(socket: ServerConnection) -> None:
+        try:
+            await socket.send(json.dumps({"type": "session.created"}))
+            update = json.loads(await socket.recv())
+            assert update["type"] == "session.update"
+            setup_reached.set()
+            await socket.wait_closed()
+        finally:
+            socket_closed.set()
+
+    async with serve(handle_connection, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with AsyncOpenAI(
+            api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1"
+        ) as client:
+            session = await OpenAISTTModel("gpt-4o-mini-transcribe", client).create_session(
+                StreamedAudioInput(), STTModelSettings(), False, False
+            )
+            assert isinstance(session, OpenAISTTTranscriptionSession)
+
+            async def consume() -> list[str]:
+                return [turn async for turn in session.transcribe_turns()]
+
+            with trace("close during STT setup", disabled=tracing_disabled):
+                consumer = asyncio.create_task(consume())
+                try:
+                    await asyncio.wait_for(setup_reached.wait(), 2)
+                    owned_tasks = [session._connection_task, session._listener_task]
+                    await asyncio.wait_for(session.close(), 2)
+                    await asyncio.wait_for(socket_closed.wait(), 2)
+                    assert all(task is not None and task.done() for task in owned_tasks)
+                    assert await asyncio.wait_for(asyncio.shield(consumer), 2) == []
+
+                    # The iterator also closes in finally; repeated close must not add markers.
+                    await session.close()
+                    await session.close()
+                    assert session._output_queue.empty()
+                    await asyncio.wait_for(session._output_queue.join(), 2)
+                finally:
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                    await session.close()
+            if not tracing_disabled:
+                assert fetch_events().count("trace_start") == 1
+                assert fetch_events().count("trace_end") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["close", "server_close", "error", "cancel"])
+async def test_transcription_terminal_paths_after_setup(outcome: str) -> None:
+    # Scripted STT bypasses the provider's socket and cannot exercise this close boundary.
+    transcript_received = asyncio.Event()
+    finish_server = asyncio.Event()
+    socket_closed = asyncio.Event()
+
+    async def handle_connection(socket: ServerConnection) -> None:
+        try:
+            await socket.send(json.dumps({"type": "session.created"}))
+            assert json.loads(await socket.recv())["type"] == "session.update"
+            await socket.send(json.dumps({"type": "session.updated"}))
+            assert json.loads(await socket.recv())["type"] == "input_audio_buffer.append"
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": "hello",
+                    }
+                )
+            )
+            await finish_server.wait()
+            if outcome == "error":
+                await socket.send(json.dumps({"type": "error", "error": "test provider error"}))
+            elif outcome == "server_close":
+                await socket.close()
+            await socket.wait_closed()
+        finally:
+            socket_closed.set()
+
+    async with serve(handle_connection, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with AsyncOpenAI(
+            api_key="test-key", base_url=f"http://127.0.0.1:{port}/v1"
+        ) as client:
+            audio_input = StreamedAudioInput()
+            await audio_input.add_audio(np.array([1, 2], dtype=np.int16))
+            session = await OpenAISTTModel("gpt-4o-mini-transcribe", client).create_session(
+                audio_input, STTModelSettings(), False, False
+            )
+            assert isinstance(session, OpenAISTTTranscriptionSession)
+            transcripts: list[str] = []
+
+            async def consume() -> None:
+                async for turn in session.transcribe_turns():
+                    transcripts.append(turn)
+                    transcript_received.set()
+
+            with trace("STT terminal paths"):
+                consumer = asyncio.create_task(consume())
+                try:
+                    await asyncio.wait_for(transcript_received.wait(), 2)
+                    owned_tasks = [
+                        session._connection_task,
+                        session._listener_task,
+                        session._process_events_task,
+                        session._stream_audio_task,
+                    ]
+                    finish_server.set()
+                    if outcome == "close":
+                        await asyncio.wait_for(session.close(), 2)
+                    elif outcome == "cancel":
+                        consumer.cancel()
+
+                    if outcome == "error":
+                        with pytest.raises(
+                            STTWebsocketConnectionError, match="Error parsing events"
+                        ):
+                            await asyncio.wait_for(asyncio.shield(consumer), 2)
+                        assert session._stored_exception is not None
+                        assert "test provider error" in str(session._stored_exception.__cause__)
+                    elif outcome == "cancel":
+                        with pytest.raises(asyncio.CancelledError):
+                            await asyncio.wait_for(asyncio.shield(consumer), 2)
+                    else:
+                        await asyncio.wait_for(asyncio.shield(consumer), 2)
+                        await session.close()
+                        assert session._output_queue.empty()
+                        await asyncio.wait_for(session._output_queue.join(), 2)
+
+                    assert transcripts == ["hello"]
+                    assert all(task is not None and task.done() for task in owned_tasks)
+                    await asyncio.wait_for(socket_closed.wait(), 2)
+                finally:
+                    finish_server.set()
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                    await session.close()
+
+            events = fetch_events()
+            assert events.count("span_start") == events.count("span_end")
+            assert events[-1] == "trace_end"
+            assert all(span.ended_at is not None for span in fetch_ordered_spans())
 
 
 def create_mock_websocket(messages: list[str]) -> AsyncMock:

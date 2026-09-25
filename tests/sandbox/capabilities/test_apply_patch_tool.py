@@ -9,14 +9,15 @@ from typing import Any, cast
 import pytest
 
 import agents.sandbox.apply_patch as sandbox_apply_patch
-from agents import Agent, CustomTool, RunHooks
+from agents import Agent, ApplyPatchTool, CustomTool, RunHooks
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.models.openai_responses import Converter
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
-from agents.run_internal.run_steps import ToolRunCustom
-from agents.run_internal.tool_actions import CustomToolAction
+from agents.run_internal.run_steps import NextStepInterruption, ToolRunApplyPatchCall, ToolRunCustom
+from agents.run_internal.tool_actions import ApplyPatchAction, CustomToolAction
+from agents.run_state import RunState
 from agents.sandbox import SandboxWorkspaceScope
 from agents.sandbox.capabilities.tools import SandboxApplyPatchTool
 from agents.sandbox.errors import ApplyPatchDecodeError, ApplyPatchFileNotFoundError
@@ -178,6 +179,126 @@ class TestSandboxApplyPatchTool:
 
         assert isinstance(result, ToolApprovalItem)
         assert checked_paths == [(expected_path, expected_move_to)]
+
+    @pytest.mark.parametrize("round_trip", [False, True], ids=["in-memory", "json"])
+    @pytest.mark.parametrize("native_approved", [True, False])
+    @pytest.mark.parametrize("sandbox_approved", [True, False])
+    @pytest.mark.parametrize("sandbox_always", [False, True], ids=["once", "always"])
+    @pytest.mark.asyncio
+    async def test_multi_operation_checker_ignores_native_sticky_approval(
+        self,
+        native_approved: bool,
+        sandbox_approved: bool,
+        sandbox_always: bool,
+        round_trip: bool,
+    ) -> None:
+        checked_paths: list[str] = []
+
+        async def needs_approval(
+            _ctx: RunContextWrapper[Any], operation: ApplyPatchOperation, _call_id: str
+        ) -> bool:
+            checked_paths.append(operation.path)
+            return operation.type == "delete_file"
+
+        protected_path = Path("/workspace/protected.txt")
+        session = ApplyPatchSession()
+        session.files[protected_path] = b"protected"
+        tool = SandboxApplyPatchTool(session=session, needs_approval=needs_approval)
+        context = make_context_wrapper()
+        native_approval = ToolApprovalItem(
+            agent=Agent(name="patcher"),
+            raw_item={
+                "type": "apply_patch_call",
+                "call_id": "native_apply",
+                "operation": {"type": "create_file", "path": "native.txt", "diff": "+native\n"},
+            },
+            tool_name="apply_patch",
+        )
+        if native_approved:
+            context.approve_tool(native_approval, always_approve=True)
+        else:
+            context.reject_tool(
+                native_approval, always_reject=True, rejection_message="Native patch denied"
+            )
+        raw_input = (
+            "*** Begin Patch\n*** Add File: harmless.txt\n+harmless\n"
+            "*** Delete File: protected.txt\n*** End Patch\n"
+        )
+
+        result = await _execute_custom_tool_call(tool, context_wrapper=context, raw_input=raw_input)
+
+        assert isinstance(result, ToolApprovalItem)
+        assert checked_paths == ["harmless.txt", "protected.txt"]
+        assert session.files == {protected_path: b"protected"}
+        state = RunState(context=context, original_input="patch", starting_agent=result.agent)
+        state._current_step = NextStepInterruption(interruptions=[result])
+        if round_trip:
+            state = await RunState.from_json(result.agent, state.to_json())
+        if sandbox_approved:
+            state.approve(state.get_interruptions()[0], always_approve=sandbox_always)
+        else:
+            state.reject(
+                state.get_interruptions()[0],
+                always_reject=sandbox_always,
+                rejection_message="Sandbox patch denied",
+            )
+        if round_trip:
+            state = await RunState.from_json(result.agent, state.to_json())
+        assert state._context is not None
+
+        resumed = await _execute_custom_tool_call(
+            tool, context_wrapper=state._context, raw_input=raw_input
+        )
+
+        assert isinstance(resumed, ToolCallOutputItem)
+        if sandbox_approved:
+            assert session.files == {Path("/workspace/harmless.txt"): b"harmless"}
+        else:
+            assert resumed.output == "Sandbox patch denied"
+            assert session.files == {protected_path: b"protected"}
+
+        native_tool = ApplyPatchTool(editor=tool.editor, needs_approval=native_approved)
+        native_result = await ApplyPatchAction.execute(
+            agent=Agent(name="patcher", tools=[native_tool]),
+            call=ToolRunApplyPatchCall(
+                tool_call={
+                    "type": "apply_patch_call",
+                    "call_id": "native_followup",
+                    "operation": {
+                        "type": "create_file",
+                        "path": "native.txt",
+                        "diff": "+native\n",
+                    },
+                },
+                apply_patch_tool=native_tool,
+            ),
+            hooks=RunHooks[Any](),
+            context_wrapper=state._context,
+            config=RunConfig(),
+        )
+
+        assert isinstance(native_result, ToolCallOutputItem)
+        if native_approved:
+            assert session.files[Path("/workspace/native.txt")] == b"native"
+        else:
+            assert native_result.output == "Native patch denied"
+            assert Path("/workspace/native.txt") not in session.files
+
+        if sandbox_always:
+            tool.needs_approval = sandbox_approved
+            sandbox_result = await _execute_custom_tool_call(
+                tool,
+                context_wrapper=state._context,
+                call_id="sandbox_followup",
+                raw_input="*** Begin Patch\n*** Add File: sandbox.txt\n+sandbox\n*** End Patch\n",
+            )
+
+            assert isinstance(sandbox_result, ToolCallOutputItem)
+            if sandbox_approved:
+                assert session.files[Path("/workspace/sandbox.txt")] == b"sandbox"
+            else:
+                assert sandbox_result.output == "Sandbox patch denied"
+                assert Path("/workspace/sandbox.txt") not in session.files
 
     @pytest.mark.parametrize("approved", [True, False], ids=["approved", "rejected"])
     @pytest.mark.asyncio

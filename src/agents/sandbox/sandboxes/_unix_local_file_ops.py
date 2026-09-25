@@ -7,7 +7,6 @@ import sys
 if sys.platform == "win32":  # pragma: no cover
     raise ImportError("UnixLocal file operations are not supported on Windows.")
 
-import errno
 import grp
 import io
 import json
@@ -142,24 +141,12 @@ def _entry(path: Path, entry: os.stat_result) -> dict[str, str | int]:
     }
 
 
-def _remove_at(
-    parent_fd: int,
-    name: str,
-    *,
-    recursive: bool,
-) -> None:
+def _remove_at(parent_fd: int, name: str, *, recursive: bool) -> None:
     entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if not stat.S_ISDIR(entry.st_mode):
         os.unlink(name, dir_fd=parent_fd)
         return
     if recursive:
-        # Empty directories need only parent access, even without search permission.
-        try:
-            os.rmdir(name, dir_fd=parent_fd)
-            return
-        except OSError as exc:
-            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                raise
         fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         try:
             with os.scandir(fd) as entries:

@@ -4,6 +4,10 @@ Run this service in a trusted process on the Docker daemon host, as root. It use
 host Python workers, not binaries supplied by the container. It does not listen on
 a network socket. Give its Docker client only to trusted application code.
 
+Only Docker sessions explicitly configured with this service use its removal
+authority. Other backends and Docker clients without the service retain their
+existing recursive removal and snapshot restoration behavior.
+
 The service requires a trusted image, Docker 26+ with its builtin seccomp profile,
 and the runc runtime. Workspaces and path-only grant roots must exist in the image.
 Read-only host bind mounts are supported outside the private workspace. Writable

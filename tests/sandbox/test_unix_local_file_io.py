@@ -7,7 +7,6 @@ import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -42,91 +41,6 @@ def _session(root: Path, *, grants: tuple[SandboxPathGrant, ...] = ()) -> UnixLo
             snapshot=NoopSnapshot(id="file-io"),
         )
     )
-
-
-@pytest.mark.parametrize("user", [None, "example-user"])
-@pytest.mark.parametrize("grant_alias", [False, True])
-async def test_recursive_rm_preserves_read_only_descendants_and_writable_siblings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str | None, grant_alias: bool
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    data = tmp_path / "data"
-    protected = data / "protected"
-    protected.mkdir(parents=True)
-    secret = protected / "sentinel"
-    secret.write_bytes(b"protected")
-    writable = data / "writable"
-    writable.mkdir()
-    sibling = writable / "sentinel"
-    sibling.write_bytes(b"writable")
-    grant_path = protected
-    if grant_alias:
-        grant_path = tmp_path / "protected-alias"
-        grant_path.symlink_to(protected, target_is_directory=True)
-    session = _session(
-        workspace,
-        grants=(
-            SandboxPathGrant(path=str(data)),
-            SandboxPathGrant(path=str(grant_path), read_only=True),
-        ),
-    )
-    probe = AsyncMock(side_effect=LookupError("unknown requested user"))
-    execute = AsyncMock(side_effect=AssertionError("no user process should start"))
-    monkeypatch.setattr(session, "_check_rm_with_exec", probe)
-    monkeypatch.setattr(session, "exec", execute)
-    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
-        await session.rm(data, recursive=True, user=user)
-    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
-    assert secret.read_bytes() == b"protected"
-    assert sibling.read_bytes() == b"writable"
-
-    with pytest.raises(WorkspaceArchiveWriteError) as rejected:
-        await session.rm(writable, recursive=True, user=user)
-    assert rejected.value.context["reason"] == "recursive_remove_with_read_only_grants"
-    probe.assert_not_awaited()
-    execute.assert_not_awaited()
-    assert sibling.read_bytes() == b"writable"
-    assert secret.read_bytes() == b"protected"
-
-
-@pytest.mark.parametrize(("recursive", "read_only"), [(False, True), (True, False)])
-async def test_supported_rm_still_runs_user_preflight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recursive: bool, read_only: bool
-) -> None:
-    session = _session(
-        tmp_path / "workspace",
-        grants=(SandboxPathGrant(path=str(tmp_path / "external"), read_only=read_only),),
-    )
-    failure = LookupError("unknown requested user")
-    probe = AsyncMock(side_effect=failure)
-    monkeypatch.setattr(session, "_check_rm_with_exec", probe)
-    with pytest.raises(LookupError) as rejected:
-        await session.rm("build", recursive=recursive, user="example-user")
-    assert rejected.value is failure
-    probe.assert_awaited_once_with("build", recursive=recursive, user="example-user")
-
-
-async def test_recursive_rm_rejects_nested_writable_override_with_read_only_grant(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    protected = tmp_path / "protected"
-    writable = protected / "writable"
-    writable.mkdir(parents=True)
-    (writable / "sentinel").write_bytes(b"writable")
-    session = _session(
-        workspace,
-        grants=(
-            SandboxPathGrant(path=str(protected), read_only=True),
-            SandboxPathGrant(path=str(writable)),
-        ),
-    )
-    with pytest.raises(WorkspaceArchiveWriteError):
-        await session.rm(writable, recursive=True)
-    assert (writable / "sentinel").read_bytes() == b"writable"
-    assert protected.is_dir()
 
 
 async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path) -> object:
@@ -262,10 +176,8 @@ async def test_safe_symlinks_grants_and_listing_paths_remain_supported(tmp_path:
         await session.write(readonly / "file", io.BytesIO(b"denied"))
     listed = await session.ls(Path("internal/nested"))
     assert [entry.path for entry in listed] == [str(workspace / "real/nested/file")]
-    with pytest.raises(WorkspaceArchiveWriteError):
-        await session.rm(Path("internal"), recursive=True)
-    await session.rm(Path("internal/nested/file"))
-    assert not (workspace / "real/nested/file").exists()
+    await session.rm(Path("internal"), recursive=True)
+    assert not (workspace / "real").exists()
     assert (allowed / "file").read_bytes() == b"allowed"
 
 
@@ -492,8 +404,7 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     monkeypatch.setattr(os, "scandir", paused_scandir)
     task = asyncio.create_task(session.rm(Path("child"), recursive=True))
     try:
-        did_start = await asyncio.to_thread(started.wait, 5)
-        assert did_start
+        assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
@@ -506,84 +417,3 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)
-
-
-@pytest.mark.parametrize("kind", ["missing", "file", "empty", "nonempty"])
-@pytest.mark.parametrize("read_only_grant", [False, True])
-async def test_recursive_rm_rejects_read_only_sessions_before_filesystem_operations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, read_only_grant: bool
-) -> None:
-    import errno
-    import stat
-    from collections.abc import Iterator
-    from contextlib import contextmanager
-    from types import SimpleNamespace
-
-    from agents.sandbox.sandboxes import _unix_local_file_ops as file_ops
-
-    target = tmp_path / "external"
-    session = _session(
-        tmp_path / "workspace",
-        grants=(
-            SandboxPathGrant(path=str(target)),
-            *(
-                [SandboxPathGrant(path=str(tmp_path / "protected"), read_only=True)]
-                if read_only_grant
-                else []
-            ),
-        ),
-    )
-    events: list[str] = []
-
-    @contextmanager
-    def parent(path: Path, **kwargs: object) -> Iterator[tuple[int, str]]:
-        if read_only_grant:
-            pytest.fail("read-only sessions must reject before opening the parent")
-        session._files.authorize(path, for_write=True)
-        yield 20, path.name
-
-    def metadata(*args: object, **kwargs: object) -> SimpleNamespace:
-        if kind == "missing":
-            raise FileNotFoundError("missing target")
-        return SimpleNamespace(st_mode=stat.S_IFREG if kind == "file" else stat.S_IFDIR)
-
-    def rmdir(*args: object, **kwargs: object) -> None:
-        if kind == "nonempty" and "close" not in events:
-            raise OSError(errno.ENOTEMPTY, "not empty")
-        events.append("rmdir")
-
-    @contextmanager
-    def scan(*args: object) -> Iterator[Iterator[SimpleNamespace]]:
-        events.append("scan")
-        yield iter(())
-
-    monkeypatch.setattr(session._files, "parent", parent)
-    monkeypatch.setattr(
-        file_ops,
-        "os",
-        SimpleNamespace(
-            stat=metadata,
-            unlink=lambda *args, **kwargs: events.append("unlink"),
-            rmdir=rmdir,
-            open=lambda *args, **kwargs: 21,
-            close=lambda fd: events.append("close"),
-            scandir=scan,
-        ),
-    )
-    if read_only_grant:
-        with pytest.raises(WorkspaceArchiveWriteError):
-            await session.rm(target, recursive=True)
-        with pytest.raises(WorkspaceArchiveWriteError):
-            session._files.rm(target, recursive=True)
-        assert events == []
-    else:
-        await session.rm(target, recursive=True)
-        assert (
-            events
-            == {
-                "missing": [],
-                "file": ["unlink"],
-                "empty": ["rmdir"],
-                "nonempty": ["scan", "close", "rmdir"],
-            }[kind]
-        )

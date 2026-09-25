@@ -229,7 +229,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
     ),
-    "1.18": "Binds restored local MCP calls to their configured server and original tool name.",
+    "1.18": (
+        "Binds restored local MCP calls to their configured server and original tool name, "
+        "and preserves independent apply_patch approval scopes."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 

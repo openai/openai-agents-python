@@ -269,6 +269,135 @@ async def test_sqlite_session_close_closes_worker_thread_connections():
             connections[0].execute("SELECT 1")
 
 
+def test_sqlite_session_reaps_connections_from_exited_worker_threads():
+    """Test that a session closes connections owned by exited worker threads."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "exited_worker_threads.db"
+        session = SQLiteSession("exited_worker_threads", db_path)
+
+        try:
+            # Each asyncio.run shuts down its default executor, so the worker that served
+            # the session exits and its connection is unreachable from the next turn on.
+            asyncio.run(session.add_items([{"role": "user", "content": "turn 0"}]))
+            (abandoned,) = session._connections
+
+            for turn in range(1, 5):
+                asyncio.run(session.add_items([{"role": "user", "content": f"turn {turn}"}]))
+                assert len(session._connections) == 1
+
+            assert abandoned not in session._connections
+            with pytest.raises(sqlite3.ProgrammingError):
+                abandoned.execute("SELECT 1")
+
+            items = asyncio.run(session.get_items())
+            assert [item["content"] for item in items] == [f"turn {turn}" for turn in range(5)]
+        finally:
+            session.close()
+
+
+def test_sqlite_session_closes_retired_connections_before_the_next_allocation(monkeypatch):
+    """Test that connections left by a burst of retired workers close before the next one opens."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "retired_workers.db"
+        session = SQLiteSession("retired_workers", db_path)
+        # Each worker holds at the barrier until all of them have registered a
+        # connection, so they retire together instead of one at a time.
+        registered = threading.Barrier(3)
+
+        def serve_one_turn(index: int) -> None:
+            async def turn() -> None:
+                await session.add_items([{"role": "user", "content": f"worker {index}"}])
+                await asyncio.to_thread(registered.wait)
+
+            # asyncio.run waits for its executor to shut down, so this worker has
+            # exited by the time the thread is joined.
+            asyncio.run(turn())
+
+        workers = [threading.Thread(target=serve_one_turn, args=(index,)) for index in range(3)]
+        try:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+
+            retired = list(session._connections)
+            assert len(retired) == 3
+
+            def still_open() -> int:
+                open_count = 0
+                for connection in retired:
+                    try:
+                        connection.execute("SELECT 1")
+                    except sqlite3.ProgrammingError:
+                        continue
+                    open_count += 1
+                return open_count
+
+            retired_open_at_allocation: list[int] = []
+            connect = sqlite3.connect
+
+            def recording_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+                retired_open_at_allocation.append(still_open())
+                return connect(*args, **kwargs)
+
+            with monkeypatch.context() as allocation:
+                allocation.setattr(sqlite3, "connect", recording_connect)
+                asyncio.run(session.add_items([{"role": "user", "content": "after they retired"}]))
+
+            # The replacement connection must not be allocated while the retired ones
+            # still hold their descriptors.
+            assert retired_open_at_allocation == [0]
+            assert len(session._connections) == 1
+
+            # The workers write concurrently, so only the final turn has a fixed position.
+            contents = [item["content"] for item in asyncio.run(session.get_items())]
+            assert sorted(contents[:-1]) == ["worker 0", "worker 1", "worker 2"]
+            assert contents[-1] == "after they retired"
+        finally:
+            registered.abort()
+            for worker in workers:
+                worker.join(timeout=5)
+            session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_keeps_connections_of_live_worker_threads():
+    """Test that connections owned by running worker threads are never closed."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "live_worker_threads.db"
+        session = SQLiteSession("live_worker_threads", db_path)
+        # A second running loop has its own default executor, so its worker is a
+        # different thread that stays alive for as long as that loop does.
+        other_loop = asyncio.new_event_loop()
+        other_thread = threading.Thread(target=other_loop.run_forever)
+        other_thread.start()
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                session.add_items([{"role": "user", "content": "from the other loop"}]),
+                other_loop,
+            ).result(timeout=5)
+            (held,) = session._connections
+
+            # Registering from this loop's worker sweeps while the other worker lives.
+            await session.add_items([{"role": "user", "content": "from this loop"}])
+
+            assert held in session._connections
+            held.execute("SELECT 1").fetchone()
+
+            items = await session.get_items()
+            assert [item["content"] for item in items] == [
+                "from the other loop",
+                "from this loop",
+            ]
+        finally:
+            other_loop.call_soon_threadsafe(other_loop.stop)
+            other_thread.join(timeout=5)
+            other_loop.close()
+            session.close()
+
+
 @pytest.mark.asyncio
 async def test_sqlite_session_closed_rejects_empty_add_items():
     """add_items([]) must not bypass the closed check through the empty-list fast path."""

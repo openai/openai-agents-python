@@ -217,6 +217,8 @@ await Runner.run(
 
 The following community and vendor integrations support the tracing API surface of the OpenAI Agents SDK.
 
+The integration maintainers provide support for their integrations. Inclusion in this list does not constitute an OpenAI endorsement or security certification. To request a new listing, follow the [integration listing criteria](https://github.com/openai/openai-agents-python/blob/main/CONTRIBUTING.md#tracing-integration-listings).
+
 ### External tracing processors list
 
 -   [Weights & Biases](https://docs.wandb.ai/weave/guides/integrations/agents/openai-agents-sdk)
@@ -249,3 +251,4 @@ The following community and vendor integrations support the tracing API surface 
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
 -   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
 -   [Laminar](https://laminar.sh/docs/tracing/integrations/openai-agents-sdk)
+-   [Noveum](https://github.com/Noveum/noveum-trace/blob/main/docs/OPENAI_AGENTS_INTEGRATION.md)

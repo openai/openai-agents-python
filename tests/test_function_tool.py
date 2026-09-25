@@ -1584,6 +1584,74 @@ def kwargs_collision_function(x: int, *rest: int, **kw: Any) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"a": 1, "b": "x"}, {"kwargs": {"a": 1}, "b": "x"}])
+async def test_kwargs_tool_rejects_flat_arguments_before_invocation(payload):
+    calls = []
+
+    def collect(**kwargs):
+        calls.append(kwargs)
+        return kwargs
+
+    tool = function_tool(collect, strict_mode=False, failure_error_function=None)
+    arguments = json.dumps(payload)
+    context = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments)
+
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input for tool collect"):
+        await tool.on_invoke_tool(context, arguments)
+
+    assert calls == []
+    assert tool.params_json_schema["additionalProperties"] is False
+    assert tool.params_json_schema["properties"]["kwargs"]["additionalProperties"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload, expected", [({"kwargs": {"a": 1, "b": "x"}}, {"a": 1, "b": "x"}), ({}, {})]
+)
+async def test_kwargs_tool_preserves_nested_arguments_and_empty_default(payload, expected):
+    def collect(**kwargs):
+        return kwargs
+
+    tool = function_tool(collect, strict_mode=False, failure_error_function=None)
+    arguments = json.dumps(payload)
+    context = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments)
+
+    assert await tool.on_invoke_tool(context, arguments) == expected
+
+
+@pytest.mark.asyncio
+async def test_kwargs_tool_preserves_named_arguments_and_typed_nested_values():
+    calls = []
+
+    async def collect(label: str, **options: int):
+        calls.append((label, options))
+        return options
+
+    tool = function_tool(collect, strict_mode=False, failure_error_function=None)
+    arguments = '{"label": "sample", "options": {"a": 1}}'
+    context = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=arguments)
+    assert await tool.on_invoke_tool(context, arguments) == {"a": 1}
+    assert calls == [("sample", {"a": 1})]
+
+    for arguments in (
+        '{"label": "sample", "a": 1}',
+        '{"label": "sample", "options": {"a": "invalid"}}',
+    ):
+        context = ToolContext(None, tool_name=tool.name, tool_call_id="2", tool_arguments=arguments)
+        with pytest.raises(ModelBehaviorError):
+            await tool.on_invoke_tool(context, arguments)
+    assert calls == [("sample", {"a": 1})]
+
+
+def test_kwargs_tool_strict_error_explains_non_strict_nested_input():
+    def collect(**options: Any):
+        return options
+
+    with pytest.raises(UserError, match=r"\*\*options.*strict_mode=False.*nested.*options"):
+        function_tool(collect)
+
+
+@pytest.mark.asyncio
 async def test_kwargs_key_colliding_with_param_is_reported_as_model_behavior_error():
     """The collision reaches the model as feedback, not as an unhandled TypeError.
 

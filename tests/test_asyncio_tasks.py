@@ -160,3 +160,77 @@ async def test_run_producer_consumer_fail_fast_cancels_blocked_consumer() -> Non
             timeout=1,
         )
     assert consumer_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("producer_consumer", [False, True])
+async def test_closing_task_helper_leaves_child_cleanup_to_owner(producer_consumer: bool) -> None:
+    children = [asyncio.create_task(asyncio.Event().wait()) for _ in range(2)]
+    child_failure_reported = asyncio.Event()
+    coro = (
+        run_producer_consumer(*children, on_failure=child_failure_reported.set)
+        if producer_consumer
+        else gather_with_cancel(*children, on_child_failure=child_failure_reported.set)
+    )
+    try:
+        # Drive the coroutine as its owner; do not close a live asyncio Task's coroutine.
+        coro.send(None)
+        coro.close()
+        await asyncio.sleep(0)
+        assert all(not child.done() for child in children)
+        assert not child_failure_reported.is_set()
+    finally:
+        for child in children:
+            child.cancel()
+        await asyncio.gather(*children, return_exceptions=True)
+        coro.close()
+
+
+@pytest.mark.asyncio
+async def test_closing_agent_tool_lookup_leaves_enabled_check_cleanup_to_owner() -> None:
+    from agents import Agent, RunContextWrapper
+    from agents.decorators import tool
+
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    release = asyncio.Event()
+
+    async def is_enabled(context: RunContextWrapper[None], agent: Agent[None]) -> bool:
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            finished.set()
+        return True
+
+    @tool(is_enabled=is_enabled)
+    def example() -> str:
+        return "example"
+
+    agent = Agent[None](name="test", tools=[example])
+    coro = agent.get_all_tools(RunContextWrapper(context=None))
+    try:
+        coro.send(None)
+        await started.wait()
+        coro.close()
+        await asyncio.sleep(0)
+        assert not finished.is_set()
+    finally:
+        release.set()
+        await finished.wait()
+        coro.close()
+
+
+@pytest.mark.asyncio
+async def test_run_producer_consumer_drains_children_on_parent_cancellation() -> None:
+    children = [asyncio.create_task(asyncio.Event().wait()) for _ in range(2)]
+    parent = asyncio.create_task(run_producer_consumer(*children))
+    try:
+        await asyncio.sleep(0)
+        parent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        assert all(child.cancelled() for child in children)
+    finally:
+        parent.cancel()
+        await asyncio.gather(parent, *children, return_exceptions=True)

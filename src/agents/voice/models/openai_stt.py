@@ -150,6 +150,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._stream_audio_task: asyncio.Task[Any] | None = None
         self._connection_task: asyncio.Task[Any] | None = None
         self._stored_exception: Exception | None = None
+        self._completion_signaled = False
 
     def _get_transcription_config(self) -> dict[str, Any]:
         transcription_config: dict[str, Any] = {"model": self._model}
@@ -329,7 +330,12 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             except Exception as e:
                 await self._output_queue.put(ErrorSentinel(e))
                 raise
-        await self._output_queue.put(SessionCompleteSentinel())
+        self._signal_completion()
+
+    def _signal_completion(self) -> None:
+        if not self._completion_signaled:
+            self._completion_signaled = True
+            self._output_queue.put_nowait(SessionCompleteSentinel())
 
     async def _stream_audio(
         self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None]
@@ -512,6 +518,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 await self._cleanup_tasks()
             finally:
                 self._end_turn("")
+                # Closing during setup may leave no event processor to notify the consumer.
+                self._signal_completion()
 
 
 class OpenAISTTModel(STTModel):
