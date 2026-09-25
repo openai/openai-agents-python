@@ -2154,6 +2154,11 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         touched the transport: the websocket and its listener live on, so the item,
         audio and session state they depend on must survive as well."""
 
+        # Keep playback incomplete regardless of scheduling delays during cancellation.
+        clock = SimpleNamespace(monotonic=lambda: 0.0)
+        monkeypatch.setattr("agents.realtime._default_tracker.time", clock)
+        monkeypatch.setattr("agents.realtime.openai_realtime.time", clock)
+
         class RecordingWebSocket:
             def __init__(self) -> None:
                 self._closed = asyncio.Event()
