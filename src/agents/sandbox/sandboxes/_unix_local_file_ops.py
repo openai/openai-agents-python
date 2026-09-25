@@ -15,6 +15,7 @@ import os
 import pwd
 import shutil
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -54,23 +55,35 @@ class _FileOps:
 
     def _open_regular_file(self, path: Path, *, for_write: bool = False) -> int:
         with self.parent(path, for_write=for_write, create_parents=for_write) as (parent_fd, name):
-            try:
-                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass  # Let open report missing reads or create a regular file for writes.
-            else:
-                # Avoid invoking a stable device node's open handler. Symlinks and
-                # directories retain the errors from O_NOFOLLOW/open below.
-                if not (
-                    stat.S_ISREG(entry.st_mode)
-                    or stat.S_ISDIR(entry.st_mode)
-                    or stat.S_ISLNK(entry.st_mode)
-                ):
-                    raise OSError(errno.EINVAL, "Not a regular file", str(path))
             flags = os.O_WRONLY | os.O_CREAT if for_write else os.O_RDONLY
-            # A workspace process can replace the entry after stat. A FIFO must not
-            # block open, and nothing may truncate or write before descriptor validation.
-            fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666, dir_fd=parent_fd)
+            while True:
+                try:
+                    entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass  # Let open report missing reads or create a regular file for writes.
+                else:
+                    # Avoid invoking a stable device node's open handler. Symlinks and
+                    # directories retain the errors from O_NOFOLLOW/open below.
+                    if not (
+                        stat.S_ISREG(entry.st_mode)
+                        or stat.S_ISDIR(entry.st_mode)
+                        or stat.S_ISLNK(entry.st_mode)
+                    ):
+                        raise OSError(errno.EINVAL, "Not a regular file", str(path))
+                try:
+                    # A workspace process can replace the entry after stat. A FIFO must not
+                    # block open, and nothing may truncate before descriptor validation.
+                    fd = os.open(
+                        name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666, dir_fd=parent_fd
+                    )
+                    break
+                except OSError as exc:
+                    if sys.platform != "linux" or exc.errno != errno.EWOULDBLOCK:
+                        raise
+                    # A conflicting Linux file lease is being broken. Preserve waiting
+                    # for its release (or the kernel's lease-break deadline), but recheck
+                    # the entry and keep every open nonblocking in case it becomes a FIFO.
+                    time.sleep(0.01)
         try:
             mode = os.fstat(fd).st_mode
             if stat.S_ISDIR(mode):
