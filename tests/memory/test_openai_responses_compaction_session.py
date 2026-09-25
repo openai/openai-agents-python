@@ -457,6 +457,158 @@ class TestOpenAIResponsesCompactionSession:
             underlying.close()
 
     @pytest.mark.asyncio
+    async def test_clear_session_invalidates_response_chain(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "remove me"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        # Seed deferred work through the runner's compaction hook.
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+
+        await session.clear_session()
+        assert await session.get_items() == []
+        with pytest.raises(ValueError, match="requires a response_id"):
+            await session.run_compaction({"force": True})
+        mock_client.responses.compact.assert_not_awaited()
+        assert session._get_deferred_compaction_response_id() is None
+        assert session._last_unstored_response_id is None
+
+        await session.run_compaction({"response_id": "resp-new", "force": True})
+        assert mock_client.responses.compact.await_args is not None
+        assert mock_client.responses.compact.await_args.kwargs["previous_response_id"] == "resp-new"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["cancelled", "error"])
+    async def test_settled_clear_failure_invalidates_response_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        # Gate the real SQLite commit acknowledgement so cancellation cannot undo the clear.
+        committed = threading.Event()
+        allow_return = threading.Event()
+
+        class PausingCommitConnection(sqlite3.Connection):
+            pause_commit = True
+
+            def commit(self) -> None:
+                super().commit()
+                if self.pause_commit:
+                    self.pause_commit = False
+                    committed.set()
+                    assert allow_return.wait(timeout=10)
+                    if outcome == "error":
+                        raise RuntimeError("commit acknowledgement failed")
+
+        underlying = SQLiteSession("settled-clear", tmp_path / "settled-clear.db")
+        history: list[TResponseInputItem] = [
+            {"role": "user", "content": "keep me"},
+            {"role": "assistant", "content": "remove me"},
+        ]
+        await underlying.add_items(history)
+        connection = sqlite3.connect(
+            str(tmp_path / "settled-clear.db"),
+            check_same_thread=False,
+            factory=PausingCommitConnection,
+        )
+        with underlying._connections_lock:
+            underlying._connections.add(connection)
+        monkeypatch.setattr(underlying, "_get_connection", lambda: connection)
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="settled-clear",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="previous_response_id",
+            should_trigger_compaction=lambda ctx: False,
+        )
+        await session.run_compaction({"response_id": "resp-old", "store": False})
+        session.should_trigger_compaction = lambda ctx: True
+        await session._defer_compaction("resp-old")
+        mutation = asyncio.create_task(session.clear_session())
+        try:
+            assert await asyncio.to_thread(committed.wait, 10)
+            if outcome == "cancelled":
+                mutation.cancel()
+            allow_return.set()
+            if outcome == "cancelled":
+                with pytest.raises(asyncio.CancelledError):
+                    await mutation
+            else:
+                with pytest.raises(RuntimeError, match="commit acknowledgement failed"):
+                    await mutation
+
+            # The deletion committed before the failure reached the caller.
+            assert await session.get_items() == []
+            assert not session._mutation_lock.locked()
+            with pytest.raises(ValueError, match="requires a response_id"):
+                await session.run_compaction({"force": True})
+            mock_client.responses.compact.assert_not_awaited()
+            assert session._get_deferred_compaction_response_id() is None
+            assert session._last_unstored_response_id is None
+
+            # The session stays usable: a subsequent write survives.
+            follow_up: TResponseInputItem = {"role": "user", "content": "after clear"}
+            await session.add_items([follow_up])
+            assert await session.get_items() == [follow_up]
+            await session.run_compaction({"response_id": "resp-new", "force": True})
+            assert mock_client.responses.compact.await_args is not None
+            compact_kwargs = mock_client.responses.compact.await_args.kwargs
+            assert compact_kwargs["previous_response_id"] == "resp-new"
+        finally:
+            allow_return.set()
+            if not mutation.done():
+                mutation.cancel()
+            await asyncio.gather(mutation, return_exceptions=True)
+            underlying.close()
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_auto_uses_input_after_clear(self) -> None:
+        item: TResponseInputItem = {"role": "assistant", "content": "old turn"}
+        underlying = SimpleListSession(history=[item])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(
+            return_value=SimpleNamespace(output=[], usage=None)
+        )
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=underlying,
+            client=mock_client,
+        )
+        # Default auto mode follows the stored response chain first.
+        await session.run_compaction({"response_id": "resp-old", "force": True})
+        first_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert first_kwargs.get("previous_response_id") == "resp-old"
+        assert "input" not in first_kwargs
+
+        await session.clear_session()
+        new_items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"role": "user", "content": "fresh start"}),
+            cast(TResponseInputItem, {"role": "assistant", "content": "fresh reply"}),
+        ]
+        await session.add_items(new_items)
+
+        # After clearing the stored response, auto mode compacts from the
+        # current local input instead of reusing the cleared response chain.
+        await session.run_compaction({"force": True})
+        assert mock_client.responses.compact.call_count == 2
+        second_kwargs = mock_client.responses.compact.call_args.kwargs
+        assert "previous_response_id" not in second_kwargs
+        assert second_kwargs.get("input") == new_items
+
+    @pytest.mark.asyncio
     async def test_get_items_delegates(self) -> None:
         mock_session = self.create_mock_session()
         mock_session.get_items.return_value = [{"type": "message", "content": "test"}]

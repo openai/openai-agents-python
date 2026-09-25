@@ -152,6 +152,22 @@ class BackendSpanExporter(TracingExporter):
                 if exported:
                     if sanitize_for_openai:
                         exported = self._sanitize_for_openai_tracing_api(exported)
+                    try:
+                        # Encode the way the request body is encoded (UTF-8, no NaN), so
+                        # strings holding unpaired surrogates are caught here as well.
+                        json.dumps(exported, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[non-fatal] Tracing: sanitizing values that can't be sent as JSON."
+                        )
+                        exported = self._sanitize_json_compatible_value(exported)
+                        # Strings pass the sanitizer unchanged, so replace any unpaired
+                        # surrogates, which UTF-8 can't encode, with "?".
+                        exported = json.loads(
+                            json.dumps(exported, ensure_ascii=False)
+                            .encode("utf-8", "replace")
+                            .decode("utf-8")
+                        )
                     data.append(exported)
             payload = {"data": data}
 
@@ -428,7 +444,9 @@ class BackendSpanExporter(TracingExporter):
             serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             return self._OPENAI_TRACING_MAX_FIELD_BYTES + 1
-        return len(serialized.encode("utf-8"))
+        # Unpaired surrogates can't be UTF-8 encoded; export replaces each with "?" later,
+        # so count them as that one byte instead of raising.
+        return len(serialized.encode("utf-8", "replace"))
 
     def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
         value_size = self._value_json_size_bytes(value)
@@ -564,20 +582,24 @@ class BackendSpanExporter(TracingExporter):
         existing_details = usage.get("details")
         if isinstance(existing_details, dict):
             for key, value in existing_details.items():
-                if not isinstance(key, str):
+                json_key = self._json_object_key(key)
+                if json_key is None:
                     continue
                 sanitized_value = self._sanitize_json_compatible_value(value)
                 if sanitized_value is self._UNSERIALIZABLE:
                     continue
-                details[key] = sanitized_value
+                details[json_key] = sanitized_value
 
         for key, value in usage.items():
             if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS or key == "details" or value is None:
                 continue
+            json_key = self._json_object_key(key)
+            if json_key is None:
+                continue
             sanitized_value = self._sanitize_json_compatible_value(value)
             if sanitized_value is self._UNSERIALIZABLE:
                 continue
-            details[key] = sanitized_value
+            details[json_key] = sanitized_value
 
         sanitized_usage: dict[str, Any] = {
             "input_tokens": input_tokens,
@@ -609,12 +631,13 @@ class BackendSpanExporter(TracingExporter):
             sanitized_dict: dict[str, Any] = {}
             try:
                 for key, nested_value in value.items():
-                    if not isinstance(key, str):
+                    json_key = self._json_object_key(key)
+                    if json_key is None:
                         continue
                     sanitized_nested = self._sanitize_json_compatible_value(nested_value, seen_ids)
                     if sanitized_nested is self._UNSERIALIZABLE:
                         continue
-                    sanitized_dict[key] = sanitized_nested
+                    sanitized_dict[json_key] = sanitized_nested
             finally:
                 seen_ids.remove(value_id)
             return sanitized_dict
@@ -634,6 +657,19 @@ class BackendSpanExporter(TracingExporter):
                 seen_ids.remove(value_id)
             return sanitized_list
         return self._UNSERIALIZABLE
+
+    def _json_object_key(self, key: Any) -> str | None:
+        """Return the key text json.dumps would send for ``key``, or None if it can't send it."""
+        if isinstance(key, str):
+            return key
+        if key is None or isinstance(key, bool | int | float):
+            try:
+                # Same text json writes for these keys: "true", "null", "200", "1.5".
+                return json.dumps(key, allow_nan=False)
+            except ValueError:
+                # A key the JSON encoder cannot represent, such as a non-finite float.
+                return None
+        return None
 
     def close(self):
         """Close the underlying HTTP client."""
