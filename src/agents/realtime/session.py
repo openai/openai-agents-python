@@ -314,7 +314,9 @@ class RealtimeSession(RealtimeModelListener):
     async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
         """Iterate over events from the session."""
         while True:
-            if (self._closed or self._model_stream_ended) and self._event_queue.empty():
+            if (
+                self._closing or self._closed or self._model_stream_ended
+            ) and self._event_queue.empty():
                 return
 
             # Check if there's a stored exception to raise
@@ -338,6 +340,9 @@ class RealtimeSession(RealtimeModelListener):
             finally:
                 self._event_iterator_waiters -= 1
             if event is _REALTIME_SESSION_CLOSED_SENTINEL:
+                if self._event_iterator_waiters:
+                    # A resumed consumer may get here before an already-woken queue reader.
+                    self._event_queue.put_nowait(event)
                 return
             yield cast(RealtimeSessionEvent, event)
 
@@ -357,6 +362,8 @@ class RealtimeSession(RealtimeModelListener):
 
         if cleanup_task is None:
             self._closing = True
+            # Event delivery has stopped, even if transport cleanup must later be retried.
+            self._wake_event_iterators()
             cleanup_task = asyncio.create_task(
                 self._cleanup(),
                 name="agents-realtime-session-cleanup",
