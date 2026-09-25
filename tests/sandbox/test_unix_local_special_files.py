@@ -205,8 +205,9 @@ async def test_stable_special_files_are_rejected_without_io_open(
             await session.write(target, io.BytesIO(b"payload"))
 
 
-def _lease_client(root: str, operation: str, replacement: str) -> None:
+def _lease_client(root: str, operation: str) -> None:
     import asyncio
+    import errno
     import io
     from pathlib import Path
 
@@ -227,74 +228,69 @@ def _lease_client(root: str, operation: str, replacement: str) -> None:
     async def exercise():
         try:
             if operation == "read":
-                with await session.read(Path("file")) as stream:
-                    assert stream.read() == b"original"
+                with await session.read(Path("file")):
+                    pass
             else:
                 await session.write(Path("file"), io.BytesIO(b"updated"))
-        except (WorkspaceArchiveReadError, WorkspaceArchiveWriteError):
-            if replacement == "fifo":
-                return
-            raise
-        assert replacement == "none", "A replacement FIFO must be rejected"
+        except (WorkspaceArchiveReadError, WorkspaceArchiveWriteError) as exc:
+            assert isinstance(exc.__cause__, OSError)
+            assert exc.__cause__.errno == errno.EWOULDBLOCK
+            return
+        raise AssertionError("A conflicting lease must be rejected")
 
     asyncio.run(exercise())
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux file leases")
 @pytest.mark.parametrize("operation", ["read", "write"])
-@pytest.mark.parametrize("replacement", ["none", "fifo"])
-def test_regular_file_lease_waiting(tmp_path: Path, operation: str, replacement: str) -> None:
+def test_regular_file_lease_rejected(tmp_path: Path, operation: str) -> None:
     import fcntl
     import signal
-    import threading
 
     target = tmp_path / "file"
     target.write_bytes(b"original")
-    notified = threading.Event()
-    previous_handler = signal.signal(signal.SIGIO, lambda *_: notified.set())
+    notified = False
+
+    def on_lease_break(_signum, _frame):
+        nonlocal notified
+        notified = True
+
+    previous_handler = signal.signal(signal.SIGIO, on_lease_break)
     source = inspect.getsource(_lease_client) + '\n_lease_client(*__import__("sys").argv[1:])'
     try:
         with target.open("r+b") as lease:
             fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_WRLCK)
             with subprocess.Popen(
-                [sys.executable, "-c", source, str(tmp_path), operation, replacement],
+                [sys.executable, "-c", source, str(tmp_path), operation],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             ) as client:
                 try:
-                    assert notified.wait(10), "Client did not request a lease break"
-                    # The operation must wait for this process to release its lease,
-                    # rather than exposing the transient nonblocking-open failure.
-                    with pytest.raises(subprocess.TimeoutExpired):
-                        client.wait(timeout=0.1)
-                    if replacement == "fifo":
-                        target.rename(tmp_path / "original")
-                        os.mkfifo(target)
-                    fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+                    # Keep the lease held until the public operation has failed. An
+                    # external watchdog bounds regressions without blocking pytest.
                     _, stderr = client.communicate(timeout=10)
                     assert client.returncode == 0, stderr.decode()
+                    assert notified, "Client did not request a lease break"
                 finally:
                     if client.poll() is None:
                         client.kill()
                     client.wait()
+                    fcntl.fcntl(lease, fcntl.F_SETLEASE, fcntl.F_UNLCK)
     finally:
         signal.signal(signal.SIGIO, previous_handler)
-    if replacement == "fifo":
-        assert target.is_fifo()
-        assert (tmp_path / "original").read_bytes() == b"original"
-    else:
-        assert target.read_bytes() == (b"updated" if operation == "write" else b"original")
+    assert target.read_bytes() == b"original"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("replacement", ["none", "fifo"])
-async def test_lease_retry_rechecks_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_conflicting_lease_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     import errno
+    import io
     from types import SimpleNamespace
 
-    from agents.sandbox.errors import WorkspaceArchiveReadError
+    from agents.sandbox.errors import WorkspaceArchiveReadError, WorkspaceArchiveWriteError
     from agents.sandbox.sandboxes import _unix_local_file_ops as file_ops
 
     from .test_unix_local_file_io import _session
@@ -308,24 +304,22 @@ async def test_lease_retry_rechecks_file(
         nonlocal attempts
         if path == "file":
             attempts += 1
-            if attempts == 1:
-                raise BlockingIOError(errno.EWOULDBLOCK, "Conflicting lease")
+            assert attempts == 1, "A conflicting lease must not be retried"
+            raise BlockingIOError(errno.EWOULDBLOCK, "Conflicting lease")
         return real_open(path, flags, *args, **kwargs)
 
-    def replace_during_wait(_delay):
-        if replacement == "fifo":
-            target.rename(tmp_path / "original")
-            os.mkfifo(target)
-
     monkeypatch.setattr(file_ops, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(file_ops, "time", SimpleNamespace(sleep=replace_during_wait))
     monkeypatch.setattr(os, "open", leased_open)
-    if replacement == "fifo":
-        with pytest.raises(WorkspaceArchiveReadError):
+    payload = io.BytesIO(b"updated")
+    error = WorkspaceArchiveReadError if operation == "read" else WorkspaceArchiveWriteError
+    with pytest.raises(error) as caught:
+        if operation == "read":
             await _session(tmp_path).read(Path("file"))
-        assert attempts == 1, "The replacement FIFO must be rejected before another leaf open"
-        assert target.is_fifo()
-        assert (tmp_path / "original").read_bytes() == b"original"
-    else:
-        with await _session(tmp_path).read(Path("file")) as stream:
-            assert stream.read() == b"original"
+        else:
+            await _session(tmp_path).write(Path("file"), payload)
+    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.__cause__.errno == errno.EWOULDBLOCK
+    assert attempts == 1
+    assert not payload.closed
+    assert payload.tell() == 0
+    assert target.read_bytes() == b"original"
