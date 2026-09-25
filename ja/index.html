@@ -394,7 +394,7 @@
   <a href="#choose-your-path" class="md-nav__link">
     <span class="md-ellipsis">
       
-        パスの選択
+        目的別ガイド
       
     </span>
   </a>
@@ -1703,7 +1703,7 @@
   <a href="#choose-your-path" class="md-nav__link">
     <span class="md-ellipsis">
       
-        パスの選択
+        目的別ガイド
       
     </span>
   </a>
@@ -1739,55 +1739,48 @@
 
 
 <h1 id="openai-agents-sdk">OpenAI Agents SDK</h1>
-<div class="admonition note">
-<p class="admonition-title">重要なお知らせ</p>
-<p>Agents SDK は <strong>機能が完成した状態</strong> です。保守、セキュリティ修正、重大なバグ修正、互換性対応は継続しますが、大規模な新機能は予定されていません。新しいエージェントアプリケーションには、マネージド Codex ハーネス上で動作する <strong><a href="https://developers.openai.com/api/docs/guides/agents-api/quickstart">Agents API</a></strong> を推奨します。</p>
-<p>既存のアプリケーションでは、Agents SDK を引き続き使用できます。Agents API がまだサポートしていない機能を必要とする新しいアプリケーションでは、SDK が当面の選択肢となります。</p>
-</div>
-<p><a href="https://github.com/openai/openai-agents-python">OpenAI Agents SDK</a> は、アプリケーションコード内でエージェントワークフローを構築するためのオープンソースフレームワークです。<a href="https://github.com/openai/swarm/tree/main">Swarm</a> を基盤としており、ガードレールと組み込みのトレーシングを備えた軽量なマルチエージェントオーケストレーションを本番アプリケーションで利用できるようにします。</p>
-<p>SDK はアプリケーション内でエージェントループを実行し、MCP サーバーのツールを含むモデル呼び出しとツール実行を調整します。セッションは複数の実行にわたって会話コンテキストを保持し、人間による承認を利用すると、アプリケーションはレビューのためにツール実行を一時停止できます。基本コンポーネントは次のとおりです。</p>
+<p><a href="https://github.com/openai/openai-agents-python">OpenAI Agents SDK</a> を使用すると、抽象化を最小限に抑えた軽量で使いやすいパッケージで、エージェント型 AI アプリを構築できます。これは、以前のエージェント向け実験プロジェクトである <a href="https://github.com/openai/swarm/tree/main">Swarm</a> を本番環境向けにアップグレードしたものです。Agents SDK は、非常に少数の基本コンポーネントで構成されています。</p>
 <ul>
 <li><strong>エージェント</strong>: 指示とツールを備えた LLM</li>
-<li><strong>Agents as tools / ハンドオフ</strong>: エージェントが特定のタスクを他のエージェントに委任できる仕組み</li>
+<li><strong>Agents as tools / ハンドオフ</strong>: エージェントが特定のタスクを別のエージェントに委任できる仕組み</li>
 <li><strong>ガードレール</strong>: エージェントの入力と出力を検証できる仕組み</li>
 </ul>
-<p>これらの基本コンポーネントを Python と組み合わせて、複数ステップのワークフローを調整できます。組み込みの <strong>トレーシング</strong> により、これらのワークフローを可視化、デバッグ、評価できます。SDK は、低レイテンシーの音声対話向けの <a href="realtime/guide/">リアルタイムエージェント</a> と、ファイルやコマンドを扱うための <a href="sandbox_agents/">サンドボックスエージェント</a> もサポートしています。</p>
+<p>これらの基本コンポーネントを Python と組み合わせることで、ツールとエージェント間の複雑な関係を表現し、学習コストを抑えながら実用的なアプリケーションを構築できます。さらに、SDK には組み込みの <strong>トレーシング</strong> が含まれており、エージェント型フローの可視化とデバッグに加え、評価やアプリケーション向けモデルのファインチューニングも行えます。</p>
 <h2 id="why-use-the-agents-sdk">Agents SDK を使用する理由</h2>
-<p>SDK の設計は、次の 2 つの原則に基づいています。</p>
+<p>SDK には、設計を支える 2 つの原則があります。</p>
 <ol>
-<li>使用する価値がある十分な機能を備えながら、短時間で習得できるように基本コンポーネントを必要最小限に抑えること。</li>
-<li>そのままでも優れた動作をしつつ、実際の処理を細部までカスタマイズできること。</li>
+<li>使用する価値があるだけの機能を備えつつ、すぐに習得できるよう基本コンポーネントを十分に少なくすること。</li>
+<li>初期設定のままでも適切に動作しながら、実際の処理を詳細にカスタマイズできること。</li>
 </ol>
 <p>SDK の主な機能は次のとおりです。</p>
 <ul>
 <li><strong>エージェント</strong>: 指示、ツール、ガードレール、ハンドオフ、およびタスクが完了するまで継続する組み込みループを備えたエージェントを構築できます。</li>
-<li><strong>サンドボックスエージェント</strong>: 実際の分離されたワークスペース内で専門エージェントを実行できます。サンドボックスエージェントは、マニフェストで定義されたファイル、サンドボックスクライアントの選択、再開可能なサンドボックスセッションをサポートします。</li>
-<li><strong>リアルタイムエージェント</strong>: <code>gpt-realtime-2.1</code>、自動中断検出、コンテキスト管理、ガードレールなどを備えた強力な音声エージェントを構築できます。</li>
+<li><strong>サンドボックスエージェント</strong>: 実際の隔離されたワークスペース内で専門エージェントを実行できます。サンドボックスエージェントは、マニフェストで定義されたファイル、サンドボックスクライアントの選択、再開可能なサンドボックスセッションをサポートします。</li>
+<li><strong>Realtime エージェント</strong>: <code>gpt-realtime-2.1</code>、自動中断検出、コンテキスト管理、ガードレールなどを使用して、強力な音声エージェントを構築できます。</li>
 <li><strong>音声エージェント</strong>: 音声テキスト変換、エージェントワークフロー、テキスト音声変換を組み合わせた音声パイプラインを構築できます。</li>
-<li><strong>Python ファースト</strong>: 新しい抽象化概念を学ぶことなく、組み込みの言語機能を使用してエージェントをオーケストレーションし、連携させることができます。</li>
+<li><strong>Python ファースト</strong>: 新しい抽象化を学ぶ必要はなく、組み込みの言語機能を使用してエージェントをオーケストレーションし、連鎖させることができます。</li>
 <li><strong>Agents as tools / ハンドオフ</strong>: 複数のエージェント間で作業を調整し、委任するための強力な仕組みです。</li>
-<li><strong>ガードレール</strong>: 入力検証と安全性チェックをエージェントの実行と並行して行い、チェックに合格しなかった場合は即座に処理を失敗させます。</li>
-<li><strong>関数ツール</strong>: 自動スキーマ生成と Pydantic による検証を使用して、任意の Python 関数をツールに変換できます。</li>
-<li><strong>MCP サーバーツールの呼び出し</strong>: リモートの MCP ツールを関数ツールとともにエージェントへ公開する組み込み統合です。</li>
+<li><strong>ガードレール</strong>: エージェントの実行と並行して入力検証と安全性チェックを実行し、チェックに合格しない場合は即座に失敗させます。</li>
+<li><strong>関数ツール</strong>: スキーマの自動生成と Pydantic を利用した検証により、任意の Python 関数をツールに変換できます。</li>
+<li><strong>MCP サーバーツール呼び出し</strong>: リモートの MCP ツールを関数ツールとともにエージェントへ公開するための組み込み統合です。</li>
 <li><strong>セッション</strong>: エージェントループ内で作業コンテキストを維持するための永続的なメモリレイヤーです。</li>
-<li><strong>ヒューマンインザループ</strong>: エージェントの実行中に人間が関与するための組み込みの仕組みです。</li>
-<li><strong>トレーシング</strong>: ワークフローの可視化、デバッグ、監視を行うための組み込みのトレーシングであり、OpenAI の評価、ファインチューニング、蒸留ツール一式をサポートします。</li>
+<li><strong>Human in the loop</strong>: エージェントの実行中に人間を関与させるための組み込みの仕組みです。</li>
+<li><strong>トレーシング</strong>: ワークフローを可視化、デバッグ、監視するための組み込みのトレーシングです。OpenAI の評価、ファインチューニング、蒸留ツール群をサポートしています。</li>
 </ul>
 <h2 id="agents-sdk-or-responses-api">Agents SDK と Responses API の選択</h2>
-<p>新しいエージェントアプリケーションでは、<a href="https://developers.openai.com/api/docs/guides/agents-api/quickstart">Agents API</a> から始めてください。以下の比較は、独自のアプリケーションコード内でエージェントワークフローを実行する必要がある場合に適用されます。</p>
-<p>SDK は OpenAI モデルに対してデフォルトで Responses API を使用しますが、モデル呼び出しをより高レベルなランタイムでラップします。</p>
-<p>次の場合は Responses API を直接使用します。</p>
+<p>SDK は、OpenAI モデルに対してデフォルトで Responses API を使用しますが、モデル呼び出しをより高レベルのランタイムでラップします。</p>
+<p>次の場合は、Responses API を直接使用します。</p>
 <ul>
-<li>ループ、ツールのディスパッチ、状態処理を自身で管理したい場合</li>
+<li>ループ、ツールのディスパッチ、状態管理を自分で制御したい場合</li>
 <li>ワークフローの実行時間が短く、主な目的がモデルの応答を返すことである場合</li>
 </ul>
-<p>次の場合は Agents SDK を使用します。</p>
+<p>次の場合は、Agents SDK を使用します。</p>
 <ul>
-<li>ターン、ツール実行、ガードレール、ハンドオフ、セッションをランタイムに管理させたい場合</li>
-<li>エージェントが成果物を生成する、または連携された複数のステップにわたって動作する必要がある場合</li>
-<li><a href="sandbox_agents/">サンドボックスエージェント</a> を通じて実際のワークスペースまたは再開可能な実行が必要な場合</li>
+<li>ターン、ツール実行、ガードレール、ハンドオフ、またはセッションをランタイムに管理させたい場合</li>
+<li>エージェントが成果物を生成する場合や、連携された複数のステップにわたって動作する必要がある場合</li>
+<li><a href="sandbox_agents/">サンドボックスエージェント</a>を通じて、実際のワークスペースまたは再開可能な実行が必要な場合</li>
 </ul>
-<p>どちらか一方を全面的に選択する必要はありません。多くのアプリケーションでは、管理されたワークフローに SDK を使用し、より低レベルな処理経路では Responses API を直接呼び出します。</p>
+<p>アプリケーション全体で、どちらか一方だけを選択する必要はありません。多くのアプリケーションでは、管理されたワークフローに SDK を使用し、より低レベルの処理では Responses API を直接呼び出します。</p>
 <h2 id="installation">インストール</h2>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents
 </span></code></pre></div>
@@ -1803,45 +1796,45 @@
 </span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="c1"># Functions calling themselves,</span>
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="c1"># Infinite loop&#39;s dance.</span>
 </span></code></pre></div>
-<p>(<em>これを実行する場合は、<code>OPENAI_API_KEY</code> 環境変数が設定されていることを確認してください</em>)</p>
+<p>(<em>これを実行する場合は、環境変数 <code>OPENAI_API_KEY</code> を設定してください</em>)</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>sk-...
 </span></code></pre></div>
 <h2 id="start-here">はじめに</h2>
 <ul>
 <li><a href="quickstart/">クイックスタート</a>で、最初のテキストベースのエージェントを構築します。</li>
-<li>次に、<a href="running_agents/#choose-a-memory-strategy">エージェントの実行</a>で、ターンをまたいで状態を引き継ぐ方法を決定します。</li>
-<li>タスクが実際のファイル、リポジトリ、またはエージェントごとに分離されたワークスペースの状態に依存する場合は、<a href="sandbox_agents/">サンドボックスエージェントのクイックスタート</a>を参照してください。</li>
-<li>ハンドオフとマネージャー形式のオーケストレーションのどちらを使用するか検討している場合は、<a href="multi_agent/">エージェントオーケストレーション</a>を参照してください。</li>
+<li>次に、<a href="running_agents/#choose-a-memory-strategy">エージェントの実行</a>で、ターン間で状態を引き継ぐ方法を決定します。</li>
+<li>タスクが実際のファイル、リポジトリ、またはエージェントごとに隔離されたワークスペースの状態に依存する場合は、<a href="sandbox_agents/">サンドボックスエージェントのクイックスタート</a>を参照してください。</li>
+<li>ハンドオフとマネージャー型オーケストレーションのどちらを使用するか決める場合は、<a href="multi_agent/">エージェントオーケストレーション</a>を参照してください。</li>
 </ul>
-<h2 id="choose-your-path">パスの選択</h2>
-<p>実行したい作業は分かっていても、どのページに説明があるか分からない場合は、この表を使用してください。</p>
+<h2 id="choose-your-path">目的別ガイド</h2>
+<p>実行したい作業は決まっていても、説明がどのページにあるか分からない場合は、次の表を使用してください。</p>
 <table>
 <thead>
 <tr>
 <th>目的</th>
-<th>参照先</th>
+<th>最初に参照するページ</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>最初のテキストエージェントを構築し、1 回の完全な実行を確認する</td>
+<td>最初のテキストエージェントを構築し、一連の実行全体を確認する</td>
 <td><a href="quickstart/">クイックスタート</a></td>
 </tr>
 <tr>
-<td>関数ツール、ホスト型ツール、または agents as tools を追加する</td>
+<td>関数ツール、ホスト型ツール、または Agents as tools を追加する</td>
 <td><a href="tools/">ツール</a></td>
 </tr>
 <tr>
-<td>実際の分離されたワークスペース内で、コーディング、レビュー、または文書処理を行うエージェントを実行する</td>
-<td><a href="sandbox_agents/">サンドボックスエージェントのクイックスタート</a>および<a href="sandbox/clients/">サンドボックスクライアント</a></td>
+<td>実際の隔離されたワークスペース内で、コーディング、レビュー、またはドキュメント処理を行うエージェントを実行する</td>
+<td><a href="sandbox_agents/">サンドボックスエージェントのクイックスタート</a>と<a href="sandbox/clients/">サンドボックスクライアント</a></td>
 </tr>
 <tr>
-<td>ハンドオフとマネージャー形式のオーケストレーションのどちらを使用するか決定する</td>
+<td>ハンドオフとマネージャー型オーケストレーションのどちらを使用するか決定する</td>
 <td><a href="multi_agent/">エージェントオーケストレーション</a></td>
 </tr>
 <tr>
-<td>ターンをまたいでメモリを保持する</td>
-<td><a href="running_agents/#choose-a-memory-strategy">エージェントの実行</a>および<a href="sessions/">セッション</a></td>
+<td>ターン間でメモリを保持する</td>
+<td><a href="running_agents/#choose-a-memory-strategy">エージェントの実行</a>と<a href="sessions/">セッション</a></td>
 </tr>
 <tr>
 <td>OpenAI モデル、WebSocket トランスポート、または OpenAI 以外のプロバイダーを使用する</td>
@@ -1853,10 +1846,10 @@
 </tr>
 <tr>
 <td><code>gpt-realtime-2.1</code> を使用して低レイテンシーの音声エージェントを構築する</td>
-<td><a href="realtime/quickstart/">リアルタイムエージェントのクイックスタート</a>および<a href="realtime/transport/">リアルタイムトランスポート</a></td>
+<td><a href="realtime/quickstart/">Realtime エージェントのクイックスタート</a>と<a href="realtime/transport/">Realtime トランスポート</a></td>
 </tr>
 <tr>
-<td>音声テキスト変換 / エージェント / テキスト音声変換のパイプラインを構築する</td>
+<td>音声テキスト変換、エージェント、テキスト音声変換を組み合わせたパイプラインを構築する</td>
 <td><a href="voice/quickstart/">音声パイプラインのクイックスタート</a></td>
 </tr>
 </tbody>

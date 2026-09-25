@@ -5052,19 +5052,13 @@
 
 
 <h1 id="openai-agents-sdk">OpenAI Agents SDK</h1>
-<div class="admonition note">
-<p class="admonition-title">Important notice</p>
-<p>The Agents SDK is <strong>feature complete</strong>. Maintenance, security fixes, critical bug fixes, and compatibility work continue, but major new features are not planned. For new agent applications, we recommend the <strong><a href="https://developers.openai.com/api/docs/guides/agents-api/quickstart">Agents API</a></strong>, which runs a managed Codex harness.</p>
-<p>You can continue using the Agents SDK for existing applications. For new applications that require capabilities the Agents API does not yet support, the SDK remains a short-term option.</p>
-</div>
-<p>The <a href="https://github.com/openai/openai-agents-python">OpenAI Agents SDK</a> is an open-source framework for building agent workflows in application code. It builds on <a href="https://github.com/openai/swarm/tree/main">Swarm</a>, bringing lightweight multi-agent orchestration into production applications with guardrails and built-in tracing.</p>
-<p>The SDK runs the agent loop in your application, coordinating model calls and tool execution, including MCP server tools. Sessions preserve conversation context across runs, and human approvals let your application pause tool execution for review. The core primitives are:</p>
+<p>The <a href="https://github.com/openai/openai-agents-python">OpenAI Agents SDK</a> enables you to build agentic AI apps in a lightweight, easy-to-use package with very few abstractions. It's a production-ready upgrade of our previous experimentation for agents, <a href="https://github.com/openai/swarm/tree/main">Swarm</a>. The Agents SDK has a very small set of primitives:</p>
 <ul>
 <li><strong>Agents</strong>, which are LLMs equipped with instructions and tools</li>
 <li><strong>Agents as tools / Handoffs</strong>, which allow agents to delegate to other agents for specific tasks</li>
 <li><strong>Guardrails</strong>, which enable validation of agent inputs and outputs</li>
 </ul>
-<p>You can combine these primitives with Python to coordinate multi-step workflows. Built-in <strong>tracing</strong> helps you visualize, debug, and evaluate those workflows. The SDK also supports <a href="realtime/guide/">Realtime agents</a> for low-latency voice interactions and <a href="sandbox_agents/">Sandbox agents</a> for working with files and commands.</p>
+<p>In combination with Python, these primitives are powerful enough to express complex relationships between tools and agents, and allow you to build real-world applications without a steep learning curve. In addition, the SDK comes with built-in <strong>tracing</strong> that lets you visualize and debug your agentic flows, as well as evaluate them and even fine-tune models for your application.</p>
 <h2 id="why-use-the-agents-sdk">Why use the Agents SDK</h2>
 <p>The SDK has two driving design principles:</p>
 <ol>
@@ -5087,7 +5081,6 @@
 <li><strong>Tracing</strong>: Built-in tracing for visualizing, debugging, and monitoring workflows, with support for the OpenAI suite of evaluation, fine-tuning, and distillation tools.</li>
 </ul>
 <h2 id="agents-sdk-or-responses-api">Agents SDK or Responses API?</h2>
-<p>For new agent applications, start with the <a href="https://developers.openai.com/api/docs/guides/agents-api/quickstart">Agents API</a>. The comparison below applies when you need to run the agent workflow in your own application code.</p>
 <p>The SDK uses the Responses API by default for OpenAI models, but it wraps model calls in a higher-level runtime.</p>
 <p>Use the Responses API directly when:</p>
 <ul>
