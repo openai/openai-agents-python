@@ -93,6 +93,22 @@ async def test_parent_swap_after_validation_cannot_access_outside(
 
     # Suspend at the check/use boundary without replacing the actual OS file operations.
     monkeypatch.setattr(session, "normalize_path", swap)
+
+    # The exclusive create authorizes through the descriptor-relative file ops rather than
+    # session.normalize_path, so the patch case injects at that boundary instead.
+    authorize = session._files.authorize
+
+    def swap_authorize(path: Path, *, for_write: bool = False) -> Path:
+        nonlocal swapped
+        result = authorize(path, for_write=for_write)
+        if not swapped and for_write and result.name == "target":
+            swapped = True
+            parent.rename(workspace / "original")
+            parent.symlink_to(outside, target_is_directory=True)
+        return result
+
+    if operation == "patch":
+        monkeypatch.setattr(session._files, "authorize", swap_authorize)
     with pytest.raises(
         (
             OSError,
