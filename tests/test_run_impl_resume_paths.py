@@ -498,8 +498,30 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
     assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
+def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
+    """Rewrite the 1.18-only agent-scoped approvals and MCP bindings the older readers refuse."""
+    for entry in payload["context"].pop("function_tool_approvals", []):
+        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+    response = payload.get("last_processed_response")
+    if isinstance(response, dict):
+        response.pop("mcp_tool_bindings", None)
+    payload["$schemaVersion"] = version
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "old-schema",
+        "batch-shape",
+        "held-shape",
+        "held-with-before",
+        "held-under-1-17",
+        "held-keys-without-held",
+        "policy-shape",
+        "fold-marker-shape",
+    ],
+)
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"
@@ -507,13 +529,59 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
     if invalid == "old-schema":
-        for entry in payload["context"].pop("function_tool_approvals", []):
-            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
-        payload["$schemaVersion"] = "1.16"
-    else:
+        _relabel_as_older_schema(payload, "1.16")
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    elif invalid == "held-shape":
+        payload["pending_session_write"]["held"] = "yes"
+    elif invalid == "held-keys-without-held":
+        # response_id and store describe the withheld response, so they are refused on
+        # an ordinary pending write where nothing consumes them.
+        payload["pending_session_write"]["response_id"] = "resp_1"
+    elif invalid == "policy-shape":
+        # The conversion-policy key only speaks the two policy literals or None; any
+        # other value would silently change how a fold converts the batch's items.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
+    elif invalid == "fold-marker-shape":
+        # The fold marker names outputs and the turn that owns them; a malformed
+        # marker would silently change which outputs the filter contract gates.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["folded_tool_outputs"] = {"turn": -1, "call_ids": []}
+    elif invalid == "held-under-1-17":
+        # 1.17 defined the pending write as exactly four keys, so the held variant is
+        # only readable under the version that introduced it.
+        _relabel_as_older_schema(payload, "1.17")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+    else:
+        # A held batch was never offered to the Session, so recorded digests and the
+        # held marker cannot coexist on one record.
+        payload["pending_session_write"]["held"] = True
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_pending_session_write_without_the_held_key_keeps_its_meaning() -> None:
+    # The four-key form 1.17 defined still settles eagerly on resume entry under its
+    # own label, unchanged by the held variant that 1.18 introduced.
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    assert "held" not in payload["pending_session_write"]
+    _relabel_as_older_schema(payload, "1.17")
+    payload["pending_session_write"].pop("response_id", None)
+    restored = await RunState.from_json(agent, payload)
+
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio
