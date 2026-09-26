@@ -280,8 +280,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "decisions to their owning agent, and persists the interrupted turn's withheld "
         "Session write, including the response it belongs to, the conversion policy its "
         "items were registered under, and the fold ownership of its outputs, so an "
-        "approval resume can settle it under the "
-        "output-guardrail gate."
+        "approval resume can settle it under the output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
