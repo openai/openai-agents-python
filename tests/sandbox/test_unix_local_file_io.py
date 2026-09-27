@@ -15,6 +15,7 @@ from agents.run_config import SandboxRunConfig
 from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.capabilities import Capability
 from agents.sandbox.errors import (
+    ApplyPatchDiffError,
     ExecNonZeroError,
     InvalidManifestPathError,
     WorkspaceArchiveReadError,
@@ -42,6 +43,55 @@ def _session(root: Path, *, grants: tuple[SandboxPathGrant, ...] = ()) -> UnixLo
             snapshot=NoopSnapshot(id="file-io"),
         )
     )
+
+
+@pytest.mark.parametrize("replace_source", [False, True])
+async def test_apply_patch_preserves_diverged_alias_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_source: bool
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_bytes(b"original\n")
+    destination.hardlink_to(source)
+    session = _session(tmp_path)
+    committed = asyncio.Event()
+    resume = asyncio.Event()
+    move = session.mv
+
+    async def pause_after_commit(*args, **kwargs):
+        await move(*args, **kwargs)
+        committed.set()
+        await resume.wait()
+
+    monkeypatch.setattr(session, "mv", pause_after_commit)
+    operation = asyncio.create_task(
+        session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                move_to="destination.txt",
+                diff="@@\n-original\n+updated\n",
+            )
+        )
+    )
+    try:
+        await asyncio.wait_for(committed.wait(), timeout=5)
+        assert destination.read_bytes() == b"updated\n"
+        if replace_source:
+            source.unlink()
+            source.write_bytes(b"other writer\n")
+        resume.set()
+        with pytest.raises(ApplyPatchDiffError, match="source was left untouched"):
+            await operation
+        assert source.read_bytes() == (b"other writer\n" if replace_source else b"original\n")
+        assert destination.read_bytes() == b"updated\n"
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "destination.txt",
+            "source.txt",
+        ]
+    finally:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
 
 
 async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path) -> object:

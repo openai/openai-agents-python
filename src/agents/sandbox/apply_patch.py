@@ -225,6 +225,8 @@ class WorkspaceEditor:
         An alias needs a staged replacement because writing and then removing the source
         would delete the updated file. Distinct files retain the released write/remove path,
         including an existing destination's metadata and file-level write permissions.
+        If the paths stop identifying the same file after an alias replacement, leave both
+        paths alone and report the incomplete move. This includes distinct hardlink aliases.
         These operations do not provide a transaction against concurrent workspace writers.
         """
         if source.as_posix() == moved_destination.as_posix():
@@ -263,7 +265,12 @@ class WorkspaceEditor:
             # the requested case-only rename without touching the committed content.
             await self._session.mv(source, moved_destination, user=self._user)
         elif not same_entry:
-            await self._session.rm(source, user=self._user)
+            raise ApplyPatchDiffError(
+                message=(
+                    "Move destination was updated, but source and destination no longer identify "
+                    "the same file; source was left untouched"
+                ),
+            )
 
     async def _write_text(self, destination: Path, text: str) -> None:
         await self._session.mkdir(destination.parent, parents=True, user=self._user)
