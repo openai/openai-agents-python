@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import io
 import os
 import stat
@@ -9,7 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import pytest
+from typing_extensions import Buffer
 
+from agents.sandbox.util import tar_utils
 from agents.sandbox.util.tar_utils import (
     UnsafeTarMemberError,
     safe_extract_tarfile,
@@ -178,6 +181,86 @@ def test_strip_tar_member_prefix_returns_workspace_relative_archive() -> None:
 
     with tarfile.open(fileobj=normalized, mode="r:*") as tar:
         assert tar.getnames() == [".", "pkg", "pkg/main.py", "pkg/python"]
+
+
+@pytest.mark.parametrize("absolute_link", [False, True])
+def test_strip_tar_member_prefix_retains_only_one_archive_payload(
+    monkeypatch: pytest.MonkeyPatch, absolute_link: bool
+) -> None:
+    payload = b"workspace content\n" * 65536
+    entries = [_dir("workspace")]
+    if absolute_link:
+        # The target follows the link in the input stream.
+        entries.append(_symlink("workspace/link", "/workspace/data.txt"))
+    entries.append(_file("workspace/data.txt", payload))
+    raw = _tar_bytes(*entries)
+    storage: list[io.BytesIO] = []
+
+    class BudgetedArchive(io.BytesIO):
+        def write(self, data: Buffer) -> int:
+            written = super().write(data)
+            retained = sum(len(stream.getbuffer()) for stream in storage if not stream.closed)
+            if retained > len(raw) + tarfile.RECORDSIZE:
+                raise OSError(errno.ENOSPC, "archive storage budget exceeded")
+            return written
+
+    def temporary_file() -> io.BytesIO:
+        stream = BudgetedArchive()
+        storage.append(stream)
+        return stream
+
+    monkeypatch.setattr(tar_utils.tempfile, "TemporaryFile", temporary_file)
+    source = io.BytesIO(raw)
+    with strip_tar_member_prefix(
+        source, prefix="workspace", relativize_symlinks_under="/workspace"
+    ) as normalized:
+        assert source.closed
+        with tarfile.open(fileobj=normalized, mode="r:*") as archive:
+            validate_tarfile(archive, allow_external_symlink_targets=False)
+            restored = archive.extractfile("data.txt")
+            assert restored is not None
+            with restored:
+                assert restored.read() == payload
+            if absolute_link:
+                assert archive.getmember("link").linkname == "data.txt"
+    assert all(stream.closed for stream in storage)
+
+
+@pytest.mark.parametrize("failure", ["read", "write", "validation"])
+def test_strip_tar_member_prefix_closes_streams_on_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    entries = [_dir("workspace"), _file("workspace/data.txt")]
+    if failure == "validation":
+        entries.append(_file("workspace/data.txt", b"duplicate"))
+
+    class Source(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            if failure == "read":
+                raise OSError("source read failed")
+            return super().read(size)
+
+    class Output(io.BytesIO):
+        def write(self, data: Buffer) -> int:
+            if failure == "write":
+                raise OSError("archive write failed")
+            return super().write(data)
+
+    source = Source(_tar_bytes(*entries))
+    outputs: list[Output] = []
+
+    def temporary_file() -> Output:
+        output = Output()
+        outputs.append(output)
+        return output
+
+    monkeypatch.setattr(tar_utils.tempfile, "TemporaryFile", temporary_file)
+    error = UnsafeTarMemberError if failure == "validation" else OSError
+    message = "duplicate archive path" if failure == "validation" else f"{failure} failed"
+    with pytest.raises(error, match=message):
+        strip_tar_member_prefix(source, prefix="workspace", relativize_symlinks_under="/workspace")
+    assert source.closed
+    assert outputs and all(output.closed for output in outputs)
 
 
 def _prefixed_workspace_archive(
@@ -357,6 +440,14 @@ def test_strip_tar_member_prefix_output_with_alias_link_is_refused_by_strict_hyd
             id="trailing separator after a directory",
         ),
         pytest.param(
+            (_dir("workspace/sub"),),
+            "workspace/victim",
+            "/workspace/sub",
+            id="directory target",
+        ),
+        pytest.param((), "workspace/victim", "/workspace", id="workspace root"),
+        pytest.param((), "workspace/victim", "/workspace/", id="workspace root with separator"),
+        pytest.param(
             (_file("workspace/implied/deep/data.txt", b"d"),),
             "workspace/victim",
             "/workspace/implied/deep/data.txt",
@@ -405,7 +496,6 @@ def test_strip_tar_member_prefix_rebases_simple_targets_established_by_the_archi
         _file("workspace/sub/deep/data.txt", b"d"),
         _dir("workspace/other"),
         _symlink("workspace/other/victim", "/workspace/sub/deep/data.txt"),
-        _symlink("workspace/to_dir", "/workspace/sub"),
     )
 
     stripped = strip_tar_member_prefix(
@@ -414,33 +504,7 @@ def test_strip_tar_member_prefix_rebases_simple_targets_established_by_the_archi
 
     with tarfile.open(fileobj=stripped, mode="r:*") as tar:
         assert tar.getmember("other/victim").linkname == "../sub/deep/data.txt"
-        assert tar.getmember("to_dir").linkname == "sub"
         validate_tarfile(tar, allow_external_symlink_targets=False)
-
-
-def test_strip_tar_member_prefix_rebases_links_to_the_workspace_root() -> None:
-    """The root needs no archive member to be established: hydration creates it. Only the
-    link's own parents have to be directory members for the climb to be exact."""
-    raw = _tar_bytes(
-        _dir("workspace"),
-        _dir("workspace/sub"),
-        _dir("workspace/sub/deep"),
-        _symlink("workspace/top", "/workspace"),
-        _symlink("workspace/top_slash", "/workspace/"),
-        _symlink("workspace/sub/deep/up", "/workspace"),
-        _symlink("workspace/implied/up", "/workspace"),
-    )
-
-    stripped = strip_tar_member_prefix(
-        io.BytesIO(raw), prefix="workspace", relativize_symlinks_under="/workspace"
-    )
-
-    with tarfile.open(fileobj=stripped, mode="r:*") as tar:
-        assert tar.getmember("top").linkname == "."
-        assert tar.getmember("top_slash").linkname == "."
-        assert tar.getmember("sub/deep/up").linkname == "../.."
-        # `implied/` is not a directory member, so the climb out of it proves nothing.
-        assert tar.getmember("implied/up").linkname == "/workspace"
 
 
 def test_strip_tar_member_prefix_leaves_link_under_unestablished_parent_absolute() -> None:

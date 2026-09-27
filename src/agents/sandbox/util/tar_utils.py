@@ -119,10 +119,9 @@ def strip_tar_member_prefix(
     under it is rebased onto the link's own directory with its components kept verbatim.
     Only *simple* targets are rebased: every component is a plain name and every directory
     the relative target walks through (the link's own parents and the target's parents) is
-    a directory member of the archive, with a regular-file or directory leaf. A target
-    whose meaning depends on how another symlink resolves (``alias/../x``), or that walks
-    through a directory the archive does not create, is left absolute so the strict
-    hydrate validation refuses it rather than this rewrite guessing where it lands.
+    a directory member of the archive, with a regular-file leaf. Targets that depend on
+    another symlink (``alias/../x``), walk through directories absent from the archive, or
+    name directories stay absolute for strict hydration to refuse.
     """
 
     prefix_rel = _normalize_rel(prefix)
@@ -136,12 +135,13 @@ def strip_tar_member_prefix(
             else relativize_symlinks_under
         )
 
-    staged = tempfile.TemporaryFile()
-    candidates: dict[str, str] = {}
+    out = tempfile.TemporaryFile()
+    members: dict[str, tarfile.TarInfo] = {}
+    candidates: list[tuple[tarfile.TarInfo, str]] = []
     try:
         with data:
             with tarfile.open(fileobj=data, mode="r|*") as src:
-                with tarfile.open(fileobj=staged, mode="w|") as dst:
+                with tarfile.open(fileobj=out, mode="w|") as dst:
                     for member in src:
                         if member.isfifo() or member.ischr() or member.isblk():
                             continue
@@ -168,12 +168,14 @@ def strip_tar_member_prefix(
                         rewritten.name = stripped_name
                         rewritten.pax_headers = dict(member.pax_headers)
                         rewritten.pax_headers.pop("path", None)
+                        members[stripped_name] = rewritten
                         if rewritten.issym() and symlink_root is not None:
                             rebased = rebase_symlink_target(
                                 rewritten.linkname, link_name=stripped_name, root=symlink_root
                             )
                             if rebased != rewritten.linkname:
-                                candidates[stripped_name] = rebased
+                                candidates.append((rewritten, rebased))
+                                continue
                         if member.isreg():
                             fileobj = src.extractfile(member)
                             if fileobj is None:
@@ -188,50 +190,27 @@ def strip_tar_member_prefix(
                         else:
                             dst.addfile(rewritten)
 
-        # Second pass: now that every member is known, rewrite only the simple targets
-        # whose every component the archive itself establishes; the rest stay absolute.
-        staged.seek(0)
-        out = tempfile.TemporaryFile()
-        try:
-            with tarfile.open(fileobj=staged, mode="r:*") as src:
-                members = {member.name: member for member in src.getmembers()}
-                with tarfile.open(fileobj=out, mode="w|") as dst:
-                    for member in src.getmembers():
-                        rewritten = member
-                        candidate = candidates.get(member.name)
-                        if candidate is not None and symlink_root is not None:
+                    # Only symlink headers need the complete member inventory. Keep file
+                    # payloads in one output archive instead of copying them a second time.
+                    for member, candidate in candidates:
+                        if symlink_root is not None:
                             parts = _simple_rebase_components(member.linkname, root=symlink_root)
                             if parts is not None and _archive_establishes(
                                 parts, link_name=member.name, members=members
                             ):
-                                rewritten = copy.copy(member)
-                                rewritten.linkname = candidate
+                                member.linkname = candidate
                                 # A long source target lives in a PAX "linkpath" record
                                 # that would otherwise override the rewritten linkname.
-                                rewritten.pax_headers = dict(member.pax_headers)
-                                rewritten.pax_headers.pop("linkpath", None)
-                        if member.isreg():
-                            fileobj = src.extractfile(member)
-                            if fileobj is None:
-                                raise UnsafeTarMemberError(
-                                    member=member.name, reason="missing file payload"
-                                )
-                            try:
-                                dst.addfile(rewritten, fileobj)
-                            finally:
-                                fileobj.close()
-                        else:
-                            dst.addfile(rewritten)
-            out.seek(0)
-            with tarfile.open(fileobj=out, mode="r:*") as tar:
-                validate_tarfile(tar)
-            out.seek(0)
-            return cast(io.IOBase, out)
-        except Exception:
-            out.close()
-            raise
-    finally:
-        staged.close()
+                                cast(dict[str, str], member.pax_headers).pop("linkpath", None)
+                        dst.addfile(member)
+        out.seek(0)
+        with tarfile.open(fileobj=out, mode="r:*") as tar:
+            validate_tarfile(tar)
+        out.seek(0)
+        return cast(io.IOBase, out)
+    except BaseException:
+        out.close()
+        raise
 
 
 def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | None:
@@ -240,8 +219,7 @@ def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | 
     Simple means every component after the root is a plain name: no ``.``, ``..``, or
     empty segment, and no trailing separator. A leading ``//`` is collapsed to ``/`` and
     the whole separator run at the root boundary is consumed (``/workspace//a.txt``). The
-    root itself (``/workspace`` or ``/workspace/``) is the empty tuple. Targets outside
-    the root, and
+    root itself (``/workspace`` or ``/workspace/``), targets outside the root, and
     targets whose meaning depends on how a symlink component resolves (``alias/../x``),
     return ``None`` and are left absolute for the strict hydrate check to refuse.
     """
@@ -256,7 +234,7 @@ def _simple_rebase_components(linkname: str, *, root: str) -> tuple[str, ...] | 
         rest = target[len(prefix) :].lstrip("/")
     else:
         return None
-    if rest.endswith("/"):
+    if not rest or rest.endswith("/"):
         # `/workspace/a.txt/` fails with ENOTDIR when `a.txt` is a file; dropping the
         # separator would turn it into a working link, so it is not a simple target.
         return None
@@ -283,9 +261,7 @@ def rebase_symlink_target(linkname: str, *, link_name: str, root: str) -> str:
         return linkname
     climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
     rest = "/".join(parts)
-    if rest and climb:
-        return f"{climb}/{rest}"
-    return rest or climb or "."
+    return f"{climb}/{rest}" if climb else rest
 
 
 def _archive_establishes(
@@ -297,8 +273,9 @@ def _archive_establishes(
     could already be a symlink in the destination and redirect the restored link. Every
     directory the relative target climbs out of (the link's own parents) and every
     directory it descends into must therefore be a directory member of the archive, and
-    the leaf must be a regular file or directory member: a symlink leaf would make the
-    result depend on another link, which is exactly what this rewrite refuses to model.
+    the leaf must be a regular file. Directory targets stay absolute: another relative
+    link can traverse a directory link followed by ``..``, so proving the rewritten link
+    alone is insufficient to preserve strict hydration's boundary.
     """
 
     link_parents = PurePosixPath(link_name).parent.parts
@@ -306,16 +283,12 @@ def _archive_establishes(
         parent = members.get("/".join(link_parents[:depth]))
         if parent is None or not parent.isdir():
             return False
-    if not parts:
-        # The target is the workspace root, which hydration itself establishes; only the
-        # climb out of the link's own parents had to be proven.
-        return True
     for depth in range(1, len(parts)):
         intermediate = members.get("/".join(parts[:depth]))
         if intermediate is None or not intermediate.isdir():
             return False
     leaf = members.get("/".join(parts))
-    return leaf is not None and (leaf.isreg() or leaf.isdir())
+    return leaf is not None and leaf.isreg()
 
 
 def _normalize_rel(prefix: str | Path) -> Path:

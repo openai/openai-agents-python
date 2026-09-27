@@ -770,7 +770,6 @@ async def test_docker_persist_and_hydrate_keep_absolute_workspace_symlinks_resol
     (workspace / "sub" / "data.txt").write_text("right", encoding="utf-8")
     (workspace / "alias").symlink_to("sub/deep")
     (workspace / "sub" / "abs_up").symlink_to("/workspace/sub/data.txt")
-    (workspace / "to_deep").symlink_to("/workspace/sub/deep")
     session = _HostBackedDockerSession(host_root=host_root, manifest=Manifest(root="/workspace"))
 
     archive = await session.persist_workspace()
@@ -816,31 +815,32 @@ async def test_docker_persist_and_hydrate_keep_absolute_workspace_symlinks_resol
     # sandbox's own filesystem resolves the way these assertions describe.
     restored_workspace = restored_host_root / "workspace"
     assert os.readlink(restored_workspace / "sub" / "abs_up") == "../sub/data.txt"
-    assert os.readlink(restored_workspace / "to_deep") == "sub/deep"
     assert os.readlink(restored_workspace / "alias") == "sub/deep"
     assert (restored_workspace / "sub" / "data.txt").read_text(encoding="utf-8") == "right"
 
 
 @pytest.mark.asyncio
-async def test_docker_persist_keeps_link_dependent_symlink_targets_absolute_for_hydrate(
+@pytest.mark.parametrize(
+    "target", ["/workspace/alias/../data.txt", "/workspace/sub/deep", "/workspace"]
+)
+async def test_docker_persist_keeps_unsupported_symlink_targets_absolute_for_hydrate(
     tmp_path: Path,
+    target: str,
 ) -> None:
-    """`alias -> sub/deep` makes `/workspace/alias/../data.txt` name `sub/data.txt` only
-    through another symlink. The archive keeps such a target absolute rather than
-    guessing, and the strict hydrate check refuses it."""
+    """Directory and link-dependent targets stay absolute for strict hydration to refuse."""
     host_root = tmp_path / "container"
     workspace = host_root / "workspace"
     (workspace / "sub" / "deep").mkdir(parents=True)
     (workspace / "data.txt").write_text("wrong", encoding="utf-8")
     (workspace / "sub" / "data.txt").write_text("right", encoding="utf-8")
     (workspace / "alias").symlink_to("sub/deep")
-    (workspace / "abs_alias").symlink_to("/workspace/alias/../data.txt")
+    (workspace / "abs_alias").symlink_to(target)
     session = _HostBackedDockerSession(host_root=host_root, manifest=Manifest(root="/workspace"))
 
     archive = await session.persist_workspace()
 
     with tarfile.open(fileobj=archive, mode="r:*") as tar:
-        assert tar.getmember("abs_alias").linkname == "/workspace/alias/../data.txt"
+        assert tar.getmember("abs_alias").linkname == target
         assert tar.getmember("alias").linkname == "sub/deep"
     archive.seek(0)
 
