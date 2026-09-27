@@ -3165,12 +3165,10 @@ applies there.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Fail closed when a previous run already produced a final output that cannot be reproduced.</p>
-<p>The marker is set once that output, its guardrails, and its terminal hooks have completed,
-and is cleared only once the turn is fully persisted. In between, the run owns a result no
-resume can settle, so resuming would repeat the model call and the lifecycle hooks for an
-output the caller already received. Raised before any Session, sandbox, model, tool,
-guardrail, or hook work so the rejection has no side effects of its own.</p>
+        <p>Fail closed when a previous run reached a boundary that cannot safely be resumed.</p>
+<p>This includes failed terminal persistence and a speculative handoff rejected by an input
+guardrail. Resuming would repeat completed work or bypass the failed input check. Reject
+before any Session, sandbox, model, tool, guardrail, or hook work.</p>
 
 
             <details class="mkdocstrings-source">
@@ -3186,22 +3184,18 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 <span class="normal"><a href="#__codelineno-0-515">515</a></span>
 <span class="normal"><a href="#__codelineno-0-516">516</a></span>
 <span class="normal"><a href="#__codelineno-0-517">517</a></span>
-<span class="normal"><a href="#__codelineno-0-518">518</a></span>
-<span class="normal"><a href="#__codelineno-0-519">519</a></span>
-<span class="normal"><a href="#__codelineno-0-520">520</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-507"><a id="__codelineno-0-507" name="__codelineno-0-507"></a><span class="k">def</span><span class="w"> </span><span class="nf">reject_unrecoverable_terminal_state</span><span class="p">(</span><span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-508"><a id="__codelineno-0-508" name="__codelineno-0-508"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fail closed when a previous run already produced a final output that cannot be reproduced.</span>
+<span class="normal"><a href="#__codelineno-0-518">518</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-507"><a id="__codelineno-0-507" name="__codelineno-0-507"></a><span class="k">def</span><span class="w"> </span><span class="nf">reject_unrecoverable_terminal_state</span><span class="p">(</span><span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-508"><a id="__codelineno-0-508" name="__codelineno-0-508"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fail closed when a previous run reached a boundary that cannot safely be resumed.</span>
 </span><span id="__span-0-509"><a id="__codelineno-0-509" name="__codelineno-0-509"></a>
-</span><span id="__span-0-510"><a id="__codelineno-0-510" name="__codelineno-0-510"></a><span class="sd">    The marker is set once that output, its guardrails, and its terminal hooks have completed,</span>
-</span><span id="__span-0-511"><a id="__codelineno-0-511" name="__codelineno-0-511"></a><span class="sd">    and is cleared only once the turn is fully persisted. In between, the run owns a result no</span>
-</span><span id="__span-0-512"><a id="__codelineno-0-512" name="__codelineno-0-512"></a><span class="sd">    resume can settle, so resuming would repeat the model call and the lifecycle hooks for an</span>
-</span><span id="__span-0-513"><a id="__codelineno-0-513" name="__codelineno-0-513"></a><span class="sd">    output the caller already received. Raised before any Session, sandbox, model, tool,</span>
-</span><span id="__span-0-514"><a id="__codelineno-0-514" name="__codelineno-0-514"></a><span class="sd">    guardrail, or hook work so the rejection has no side effects of its own.</span>
-</span><span id="__span-0-515"><a id="__codelineno-0-515" name="__codelineno-0-515"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-516"><a id="__codelineno-0-516" name="__codelineno-0-516"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_terminal_unrecoverable</span><span class="p">:</span>
-</span><span id="__span-0-517"><a id="__codelineno-0-517" name="__codelineno-0-517"></a>        <span class="k">raise</span> <span class="n">UserError</span><span class="p">(</span>
-</span><span id="__span-0-518"><a id="__codelineno-0-518" name="__codelineno-0-518"></a>            <span class="s2">&quot;This RunState already produced a final output whose Session write did not &quot;</span>
-</span><span id="__span-0-519"><a id="__codelineno-0-519" name="__codelineno-0-519"></a>            <span class="s2">&quot;complete, so it cannot be resumed. Start a new run instead.&quot;</span>
-</span><span id="__span-0-520"><a id="__codelineno-0-520" name="__codelineno-0-520"></a>        <span class="p">)</span>
+</span><span id="__span-0-510"><a id="__codelineno-0-510" name="__codelineno-0-510"></a><span class="sd">    This includes failed terminal persistence and a speculative handoff rejected by an input</span>
+</span><span id="__span-0-511"><a id="__codelineno-0-511" name="__codelineno-0-511"></a><span class="sd">    guardrail. Resuming would repeat completed work or bypass the failed input check. Reject</span>
+</span><span id="__span-0-512"><a id="__codelineno-0-512" name="__codelineno-0-512"></a><span class="sd">    before any Session, sandbox, model, tool, guardrail, or hook work.</span>
+</span><span id="__span-0-513"><a id="__codelineno-0-513" name="__codelineno-0-513"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-514"><a id="__codelineno-0-514" name="__codelineno-0-514"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_terminal_unrecoverable</span><span class="p">:</span>
+</span><span id="__span-0-515"><a id="__codelineno-0-515" name="__codelineno-0-515"></a>        <span class="k">raise</span> <span class="n">UserError</span><span class="p">(</span>
+</span><span id="__span-0-516"><a id="__codelineno-0-516" name="__codelineno-0-516"></a>            <span class="s2">&quot;This RunState ended at an unrecoverable boundary and cannot be resumed. &quot;</span>
+</span><span id="__span-0-517"><a id="__codelineno-0-517" name="__codelineno-0-517"></a>            <span class="s2">&quot;Start a new run instead.&quot;</span>
+</span><span id="__span-0-518"><a id="__codelineno-0-518" name="__codelineno-0-518"></a>        <span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3229,19 +3223,19 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-523">523</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-521">521</a></span>
+<span class="normal"><a href="#__codelineno-0-522">522</a></span>
+<span class="normal"><a href="#__codelineno-0-523">523</a></span>
 <span class="normal"><a href="#__codelineno-0-524">524</a></span>
 <span class="normal"><a href="#__codelineno-0-525">525</a></span>
 <span class="normal"><a href="#__codelineno-0-526">526</a></span>
-<span class="normal"><a href="#__codelineno-0-527">527</a></span>
-<span class="normal"><a href="#__codelineno-0-528">528</a></span>
-<span class="normal"><a href="#__codelineno-0-529">529</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-523"><a id="__codelineno-0-523" name="__codelineno-0-523"></a><span class="k">def</span><span class="w"> </span><span class="nf">append_model_response_if_new</span><span class="p">(</span>
-</span><span id="__span-0-524"><a id="__codelineno-0-524" name="__codelineno-0-524"></a>    <span class="n">model_responses</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ModelResponse</span><span class="p">],</span>
-</span><span id="__span-0-525"><a id="__codelineno-0-525" name="__codelineno-0-525"></a>    <span class="n">response</span><span class="p">:</span> <span class="n">ModelResponse</span><span class="p">,</span>
-</span><span id="__span-0-526"><a id="__codelineno-0-526" name="__codelineno-0-526"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-527"><a id="__codelineno-0-527" name="__codelineno-0-527"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Append a model response only when it is not already in the list tail.&quot;&quot;&quot;</span>
-</span><span id="__span-0-528"><a id="__codelineno-0-528" name="__codelineno-0-528"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">model_responses</span> <span class="ow">or</span> <span class="n">model_responses</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">response</span><span class="p">:</span>
-</span><span id="__span-0-529"><a id="__codelineno-0-529" name="__codelineno-0-529"></a>        <span class="n">model_responses</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
+<span class="normal"><a href="#__codelineno-0-527">527</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-521"><a id="__codelineno-0-521" name="__codelineno-0-521"></a><span class="k">def</span><span class="w"> </span><span class="nf">append_model_response_if_new</span><span class="p">(</span>
+</span><span id="__span-0-522"><a id="__codelineno-0-522" name="__codelineno-0-522"></a>    <span class="n">model_responses</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ModelResponse</span><span class="p">],</span>
+</span><span id="__span-0-523"><a id="__codelineno-0-523" name="__codelineno-0-523"></a>    <span class="n">response</span><span class="p">:</span> <span class="n">ModelResponse</span><span class="p">,</span>
+</span><span id="__span-0-524"><a id="__codelineno-0-524" name="__codelineno-0-524"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-525"><a id="__codelineno-0-525" name="__codelineno-0-525"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Append a model response only when it is not already in the list tail.&quot;&quot;&quot;</span>
+</span><span id="__span-0-526"><a id="__codelineno-0-526" name="__codelineno-0-526"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">model_responses</span> <span class="ow">or</span> <span class="n">model_responses</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">response</span><span class="p">:</span>
+</span><span id="__span-0-527"><a id="__codelineno-0-527" name="__codelineno-0-527"></a>        <span class="n">model_responses</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3273,11 +3267,11 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-532">532</a></span>
-<span class="normal"><a href="#__codelineno-0-533">533</a></span>
-<span class="normal"><a href="#__codelineno-0-534">534</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-532"><a id="__codelineno-0-532" name="__codelineno-0-532"></a><span class="k">def</span><span class="w"> </span><span class="nf">input_guardrails_triggered</span><span class="p">(</span><span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
-</span><span id="__span-0-533"><a id="__codelineno-0-533" name="__codelineno-0-533"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True when any guardrail tripwire has fired.&quot;&quot;&quot;</span>
-</span><span id="__span-0-534"><a id="__codelineno-0-534" name="__codelineno-0-534"></a>    <span class="k">return</span> <span class="nb">any</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">tripwire_triggered</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">)</span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-530">530</a></span>
+<span class="normal"><a href="#__codelineno-0-531">531</a></span>
+<span class="normal"><a href="#__codelineno-0-532">532</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-530"><a id="__codelineno-0-530" name="__codelineno-0-530"></a><span class="k">def</span><span class="w"> </span><span class="nf">input_guardrails_triggered</span><span class="p">(</span><span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+</span><span id="__span-0-531"><a id="__codelineno-0-531" name="__codelineno-0-531"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True when any guardrail tripwire has fired.&quot;&quot;&quot;</span>
+</span><span id="__span-0-532"><a id="__codelineno-0-532" name="__codelineno-0-532"></a>    <span class="k">return</span> <span class="nb">any</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">tripwire_triggered</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3336,7 +3330,9 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-537">537</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-535">535</a></span>
+<span class="normal"><a href="#__codelineno-0-536">536</a></span>
+<span class="normal"><a href="#__codelineno-0-537">537</a></span>
 <span class="normal"><a href="#__codelineno-0-538">538</a></span>
 <span class="normal"><a href="#__codelineno-0-539">539</a></span>
 <span class="normal"><a href="#__codelineno-0-540">540</a></span>
@@ -3351,26 +3347,24 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 <span class="normal"><a href="#__codelineno-0-549">549</a></span>
 <span class="normal"><a href="#__codelineno-0-550">550</a></span>
 <span class="normal"><a href="#__codelineno-0-551">551</a></span>
-<span class="normal"><a href="#__codelineno-0-552">552</a></span>
-<span class="normal"><a href="#__codelineno-0-553">553</a></span>
-<span class="normal"><a href="#__codelineno-0-554">554</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-537"><a id="__codelineno-0-537" name="__codelineno-0-537"></a><span class="k">def</span><span class="w"> </span><span class="nf">update_run_state_for_interruption</span><span class="p">(</span>
-</span><span id="__span-0-538"><a id="__codelineno-0-538" name="__codelineno-0-538"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-539"><a id="__codelineno-0-539" name="__codelineno-0-539"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span><span class="p">[</span><span class="n">TContext</span><span class="p">],</span>
-</span><span id="__span-0-540"><a id="__codelineno-0-540" name="__codelineno-0-540"></a>    <span class="n">model_responses</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ModelResponse</span><span class="p">],</span>
-</span><span id="__span-0-541"><a id="__codelineno-0-541" name="__codelineno-0-541"></a>    <span class="n">processed_response</span><span class="p">:</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-542"><a id="__codelineno-0-542" name="__codelineno-0-542"></a>    <span class="n">generated_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
-</span><span id="__span-0-543"><a id="__codelineno-0-543" name="__codelineno-0-543"></a>    <span class="n">session_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-544"><a id="__codelineno-0-544" name="__codelineno-0-544"></a>    <span class="n">current_turn</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
-</span><span id="__span-0-545"><a id="__codelineno-0-545" name="__codelineno-0-545"></a>    <span class="n">next_step</span><span class="p">:</span> <span class="n">NextStepInterruption</span><span class="p">,</span>
-</span><span id="__span-0-546"><a id="__codelineno-0-546" name="__codelineno-0-546"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-547"><a id="__codelineno-0-547" name="__codelineno-0-547"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Sync run-state fields needed to resume after an interruption.&quot;&quot;&quot;</span>
-</span><span id="__span-0-548"><a id="__codelineno-0-548" name="__codelineno-0-548"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_model_responses</span> <span class="o">=</span> <span class="n">model_responses</span>
-</span><span id="__span-0-549"><a id="__codelineno-0-549" name="__codelineno-0-549"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_last_processed_response</span> <span class="o">=</span> <span class="n">processed_response</span>
-</span><span id="__span-0-550"><a id="__codelineno-0-550" name="__codelineno-0-550"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_generated_items</span> <span class="o">=</span> <span class="n">generated_items</span>
-</span><span id="__span-0-551"><a id="__codelineno-0-551" name="__codelineno-0-551"></a>    <span class="k">if</span> <span class="n">session_items</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-552"><a id="__codelineno-0-552" name="__codelineno-0-552"></a>        <span class="n">run_state</span><span class="o">.</span><span class="n">_session_items</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">session_items</span><span class="p">)</span>
-</span><span id="__span-0-553"><a id="__codelineno-0-553" name="__codelineno-0-553"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_current_step</span> <span class="o">=</span> <span class="n">next_step</span>
-</span><span id="__span-0-554"><a id="__codelineno-0-554" name="__codelineno-0-554"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn</span> <span class="o">=</span> <span class="n">current_turn</span>
+<span class="normal"><a href="#__codelineno-0-552">552</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-535"><a id="__codelineno-0-535" name="__codelineno-0-535"></a><span class="k">def</span><span class="w"> </span><span class="nf">update_run_state_for_interruption</span><span class="p">(</span>
+</span><span id="__span-0-536"><a id="__codelineno-0-536" name="__codelineno-0-536"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-537"><a id="__codelineno-0-537" name="__codelineno-0-537"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span><span class="p">[</span><span class="n">TContext</span><span class="p">],</span>
+</span><span id="__span-0-538"><a id="__codelineno-0-538" name="__codelineno-0-538"></a>    <span class="n">model_responses</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ModelResponse</span><span class="p">],</span>
+</span><span id="__span-0-539"><a id="__codelineno-0-539" name="__codelineno-0-539"></a>    <span class="n">processed_response</span><span class="p">:</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-540"><a id="__codelineno-0-540" name="__codelineno-0-540"></a>    <span class="n">generated_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
+</span><span id="__span-0-541"><a id="__codelineno-0-541" name="__codelineno-0-541"></a>    <span class="n">session_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-542"><a id="__codelineno-0-542" name="__codelineno-0-542"></a>    <span class="n">current_turn</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+</span><span id="__span-0-543"><a id="__codelineno-0-543" name="__codelineno-0-543"></a>    <span class="n">next_step</span><span class="p">:</span> <span class="n">NextStepInterruption</span><span class="p">,</span>
+</span><span id="__span-0-544"><a id="__codelineno-0-544" name="__codelineno-0-544"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-545"><a id="__codelineno-0-545" name="__codelineno-0-545"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Sync run-state fields needed to resume after an interruption.&quot;&quot;&quot;</span>
+</span><span id="__span-0-546"><a id="__codelineno-0-546" name="__codelineno-0-546"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_model_responses</span> <span class="o">=</span> <span class="n">model_responses</span>
+</span><span id="__span-0-547"><a id="__codelineno-0-547" name="__codelineno-0-547"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_last_processed_response</span> <span class="o">=</span> <span class="n">processed_response</span>
+</span><span id="__span-0-548"><a id="__codelineno-0-548" name="__codelineno-0-548"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_generated_items</span> <span class="o">=</span> <span class="n">generated_items</span>
+</span><span id="__span-0-549"><a id="__codelineno-0-549" name="__codelineno-0-549"></a>    <span class="k">if</span> <span class="n">session_items</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-550"><a id="__codelineno-0-550" name="__codelineno-0-550"></a>        <span class="n">run_state</span><span class="o">.</span><span class="n">_session_items</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">session_items</span><span class="p">)</span>
+</span><span id="__span-0-551"><a id="__codelineno-0-551" name="__codelineno-0-551"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_current_step</span> <span class="o">=</span> <span class="n">next_step</span>
+</span><span id="__span-0-552"><a id="__codelineno-0-552" name="__codelineno-0-552"></a>    <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn</span> <span class="o">=</span> <span class="n">current_turn</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3429,7 +3423,9 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-557">557</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-555">555</a></span>
+<span class="normal"><a href="#__codelineno-0-556">556</a></span>
+<span class="normal"><a href="#__codelineno-0-557">557</a></span>
 <span class="normal"><a href="#__codelineno-0-558">558</a></span>
 <span class="normal"><a href="#__codelineno-0-559">559</a></span>
 <span class="normal"><a href="#__codelineno-0-560">560</a></span>
@@ -3453,35 +3449,33 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 <span class="normal"><a href="#__codelineno-0-578">578</a></span>
 <span class="normal"><a href="#__codelineno-0-579">579</a></span>
 <span class="normal"><a href="#__codelineno-0-580">580</a></span>
-<span class="normal"><a href="#__codelineno-0-581">581</a></span>
-<span class="normal"><a href="#__codelineno-0-582">582</a></span>
-<span class="normal"><a href="#__codelineno-0-583">583</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-557"><a id="__codelineno-0-557" name="__codelineno-0-557"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">save_turn_items_if_needed</span><span class="p">(</span>
-</span><span id="__span-0-558"><a id="__codelineno-0-558" name="__codelineno-0-558"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-559"><a id="__codelineno-0-559" name="__codelineno-0-559"></a>    <span class="n">session</span><span class="p">:</span> <span class="n">Session</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-560"><a id="__codelineno-0-560" name="__codelineno-0-560"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-561"><a id="__codelineno-0-561" name="__codelineno-0-561"></a>    <span class="n">session_persistence_enabled</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
-</span><span id="__span-0-562"><a id="__codelineno-0-562" name="__codelineno-0-562"></a>    <span class="n">input_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">],</span>
-</span><span id="__span-0-563"><a id="__codelineno-0-563" name="__codelineno-0-563"></a>    <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
-</span><span id="__span-0-564"><a id="__codelineno-0-564" name="__codelineno-0-564"></a>    <span class="n">response_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-565"><a id="__codelineno-0-565" name="__codelineno-0-565"></a>    <span class="n">store</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-566"><a id="__codelineno-0-566" name="__codelineno-0-566"></a>    <span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-567"><a id="__codelineno-0-567" name="__codelineno-0-567"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-568"><a id="__codelineno-0-568" name="__codelineno-0-568"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Persist turn items when persistence is enabled and guardrails allow it.&quot;&quot;&quot;</span>
-</span><span id="__span-0-569"><a id="__codelineno-0-569" name="__codelineno-0-569"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">session_persistence_enabled</span><span class="p">:</span>
+<span class="normal"><a href="#__codelineno-0-581">581</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-555"><a id="__codelineno-0-555" name="__codelineno-0-555"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">save_turn_items_if_needed</span><span class="p">(</span>
+</span><span id="__span-0-556"><a id="__codelineno-0-556" name="__codelineno-0-556"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-557"><a id="__codelineno-0-557" name="__codelineno-0-557"></a>    <span class="n">session</span><span class="p">:</span> <span class="n">Session</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-558"><a id="__codelineno-0-558" name="__codelineno-0-558"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-559"><a id="__codelineno-0-559" name="__codelineno-0-559"></a>    <span class="n">session_persistence_enabled</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
+</span><span id="__span-0-560"><a id="__codelineno-0-560" name="__codelineno-0-560"></a>    <span class="n">input_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">],</span>
+</span><span id="__span-0-561"><a id="__codelineno-0-561" name="__codelineno-0-561"></a>    <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
+</span><span id="__span-0-562"><a id="__codelineno-0-562" name="__codelineno-0-562"></a>    <span class="n">response_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-563"><a id="__codelineno-0-563" name="__codelineno-0-563"></a>    <span class="n">store</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-564"><a id="__codelineno-0-564" name="__codelineno-0-564"></a>    <span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-565"><a id="__codelineno-0-565" name="__codelineno-0-565"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-566"><a id="__codelineno-0-566" name="__codelineno-0-566"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Persist turn items when persistence is enabled and guardrails allow it.&quot;&quot;&quot;</span>
+</span><span id="__span-0-567"><a id="__codelineno-0-567" name="__codelineno-0-567"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">session_persistence_enabled</span><span class="p">:</span>
+</span><span id="__span-0-568"><a id="__codelineno-0-568" name="__codelineno-0-568"></a>        <span class="k">return</span>
+</span><span id="__span-0-569"><a id="__codelineno-0-569" name="__codelineno-0-569"></a>    <span class="k">if</span> <span class="n">input_guardrails_triggered</span><span class="p">(</span><span class="n">input_guardrail_results</span><span class="p">):</span>
 </span><span id="__span-0-570"><a id="__codelineno-0-570" name="__codelineno-0-570"></a>        <span class="k">return</span>
-</span><span id="__span-0-571"><a id="__codelineno-0-571" name="__codelineno-0-571"></a>    <span class="k">if</span> <span class="n">input_guardrails_triggered</span><span class="p">(</span><span class="n">input_guardrail_results</span><span class="p">):</span>
+</span><span id="__span-0-571"><a id="__codelineno-0-571" name="__codelineno-0-571"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
 </span><span id="__span-0-572"><a id="__codelineno-0-572" name="__codelineno-0-572"></a>        <span class="k">return</span>
-</span><span id="__span-0-573"><a id="__codelineno-0-573" name="__codelineno-0-573"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
-</span><span id="__span-0-574"><a id="__codelineno-0-574" name="__codelineno-0-574"></a>        <span class="k">return</span>
-</span><span id="__span-0-575"><a id="__codelineno-0-575" name="__codelineno-0-575"></a>    <span class="k">await</span> <span class="n">save_result_to_session</span><span class="p">(</span>
-</span><span id="__span-0-576"><a id="__codelineno-0-576" name="__codelineno-0-576"></a>        <span class="n">session</span><span class="p">,</span>
-</span><span id="__span-0-577"><a id="__codelineno-0-577" name="__codelineno-0-577"></a>        <span class="p">[],</span>
-</span><span id="__span-0-578"><a id="__codelineno-0-578" name="__codelineno-0-578"></a>        <span class="nb">list</span><span class="p">(</span><span class="n">items</span><span class="p">),</span>
-</span><span id="__span-0-579"><a id="__codelineno-0-579" name="__codelineno-0-579"></a>        <span class="n">run_state</span><span class="p">,</span>
-</span><span id="__span-0-580"><a id="__codelineno-0-580" name="__codelineno-0-580"></a>        <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
-</span><span id="__span-0-581"><a id="__codelineno-0-581" name="__codelineno-0-581"></a>        <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
-</span><span id="__span-0-582"><a id="__codelineno-0-582" name="__codelineno-0-582"></a>        <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
-</span><span id="__span-0-583"><a id="__codelineno-0-583" name="__codelineno-0-583"></a>    <span class="p">)</span>
+</span><span id="__span-0-573"><a id="__codelineno-0-573" name="__codelineno-0-573"></a>    <span class="k">await</span> <span class="n">save_result_to_session</span><span class="p">(</span>
+</span><span id="__span-0-574"><a id="__codelineno-0-574" name="__codelineno-0-574"></a>        <span class="n">session</span><span class="p">,</span>
+</span><span id="__span-0-575"><a id="__codelineno-0-575" name="__codelineno-0-575"></a>        <span class="p">[],</span>
+</span><span id="__span-0-576"><a id="__codelineno-0-576" name="__codelineno-0-576"></a>        <span class="nb">list</span><span class="p">(</span><span class="n">items</span><span class="p">),</span>
+</span><span id="__span-0-577"><a id="__codelineno-0-577" name="__codelineno-0-577"></a>        <span class="n">run_state</span><span class="p">,</span>
+</span><span id="__span-0-578"><a id="__codelineno-0-578" name="__codelineno-0-578"></a>        <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
+</span><span id="__span-0-579"><a id="__codelineno-0-579" name="__codelineno-0-579"></a>        <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
+</span><span id="__span-0-580"><a id="__codelineno-0-580" name="__codelineno-0-580"></a>        <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
+</span><span id="__span-0-581"><a id="__codelineno-0-581" name="__codelineno-0-581"></a>    <span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3542,7 +3536,9 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-586">586</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-584">584</a></span>
+<span class="normal"><a href="#__codelineno-0-585">585</a></span>
+<span class="normal"><a href="#__codelineno-0-586">586</a></span>
 <span class="normal"><a href="#__codelineno-0-587">587</a></span>
 <span class="normal"><a href="#__codelineno-0-588">588</a></span>
 <span class="normal"><a href="#__codelineno-0-589">589</a></span>
@@ -3577,46 +3573,44 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 <span class="normal"><a href="#__codelineno-0-618">618</a></span>
 <span class="normal"><a href="#__codelineno-0-619">619</a></span>
 <span class="normal"><a href="#__codelineno-0-620">620</a></span>
-<span class="normal"><a href="#__codelineno-0-621">621</a></span>
-<span class="normal"><a href="#__codelineno-0-622">622</a></span>
-<span class="normal"><a href="#__codelineno-0-623">623</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-586"><a id="__codelineno-0-586" name="__codelineno-0-586"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">save_final_turn_items_after_guardrails</span><span class="p">(</span>
-</span><span id="__span-0-587"><a id="__codelineno-0-587" name="__codelineno-0-587"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-588"><a id="__codelineno-0-588" name="__codelineno-0-588"></a>    <span class="n">session</span><span class="p">:</span> <span class="n">Session</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-589"><a id="__codelineno-0-589" name="__codelineno-0-589"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-590"><a id="__codelineno-0-590" name="__codelineno-0-590"></a>    <span class="n">session_persistence_enabled</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
-</span><span id="__span-0-591"><a id="__codelineno-0-591" name="__codelineno-0-591"></a>    <span class="n">input_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">],</span>
-</span><span id="__span-0-592"><a id="__codelineno-0-592" name="__codelineno-0-592"></a>    <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
-</span><span id="__span-0-593"><a id="__codelineno-0-593" name="__codelineno-0-593"></a>    <span class="n">response_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-594"><a id="__codelineno-0-594" name="__codelineno-0-594"></a>    <span class="n">reasoning_item_id_policy</span><span class="p">:</span> <span class="n">ReasoningItemIdPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-595"><a id="__codelineno-0-595" name="__codelineno-0-595"></a>    <span class="n">store</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-596"><a id="__codelineno-0-596" name="__codelineno-0-596"></a>    <span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-597"><a id="__codelineno-0-597" name="__codelineno-0-597"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-</span><span id="__span-0-598"><a id="__codelineno-0-598" name="__codelineno-0-598"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Persist deferred final-turn items without skipping a partially persisted resumed turn.&quot;&quot;&quot;</span>
-</span><span id="__span-0-599"><a id="__codelineno-0-599" name="__codelineno-0-599"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">session_persistence_enabled</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">items</span><span class="p">:</span>
+<span class="normal"><a href="#__codelineno-0-621">621</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-584"><a id="__codelineno-0-584" name="__codelineno-0-584"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">save_final_turn_items_after_guardrails</span><span class="p">(</span>
+</span><span id="__span-0-585"><a id="__codelineno-0-585" name="__codelineno-0-585"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-586"><a id="__codelineno-0-586" name="__codelineno-0-586"></a>    <span class="n">session</span><span class="p">:</span> <span class="n">Session</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-587"><a id="__codelineno-0-587" name="__codelineno-0-587"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-588"><a id="__codelineno-0-588" name="__codelineno-0-588"></a>    <span class="n">session_persistence_enabled</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
+</span><span id="__span-0-589"><a id="__codelineno-0-589" name="__codelineno-0-589"></a>    <span class="n">input_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">InputGuardrailResult</span><span class="p">],</span>
+</span><span id="__span-0-590"><a id="__codelineno-0-590" name="__codelineno-0-590"></a>    <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
+</span><span id="__span-0-591"><a id="__codelineno-0-591" name="__codelineno-0-591"></a>    <span class="n">response_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-592"><a id="__codelineno-0-592" name="__codelineno-0-592"></a>    <span class="n">reasoning_item_id_policy</span><span class="p">:</span> <span class="n">ReasoningItemIdPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-593"><a id="__codelineno-0-593" name="__codelineno-0-593"></a>    <span class="n">store</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-594"><a id="__codelineno-0-594" name="__codelineno-0-594"></a>    <span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-595"><a id="__codelineno-0-595" name="__codelineno-0-595"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+</span><span id="__span-0-596"><a id="__codelineno-0-596" name="__codelineno-0-596"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Persist deferred final-turn items without skipping a partially persisted resumed turn.&quot;&quot;&quot;</span>
+</span><span id="__span-0-597"><a id="__codelineno-0-597" name="__codelineno-0-597"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="n">session_persistence_enabled</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">items</span><span class="p">:</span>
+</span><span id="__span-0-598"><a id="__codelineno-0-598" name="__codelineno-0-598"></a>        <span class="k">return</span> <span class="mi">0</span>
+</span><span id="__span-0-599"><a id="__codelineno-0-599" name="__codelineno-0-599"></a>    <span class="k">if</span> <span class="n">input_guardrails_triggered</span><span class="p">(</span><span class="n">input_guardrail_results</span><span class="p">):</span>
 </span><span id="__span-0-600"><a id="__codelineno-0-600" name="__codelineno-0-600"></a>        <span class="k">return</span> <span class="mi">0</span>
-</span><span id="__span-0-601"><a id="__codelineno-0-601" name="__codelineno-0-601"></a>    <span class="k">if</span> <span class="n">input_guardrails_triggered</span><span class="p">(</span><span class="n">input_guardrail_results</span><span class="p">):</span>
-</span><span id="__span-0-602"><a id="__codelineno-0-602" name="__codelineno-0-602"></a>        <span class="k">return</span> <span class="mi">0</span>
-</span><span id="__span-0-603"><a id="__codelineno-0-603" name="__codelineno-0-603"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
-</span><span id="__span-0-604"><a id="__codelineno-0-604" name="__codelineno-0-604"></a>        <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">=</span> <span class="k">await</span> <span class="n">save_resumed_turn_items</span><span class="p">(</span>
-</span><span id="__span-0-605"><a id="__codelineno-0-605" name="__codelineno-0-605"></a>            <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">,</span>
-</span><span id="__span-0-606"><a id="__codelineno-0-606" name="__codelineno-0-606"></a>            <span class="n">items</span><span class="o">=</span><span class="n">items</span><span class="p">,</span>
-</span><span id="__span-0-607"><a id="__codelineno-0-607" name="__codelineno-0-607"></a>            <span class="n">persisted_count</span><span class="o">=</span><span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span><span class="p">,</span>
-</span><span id="__span-0-608"><a id="__codelineno-0-608" name="__codelineno-0-608"></a>            <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
-</span><span id="__span-0-609"><a id="__codelineno-0-609" name="__codelineno-0-609"></a>            <span class="n">reasoning_item_id_policy</span><span class="o">=</span><span class="n">run_state</span><span class="o">.</span><span class="n">_reasoning_item_id_policy</span><span class="p">,</span>
-</span><span id="__span-0-610"><a id="__codelineno-0-610" name="__codelineno-0-610"></a>            <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
-</span><span id="__span-0-611"><a id="__codelineno-0-611" name="__codelineno-0-611"></a>            <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
-</span><span id="__span-0-612"><a id="__codelineno-0-612" name="__codelineno-0-612"></a>        <span class="p">)</span>
-</span><span id="__span-0-613"><a id="__codelineno-0-613" name="__codelineno-0-613"></a>        <span class="k">return</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span>
-</span><span id="__span-0-614"><a id="__codelineno-0-614" name="__codelineno-0-614"></a>    <span class="k">return</span> <span class="k">await</span> <span class="n">save_result_to_session</span><span class="p">(</span>
-</span><span id="__span-0-615"><a id="__codelineno-0-615" name="__codelineno-0-615"></a>        <span class="n">session</span><span class="p">,</span>
-</span><span id="__span-0-616"><a id="__codelineno-0-616" name="__codelineno-0-616"></a>        <span class="p">[],</span>
-</span><span id="__span-0-617"><a id="__codelineno-0-617" name="__codelineno-0-617"></a>        <span class="nb">list</span><span class="p">(</span><span class="n">items</span><span class="p">),</span>
-</span><span id="__span-0-618"><a id="__codelineno-0-618" name="__codelineno-0-618"></a>        <span class="n">run_state</span><span class="p">,</span>
-</span><span id="__span-0-619"><a id="__codelineno-0-619" name="__codelineno-0-619"></a>        <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
-</span><span id="__span-0-620"><a id="__codelineno-0-620" name="__codelineno-0-620"></a>        <span class="n">reasoning_item_id_policy</span><span class="o">=</span><span class="n">reasoning_item_id_policy</span><span class="p">,</span>
-</span><span id="__span-0-621"><a id="__codelineno-0-621" name="__codelineno-0-621"></a>        <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
-</span><span id="__span-0-622"><a id="__codelineno-0-622" name="__codelineno-0-622"></a>        <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
-</span><span id="__span-0-623"><a id="__codelineno-0-623" name="__codelineno-0-623"></a>    <span class="p">)</span>
+</span><span id="__span-0-601"><a id="__codelineno-0-601" name="__codelineno-0-601"></a>    <span class="k">if</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+</span><span id="__span-0-602"><a id="__codelineno-0-602" name="__codelineno-0-602"></a>        <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span> <span class="o">=</span> <span class="k">await</span> <span class="n">save_resumed_turn_items</span><span class="p">(</span>
+</span><span id="__span-0-603"><a id="__codelineno-0-603" name="__codelineno-0-603"></a>            <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">,</span>
+</span><span id="__span-0-604"><a id="__codelineno-0-604" name="__codelineno-0-604"></a>            <span class="n">items</span><span class="o">=</span><span class="n">items</span><span class="p">,</span>
+</span><span id="__span-0-605"><a id="__codelineno-0-605" name="__codelineno-0-605"></a>            <span class="n">persisted_count</span><span class="o">=</span><span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span><span class="p">,</span>
+</span><span id="__span-0-606"><a id="__codelineno-0-606" name="__codelineno-0-606"></a>            <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
+</span><span id="__span-0-607"><a id="__codelineno-0-607" name="__codelineno-0-607"></a>            <span class="n">reasoning_item_id_policy</span><span class="o">=</span><span class="n">run_state</span><span class="o">.</span><span class="n">_reasoning_item_id_policy</span><span class="p">,</span>
+</span><span id="__span-0-608"><a id="__codelineno-0-608" name="__codelineno-0-608"></a>            <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
+</span><span id="__span-0-609"><a id="__codelineno-0-609" name="__codelineno-0-609"></a>            <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
+</span><span id="__span-0-610"><a id="__codelineno-0-610" name="__codelineno-0-610"></a>        <span class="p">)</span>
+</span><span id="__span-0-611"><a id="__codelineno-0-611" name="__codelineno-0-611"></a>        <span class="k">return</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_current_turn_persisted_item_count</span>
+</span><span id="__span-0-612"><a id="__codelineno-0-612" name="__codelineno-0-612"></a>    <span class="k">return</span> <span class="k">await</span> <span class="n">save_result_to_session</span><span class="p">(</span>
+</span><span id="__span-0-613"><a id="__codelineno-0-613" name="__codelineno-0-613"></a>        <span class="n">session</span><span class="p">,</span>
+</span><span id="__span-0-614"><a id="__codelineno-0-614" name="__codelineno-0-614"></a>        <span class="p">[],</span>
+</span><span id="__span-0-615"><a id="__codelineno-0-615" name="__codelineno-0-615"></a>        <span class="nb">list</span><span class="p">(</span><span class="n">items</span><span class="p">),</span>
+</span><span id="__span-0-616"><a id="__codelineno-0-616" name="__codelineno-0-616"></a>        <span class="n">run_state</span><span class="p">,</span>
+</span><span id="__span-0-617"><a id="__codelineno-0-617" name="__codelineno-0-617"></a>        <span class="n">response_id</span><span class="o">=</span><span class="n">response_id</span><span class="p">,</span>
+</span><span id="__span-0-618"><a id="__codelineno-0-618" name="__codelineno-0-618"></a>        <span class="n">reasoning_item_id_policy</span><span class="o">=</span><span class="n">reasoning_item_id_policy</span><span class="p">,</span>
+</span><span id="__span-0-619"><a id="__codelineno-0-619" name="__codelineno-0-619"></a>        <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">,</span>
+</span><span id="__span-0-620"><a id="__codelineno-0-620" name="__codelineno-0-620"></a>        <span class="n">wrapper</span><span class="o">=</span><span class="n">wrapper</span><span class="p">,</span>
+</span><span id="__span-0-621"><a id="__codelineno-0-621" name="__codelineno-0-621"></a>    <span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -3660,23 +3654,23 @@ guardrail, or hook work so the rejection has no side effects of its own.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/agent_runner_helpers.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-626">626</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-624">624</a></span>
+<span class="normal"><a href="#__codelineno-0-625">625</a></span>
+<span class="normal"><a href="#__codelineno-0-626">626</a></span>
 <span class="normal"><a href="#__codelineno-0-627">627</a></span>
 <span class="normal"><a href="#__codelineno-0-628">628</a></span>
 <span class="normal"><a href="#__codelineno-0-629">629</a></span>
 <span class="normal"><a href="#__codelineno-0-630">630</a></span>
 <span class="normal"><a href="#__codelineno-0-631">631</a></span>
-<span class="normal"><a href="#__codelineno-0-632">632</a></span>
-<span class="normal"><a href="#__codelineno-0-633">633</a></span>
-<span class="normal"><a href="#__codelineno-0-634">634</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-626"><a id="__codelineno-0-626" name="__codelineno-0-626"></a><span class="k">def</span><span class="w"> </span><span class="nf">resolve_processed_response</span><span class="p">(</span>
-</span><span id="__span-0-627"><a id="__codelineno-0-627" name="__codelineno-0-627"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-628"><a id="__codelineno-0-628" name="__codelineno-0-628"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-629"><a id="__codelineno-0-629" name="__codelineno-0-629"></a>    <span class="n">processed_response</span><span class="p">:</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-630"><a id="__codelineno-0-630" name="__codelineno-0-630"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-631"><a id="__codelineno-0-631" name="__codelineno-0-631"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a processed response, falling back to the run state when missing.&quot;&quot;&quot;</span>
-</span><span id="__span-0-632"><a id="__codelineno-0-632" name="__codelineno-0-632"></a>    <span class="k">if</span> <span class="n">processed_response</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-633"><a id="__codelineno-0-633" name="__codelineno-0-633"></a>        <span class="k">return</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_last_processed_response</span>
-</span><span id="__span-0-634"><a id="__codelineno-0-634" name="__codelineno-0-634"></a>    <span class="k">return</span> <span class="n">processed_response</span>
+<span class="normal"><a href="#__codelineno-0-632">632</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-624"><a id="__codelineno-0-624" name="__codelineno-0-624"></a><span class="k">def</span><span class="w"> </span><span class="nf">resolve_processed_response</span><span class="p">(</span>
+</span><span id="__span-0-625"><a id="__codelineno-0-625" name="__codelineno-0-625"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-626"><a id="__codelineno-0-626" name="__codelineno-0-626"></a>    <span class="n">run_state</span><span class="p">:</span> <span class="n">RunState</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-627"><a id="__codelineno-0-627" name="__codelineno-0-627"></a>    <span class="n">processed_response</span><span class="p">:</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-628"><a id="__codelineno-0-628" name="__codelineno-0-628"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ProcessedResponse</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-629"><a id="__codelineno-0-629" name="__codelineno-0-629"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a processed response, falling back to the run state when missing.&quot;&quot;&quot;</span>
+</span><span id="__span-0-630"><a id="__codelineno-0-630" name="__codelineno-0-630"></a>    <span class="k">if</span> <span class="n">processed_response</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">run_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-631"><a id="__codelineno-0-631" name="__codelineno-0-631"></a>        <span class="k">return</span> <span class="n">run_state</span><span class="o">.</span><span class="n">_last_processed_response</span>
+</span><span id="__span-0-632"><a id="__codelineno-0-632" name="__codelineno-0-632"></a>    <span class="k">return</span> <span class="n">processed_response</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>

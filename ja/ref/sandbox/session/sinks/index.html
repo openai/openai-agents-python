@@ -2100,9 +2100,13 @@
 
 
         <p>Append events to a JSONL file inside the session workspace (under manifest.root).</p>
-<p>This sink still runs in the client process, but writes into the session via
-<code>SandboxSession.write()</code>, so it works across sandboxes (Docker/Modal)
-without requiring host-mounted volumes.</p>
+<p>This sink reads and replaces the outbox through the session's file APIs.
+With a finite <code>max_bytes</code>, SDK backends limit acquisition from the source.
+Legacy custom backends use their existing <code>read()</code> API; data acquired inside that method
+is outside this sink's size limit. Backends own read deadlines and cleanup;
+this sink does not impose an additional timeout. Workspace logs are
+workload-modifiable and are not authoritative audit records. Use
+<code>JsonlOutboxSink</code> or <code>HttpProxySink</code> for storage outside the workspace.</p>
 
 
 
@@ -2245,139 +2249,209 @@ without requiring host-mounted volumes.</p>
 <span class="normal"><a href="#__codelineno-0-272">272</a></span>
 <span class="normal"><a href="#__codelineno-0-273">273</a></span>
 <span class="normal"><a href="#__codelineno-0-274">274</a></span>
-<span class="normal"><a href="#__codelineno-0-275">275</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-143"><a id="__codelineno-0-143" name="__codelineno-0-143"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkspaceJsonlSink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
+<span class="normal"><a href="#__codelineno-0-275">275</a></span>
+<span class="normal"><a href="#__codelineno-0-276">276</a></span>
+<span class="normal"><a href="#__codelineno-0-277">277</a></span>
+<span class="normal"><a href="#__codelineno-0-278">278</a></span>
+<span class="normal"><a href="#__codelineno-0-279">279</a></span>
+<span class="normal"><a href="#__codelineno-0-280">280</a></span>
+<span class="normal"><a href="#__codelineno-0-281">281</a></span>
+<span class="normal"><a href="#__codelineno-0-282">282</a></span>
+<span class="normal"><a href="#__codelineno-0-283">283</a></span>
+<span class="normal"><a href="#__codelineno-0-284">284</a></span>
+<span class="normal"><a href="#__codelineno-0-285">285</a></span>
+<span class="normal"><a href="#__codelineno-0-286">286</a></span>
+<span class="normal"><a href="#__codelineno-0-287">287</a></span>
+<span class="normal"><a href="#__codelineno-0-288">288</a></span>
+<span class="normal"><a href="#__codelineno-0-289">289</a></span>
+<span class="normal"><a href="#__codelineno-0-290">290</a></span>
+<span class="normal"><a href="#__codelineno-0-291">291</a></span>
+<span class="normal"><a href="#__codelineno-0-292">292</a></span>
+<span class="normal"><a href="#__codelineno-0-293">293</a></span>
+<span class="normal"><a href="#__codelineno-0-294">294</a></span>
+<span class="normal"><a href="#__codelineno-0-295">295</a></span>
+<span class="normal"><a href="#__codelineno-0-296">296</a></span>
+<span class="normal"><a href="#__codelineno-0-297">297</a></span>
+<span class="normal"><a href="#__codelineno-0-298">298</a></span>
+<span class="normal"><a href="#__codelineno-0-299">299</a></span>
+<span class="normal"><a href="#__codelineno-0-300">300</a></span>
+<span class="normal"><a href="#__codelineno-0-301">301</a></span>
+<span class="normal"><a href="#__codelineno-0-302">302</a></span>
+<span class="normal"><a href="#__codelineno-0-303">303</a></span>
+<span class="normal"><a href="#__codelineno-0-304">304</a></span>
+<span class="normal"><a href="#__codelineno-0-305">305</a></span>
+<span class="normal"><a href="#__codelineno-0-306">306</a></span>
+<span class="normal"><a href="#__codelineno-0-307">307</a></span>
+<span class="normal"><a href="#__codelineno-0-308">308</a></span>
+<span class="normal"><a href="#__codelineno-0-309">309</a></span>
+<span class="normal"><a href="#__codelineno-0-310">310</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-143"><a id="__codelineno-0-143" name="__codelineno-0-143"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkspaceJsonlSink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
 </span><span id="__span-0-144"><a id="__codelineno-0-144" name="__codelineno-0-144"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 </span><span id="__span-0-145"><a id="__codelineno-0-145" name="__codelineno-0-145"></a><span class="sd">    Append events to a JSONL file inside the session workspace (under manifest.root).</span>
 </span><span id="__span-0-146"><a id="__codelineno-0-146" name="__codelineno-0-146"></a>
-</span><span id="__span-0-147"><a id="__codelineno-0-147" name="__codelineno-0-147"></a><span class="sd">    This sink still runs in the client process, but writes into the session via</span>
-</span><span id="__span-0-148"><a id="__codelineno-0-148" name="__codelineno-0-148"></a><span class="sd">    `SandboxSession.write()`, so it works across sandboxes (Docker/Modal)</span>
-</span><span id="__span-0-149"><a id="__codelineno-0-149" name="__codelineno-0-149"></a><span class="sd">    without requiring host-mounted volumes.</span>
-</span><span id="__span-0-150"><a id="__codelineno-0-150" name="__codelineno-0-150"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-151"><a id="__codelineno-0-151" name="__codelineno-0-151"></a>
-</span><span id="__span-0-152"><a id="__codelineno-0-152" name="__codelineno-0-152"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
-</span><span id="__span-0-153"><a id="__codelineno-0-153" name="__codelineno-0-153"></a>        <span class="bp">self</span><span class="p">,</span>
-</span><span id="__span-0-154"><a id="__codelineno-0-154" name="__codelineno-0-154"></a>        <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-155"><a id="__codelineno-0-155" name="__codelineno-0-155"></a>        <span class="n">workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;logs/events-</span><span class="si">{session_id}</span><span class="s2">.jsonl&quot;</span><span class="p">),</span>
-</span><span id="__span-0-156"><a id="__codelineno-0-156" name="__codelineno-0-156"></a>        <span class="n">ephemeral</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-0-157"><a id="__codelineno-0-157" name="__codelineno-0-157"></a>        <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
-</span><span id="__span-0-158"><a id="__codelineno-0-158" name="__codelineno-0-158"></a>        <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
-</span><span id="__span-0-159"><a id="__codelineno-0-159" name="__codelineno-0-159"></a>        <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-160"><a id="__codelineno-0-160" name="__codelineno-0-160"></a>        <span class="n">flush_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
-</span><span id="__span-0-161"><a id="__codelineno-0-161" name="__codelineno-0-161"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a><span class="sd">        Args:</span>
-</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a><span class="sd">            workspace_relpath: Relative path under the session workspace root.</span>
-</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a><span class="sd">                This also supports lightweight templating which is expanded on `bind()`:</span>
-</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a><span class="sd">                - `&quot;{session_id}&quot;` (UUID string, e.g. &quot;550e8400-e29b-41d4-a716-446655440000&quot;)</span>
-</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a><span class="sd">                - `&quot;{session_id_hex}&quot;` (UUID hex, e.g. &quot;550e8400e29b41d4a716446655440000&quot;)</span>
-</span><span id="__span-0-168"><a id="__codelineno-0-168" name="__codelineno-0-168"></a>
-</span><span id="__span-0-169"><a id="__codelineno-0-169" name="__codelineno-0-169"></a><span class="sd">                Example:</span>
-</span><span id="__span-0-170"><a id="__codelineno-0-170" name="__codelineno-0-170"></a><span class="sd">                    Path(&quot;logs/events-{session_id}.jsonl&quot;)</span>
-</span><span id="__span-0-171"><a id="__codelineno-0-171" name="__codelineno-0-171"></a><span class="sd">        &quot;&quot;&quot;</span>
-</span><span id="__span-0-172"><a id="__codelineno-0-172" name="__codelineno-0-172"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span> <span class="o">=</span> <span class="n">workspace_relpath</span>
-</span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span> <span class="o">=</span> <span class="n">ephemeral</span>
-</span><span id="__span-0-174"><a id="__codelineno-0-174" name="__codelineno-0-174"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
-</span><span id="__span-0-175"><a id="__codelineno-0-175" name="__codelineno-0-175"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
-</span><span id="__span-0-176"><a id="__codelineno-0-176" name="__codelineno-0-176"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
-</span><span id="__span-0-177"><a id="__codelineno-0-177" name="__codelineno-0-177"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-178"><a id="__codelineno-0-178" name="__codelineno-0-178"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-179"><a id="__codelineno-0-179" name="__codelineno-0-179"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">()</span>
-</span><span id="__span-0-180"><a id="__codelineno-0-180" name="__codelineno-0-180"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">=</span> <span class="mi">0</span>
-</span><span id="__span-0-181"><a id="__codelineno-0-181" name="__codelineno-0-181"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
-</span><span id="__span-0-182"><a id="__codelineno-0-182" name="__codelineno-0-182"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">flush_every</span><span class="p">))</span>
-</span><span id="__span-0-183"><a id="__codelineno-0-183" name="__codelineno-0-183"></a>
-</span><span id="__span-0-184"><a id="__codelineno-0-184" name="__codelineno-0-184"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_relpath</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
-</span><span id="__span-0-185"><a id="__codelineno-0-185" name="__codelineno-0-185"></a>        <span class="n">rel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
-</span><span id="__span-0-186"><a id="__codelineno-0-186" name="__codelineno-0-186"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-187"><a id="__codelineno-0-187" name="__codelineno-0-187"></a>            <span class="k">return</span> <span class="n">rel</span>
-</span><span id="__span-0-188"><a id="__codelineno-0-188" name="__codelineno-0-188"></a>        <span class="n">template</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">rel</span><span class="p">)</span>
-</span><span id="__span-0-189"><a id="__codelineno-0-189" name="__codelineno-0-189"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-190"><a id="__codelineno-0-190" name="__codelineno-0-190"></a>            <span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
-</span><span id="__span-0-191"><a id="__codelineno-0-191" name="__codelineno-0-191"></a>                <span class="n">session_id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">session_id</span><span class="p">,</span>
-</span><span id="__span-0-192"><a id="__codelineno-0-192" name="__codelineno-0-192"></a>                <span class="n">session_id_hex</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">session_id</span><span class="o">.</span><span class="n">hex</span><span class="p">,</span>
-</span><span id="__span-0-193"><a id="__codelineno-0-193" name="__codelineno-0-193"></a>            <span class="p">)</span>
-</span><span id="__span-0-194"><a id="__codelineno-0-194" name="__codelineno-0-194"></a>        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-</span><span id="__span-0-195"><a id="__codelineno-0-195" name="__codelineno-0-195"></a>            <span class="c1"># If formatting fails for any reason, fall back to the literal path.</span>
-</span><span id="__span-0-196"><a id="__codelineno-0-196" name="__codelineno-0-196"></a>            <span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span>
-</span><span id="__span-0-197"><a id="__codelineno-0-197" name="__codelineno-0-197"></a>        <span class="k">return</span> <span class="n">Path</span><span class="p">(</span><span class="n">rendered</span><span class="p">)</span>
-</span><span id="__span-0-198"><a id="__codelineno-0-198" name="__codelineno-0-198"></a>
-</span><span id="__span-0-199"><a id="__codelineno-0-199" name="__codelineno-0-199"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-200"><a id="__codelineno-0-200" name="__codelineno-0-200"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="o">=</span> <span class="n">_unwrap_session_wrapper</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
-</span><span id="__span-0-201"><a id="__codelineno-0-201" name="__codelineno-0-201"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_relpath</span><span class="p">()</span>
-</span><span id="__span-0-202"><a id="__codelineno-0-202" name="__codelineno-0-202"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span><span class="p">:</span>
-</span><span id="__span-0-203"><a id="__codelineno-0-203" name="__codelineno-0-203"></a>            <span class="n">relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
-</span><span id="__span-0-204"><a id="__codelineno-0-204" name="__codelineno-0-204"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">register_persist_workspace_skip_path</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
-</span><span id="__span-0-205"><a id="__codelineno-0-205" name="__codelineno-0-205"></a>
-</span><span id="__span-0-206"><a id="__codelineno-0-206" name="__codelineno-0-206"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_buffer_event</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
-</span><span id="__span-0-207"><a id="__codelineno-0-207" name="__codelineno-0-207"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">event_to_json_line</span><span class="p">(</span><span class="n">event</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">))</span>
-</span><span id="__span-0-208"><a id="__codelineno-0-208" name="__codelineno-0-208"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">+=</span> <span class="mi">1</span>
-</span><span id="__span-0-209"><a id="__codelineno-0-209" name="__codelineno-0-209"></a>
-</span><span id="__span-0-210"><a id="__codelineno-0-210" name="__codelineno-0-210"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-</span><span id="__span-0-211"><a id="__codelineno-0-211" name="__codelineno-0-211"></a>            <span class="k">return</span> <span class="kc">True</span>
-</span><span id="__span-0-212"><a id="__codelineno-0-212" name="__codelineno-0-212"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;persist_workspace&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;start&quot;</span><span class="p">:</span>
-</span><span id="__span-0-213"><a id="__codelineno-0-213" name="__codelineno-0-213"></a>            <span class="k">return</span> <span class="kc">True</span>
-</span><span id="__span-0-214"><a id="__codelineno-0-214" name="__codelineno-0-214"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;stop&quot;</span><span class="p">:</span>
-</span><span id="__span-0-215"><a id="__codelineno-0-215" name="__codelineno-0-215"></a>            <span class="k">return</span> <span class="kc">True</span>
-</span><span id="__span-0-216"><a id="__codelineno-0-216" name="__codelineno-0-216"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;shutdown&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;start&quot;</span><span class="p">:</span>
-</span><span id="__span-0-217"><a id="__codelineno-0-217" name="__codelineno-0-217"></a>            <span class="k">return</span> <span class="kc">True</span>
-</span><span id="__span-0-218"><a id="__codelineno-0-218" name="__codelineno-0-218"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;shutdown&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;finish&quot;</span><span class="p">:</span>
-</span><span id="__span-0-219"><a id="__codelineno-0-219" name="__codelineno-0-219"></a>            <span class="k">return</span> <span class="kc">False</span>
-</span><span id="__span-0-220"><a id="__codelineno-0-220" name="__codelineno-0-220"></a>
-</span><span id="__span-0-221"><a id="__codelineno-0-221" name="__codelineno-0-221"></a>        <span class="k">return</span> <span class="kc">False</span>
-</span><span id="__span-0-222"><a id="__codelineno-0-222" name="__codelineno-0-222"></a>
-</span><span id="__span-0-223"><a id="__codelineno-0-223" name="__codelineno-0-223"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_can_flush_to_workspace</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
-</span><span id="__span-0-224"><a id="__codelineno-0-224" name="__codelineno-0-224"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-225"><a id="__codelineno-0-225" name="__codelineno-0-225"></a>            <span class="k">return</span> <span class="kc">False</span>
-</span><span id="__span-0-226"><a id="__codelineno-0-226" name="__codelineno-0-226"></a>
-</span><span id="__span-0-227"><a id="__codelineno-0-227" name="__codelineno-0-227"></a>        <span class="c1"># `SandboxSession.start()` emits the `start` event before the underlying sandbox</span>
-</span><span id="__span-0-228"><a id="__codelineno-0-228" name="__codelineno-0-228"></a>        <span class="c1"># is fully running, so writes may still fail during early startup or late teardown.</span>
-</span><span id="__span-0-229"><a id="__codelineno-0-229" name="__codelineno-0-229"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-230"><a id="__codelineno-0-230" name="__codelineno-0-230"></a>            <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">running</span><span class="p">()</span>
-</span><span id="__span-0-231"><a id="__codelineno-0-231" name="__codelineno-0-231"></a>        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-</span><span id="__span-0-232"><a id="__codelineno-0-232" name="__codelineno-0-232"></a>            <span class="k">return</span> <span class="kc">False</span>
-</span><span id="__span-0-233"><a id="__codelineno-0-233" name="__codelineno-0-233"></a>
-</span><span id="__span-0-234"><a id="__codelineno-0-234" name="__codelineno-0-234"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_flush_buffer</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-235"><a id="__codelineno-0-235" name="__codelineno-0-235"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="p">:</span>
-</span><span id="__span-0-236"><a id="__codelineno-0-236" name="__codelineno-0-236"></a>            <span class="k">return</span>
-</span><span id="__span-0-237"><a id="__codelineno-0-237" name="__codelineno-0-237"></a>
-</span><span id="__span-0-238"><a id="__codelineno-0-238" name="__codelineno-0-238"></a>        <span class="n">relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
-</span><span id="__span-0-239"><a id="__codelineno-0-239" name="__codelineno-0-239"></a>        <span class="n">existing</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_read_existing_outbox</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
-</span><span id="__span-0-240"><a id="__codelineno-0-240" name="__codelineno-0-240"></a>        <span class="n">pending</span> <span class="o">=</span> <span class="nb">bytes</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="p">)</span>
-</span><span id="__span-0-241"><a id="__codelineno-0-241" name="__codelineno-0-241"></a>        <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">relpath</span><span class="p">,</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">existing</span> <span class="o">+</span> <span class="n">pending</span><span class="p">))</span>
-</span><span id="__span-0-242"><a id="__codelineno-0-242" name="__codelineno-0-242"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-0-147"><a id="__codelineno-0-147" name="__codelineno-0-147"></a><span class="sd">    This sink reads and replaces the outbox through the session&#39;s file APIs.</span>
+</span><span id="__span-0-148"><a id="__codelineno-0-148" name="__codelineno-0-148"></a><span class="sd">    With a finite `max_bytes`, SDK backends limit acquisition from the source.</span>
+</span><span id="__span-0-149"><a id="__codelineno-0-149" name="__codelineno-0-149"></a><span class="sd">    Legacy custom backends use their existing `read()` API; data acquired inside that method</span>
+</span><span id="__span-0-150"><a id="__codelineno-0-150" name="__codelineno-0-150"></a><span class="sd">    is outside this sink&#39;s size limit. Backends own read deadlines and cleanup;</span>
+</span><span id="__span-0-151"><a id="__codelineno-0-151" name="__codelineno-0-151"></a><span class="sd">    this sink does not impose an additional timeout. Workspace logs are</span>
+</span><span id="__span-0-152"><a id="__codelineno-0-152" name="__codelineno-0-152"></a><span class="sd">    workload-modifiable and are not authoritative audit records. Use</span>
+</span><span id="__span-0-153"><a id="__codelineno-0-153" name="__codelineno-0-153"></a><span class="sd">    `JsonlOutboxSink` or `HttpProxySink` for storage outside the workspace.</span>
+</span><span id="__span-0-154"><a id="__codelineno-0-154" name="__codelineno-0-154"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-155"><a id="__codelineno-0-155" name="__codelineno-0-155"></a>
+</span><span id="__span-0-156"><a id="__codelineno-0-156" name="__codelineno-0-156"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+</span><span id="__span-0-157"><a id="__codelineno-0-157" name="__codelineno-0-157"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-0-158"><a id="__codelineno-0-158" name="__codelineno-0-158"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-159"><a id="__codelineno-0-159" name="__codelineno-0-159"></a>        <span class="n">workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;logs/events-</span><span class="si">{session_id}</span><span class="s2">.jsonl&quot;</span><span class="p">),</span>
+</span><span id="__span-0-160"><a id="__codelineno-0-160" name="__codelineno-0-160"></a>        <span class="n">ephemeral</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-0-161"><a id="__codelineno-0-161" name="__codelineno-0-161"></a>        <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
+</span><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a>        <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
+</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a>        <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a>        <span class="n">flush_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a>        <span class="n">max_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+</span><span id="__span-0-168"><a id="__codelineno-0-168" name="__codelineno-0-168"></a><span class="sd">        Args:</span>
+</span><span id="__span-0-169"><a id="__codelineno-0-169" name="__codelineno-0-169"></a><span class="sd">            workspace_relpath: Relative path under the session workspace root.</span>
+</span><span id="__span-0-170"><a id="__codelineno-0-170" name="__codelineno-0-170"></a><span class="sd">                This also supports lightweight templating which is expanded on `bind()`:</span>
+</span><span id="__span-0-171"><a id="__codelineno-0-171" name="__codelineno-0-171"></a><span class="sd">                - `&quot;{session_id}&quot;` (UUID string, e.g. &quot;550e8400-e29b-41d4-a716-446655440000&quot;)</span>
+</span><span id="__span-0-172"><a id="__codelineno-0-172" name="__codelineno-0-172"></a><span class="sd">                - `&quot;{session_id_hex}&quot;` (UUID hex, e.g. &quot;550e8400e29b41d4a716446655440000&quot;)</span>
+</span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>
+</span><span id="__span-0-174"><a id="__codelineno-0-174" name="__codelineno-0-174"></a><span class="sd">                Example:</span>
+</span><span id="__span-0-175"><a id="__codelineno-0-175" name="__codelineno-0-175"></a><span class="sd">                    Path(&quot;logs/events-{session_id}.jsonl&quot;)</span>
+</span><span id="__span-0-176"><a id="__codelineno-0-176" name="__codelineno-0-176"></a><span class="sd">            max_bytes: Optional maximum replacement-file and pending-buffer size in bytes.</span>
+</span><span id="__span-0-177"><a id="__codelineno-0-177" name="__codelineno-0-177"></a><span class="sd">                The default `None` preserves unlimited delivery and whole-file reads.</span>
+</span><span id="__span-0-178"><a id="__codelineno-0-178" name="__codelineno-0-178"></a><span class="sd">                Set a positive budget to bound acquisition of workload-modifiable logs.</span>
+</span><span id="__span-0-179"><a id="__codelineno-0-179" name="__codelineno-0-179"></a><span class="sd">                Exceeding either budget clears pending events</span>
+</span><span id="__span-0-180"><a id="__codelineno-0-180" name="__codelineno-0-180"></a><span class="sd">                and permanently stops this sink, reporting one error through</span>
+</span><span id="__span-0-181"><a id="__codelineno-0-181" name="__codelineno-0-181"></a><span class="sd">                `on_error`. Subsequent events are ignored, including after rebind.</span>
+</span><span id="__span-0-182"><a id="__codelineno-0-182" name="__codelineno-0-182"></a><span class="sd">                Create a new sink for a new outbox or with a larger finite budget,</span>
+</span><span id="__span-0-183"><a id="__codelineno-0-183" name="__codelineno-0-183"></a><span class="sd">                or use a host/HTTP sink for longer-lived logs. No file is truncated</span>
+</span><span id="__span-0-184"><a id="__codelineno-0-184" name="__codelineno-0-184"></a><span class="sd">                or rotated when the budget is exceeded.</span>
+</span><span id="__span-0-185"><a id="__codelineno-0-185" name="__codelineno-0-185"></a><span class="sd">        &quot;&quot;&quot;</span>
+</span><span id="__span-0-186"><a id="__codelineno-0-186" name="__codelineno-0-186"></a>        <span class="k">if</span> <span class="n">max_bytes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">max_bytes</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+</span><span id="__span-0-187"><a id="__codelineno-0-187" name="__codelineno-0-187"></a>            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;max_bytes must be positive&quot;</span><span class="p">)</span>
+</span><span id="__span-0-188"><a id="__codelineno-0-188" name="__codelineno-0-188"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="o">=</span> <span class="n">max_bytes</span>
+</span><span id="__span-0-189"><a id="__codelineno-0-189" name="__codelineno-0-189"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_disabled</span> <span class="o">=</span> <span class="kc">False</span>
+</span><span id="__span-0-190"><a id="__codelineno-0-190" name="__codelineno-0-190"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span> <span class="o">=</span> <span class="n">workspace_relpath</span>
+</span><span id="__span-0-191"><a id="__codelineno-0-191" name="__codelineno-0-191"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span> <span class="o">=</span> <span class="n">ephemeral</span>
+</span><span id="__span-0-192"><a id="__codelineno-0-192" name="__codelineno-0-192"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
+</span><span id="__span-0-193"><a id="__codelineno-0-193" name="__codelineno-0-193"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
+</span><span id="__span-0-194"><a id="__codelineno-0-194" name="__codelineno-0-194"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
+</span><span id="__span-0-195"><a id="__codelineno-0-195" name="__codelineno-0-195"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-196"><a id="__codelineno-0-196" name="__codelineno-0-196"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-197"><a id="__codelineno-0-197" name="__codelineno-0-197"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">()</span>
+</span><span id="__span-0-198"><a id="__codelineno-0-198" name="__codelineno-0-198"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">=</span> <span class="mi">0</span>
+</span><span id="__span-0-199"><a id="__codelineno-0-199" name="__codelineno-0-199"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+</span><span id="__span-0-200"><a id="__codelineno-0-200" name="__codelineno-0-200"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">flush_every</span><span class="p">))</span>
+</span><span id="__span-0-201"><a id="__codelineno-0-201" name="__codelineno-0-201"></a>
+</span><span id="__span-0-202"><a id="__codelineno-0-202" name="__codelineno-0-202"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_relpath</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+</span><span id="__span-0-203"><a id="__codelineno-0-203" name="__codelineno-0-203"></a>        <span class="n">rel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
+</span><span id="__span-0-204"><a id="__codelineno-0-204" name="__codelineno-0-204"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-205"><a id="__codelineno-0-205" name="__codelineno-0-205"></a>            <span class="k">return</span> <span class="n">rel</span>
+</span><span id="__span-0-206"><a id="__codelineno-0-206" name="__codelineno-0-206"></a>        <span class="n">template</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">rel</span><span class="p">)</span>
+</span><span id="__span-0-207"><a id="__codelineno-0-207" name="__codelineno-0-207"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-208"><a id="__codelineno-0-208" name="__codelineno-0-208"></a>            <span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+</span><span id="__span-0-209"><a id="__codelineno-0-209" name="__codelineno-0-209"></a>                <span class="n">session_id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">session_id</span><span class="p">,</span>
+</span><span id="__span-0-210"><a id="__codelineno-0-210" name="__codelineno-0-210"></a>                <span class="n">session_id_hex</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">session_id</span><span class="o">.</span><span class="n">hex</span><span class="p">,</span>
+</span><span id="__span-0-211"><a id="__codelineno-0-211" name="__codelineno-0-211"></a>            <span class="p">)</span>
+</span><span id="__span-0-212"><a id="__codelineno-0-212" name="__codelineno-0-212"></a>        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+</span><span id="__span-0-213"><a id="__codelineno-0-213" name="__codelineno-0-213"></a>            <span class="c1"># If formatting fails for any reason, fall back to the literal path.</span>
+</span><span id="__span-0-214"><a id="__codelineno-0-214" name="__codelineno-0-214"></a>            <span class="n">rendered</span> <span class="o">=</span> <span class="n">template</span>
+</span><span id="__span-0-215"><a id="__codelineno-0-215" name="__codelineno-0-215"></a>        <span class="k">return</span> <span class="n">Path</span><span class="p">(</span><span class="n">rendered</span><span class="p">)</span>
+</span><span id="__span-0-216"><a id="__codelineno-0-216" name="__codelineno-0-216"></a>
+</span><span id="__span-0-217"><a id="__codelineno-0-217" name="__codelineno-0-217"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-218"><a id="__codelineno-0-218" name="__codelineno-0-218"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="o">=</span> <span class="n">_unwrap_session_wrapper</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
+</span><span id="__span-0-219"><a id="__codelineno-0-219" name="__codelineno-0-219"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_relpath</span><span class="p">()</span>
+</span><span id="__span-0-220"><a id="__codelineno-0-220" name="__codelineno-0-220"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span><span class="p">:</span>
+</span><span id="__span-0-221"><a id="__codelineno-0-221" name="__codelineno-0-221"></a>            <span class="n">relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
+</span><span id="__span-0-222"><a id="__codelineno-0-222" name="__codelineno-0-222"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">register_persist_workspace_skip_path</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
+</span><span id="__span-0-223"><a id="__codelineno-0-223" name="__codelineno-0-223"></a>
+</span><span id="__span-0-224"><a id="__codelineno-0-224" name="__codelineno-0-224"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_buffer_event</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+</span><span id="__span-0-225"><a id="__codelineno-0-225" name="__codelineno-0-225"></a>        <span class="n">line</span> <span class="o">=</span> <span class="n">event_to_json_line</span><span class="p">(</span><span class="n">event</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
+</span><span id="__span-0-226"><a id="__codelineno-0-226" name="__codelineno-0-226"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="p">)</span> <span class="o">+</span> <span class="nb">len</span><span class="p">(</span><span class="n">line</span><span class="p">)</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span><span class="p">:</span>
+</span><span id="__span-0-227"><a id="__codelineno-0-227" name="__codelineno-0-227"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">_stop_at_limit</span><span class="p">()</span>
+</span><span id="__span-0-228"><a id="__codelineno-0-228" name="__codelineno-0-228"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+</span><span id="__span-0-229"><a id="__codelineno-0-229" name="__codelineno-0-229"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">+=</span> <span class="mi">1</span>
+</span><span id="__span-0-230"><a id="__codelineno-0-230" name="__codelineno-0-230"></a>
+</span><span id="__span-0-231"><a id="__codelineno-0-231" name="__codelineno-0-231"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+</span><span id="__span-0-232"><a id="__codelineno-0-232" name="__codelineno-0-232"></a>            <span class="k">return</span> <span class="kc">True</span>
+</span><span id="__span-0-233"><a id="__codelineno-0-233" name="__codelineno-0-233"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;persist_workspace&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;start&quot;</span><span class="p">:</span>
+</span><span id="__span-0-234"><a id="__codelineno-0-234" name="__codelineno-0-234"></a>            <span class="k">return</span> <span class="kc">True</span>
+</span><span id="__span-0-235"><a id="__codelineno-0-235" name="__codelineno-0-235"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;stop&quot;</span><span class="p">:</span>
+</span><span id="__span-0-236"><a id="__codelineno-0-236" name="__codelineno-0-236"></a>            <span class="k">return</span> <span class="kc">True</span>
+</span><span id="__span-0-237"><a id="__codelineno-0-237" name="__codelineno-0-237"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;shutdown&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;start&quot;</span><span class="p">:</span>
+</span><span id="__span-0-238"><a id="__codelineno-0-238" name="__codelineno-0-238"></a>            <span class="k">return</span> <span class="kc">True</span>
+</span><span id="__span-0-239"><a id="__codelineno-0-239" name="__codelineno-0-239"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;shutdown&quot;</span> <span class="ow">and</span> <span class="n">event</span><span class="o">.</span><span class="n">phase</span> <span class="o">==</span> <span class="s2">&quot;finish&quot;</span><span class="p">:</span>
+</span><span id="__span-0-240"><a id="__codelineno-0-240" name="__codelineno-0-240"></a>            <span class="k">return</span> <span class="kc">False</span>
+</span><span id="__span-0-241"><a id="__codelineno-0-241" name="__codelineno-0-241"></a>
+</span><span id="__span-0-242"><a id="__codelineno-0-242" name="__codelineno-0-242"></a>        <span class="k">return</span> <span class="kc">False</span>
 </span><span id="__span-0-243"><a id="__codelineno-0-243" name="__codelineno-0-243"></a>
-</span><span id="__span-0-244"><a id="__codelineno-0-244" name="__codelineno-0-244"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_read_existing_outbox</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">relpath</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+</span><span id="__span-0-244"><a id="__codelineno-0-244" name="__codelineno-0-244"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_can_flush_to_workspace</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
 </span><span id="__span-0-245"><a id="__codelineno-0-245" name="__codelineno-0-245"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-246"><a id="__codelineno-0-246" name="__codelineno-0-246"></a>            <span class="k">return</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+</span><span id="__span-0-246"><a id="__codelineno-0-246" name="__codelineno-0-246"></a>            <span class="k">return</span> <span class="kc">False</span>
 </span><span id="__span-0-247"><a id="__codelineno-0-247" name="__codelineno-0-247"></a>
-</span><span id="__span-0-248"><a id="__codelineno-0-248" name="__codelineno-0-248"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-249"><a id="__codelineno-0-249" name="__codelineno-0-249"></a>            <span class="n">existing</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
-</span><span id="__span-0-250"><a id="__codelineno-0-250" name="__codelineno-0-250"></a>        <span class="k">except</span> <span class="p">(</span><span class="ne">FileNotFoundError</span><span class="p">,</span> <span class="n">WorkspaceReadNotFoundError</span><span class="p">):</span>
-</span><span id="__span-0-251"><a id="__codelineno-0-251" name="__codelineno-0-251"></a>            <span class="k">return</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
-</span><span id="__span-0-252"><a id="__codelineno-0-252" name="__codelineno-0-252"></a>
-</span><span id="__span-0-253"><a id="__codelineno-0-253" name="__codelineno-0-253"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-254"><a id="__codelineno-0-254" name="__codelineno-0-254"></a>            <span class="n">payload</span> <span class="o">=</span> <span class="n">existing</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
-</span><span id="__span-0-255"><a id="__codelineno-0-255" name="__codelineno-0-255"></a>        <span class="k">finally</span><span class="p">:</span>
-</span><span id="__span-0-256"><a id="__codelineno-0-256" name="__codelineno-0-256"></a>            <span class="n">existing</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
-</span><span id="__span-0-257"><a id="__codelineno-0-257" name="__codelineno-0-257"></a>
-</span><span id="__span-0-258"><a id="__codelineno-0-258" name="__codelineno-0-258"></a>        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
-</span><span id="__span-0-259"><a id="__codelineno-0-259" name="__codelineno-0-259"></a>            <span class="k">return</span> <span class="n">payload</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
-</span><span id="__span-0-260"><a id="__codelineno-0-260" name="__codelineno-0-260"></a>        <span class="k">return</span> <span class="nb">bytes</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
-</span><span id="__span-0-261"><a id="__codelineno-0-261" name="__codelineno-0-261"></a>
-</span><span id="__span-0-262"><a id="__codelineno-0-262" name="__codelineno-0-262"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-263"><a id="__codelineno-0-263" name="__codelineno-0-263"></a>        <span class="c1"># If unbound (e.g., audit event emission used without a SandboxSession wrapper),</span>
-</span><span id="__span-0-264"><a id="__codelineno-0-264" name="__codelineno-0-264"></a>        <span class="c1"># no-op.</span>
-</span><span id="__span-0-265"><a id="__codelineno-0-265" name="__codelineno-0-265"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-266"><a id="__codelineno-0-266" name="__codelineno-0-266"></a>            <span class="k">return</span>
-</span><span id="__span-0-267"><a id="__codelineno-0-267" name="__codelineno-0-267"></a>
-</span><span id="__span-0-268"><a id="__codelineno-0-268" name="__codelineno-0-268"></a>        <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
-</span><span id="__span-0-269"><a id="__codelineno-0-269" name="__codelineno-0-269"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buffer_event</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
-</span><span id="__span-0-270"><a id="__codelineno-0-270" name="__codelineno-0-270"></a>                <span class="k">return</span>
-</span><span id="__span-0-271"><a id="__codelineno-0-271" name="__codelineno-0-271"></a>
-</span><span id="__span-0-272"><a id="__codelineno-0-272" name="__codelineno-0-272"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_can_flush_to_workspace</span><span class="p">():</span>
-</span><span id="__span-0-273"><a id="__codelineno-0-273" name="__codelineno-0-273"></a>                <span class="k">return</span>
+</span><span id="__span-0-248"><a id="__codelineno-0-248" name="__codelineno-0-248"></a>        <span class="c1"># `SandboxSession.start()` emits the `start` event before the underlying sandbox</span>
+</span><span id="__span-0-249"><a id="__codelineno-0-249" name="__codelineno-0-249"></a>        <span class="c1"># is fully running, so writes may still fail during early startup or late teardown.</span>
+</span><span id="__span-0-250"><a id="__codelineno-0-250" name="__codelineno-0-250"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-251"><a id="__codelineno-0-251" name="__codelineno-0-251"></a>            <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">running</span><span class="p">()</span>
+</span><span id="__span-0-252"><a id="__codelineno-0-252" name="__codelineno-0-252"></a>        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+</span><span id="__span-0-253"><a id="__codelineno-0-253" name="__codelineno-0-253"></a>            <span class="k">return</span> <span class="kc">False</span>
+</span><span id="__span-0-254"><a id="__codelineno-0-254" name="__codelineno-0-254"></a>
+</span><span id="__span-0-255"><a id="__codelineno-0-255" name="__codelineno-0-255"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_flush_buffer</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-256"><a id="__codelineno-0-256" name="__codelineno-0-256"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="p">:</span>
+</span><span id="__span-0-257"><a id="__codelineno-0-257" name="__codelineno-0-257"></a>            <span class="k">return</span>
+</span><span id="__span-0-258"><a id="__codelineno-0-258" name="__codelineno-0-258"></a>
+</span><span id="__span-0-259"><a id="__codelineno-0-259" name="__codelineno-0-259"></a>        <span class="n">relpath</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span>
+</span><span id="__span-0-260"><a id="__codelineno-0-260" name="__codelineno-0-260"></a>        <span class="n">existing</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_read_existing_outbox</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
+</span><span id="__span-0-261"><a id="__codelineno-0-261" name="__codelineno-0-261"></a>        <span class="n">pending</span> <span class="o">=</span> <span class="nb">bytes</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="p">)</span>
+</span><span id="__span-0-262"><a id="__codelineno-0-262" name="__codelineno-0-262"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">existing</span><span class="p">)</span> <span class="o">+</span> <span class="nb">len</span><span class="p">(</span><span class="n">pending</span><span class="p">)</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span><span class="p">:</span>
+</span><span id="__span-0-263"><a id="__codelineno-0-263" name="__codelineno-0-263"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">_stop_at_limit</span><span class="p">()</span>
+</span><span id="__span-0-264"><a id="__codelineno-0-264" name="__codelineno-0-264"></a>        <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">relpath</span><span class="p">,</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">(</span><span class="n">existing</span> <span class="o">+</span> <span class="n">pending</span><span class="p">))</span>
+</span><span id="__span-0-265"><a id="__codelineno-0-265" name="__codelineno-0-265"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-0-266"><a id="__codelineno-0-266" name="__codelineno-0-266"></a>
+</span><span id="__span-0-267"><a id="__codelineno-0-267" name="__codelineno-0-267"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_stop_at_limit</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">NoReturn</span><span class="p">:</span>
+</span><span id="__span-0-268"><a id="__codelineno-0-268" name="__codelineno-0-268"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_disabled</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-0-269"><a id="__codelineno-0-269" name="__codelineno-0-269"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</span><span id="__span-0-270"><a id="__codelineno-0-270" name="__codelineno-0-270"></a>        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+</span><span id="__span-0-271"><a id="__codelineno-0-271" name="__codelineno-0-271"></a>            <span class="sa">f</span><span class="s2">&quot;WorkspaceJsonlSink exceeded max_bytes=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span><span class="si">}</span><span class="s2">; delivery stopped. &quot;</span>
+</span><span id="__span-0-272"><a id="__codelineno-0-272" name="__codelineno-0-272"></a>            <span class="s2">&quot;Use a new outbox and sink, or JsonlOutboxSink/HttpProxySink.&quot;</span>
+</span><span id="__span-0-273"><a id="__codelineno-0-273" name="__codelineno-0-273"></a>        <span class="p">)</span>
 </span><span id="__span-0-274"><a id="__codelineno-0-274" name="__codelineno-0-274"></a>
-</span><span id="__span-0-275"><a id="__codelineno-0-275" name="__codelineno-0-275"></a>            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flush_buffer</span><span class="p">()</span>
+</span><span id="__span-0-275"><a id="__codelineno-0-275" name="__codelineno-0-275"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_read_existing_outbox</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">relpath</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+</span><span id="__span-0-276"><a id="__codelineno-0-276" name="__codelineno-0-276"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-277"><a id="__codelineno-0-277" name="__codelineno-0-277"></a>            <span class="k">return</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+</span><span id="__span-0-278"><a id="__codelineno-0-278" name="__codelineno-0-278"></a>
+</span><span id="__span-0-279"><a id="__codelineno-0-279" name="__codelineno-0-279"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-280"><a id="__codelineno-0-280" name="__codelineno-0-280"></a>            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-281"><a id="__codelineno-0-281" name="__codelineno-0-281"></a>                <span class="n">existing</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="n">relpath</span><span class="p">)</span>
+</span><span id="__span-0-282"><a id="__codelineno-0-282" name="__codelineno-0-282"></a>                <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-283"><a id="__codelineno-0-283" name="__codelineno-0-283"></a>                    <span class="n">payload</span> <span class="o">=</span> <span class="n">existing</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+</span><span id="__span-0-284"><a id="__codelineno-0-284" name="__codelineno-0-284"></a>                <span class="k">finally</span><span class="p">:</span>
+</span><span id="__span-0-285"><a id="__codelineno-0-285" name="__codelineno-0-285"></a>                    <span class="n">existing</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</span><span id="__span-0-286"><a id="__codelineno-0-286" name="__codelineno-0-286"></a>                <span class="k">return</span> <span class="n">payload</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="nb">bytes</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+</span><span id="__span-0-287"><a id="__codelineno-0-287" name="__codelineno-0-287"></a>            <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="o">.</span><span class="n">read_bounded</span><span class="p">(</span><span class="n">relpath</span><span class="p">,</span> <span class="n">max_bytes</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+</span><span id="__span-0-288"><a id="__codelineno-0-288" name="__codelineno-0-288"></a>        <span class="k">except</span> <span class="p">(</span><span class="ne">FileNotFoundError</span><span class="p">,</span> <span class="n">WorkspaceReadNotFoundError</span><span class="p">):</span>
+</span><span id="__span-0-289"><a id="__codelineno-0-289" name="__codelineno-0-289"></a>            <span class="k">return</span> <span class="sa">b</span><span class="s2">&quot;&quot;</span>
+</span><span id="__span-0-290"><a id="__codelineno-0-290" name="__codelineno-0-290"></a>        <span class="k">except</span> <span class="n">WorkspaceArchiveReadError</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+</span><span id="__span-0-291"><a id="__codelineno-0-291" name="__codelineno-0-291"></a>            <span class="k">if</span> <span class="n">error</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;reason&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">&quot;bounded_read_wire_limit&quot;</span><span class="p">:</span>
+</span><span id="__span-0-292"><a id="__codelineno-0-292" name="__codelineno-0-292"></a>                <span class="k">raise</span>
+</span><span id="__span-0-293"><a id="__codelineno-0-293" name="__codelineno-0-293"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">_stop_at_limit</span><span class="p">()</span>
+</span><span id="__span-0-294"><a id="__codelineno-0-294" name="__codelineno-0-294"></a>
+</span><span id="__span-0-295"><a id="__codelineno-0-295" name="__codelineno-0-295"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-296"><a id="__codelineno-0-296" name="__codelineno-0-296"></a>        <span class="c1"># If unbound (e.g., audit event emission used without a SandboxSession wrapper),</span>
+</span><span id="__span-0-297"><a id="__codelineno-0-297" name="__codelineno-0-297"></a>        <span class="c1"># no-op.</span>
+</span><span id="__span-0-298"><a id="__codelineno-0-298" name="__codelineno-0-298"></a>        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-299"><a id="__codelineno-0-299" name="__codelineno-0-299"></a>            <span class="k">return</span>
+</span><span id="__span-0-300"><a id="__codelineno-0-300" name="__codelineno-0-300"></a>
+</span><span id="__span-0-301"><a id="__codelineno-0-301" name="__codelineno-0-301"></a>        <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+</span><span id="__span-0-302"><a id="__codelineno-0-302" name="__codelineno-0-302"></a>            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_disabled</span><span class="p">:</span>
+</span><span id="__span-0-303"><a id="__codelineno-0-303" name="__codelineno-0-303"></a>                <span class="k">return</span>
+</span><span id="__span-0-304"><a id="__codelineno-0-304" name="__codelineno-0-304"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buffer_event</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
+</span><span id="__span-0-305"><a id="__codelineno-0-305" name="__codelineno-0-305"></a>                <span class="k">return</span>
+</span><span id="__span-0-306"><a id="__codelineno-0-306" name="__codelineno-0-306"></a>
+</span><span id="__span-0-307"><a id="__codelineno-0-307" name="__codelineno-0-307"></a>            <span class="k">if</span> <span class="ow">not</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_can_flush_to_workspace</span><span class="p">():</span>
+</span><span id="__span-0-308"><a id="__codelineno-0-308" name="__codelineno-0-308"></a>                <span class="k">return</span>
+</span><span id="__span-0-309"><a id="__codelineno-0-309" name="__codelineno-0-309"></a>
+</span><span id="__span-0-310"><a id="__codelineno-0-310" name="__codelineno-0-310"></a>            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flush_buffer</span><span class="p">()</span>
 </span></code></pre></div></td></tr></table></div>
               </details>
 
@@ -2412,7 +2486,8 @@ without requiring host-mounted volumes.</p>
 </span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">on_error</span><span class="p">:</span> <span class="n"><span title="agents.sandbox.session.sinks.OnErrorPolicy">OnErrorPolicy</span></span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
 </span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">payload_policy</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="EventPayloadPolicy (agents.sandbox.session.events.EventPayloadPolicy)" href="../../../../../ref/sandbox/session/events/#agents.sandbox.session.events.EventPayloadPolicy">EventPayloadPolicy</a></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">flush_every</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">max_bytes</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
 </span></code></pre></div>
 
     <div class="doc doc-contents ">
@@ -2451,17 +2526,37 @@ This also supports lightweight templating which is expanded on <code>bind()</cod
                   <code><span title="pathlib.Path">Path</span>(&#39;logs/events-{session_id}.jsonl&#39;)</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>max_bytes</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional maximum replacement-file and pending-buffer size in bytes.
+The default <code>None</code> preserves unlimited delivery and whole-file reads.
+Set a positive budget to bound acquisition of workload-modifiable logs.
+Exceeding either budget clears pending events
+and permanently stops this sink, reporting one error through
+<code>on_error</code>. Subsequent events are ignored, including after rebind.
+Create a new sink for a new outbox or with a larger finite budget,
+or use a host/HTTP sink for longer-lived logs. No file is truncated
+or rotated when the budget is exceeded.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/agents/sandbox/session/sinks.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-152">152</a></span>
-<span class="normal"><a href="#__codelineno-0-153">153</a></span>
-<span class="normal"><a href="#__codelineno-0-154">154</a></span>
-<span class="normal"><a href="#__codelineno-0-155">155</a></span>
-<span class="normal"><a href="#__codelineno-0-156">156</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-156">156</a></span>
 <span class="normal"><a href="#__codelineno-0-157">157</a></span>
 <span class="normal"><a href="#__codelineno-0-158">158</a></span>
 <span class="normal"><a href="#__codelineno-0-159">159</a></span>
@@ -2487,37 +2582,69 @@ This also supports lightweight templating which is expanded on <code>bind()</cod
 <span class="normal"><a href="#__codelineno-0-179">179</a></span>
 <span class="normal"><a href="#__codelineno-0-180">180</a></span>
 <span class="normal"><a href="#__codelineno-0-181">181</a></span>
-<span class="normal"><a href="#__codelineno-0-182">182</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-152"><a id="__codelineno-0-152" name="__codelineno-0-152"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
-</span><span id="__span-0-153"><a id="__codelineno-0-153" name="__codelineno-0-153"></a>    <span class="bp">self</span><span class="p">,</span>
-</span><span id="__span-0-154"><a id="__codelineno-0-154" name="__codelineno-0-154"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-155"><a id="__codelineno-0-155" name="__codelineno-0-155"></a>    <span class="n">workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;logs/events-</span><span class="si">{session_id}</span><span class="s2">.jsonl&quot;</span><span class="p">),</span>
-</span><span id="__span-0-156"><a id="__codelineno-0-156" name="__codelineno-0-156"></a>    <span class="n">ephemeral</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-0-157"><a id="__codelineno-0-157" name="__codelineno-0-157"></a>    <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
-</span><span id="__span-0-158"><a id="__codelineno-0-158" name="__codelineno-0-158"></a>    <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
-</span><span id="__span-0-159"><a id="__codelineno-0-159" name="__codelineno-0-159"></a>    <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-160"><a id="__codelineno-0-160" name="__codelineno-0-160"></a>    <span class="n">flush_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
-</span><span id="__span-0-161"><a id="__codelineno-0-161" name="__codelineno-0-161"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a><span class="sd">    Args:</span>
-</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a><span class="sd">        workspace_relpath: Relative path under the session workspace root.</span>
-</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a><span class="sd">            This also supports lightweight templating which is expanded on `bind()`:</span>
-</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a><span class="sd">            - `&quot;{session_id}&quot;` (UUID string, e.g. &quot;550e8400-e29b-41d4-a716-446655440000&quot;)</span>
-</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a><span class="sd">            - `&quot;{session_id_hex}&quot;` (UUID hex, e.g. &quot;550e8400e29b41d4a716446655440000&quot;)</span>
-</span><span id="__span-0-168"><a id="__codelineno-0-168" name="__codelineno-0-168"></a>
-</span><span id="__span-0-169"><a id="__codelineno-0-169" name="__codelineno-0-169"></a><span class="sd">            Example:</span>
-</span><span id="__span-0-170"><a id="__codelineno-0-170" name="__codelineno-0-170"></a><span class="sd">                Path(&quot;logs/events-{session_id}.jsonl&quot;)</span>
-</span><span id="__span-0-171"><a id="__codelineno-0-171" name="__codelineno-0-171"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-172"><a id="__codelineno-0-172" name="__codelineno-0-172"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span> <span class="o">=</span> <span class="n">workspace_relpath</span>
-</span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span> <span class="o">=</span> <span class="n">ephemeral</span>
-</span><span id="__span-0-174"><a id="__codelineno-0-174" name="__codelineno-0-174"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
-</span><span id="__span-0-175"><a id="__codelineno-0-175" name="__codelineno-0-175"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
-</span><span id="__span-0-176"><a id="__codelineno-0-176" name="__codelineno-0-176"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
-</span><span id="__span-0-177"><a id="__codelineno-0-177" name="__codelineno-0-177"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-178"><a id="__codelineno-0-178" name="__codelineno-0-178"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-179"><a id="__codelineno-0-179" name="__codelineno-0-179"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">()</span>
-</span><span id="__span-0-180"><a id="__codelineno-0-180" name="__codelineno-0-180"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">=</span> <span class="mi">0</span>
-</span><span id="__span-0-181"><a id="__codelineno-0-181" name="__codelineno-0-181"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
-</span><span id="__span-0-182"><a id="__codelineno-0-182" name="__codelineno-0-182"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">flush_every</span><span class="p">))</span>
+<span class="normal"><a href="#__codelineno-0-182">182</a></span>
+<span class="normal"><a href="#__codelineno-0-183">183</a></span>
+<span class="normal"><a href="#__codelineno-0-184">184</a></span>
+<span class="normal"><a href="#__codelineno-0-185">185</a></span>
+<span class="normal"><a href="#__codelineno-0-186">186</a></span>
+<span class="normal"><a href="#__codelineno-0-187">187</a></span>
+<span class="normal"><a href="#__codelineno-0-188">188</a></span>
+<span class="normal"><a href="#__codelineno-0-189">189</a></span>
+<span class="normal"><a href="#__codelineno-0-190">190</a></span>
+<span class="normal"><a href="#__codelineno-0-191">191</a></span>
+<span class="normal"><a href="#__codelineno-0-192">192</a></span>
+<span class="normal"><a href="#__codelineno-0-193">193</a></span>
+<span class="normal"><a href="#__codelineno-0-194">194</a></span>
+<span class="normal"><a href="#__codelineno-0-195">195</a></span>
+<span class="normal"><a href="#__codelineno-0-196">196</a></span>
+<span class="normal"><a href="#__codelineno-0-197">197</a></span>
+<span class="normal"><a href="#__codelineno-0-198">198</a></span>
+<span class="normal"><a href="#__codelineno-0-199">199</a></span>
+<span class="normal"><a href="#__codelineno-0-200">200</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-156"><a id="__codelineno-0-156" name="__codelineno-0-156"></a><span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+</span><span id="__span-0-157"><a id="__codelineno-0-157" name="__codelineno-0-157"></a>    <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-0-158"><a id="__codelineno-0-158" name="__codelineno-0-158"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-159"><a id="__codelineno-0-159" name="__codelineno-0-159"></a>    <span class="n">workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;logs/events-</span><span class="si">{session_id}</span><span class="s2">.jsonl&quot;</span><span class="p">),</span>
+</span><span id="__span-0-160"><a id="__codelineno-0-160" name="__codelineno-0-160"></a>    <span class="n">ephemeral</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-0-161"><a id="__codelineno-0-161" name="__codelineno-0-161"></a>    <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
+</span><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a>    <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
+</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a>    <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a>    <span class="n">flush_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a>    <span class="n">max_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+</span><span id="__span-0-168"><a id="__codelineno-0-168" name="__codelineno-0-168"></a><span class="sd">    Args:</span>
+</span><span id="__span-0-169"><a id="__codelineno-0-169" name="__codelineno-0-169"></a><span class="sd">        workspace_relpath: Relative path under the session workspace root.</span>
+</span><span id="__span-0-170"><a id="__codelineno-0-170" name="__codelineno-0-170"></a><span class="sd">            This also supports lightweight templating which is expanded on `bind()`:</span>
+</span><span id="__span-0-171"><a id="__codelineno-0-171" name="__codelineno-0-171"></a><span class="sd">            - `&quot;{session_id}&quot;` (UUID string, e.g. &quot;550e8400-e29b-41d4-a716-446655440000&quot;)</span>
+</span><span id="__span-0-172"><a id="__codelineno-0-172" name="__codelineno-0-172"></a><span class="sd">            - `&quot;{session_id_hex}&quot;` (UUID hex, e.g. &quot;550e8400e29b41d4a716446655440000&quot;)</span>
+</span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>
+</span><span id="__span-0-174"><a id="__codelineno-0-174" name="__codelineno-0-174"></a><span class="sd">            Example:</span>
+</span><span id="__span-0-175"><a id="__codelineno-0-175" name="__codelineno-0-175"></a><span class="sd">                Path(&quot;logs/events-{session_id}.jsonl&quot;)</span>
+</span><span id="__span-0-176"><a id="__codelineno-0-176" name="__codelineno-0-176"></a><span class="sd">        max_bytes: Optional maximum replacement-file and pending-buffer size in bytes.</span>
+</span><span id="__span-0-177"><a id="__codelineno-0-177" name="__codelineno-0-177"></a><span class="sd">            The default `None` preserves unlimited delivery and whole-file reads.</span>
+</span><span id="__span-0-178"><a id="__codelineno-0-178" name="__codelineno-0-178"></a><span class="sd">            Set a positive budget to bound acquisition of workload-modifiable logs.</span>
+</span><span id="__span-0-179"><a id="__codelineno-0-179" name="__codelineno-0-179"></a><span class="sd">            Exceeding either budget clears pending events</span>
+</span><span id="__span-0-180"><a id="__codelineno-0-180" name="__codelineno-0-180"></a><span class="sd">            and permanently stops this sink, reporting one error through</span>
+</span><span id="__span-0-181"><a id="__codelineno-0-181" name="__codelineno-0-181"></a><span class="sd">            `on_error`. Subsequent events are ignored, including after rebind.</span>
+</span><span id="__span-0-182"><a id="__codelineno-0-182" name="__codelineno-0-182"></a><span class="sd">            Create a new sink for a new outbox or with a larger finite budget,</span>
+</span><span id="__span-0-183"><a id="__codelineno-0-183" name="__codelineno-0-183"></a><span class="sd">            or use a host/HTTP sink for longer-lived logs. No file is truncated</span>
+</span><span id="__span-0-184"><a id="__codelineno-0-184" name="__codelineno-0-184"></a><span class="sd">            or rotated when the budget is exceeded.</span>
+</span><span id="__span-0-185"><a id="__codelineno-0-185" name="__codelineno-0-185"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-186"><a id="__codelineno-0-186" name="__codelineno-0-186"></a>    <span class="k">if</span> <span class="n">max_bytes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">max_bytes</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+</span><span id="__span-0-187"><a id="__codelineno-0-187" name="__codelineno-0-187"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;max_bytes must be positive&quot;</span><span class="p">)</span>
+</span><span id="__span-0-188"><a id="__codelineno-0-188" name="__codelineno-0-188"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">max_bytes</span> <span class="o">=</span> <span class="n">max_bytes</span>
+</span><span id="__span-0-189"><a id="__codelineno-0-189" name="__codelineno-0-189"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_disabled</span> <span class="o">=</span> <span class="kc">False</span>
+</span><span id="__span-0-190"><a id="__codelineno-0-190" name="__codelineno-0-190"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">workspace_relpath</span> <span class="o">=</span> <span class="n">workspace_relpath</span>
+</span><span id="__span-0-191"><a id="__codelineno-0-191" name="__codelineno-0-191"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">ephemeral</span> <span class="o">=</span> <span class="n">ephemeral</span>
+</span><span id="__span-0-192"><a id="__codelineno-0-192" name="__codelineno-0-192"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
+</span><span id="__span-0-193"><a id="__codelineno-0-193" name="__codelineno-0-193"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
+</span><span id="__span-0-194"><a id="__codelineno-0-194" name="__codelineno-0-194"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
+</span><span id="__span-0-195"><a id="__codelineno-0-195" name="__codelineno-0-195"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_session</span><span class="p">:</span> <span class="n">BaseSandboxSession</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-196"><a id="__codelineno-0-196" name="__codelineno-0-196"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_resolved_workspace_relpath</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-197"><a id="__codelineno-0-197" name="__codelineno-0-197"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_buf</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">()</span>
+</span><span id="__span-0-198"><a id="__codelineno-0-198" name="__codelineno-0-198"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_seen</span> <span class="o">=</span> <span class="mi">0</span>
+</span><span id="__span-0-199"><a id="__codelineno-0-199" name="__codelineno-0-199"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+</span><span id="__span-0-200"><a id="__codelineno-0-200" name="__codelineno-0-200"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">_flush_every</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">flush_every</span><span class="p">))</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -2560,42 +2687,7 @@ This also supports lightweight templating which is expanded on <code>bind()</cod
 
               <details class="mkdocstrings-source">
                 <summary>Source code in <code>src/agents/sandbox/session/sinks.py</code></summary>
-                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-278">278</a></span>
-<span class="normal"><a href="#__codelineno-0-279">279</a></span>
-<span class="normal"><a href="#__codelineno-0-280">280</a></span>
-<span class="normal"><a href="#__codelineno-0-281">281</a></span>
-<span class="normal"><a href="#__codelineno-0-282">282</a></span>
-<span class="normal"><a href="#__codelineno-0-283">283</a></span>
-<span class="normal"><a href="#__codelineno-0-284">284</a></span>
-<span class="normal"><a href="#__codelineno-0-285">285</a></span>
-<span class="normal"><a href="#__codelineno-0-286">286</a></span>
-<span class="normal"><a href="#__codelineno-0-287">287</a></span>
-<span class="normal"><a href="#__codelineno-0-288">288</a></span>
-<span class="normal"><a href="#__codelineno-0-289">289</a></span>
-<span class="normal"><a href="#__codelineno-0-290">290</a></span>
-<span class="normal"><a href="#__codelineno-0-291">291</a></span>
-<span class="normal"><a href="#__codelineno-0-292">292</a></span>
-<span class="normal"><a href="#__codelineno-0-293">293</a></span>
-<span class="normal"><a href="#__codelineno-0-294">294</a></span>
-<span class="normal"><a href="#__codelineno-0-295">295</a></span>
-<span class="normal"><a href="#__codelineno-0-296">296</a></span>
-<span class="normal"><a href="#__codelineno-0-297">297</a></span>
-<span class="normal"><a href="#__codelineno-0-298">298</a></span>
-<span class="normal"><a href="#__codelineno-0-299">299</a></span>
-<span class="normal"><a href="#__codelineno-0-300">300</a></span>
-<span class="normal"><a href="#__codelineno-0-301">301</a></span>
-<span class="normal"><a href="#__codelineno-0-302">302</a></span>
-<span class="normal"><a href="#__codelineno-0-303">303</a></span>
-<span class="normal"><a href="#__codelineno-0-304">304</a></span>
-<span class="normal"><a href="#__codelineno-0-305">305</a></span>
-<span class="normal"><a href="#__codelineno-0-306">306</a></span>
-<span class="normal"><a href="#__codelineno-0-307">307</a></span>
-<span class="normal"><a href="#__codelineno-0-308">308</a></span>
-<span class="normal"><a href="#__codelineno-0-309">309</a></span>
-<span class="normal"><a href="#__codelineno-0-310">310</a></span>
-<span class="normal"><a href="#__codelineno-0-311">311</a></span>
-<span class="normal"><a href="#__codelineno-0-312">312</a></span>
-<span class="normal"><a href="#__codelineno-0-313">313</a></span>
+                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-313">313</a></span>
 <span class="normal"><a href="#__codelineno-0-314">314</a></span>
 <span class="normal"><a href="#__codelineno-0-315">315</a></span>
 <span class="normal"><a href="#__codelineno-0-316">316</a></span>
@@ -2607,54 +2699,89 @@ This also supports lightweight templating which is expanded on <code>bind()</cod
 <span class="normal"><a href="#__codelineno-0-322">322</a></span>
 <span class="normal"><a href="#__codelineno-0-323">323</a></span>
 <span class="normal"><a href="#__codelineno-0-324">324</a></span>
-<span class="normal"><a href="#__codelineno-0-325">325</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-278"><a id="__codelineno-0-278" name="__codelineno-0-278"></a><span class="k">class</span><span class="w"> </span><span class="nc">HttpProxySink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
-</span><span id="__span-0-279"><a id="__codelineno-0-279" name="__codelineno-0-279"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;POST events as JSON to a proxy endpoint (local daemon or remote service).&quot;&quot;&quot;</span>
-</span><span id="__span-0-280"><a id="__codelineno-0-280" name="__codelineno-0-280"></a>
-</span><span id="__span-0-281"><a id="__codelineno-0-281" name="__codelineno-0-281"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
-</span><span id="__span-0-282"><a id="__codelineno-0-282" name="__codelineno-0-282"></a>        <span class="bp">self</span><span class="p">,</span>
-</span><span id="__span-0-283"><a id="__codelineno-0-283" name="__codelineno-0-283"></a>        <span class="n">endpoint</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-284"><a id="__codelineno-0-284" name="__codelineno-0-284"></a>        <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-285"><a id="__codelineno-0-285" name="__codelineno-0-285"></a>        <span class="n">headers</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-286"><a id="__codelineno-0-286" name="__codelineno-0-286"></a>        <span class="n">timeout_s</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
-</span><span id="__span-0-287"><a id="__codelineno-0-287" name="__codelineno-0-287"></a>        <span class="n">spool_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-288"><a id="__codelineno-0-288" name="__codelineno-0-288"></a>        <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
-</span><span id="__span-0-289"><a id="__codelineno-0-289" name="__codelineno-0-289"></a>        <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
-</span><span id="__span-0-290"><a id="__codelineno-0-290" name="__codelineno-0-290"></a>        <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-291"><a id="__codelineno-0-291" name="__codelineno-0-291"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-292"><a id="__codelineno-0-292" name="__codelineno-0-292"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">endpoint</span> <span class="o">=</span> <span class="n">endpoint</span>
-</span><span id="__span-0-293"><a id="__codelineno-0-293" name="__codelineno-0-293"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">headers</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">headers</span> <span class="ow">or</span> <span class="p">{})</span>
-</span><span id="__span-0-294"><a id="__codelineno-0-294" name="__codelineno-0-294"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">timeout_s</span> <span class="o">=</span> <span class="n">timeout_s</span>
-</span><span id="__span-0-295"><a id="__codelineno-0-295" name="__codelineno-0-295"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="o">=</span> <span class="n">spool_path</span>
-</span><span id="__span-0-296"><a id="__codelineno-0-296" name="__codelineno-0-296"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
-</span><span id="__span-0-297"><a id="__codelineno-0-297" name="__codelineno-0-297"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
-</span><span id="__span-0-298"><a id="__codelineno-0-298" name="__codelineno-0-298"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
-</span><span id="__span-0-299"><a id="__codelineno-0-299" name="__codelineno-0-299"></a>
-</span><span id="__span-0-300"><a id="__codelineno-0-300" name="__codelineno-0-300"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-301"><a id="__codelineno-0-301" name="__codelineno-0-301"></a>        <span class="n">payload</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">model_dump_json</span><span class="p">()</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
-</span><span id="__span-0-302"><a id="__codelineno-0-302" name="__codelineno-0-302"></a>        <span class="n">spool_line</span> <span class="o">=</span> <span class="n">event_to_json_line</span><span class="p">(</span><span class="n">event</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-303"><a id="__codelineno-0-303" name="__codelineno-0-303"></a>        <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">to_thread</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_post</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">spool_line</span><span class="p">)</span>
-</span><span id="__span-0-304"><a id="__codelineno-0-304" name="__codelineno-0-304"></a>
-</span><span id="__span-0-305"><a id="__codelineno-0-305" name="__codelineno-0-305"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_post</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">body</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">,</span> <span class="n">spool_line</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-306"><a id="__codelineno-0-306" name="__codelineno-0-306"></a>        <span class="c1"># TODO: thinking about using proxy instead of direct http call</span>
-</span><span id="__span-0-307"><a id="__codelineno-0-307" name="__codelineno-0-307"></a>        <span class="n">req</span> <span class="o">=</span> <span class="n">Request</span><span class="p">(</span>
-</span><span id="__span-0-308"><a id="__codelineno-0-308" name="__codelineno-0-308"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">endpoint</span><span class="p">,</span>
-</span><span id="__span-0-309"><a id="__codelineno-0-309" name="__codelineno-0-309"></a>            <span class="n">data</span><span class="o">=</span><span class="n">body</span><span class="p">,</span>
-</span><span id="__span-0-310"><a id="__codelineno-0-310" name="__codelineno-0-310"></a>            <span class="n">headers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;content-type&quot;</span><span class="p">:</span> <span class="s2">&quot;application/json&quot;</span><span class="p">,</span> <span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">headers</span><span class="p">},</span>
-</span><span id="__span-0-311"><a id="__codelineno-0-311" name="__codelineno-0-311"></a>            <span class="n">method</span><span class="o">=</span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
-</span><span id="__span-0-312"><a id="__codelineno-0-312" name="__codelineno-0-312"></a>        <span class="p">)</span>
-</span><span id="__span-0-313"><a id="__codelineno-0-313" name="__codelineno-0-313"></a>        <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-314"><a id="__codelineno-0-314" name="__codelineno-0-314"></a>            <span class="k">with</span> <span class="n">urlopen</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">timeout_s</span><span class="p">)</span> <span class="k">as</span> <span class="n">resp</span><span class="p">:</span>
-</span><span id="__span-0-315"><a id="__codelineno-0-315" name="__codelineno-0-315"></a>                <span class="n">_</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>  <span class="c1"># ensure request completes</span>
-</span><span id="__span-0-316"><a id="__codelineno-0-316" name="__codelineno-0-316"></a>        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
-</span><span id="__span-0-317"><a id="__codelineno-0-317" name="__codelineno-0-317"></a>            <span class="k">if</span> <span class="n">spool_line</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-318"><a id="__codelineno-0-318" name="__codelineno-0-318"></a>                <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-0-319"><a id="__codelineno-0-319" name="__codelineno-0-319"></a>                    <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</span><span id="__span-0-320"><a id="__codelineno-0-320" name="__codelineno-0-320"></a>                    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
-</span><span id="__span-0-321"><a id="__codelineno-0-321" name="__codelineno-0-321"></a>                        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">spool_line</span><span class="p">)</span>
-</span><span id="__span-0-322"><a id="__codelineno-0-322" name="__codelineno-0-322"></a>                        <span class="n">f</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
-</span><span id="__span-0-323"><a id="__codelineno-0-323" name="__codelineno-0-323"></a>                <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
-</span><span id="__span-0-324"><a id="__codelineno-0-324" name="__codelineno-0-324"></a>                    <span class="k">pass</span>
-</span><span id="__span-0-325"><a id="__codelineno-0-325" name="__codelineno-0-325"></a>            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;http proxy sink POST failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">e</span>
+<span class="normal"><a href="#__codelineno-0-325">325</a></span>
+<span class="normal"><a href="#__codelineno-0-326">326</a></span>
+<span class="normal"><a href="#__codelineno-0-327">327</a></span>
+<span class="normal"><a href="#__codelineno-0-328">328</a></span>
+<span class="normal"><a href="#__codelineno-0-329">329</a></span>
+<span class="normal"><a href="#__codelineno-0-330">330</a></span>
+<span class="normal"><a href="#__codelineno-0-331">331</a></span>
+<span class="normal"><a href="#__codelineno-0-332">332</a></span>
+<span class="normal"><a href="#__codelineno-0-333">333</a></span>
+<span class="normal"><a href="#__codelineno-0-334">334</a></span>
+<span class="normal"><a href="#__codelineno-0-335">335</a></span>
+<span class="normal"><a href="#__codelineno-0-336">336</a></span>
+<span class="normal"><a href="#__codelineno-0-337">337</a></span>
+<span class="normal"><a href="#__codelineno-0-338">338</a></span>
+<span class="normal"><a href="#__codelineno-0-339">339</a></span>
+<span class="normal"><a href="#__codelineno-0-340">340</a></span>
+<span class="normal"><a href="#__codelineno-0-341">341</a></span>
+<span class="normal"><a href="#__codelineno-0-342">342</a></span>
+<span class="normal"><a href="#__codelineno-0-343">343</a></span>
+<span class="normal"><a href="#__codelineno-0-344">344</a></span>
+<span class="normal"><a href="#__codelineno-0-345">345</a></span>
+<span class="normal"><a href="#__codelineno-0-346">346</a></span>
+<span class="normal"><a href="#__codelineno-0-347">347</a></span>
+<span class="normal"><a href="#__codelineno-0-348">348</a></span>
+<span class="normal"><a href="#__codelineno-0-349">349</a></span>
+<span class="normal"><a href="#__codelineno-0-350">350</a></span>
+<span class="normal"><a href="#__codelineno-0-351">351</a></span>
+<span class="normal"><a href="#__codelineno-0-352">352</a></span>
+<span class="normal"><a href="#__codelineno-0-353">353</a></span>
+<span class="normal"><a href="#__codelineno-0-354">354</a></span>
+<span class="normal"><a href="#__codelineno-0-355">355</a></span>
+<span class="normal"><a href="#__codelineno-0-356">356</a></span>
+<span class="normal"><a href="#__codelineno-0-357">357</a></span>
+<span class="normal"><a href="#__codelineno-0-358">358</a></span>
+<span class="normal"><a href="#__codelineno-0-359">359</a></span>
+<span class="normal"><a href="#__codelineno-0-360">360</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-313"><a id="__codelineno-0-313" name="__codelineno-0-313"></a><span class="k">class</span><span class="w"> </span><span class="nc">HttpProxySink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
+</span><span id="__span-0-314"><a id="__codelineno-0-314" name="__codelineno-0-314"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;POST events as JSON to a proxy endpoint (local daemon or remote service).&quot;&quot;&quot;</span>
+</span><span id="__span-0-315"><a id="__codelineno-0-315" name="__codelineno-0-315"></a>
+</span><span id="__span-0-316"><a id="__codelineno-0-316" name="__codelineno-0-316"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+</span><span id="__span-0-317"><a id="__codelineno-0-317" name="__codelineno-0-317"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-0-318"><a id="__codelineno-0-318" name="__codelineno-0-318"></a>        <span class="n">endpoint</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-319"><a id="__codelineno-0-319" name="__codelineno-0-319"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-320"><a id="__codelineno-0-320" name="__codelineno-0-320"></a>        <span class="n">headers</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-321"><a id="__codelineno-0-321" name="__codelineno-0-321"></a>        <span class="n">timeout_s</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
+</span><span id="__span-0-322"><a id="__codelineno-0-322" name="__codelineno-0-322"></a>        <span class="n">spool_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-323"><a id="__codelineno-0-323" name="__codelineno-0-323"></a>        <span class="n">mode</span><span class="p">:</span> <span class="n">DeliveryMode</span> <span class="o">=</span> <span class="s2">&quot;best_effort&quot;</span><span class="p">,</span>
+</span><span id="__span-0-324"><a id="__codelineno-0-324" name="__codelineno-0-324"></a>        <span class="n">on_error</span><span class="p">:</span> <span class="n">OnErrorPolicy</span> <span class="o">=</span> <span class="s2">&quot;log&quot;</span><span class="p">,</span>
+</span><span id="__span-0-325"><a id="__codelineno-0-325" name="__codelineno-0-325"></a>        <span class="n">payload_policy</span><span class="p">:</span> <span class="n">EventPayloadPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-326"><a id="__codelineno-0-326" name="__codelineno-0-326"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-327"><a id="__codelineno-0-327" name="__codelineno-0-327"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">endpoint</span> <span class="o">=</span> <span class="n">endpoint</span>
+</span><span id="__span-0-328"><a id="__codelineno-0-328" name="__codelineno-0-328"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">headers</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">headers</span> <span class="ow">or</span> <span class="p">{})</span>
+</span><span id="__span-0-329"><a id="__codelineno-0-329" name="__codelineno-0-329"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">timeout_s</span> <span class="o">=</span> <span class="n">timeout_s</span>
+</span><span id="__span-0-330"><a id="__codelineno-0-330" name="__codelineno-0-330"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="o">=</span> <span class="n">spool_path</span>
+</span><span id="__span-0-331"><a id="__codelineno-0-331" name="__codelineno-0-331"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">mode</span>
+</span><span id="__span-0-332"><a id="__codelineno-0-332" name="__codelineno-0-332"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="n">on_error</span>
+</span><span id="__span-0-333"><a id="__codelineno-0-333" name="__codelineno-0-333"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="n">payload_policy</span>
+</span><span id="__span-0-334"><a id="__codelineno-0-334" name="__codelineno-0-334"></a>
+</span><span id="__span-0-335"><a id="__codelineno-0-335" name="__codelineno-0-335"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-336"><a id="__codelineno-0-336" name="__codelineno-0-336"></a>        <span class="n">payload</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">model_dump_json</span><span class="p">()</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
+</span><span id="__span-0-337"><a id="__codelineno-0-337" name="__codelineno-0-337"></a>        <span class="n">spool_line</span> <span class="o">=</span> <span class="n">event_to_json_line</span><span class="p">(</span><span class="n">event</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-338"><a id="__codelineno-0-338" name="__codelineno-0-338"></a>        <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">to_thread</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_post</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">spool_line</span><span class="p">)</span>
+</span><span id="__span-0-339"><a id="__codelineno-0-339" name="__codelineno-0-339"></a>
+</span><span id="__span-0-340"><a id="__codelineno-0-340" name="__codelineno-0-340"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_post</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">body</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">,</span> <span class="n">spool_line</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-341"><a id="__codelineno-0-341" name="__codelineno-0-341"></a>        <span class="c1"># TODO: thinking about using proxy instead of direct http call</span>
+</span><span id="__span-0-342"><a id="__codelineno-0-342" name="__codelineno-0-342"></a>        <span class="n">req</span> <span class="o">=</span> <span class="n">Request</span><span class="p">(</span>
+</span><span id="__span-0-343"><a id="__codelineno-0-343" name="__codelineno-0-343"></a>            <span class="bp">self</span><span class="o">.</span><span class="n">endpoint</span><span class="p">,</span>
+</span><span id="__span-0-344"><a id="__codelineno-0-344" name="__codelineno-0-344"></a>            <span class="n">data</span><span class="o">=</span><span class="n">body</span><span class="p">,</span>
+</span><span id="__span-0-345"><a id="__codelineno-0-345" name="__codelineno-0-345"></a>            <span class="n">headers</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;content-type&quot;</span><span class="p">:</span> <span class="s2">&quot;application/json&quot;</span><span class="p">,</span> <span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">headers</span><span class="p">},</span>
+</span><span id="__span-0-346"><a id="__codelineno-0-346" name="__codelineno-0-346"></a>            <span class="n">method</span><span class="o">=</span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+</span><span id="__span-0-347"><a id="__codelineno-0-347" name="__codelineno-0-347"></a>        <span class="p">)</span>
+</span><span id="__span-0-348"><a id="__codelineno-0-348" name="__codelineno-0-348"></a>        <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-349"><a id="__codelineno-0-349" name="__codelineno-0-349"></a>            <span class="k">with</span> <span class="n">urlopen</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">timeout_s</span><span class="p">)</span> <span class="k">as</span> <span class="n">resp</span><span class="p">:</span>
+</span><span id="__span-0-350"><a id="__codelineno-0-350" name="__codelineno-0-350"></a>                <span class="n">_</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>  <span class="c1"># ensure request completes</span>
+</span><span id="__span-0-351"><a id="__codelineno-0-351" name="__codelineno-0-351"></a>        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+</span><span id="__span-0-352"><a id="__codelineno-0-352" name="__codelineno-0-352"></a>            <span class="k">if</span> <span class="n">spool_line</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-353"><a id="__codelineno-0-353" name="__codelineno-0-353"></a>                <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-0-354"><a id="__codelineno-0-354" name="__codelineno-0-354"></a>                    <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-355"><a id="__codelineno-0-355" name="__codelineno-0-355"></a>                    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">spool_path</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+</span><span id="__span-0-356"><a id="__codelineno-0-356" name="__codelineno-0-356"></a>                        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">spool_line</span><span class="p">)</span>
+</span><span id="__span-0-357"><a id="__codelineno-0-357" name="__codelineno-0-357"></a>                        <span class="n">f</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+</span><span id="__span-0-358"><a id="__codelineno-0-358" name="__codelineno-0-358"></a>                <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+</span><span id="__span-0-359"><a id="__codelineno-0-359" name="__codelineno-0-359"></a>                    <span class="k">pass</span>
+</span><span id="__span-0-360"><a id="__codelineno-0-360" name="__codelineno-0-360"></a>            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;http proxy sink POST failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">e</span>
 </span></code></pre></div></td></tr></table></div>
               </details>
 
@@ -2710,47 +2837,47 @@ per-sink policy behavior).</p>
 
               <details class="mkdocstrings-source">
                 <summary>Source code in <code>src/agents/sandbox/session/sinks.py</code></summary>
-                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-328">328</a></span>
-<span class="normal"><a href="#__codelineno-0-329">329</a></span>
-<span class="normal"><a href="#__codelineno-0-330">330</a></span>
-<span class="normal"><a href="#__codelineno-0-331">331</a></span>
-<span class="normal"><a href="#__codelineno-0-332">332</a></span>
-<span class="normal"><a href="#__codelineno-0-333">333</a></span>
-<span class="normal"><a href="#__codelineno-0-334">334</a></span>
-<span class="normal"><a href="#__codelineno-0-335">335</a></span>
-<span class="normal"><a href="#__codelineno-0-336">336</a></span>
-<span class="normal"><a href="#__codelineno-0-337">337</a></span>
-<span class="normal"><a href="#__codelineno-0-338">338</a></span>
-<span class="normal"><a href="#__codelineno-0-339">339</a></span>
-<span class="normal"><a href="#__codelineno-0-340">340</a></span>
-<span class="normal"><a href="#__codelineno-0-341">341</a></span>
-<span class="normal"><a href="#__codelineno-0-342">342</a></span>
-<span class="normal"><a href="#__codelineno-0-343">343</a></span>
-<span class="normal"><a href="#__codelineno-0-344">344</a></span>
-<span class="normal"><a href="#__codelineno-0-345">345</a></span>
-<span class="normal"><a href="#__codelineno-0-346">346</a></span>
-<span class="normal"><a href="#__codelineno-0-347">347</a></span>
-<span class="normal"><a href="#__codelineno-0-348">348</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-328"><a id="__codelineno-0-328" name="__codelineno-0-328"></a><span class="k">class</span><span class="w"> </span><span class="nc">ChainedSink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
-</span><span id="__span-0-329"><a id="__codelineno-0-329" name="__codelineno-0-329"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-</span><span id="__span-0-330"><a id="__codelineno-0-330" name="__codelineno-0-330"></a><span class="sd">    Groups multiple sinks that should run in order.</span>
-</span><span id="__span-0-331"><a id="__codelineno-0-331" name="__codelineno-0-331"></a>
-</span><span id="__span-0-332"><a id="__codelineno-0-332" name="__codelineno-0-332"></a><span class="sd">    Note: Instrumentation unwraps this group and applies per-op/per-sink</span>
-</span><span id="__span-0-333"><a id="__codelineno-0-333" name="__codelineno-0-333"></a><span class="sd">    payload policies to each inner sink individually (so grouping does not disable</span>
-</span><span id="__span-0-334"><a id="__codelineno-0-334" name="__codelineno-0-334"></a><span class="sd">    per-sink policy behavior).</span>
-</span><span id="__span-0-335"><a id="__codelineno-0-335" name="__codelineno-0-335"></a><span class="sd">    &quot;&quot;&quot;</span>
-</span><span id="__span-0-336"><a id="__codelineno-0-336" name="__codelineno-0-336"></a>
-</span><span id="__span-0-337"><a id="__codelineno-0-337" name="__codelineno-0-337"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">sinks</span><span class="p">:</span> <span class="n">EventSink</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-338"><a id="__codelineno-0-338" name="__codelineno-0-338"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">sinks</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">sinks</span><span class="p">)</span>
-</span><span id="__span-0-339"><a id="__codelineno-0-339" name="__codelineno-0-339"></a>        <span class="c1"># These are not used directly when Instrumentation unwraps the</span>
-</span><span id="__span-0-340"><a id="__codelineno-0-340" name="__codelineno-0-340"></a>        <span class="c1"># group, but keep the object conforming to EventSink.</span>
-</span><span id="__span-0-341"><a id="__codelineno-0-341" name="__codelineno-0-341"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="s2">&quot;sync&quot;</span>
-</span><span id="__span-0-342"><a id="__codelineno-0-342" name="__codelineno-0-342"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="s2">&quot;raise&quot;</span>
-</span><span id="__span-0-343"><a id="__codelineno-0-343" name="__codelineno-0-343"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-344"><a id="__codelineno-0-344" name="__codelineno-0-344"></a>
-</span><span id="__span-0-345"><a id="__codelineno-0-345" name="__codelineno-0-345"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-346"><a id="__codelineno-0-346" name="__codelineno-0-346"></a>        <span class="c1"># Fallback behavior if used directly (without Instrumentation unwrapping).</span>
-</span><span id="__span-0-347"><a id="__codelineno-0-347" name="__codelineno-0-347"></a>        <span class="k">for</span> <span class="n">sink</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">sinks</span><span class="p">:</span>
-</span><span id="__span-0-348"><a id="__codelineno-0-348" name="__codelineno-0-348"></a>            <span class="k">await</span> <span class="n">sink</span><span class="o">.</span><span class="n">handle</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+                <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-363">363</a></span>
+<span class="normal"><a href="#__codelineno-0-364">364</a></span>
+<span class="normal"><a href="#__codelineno-0-365">365</a></span>
+<span class="normal"><a href="#__codelineno-0-366">366</a></span>
+<span class="normal"><a href="#__codelineno-0-367">367</a></span>
+<span class="normal"><a href="#__codelineno-0-368">368</a></span>
+<span class="normal"><a href="#__codelineno-0-369">369</a></span>
+<span class="normal"><a href="#__codelineno-0-370">370</a></span>
+<span class="normal"><a href="#__codelineno-0-371">371</a></span>
+<span class="normal"><a href="#__codelineno-0-372">372</a></span>
+<span class="normal"><a href="#__codelineno-0-373">373</a></span>
+<span class="normal"><a href="#__codelineno-0-374">374</a></span>
+<span class="normal"><a href="#__codelineno-0-375">375</a></span>
+<span class="normal"><a href="#__codelineno-0-376">376</a></span>
+<span class="normal"><a href="#__codelineno-0-377">377</a></span>
+<span class="normal"><a href="#__codelineno-0-378">378</a></span>
+<span class="normal"><a href="#__codelineno-0-379">379</a></span>
+<span class="normal"><a href="#__codelineno-0-380">380</a></span>
+<span class="normal"><a href="#__codelineno-0-381">381</a></span>
+<span class="normal"><a href="#__codelineno-0-382">382</a></span>
+<span class="normal"><a href="#__codelineno-0-383">383</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-363"><a id="__codelineno-0-363" name="__codelineno-0-363"></a><span class="k">class</span><span class="w"> </span><span class="nc">ChainedSink</span><span class="p">(</span><span class="n">EventSink</span><span class="p">):</span>
+</span><span id="__span-0-364"><a id="__codelineno-0-364" name="__codelineno-0-364"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+</span><span id="__span-0-365"><a id="__codelineno-0-365" name="__codelineno-0-365"></a><span class="sd">    Groups multiple sinks that should run in order.</span>
+</span><span id="__span-0-366"><a id="__codelineno-0-366" name="__codelineno-0-366"></a>
+</span><span id="__span-0-367"><a id="__codelineno-0-367" name="__codelineno-0-367"></a><span class="sd">    Note: Instrumentation unwraps this group and applies per-op/per-sink</span>
+</span><span id="__span-0-368"><a id="__codelineno-0-368" name="__codelineno-0-368"></a><span class="sd">    payload policies to each inner sink individually (so grouping does not disable</span>
+</span><span id="__span-0-369"><a id="__codelineno-0-369" name="__codelineno-0-369"></a><span class="sd">    per-sink policy behavior).</span>
+</span><span id="__span-0-370"><a id="__codelineno-0-370" name="__codelineno-0-370"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-371"><a id="__codelineno-0-371" name="__codelineno-0-371"></a>
+</span><span id="__span-0-372"><a id="__codelineno-0-372" name="__codelineno-0-372"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">sinks</span><span class="p">:</span> <span class="n">EventSink</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-373"><a id="__codelineno-0-373" name="__codelineno-0-373"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">sinks</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">sinks</span><span class="p">)</span>
+</span><span id="__span-0-374"><a id="__codelineno-0-374" name="__codelineno-0-374"></a>        <span class="c1"># These are not used directly when Instrumentation unwraps the</span>
+</span><span id="__span-0-375"><a id="__codelineno-0-375" name="__codelineno-0-375"></a>        <span class="c1"># group, but keep the object conforming to EventSink.</span>
+</span><span id="__span-0-376"><a id="__codelineno-0-376" name="__codelineno-0-376"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="s2">&quot;sync&quot;</span>
+</span><span id="__span-0-377"><a id="__codelineno-0-377" name="__codelineno-0-377"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">on_error</span> <span class="o">=</span> <span class="s2">&quot;raise&quot;</span>
+</span><span id="__span-0-378"><a id="__codelineno-0-378" name="__codelineno-0-378"></a>        <span class="bp">self</span><span class="o">.</span><span class="n">payload_policy</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-379"><a id="__codelineno-0-379" name="__codelineno-0-379"></a>
+</span><span id="__span-0-380"><a id="__codelineno-0-380" name="__codelineno-0-380"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">handle</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">:</span> <span class="n">SandboxSessionEvent</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-381"><a id="__codelineno-0-381" name="__codelineno-0-381"></a>        <span class="c1"># Fallback behavior if used directly (without Instrumentation unwrapping).</span>
+</span><span id="__span-0-382"><a id="__codelineno-0-382" name="__codelineno-0-382"></a>        <span class="k">for</span> <span class="n">sink</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">sinks</span><span class="p">:</span>
+</span><span id="__span-0-383"><a id="__codelineno-0-383" name="__codelineno-0-383"></a>            <span class="k">await</span> <span class="n">sink</span><span class="o">.</span><span class="n">handle</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
               </details>
 

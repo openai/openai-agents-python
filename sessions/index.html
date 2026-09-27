@@ -1558,6 +1558,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#sqlite-storage-trust-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite storage trust boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#multiple-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -5596,6 +5607,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#sqlite-storage-trust-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite storage trust boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#multiple-sessions" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -6265,6 +6287,10 @@
 <li>Use encrypted sessions (<code>EncryptedSession(session_id, underlying_session, encryption_key)</code>) to wrap any session with transparent encryption and TTL-based expiration</li>
 <li>Consider implementing custom session backends for other production systems (for example, Django) for more advanced use cases</li>
 </ul>
+<h3 id="sqlite-storage-trust-boundary">SQLite storage trust boundary</h3>
+<p><code>SQLiteSession</code> assumes that the application trusts the SQLite database and its storage. The backend does not authenticate stored rows or detect external edits, deletions, reordering, or replay. A session ID selects conversation history; the session ID does not authenticate a user or authorize access to that history.</p>
+<p>When <code>get_items()</code> reads history, the method selects rows by <code>session_id</code>, orders the rows by their insertion IDs, and decodes each row's <code>message_data</code> as JSON. Changes made directly to the database can therefore appear in the history returned to the application and used by the next agent run. Rows whose <code>message_data</code> cannot be decoded as JSON are skipped without an integrity error. Changing a row's <code>created_at</code> value does not change the returned item or its order.</p>
+<p>The application must authorize access to each session and restrict access to the database file, its containing storage, and backups. For deployments that require tamper detection on shared or untrusted storage, use storage controls or a custom <a class="autorefs autorefs-internal" title="Session" href="../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> implementation that enforces the required integrity guarantees. The <a href="encrypted_session/"><code>EncryptedSession</code></a> wrapper provides encryption, but does not verify the completeness or order of conversation history and accepts unencrypted items; the wrapper is not a substitute for those integrity controls.</p>
 <h3 id="multiple-sessions">Multiple sessions</h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">SQLiteSession</span>
 </span><span id="__span-21-2"><a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a>
