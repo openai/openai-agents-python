@@ -1439,7 +1439,7 @@ class AgentRunner:
                                                 _attempt_input_guardrail_results()
                                             ),
                                             items=final_turn_items,
-                                            held_input=take_held_session_write(run_state),
+                                            held_write=take_held_session_write(run_state),
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
@@ -1467,7 +1467,7 @@ class AgentRunner:
                                     # Safe even when the guardrail rebuild above already
                                     # recovered the parked response: the save deduplicates
                                     # the combined batch.
-                                    held_input=take_held_session_write(run_state),
+                                    held_write=take_held_session_write(run_state),
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,

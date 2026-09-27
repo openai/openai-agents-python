@@ -129,11 +129,11 @@
       "version": "1.17"
     },
     {
-      "commit": "821afdc3f709f409a307c93f42a603704be63033",
-      "emitted_version": "1.17",
+      "commit": "46599c9f5c129b46ab6a0919418f35ef1984cc1e",
+      "emitted_version": "1.18",
       "feature": "held_pending_session_write",
       "fixture": "features/v1_18_held_pending_session_write.json",
-      "note": "The held pending Session write was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving the withheld batch payload.",
+      "note": "The unreleased held-write scenario includes the current-response boundary. The recorded 1.18 writer serializes this canonical scenario payload without interpretation; this is not a historical checkpoint from a released version.",
       "provenance": "canonical_compatibility",
       "version": "1.18"
     }

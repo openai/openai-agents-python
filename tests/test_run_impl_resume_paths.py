@@ -9,11 +9,12 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, GuardrailFunctionOutput, Runner, function_tool, handoff, output_guardrail
+from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff, output_guardrail
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
-from agents.exceptions import UserError
+from agents.exceptions import InputGuardrailTripwireTriggered, UserError
+from agents.guardrail import GuardrailFunctionOutput, input_guardrail
 from agents.items import (
     MessageOutputItem,
     ModelResponse,
@@ -87,6 +88,39 @@ class _FailingResumeSession(SimpleListSession):
         await super().add_items(items)
         if failure == "after":
             raise self.error
+
+
+class _FailSecondAddItemsSession(SimpleListSession):
+    """Let the initial input-priming append succeed, then fail the next append.
+
+    Unlike ``_FailingResumeSession``, this targets a specific append by call order rather than
+    a resume-cycle phase, so it can isolate a fresh (non-resumed) run's first real turn save.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.error = RuntimeError("session append failed")
+        self._call_count = 0
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self._call_count += 1
+        if self._call_count == 2:
+            raise self.error
+        await super().add_items(items)
+
+
+class _FailSecondAddItemsSessionWithYield(_FailSecondAddItemsSession):
+    """Same failure shape as ``_FailSecondAddItemsSession``, but the failing call performs a
+    genuine ``await`` (a scheduler yield) before raising, like a real I/O-backed Session
+    (SQLite, network, etc.) would. A purely synchronous raise never yields control back to the
+    ``stream_events()`` consumer before the run-loop task finishes, so a test built on it cannot
+    observe whether an already-queued stream event was delivered before the error surfaced.
+    """
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self._call_count == 1:
+            await asyncio.sleep(0)
+        await super().add_items(items)
 
 
 class _LostAckSQLiteSession(SQLiteSession):
@@ -514,12 +548,15 @@ def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
     [
         "old-schema",
         "batch-shape",
+        "compaction-under-1.17",
         "held-shape",
         "held-with-before",
         "held-under-1-17",
         "held-keys-without-held",
         "policy-shape",
-        "fold-marker-shape",
+        "response-boundary-shape",
+        "response-boundary-missing",
+        "response-boundary-outside-batch",
     ],
 )
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
@@ -530,26 +567,34 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     payload = state.to_json()
     if invalid == "old-schema":
         _relabel_as_older_schema(payload, "1.16")
+    elif invalid == "compaction-under-1.17":
+        _relabel_as_older_schema(payload, "1.17")
     elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
     elif invalid == "held-shape":
         payload["pending_session_write"]["held"] = "yes"
     elif invalid == "held-keys-without-held":
-        # response_id and store describe the withheld response, so they are refused on
-        # an ordinary pending write where nothing consumes them.
-        payload["pending_session_write"]["response_id"] = "resp_1"
+        # Conversion policy belongs only to a withheld response.
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "omit"
     elif invalid == "policy-shape":
         # The conversion-policy key only speaks the two policy literals or None; any
         # other value would silently change how a fold converts the batch's items.
         payload["pending_session_write"]["held"] = True
         payload["pending_session_write"]["before"] = None
         payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
-    elif invalid == "fold-marker-shape":
-        # The fold marker names outputs and the turn that owns them; a malformed
-        # marker would silently change which outputs the filter contract gates.
+    elif invalid.startswith("response-boundary-"):
+        # The boundary selects the response governed by the current filter.
         payload["pending_session_write"]["held"] = True
         payload["pending_session_write"]["before"] = None
-        payload["pending_session_write"]["folded_tool_outputs"] = {"turn": -1, "call_ids": []}
+        if invalid == "response-boundary-shape":
+            boundary = {"turn": -1, "start": 0}
+        else:
+            boundary = {
+                "turn": state._current_turn,
+                "start": len(payload["pending_session_write"]["items"]) + 1,
+            }
+        if invalid != "response-boundary-missing":
+            payload["pending_session_write"]["current_response"] = boundary
     elif invalid == "held-under-1-17":
         # 1.17 defined the pending write as exactly four keys, so the held variant is
         # only readable under the version that introduced it.
@@ -575,7 +620,8 @@ async def test_pending_session_write_without_the_held_key_keeps_its_meaning() ->
     payload = state.to_json()
     assert "held" not in payload["pending_session_write"]
     _relabel_as_older_schema(payload, "1.17")
-    payload["pending_session_write"].pop("response_id", None)
+    for key in ("response_id", "store", "has_local_tool_outputs"):
+        payload["pending_session_write"].pop(key, None)
     restored = await RunState.from_json(agent, payload)
 
     result = await _run_session_resume(agent, restored, session, False)
@@ -1482,6 +1528,345 @@ async def test_resumed_handoff_session_append_is_recovered_before_next_model(
     assert _call_pair(result.to_input_list(), "charge-1") == expected_pair
     assert _call_pair(result.to_input_list(), "handoff-1") == expected_pair
     assert "pending_session_write" not in result.to_state().to_json()
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_preserves_agent_after_session_append_failure() -> None:
+    """A fresh (non-resumed) streamed run's generic-loop handoff branch must publish the new
+    agent and next-step state before the fallible session append, mirroring the fix already
+    applied to the is_resumed_state branch covered by
+    test_resumed_handoff_session_append_is_recovered_before_next_model. Every fresh streamed
+    run passes through this branch, not just resumed ones.
+    """
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+            [get_text_message("done")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = _FailSecondAddItemsSession()
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError) as error:
+        async for _ in failed_result.stream_events():
+            pass
+    assert error.value is session.error
+
+    state = failed_result.to_state()
+    assert state._current_agent is not None
+    assert state._current_agent.name == "delegate"
+    assert failed_result.current_agent.name == "delegate"
+
+    result = await _run_session_resume(triage, state, session, False)
+    assert result.final_output == "done"
+    assert result.last_agent.name == "delegate"
+    assert len(model.calls) == 2
+    expected_pair = ["function_call", "function_call_output"]
+    stored = await session.get_items()
+    assert _call_pair(stored, "handoff-1") == expected_pair
+    assert "pending_session_write" not in result.to_state().to_json()
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_publishes_agent_update_before_session_append_failure() -> (
+    None
+):
+    """A yielding Session failure still delivers the completed handoff's agent update."""
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+            [get_text_message("done")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = _FailSecondAddItemsSessionWithYield()
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    collected_events: list[Any] = []
+    caught: RuntimeError | None = None
+    try:
+        async for event in failed_result.stream_events():
+            collected_events.append(event)
+    except RuntimeError as error:
+        caught = error
+    assert caught is session.error
+    assert any(
+        isinstance(event, AgentUpdatedStreamEvent) and event.new_agent.name == "delegate"
+        for event in collected_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_drains_agent_update_event_for_slow_consumer() -> None:
+    """A session-append failure in the generic-loop handoff branch must mark itself for
+    stream-event draining, so a consumer that falls even slightly behind the producer (an
+    ordinary per-event delay, not a contrived zero-delay reader) still observes the
+    already-queued ``AgentUpdatedStreamEvent`` before the error surfaces.
+
+    test_fresh_streamed_handoff_publishes_agent_update_before_session_append_failure's
+    zero-delay consumer passes even without draining, since it never falls behind the
+    producer; this test exercises the actual drain guarantee stream_events() provides via
+    _mark_error_to_drain_stream_events()/_should_drain_stream_events_before_raising().
+    """
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
+            [get_text_message("done")],
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    session = _FailSecondAddItemsSessionWithYield()
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    collected_events: list[Any] = []
+    caught: RuntimeError | None = None
+    try:
+        async for event in failed_result.stream_events():
+            # An ordinary bit of per-event consumer work, enough to fall behind the producer.
+            await asyncio.sleep(0.001)
+            collected_events.append(event)
+    except RuntimeError as error:
+        caught = error
+    assert caught is session.error
+    assert any(
+        isinstance(event, AgentUpdatedStreamEvent) and event.new_agent.name == "delegate"
+        for event in collected_events
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raises_error", [False, True], ids=["tripwire", "guardrail-error"])
+@pytest.mark.parametrize("retry_streamed", [False, True])
+async def test_fresh_streamed_handoff_failed_guardrail_state_cannot_resume(
+    raises_error: bool,
+    retry_streamed: bool,
+) -> None:
+    handoff_observed = asyncio.Event()
+    guardrail_error = RuntimeError("guardrail backend failed")
+
+    @input_guardrail(run_in_parallel=True)
+    async def pending_guardrail(
+        ctx: RunContextWrapper[Any],
+        agent: Agent[Any],
+        input: str | list[TResponseInputItem],
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(handoff_observed.wait(), timeout=5)
+        if raises_error:
+            raise guardrail_error
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = ScriptedModel(
+        [[get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")]]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage", model=model, handoffs=[delegate], input_guardrails=[pending_guardrail]
+    )
+    session = SimpleListSession()
+    streamed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    events: list[Any] = []
+    expected_error = RuntimeError if raises_error else InputGuardrailTripwireTriggered
+    with pytest.raises(expected_error):
+        async for event in streamed_result.stream_events():
+            events.append(event)
+            if getattr(event, "name", None) == "handoff_occured":
+                handoff_observed.set()
+                await asyncio.sleep(0)
+    assert handoff_observed.is_set()
+    assert streamed_result.current_agent is triage
+    assert not any(
+        isinstance(event, AgentUpdatedStreamEvent) and event.new_agent is delegate
+        for event in events
+    )
+    state = streamed_result.to_state()
+    assert state.to_json()["terminal_unrecoverable"] is True
+    restored = await RunState.from_json(triage, state.to_json())
+    assert restored._current_agent is triage
+    for checkpoint in (state, restored):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(triage, checkpoint, session, retry_streamed)
+    assert len(model.calls) == 1
+    assert _call_pair(await session.get_items(), "handoff-1") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume(
+    round_trip: bool,
+) -> None:
+    """A checkpointed handoff batch that fails to append and later settles via a separate,
+    standalone resume_pending_session_write() call (the generic resume-startup path in
+    run.py/run_loop.py, not the original save_result_to_session() call) must still apply the
+    same post-write Responses compaction decision save_result_to_session would have applied
+    inline, instead of silently and permanently losing it. See
+    .agents/references/session-persistence.md.
+
+    Uses a should_trigger_compaction hook keyed on response_id (as a caller doing per-turn
+    compaction routing would) to make the loss observable: without the fix, the handoff's own
+    response_id is never evaluated by the hook at all, and the deferral it would have set is
+    never recorded, so the later forced compaction on the delegate's turn never happens either.
+    """
+    hook_calls: list[str | None] = []
+
+    def should_trigger_compaction(context: dict[str, Any]) -> bool:
+        hook_calls.append(context["response_id"])
+        return context["response_id"] == "resp-handoff"
+
+    compact_calls: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compact_calls.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    backend = _FailSecondAddItemsSession()
+    session = OpenAIResponsesCompactionSession(
+        "compaction-handoff-test",
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=should_trigger_compaction,
+    )
+
+    model = ScriptedModel(
+        [
+            {
+                "output": [
+                    get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")
+                ],
+                "response_id": "resp-handoff",
+            },
+            {"output": [get_text_message("done")], "response_id": "resp-delegate"},
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError) as error:
+        async for _ in failed_result.stream_events():
+            pass
+    assert error.value is backend.error
+    assert hook_calls == []
+    assert compact_calls == []
+    state = failed_result.to_state()
+    assert state._pending_session_write is not None
+    assert state._pending_session_write.get("response_id") == "resp-handoff"
+    assert state._pending_session_write.get("has_local_tool_outputs") is True
+
+    if round_trip:
+        payload = state.to_json()
+        assert payload["$schemaVersion"] == "1.18"
+        state = await RunState.from_json(triage, payload)
+
+    result = await _run_session_resume(triage, state, session, False)
+    assert result.final_output == "done"
+    # The handoff's own response_id must have been evaluated by the decision hook (and
+    # deferred), not skipped -- and, because force-compaction short-circuits the hook, it must
+    # be the only response_id the hook ever saw.
+    assert hook_calls == ["resp-handoff"]
+    # The deferred decision must actually have been forced through on the delegate's own save,
+    # i.e. the compact API was invoked at all -- not just checked and declined.
+    assert len(compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_streamed_handoff_retains_checkpoint_when_post_write_compaction_fails() -> None:
+    """If the post-write compaction decision raises after a checkpointed handoff batch's append
+    has already settled, the checkpoint (``_pending_session_write``) must survive so a later
+    retry can redo just the compaction step -- clearing it before the fallible compaction call
+    would silently and permanently lose the requested deferred/forced compaction with no way to
+    recover it. See .agents/references/session-persistence.md.
+    """
+    hook_calls: list[str | None] = []
+    compaction_error = RuntimeError("compaction decision hook exploded")
+    should_fail = True
+
+    def should_trigger_compaction(context: dict[str, Any]) -> bool:
+        hook_calls.append(context["response_id"])
+        if context["response_id"] == "resp-handoff" and should_fail:
+            raise compaction_error
+        return context["response_id"] == "resp-handoff"
+
+    compact_calls: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        items = copy.deepcopy(kwargs["input"])
+        compact_calls.append(items)
+        return SimpleNamespace(output=items, usage=None)
+
+    backend = _FailSecondAddItemsSession()
+    session = OpenAIResponsesCompactionSession(
+        "compaction-handoff-failure-test",
+        underlying_session=backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=should_trigger_compaction,
+    )
+
+    model = ScriptedModel(
+        [
+            {
+                "output": [
+                    get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")
+                ],
+                "response_id": "resp-handoff",
+            },
+            {"output": [get_text_message("done")], "response_id": "resp-delegate"},
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    failed_result = Runner.run_streamed(
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError) as append_error:
+        async for _ in failed_result.stream_events():
+            pass
+    assert append_error.value is backend.error
+    state = failed_result.to_state()
+    assert state._pending_session_write is not None
+
+    # Resume: the append itself now succeeds (the backend's failure was one-shot), but the
+    # compaction decision hook raises for the handoff's own response_id.
+    with pytest.raises(RuntimeError) as compaction_error_info:
+        await _run_session_resume(triage, state, session, False)
+    assert compaction_error_info.value is compaction_error
+    # The checkpoint must still be present so a later retry can redo compaction alone, instead
+    # of the handoff's requested compaction being silently and permanently lost.
+    assert state._pending_session_write is not None
+    assert state._pending_session_write.get("response_id") == "resp-handoff"
+
+    # Retry: the hook no longer fails. The append must not be repeated (no duplicate items in
+    # session history), but compaction must actually run this time.
+    should_fail = False
+    hook_calls.clear()
+    result = await _run_session_resume(triage, state, session, False)
+    assert result.final_output == "done"
+    assert hook_calls == ["resp-handoff"]
+    assert len(compact_calls) == 1
+    stored = await session.get_items()
+    handoff_pair = [
+        str(item.get("type"))
+        for item in stored
+        if isinstance(item, dict) and item.get("call_id") == "handoff-1"
+    ]
+    assert handoff_pair == ["function_call", "function_call_output"]
 
 
 class _TerminalLifecycleHooks(RunHooks[Any]):

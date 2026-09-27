@@ -1387,10 +1387,14 @@ class BaseSandboxSession(abc.ABC):
 
         return True
 
-    async def _compute_and_cache_snapshot_fingerprint(self) -> dict[str, str]:
+    async def _compute_and_cache_snapshot_fingerprint(
+        self, *, version: str | None = None
+    ) -> dict[str, str]:
         """Compute the current workspace fingerprint in-container and atomically cache it."""
 
-        return await snapshot_lifecycle.compute_and_cache_snapshot_fingerprint(self)
+        return await snapshot_lifecycle.compute_and_cache_snapshot_fingerprint(
+            self, version=version
+        )
 
     async def _read_cached_snapshot_fingerprint(self) -> dict[str, str]:
         """Read the cached snapshot fingerprint record from the running sandbox."""

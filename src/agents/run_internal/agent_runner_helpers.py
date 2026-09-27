@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, cast
 
 from openai.types.responses.response_usage import OutputTokensDetails
@@ -19,7 +19,7 @@ from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
-from ..run_state import RunState
+from ..run_state import RunState, _PendingSessionWrite
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span
 from ..tracing.config import TracingConfig
@@ -45,7 +45,7 @@ from .run_steps import (
 from .session_persistence import (
     _held_items_safe_to_settle,
     _pending_approval_call_ids,
-    final_items_cover_held_batch,
+    held_session_items_for_save,
     save_result_to_session,
     save_resumed_turn_items,
 )
@@ -516,18 +516,16 @@ def build_interruption_result(
 
 
 def reject_unrecoverable_terminal_state(run_state: RunState | None) -> None:
-    """Fail closed when a previous run already produced a final output that cannot be reproduced.
+    """Fail closed when a previous run reached a boundary that cannot safely be resumed.
 
-    The marker is set once that output, its guardrails, and its terminal hooks have completed,
-    and is cleared only once the turn is fully persisted. In between, the run owns a result no
-    resume can settle, so resuming would repeat the model call and the lifecycle hooks for an
-    output the caller already received. Raised before any Session, sandbox, model, tool,
-    guardrail, or hook work so the rejection has no side effects of its own.
+    This includes failed terminal persistence and a speculative handoff rejected by an input
+    guardrail. Resuming would repeat completed work or bypass the failed input check. Reject
+    before any Session, sandbox, model, tool, guardrail, or hook work.
     """
     if run_state is not None and run_state._terminal_unrecoverable:
         raise UserError(
-            "This RunState already produced a final output whose Session write did not "
-            "complete, so it cannot be resumed. Start a new run instead."
+            "This RunState ended at an unrecoverable boundary and cannot be resumed. "
+            "Start a new run instead."
         )
 
 
@@ -605,22 +603,22 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
-    held_input: Sequence[TResponseInputItem] | None = None,
+    held_write: _PendingSessionWrite | None = None,
 ) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn.
 
-    ``held_input`` is a claimed held batch that must land ahead of the final items in
+    ``held_write`` is a claimed held batch that must land ahead of the final items in
     the same append. It is safe to pass even when the rebuilt final items already
     contain the parked response: the save deduplicates the combined batch.
     """
-    if not session_persistence_enabled or (not items and not held_input):
+    if not session_persistence_enabled or (not items and held_write is None):
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
     # Whether a held batch is being claimed at all, captured before any dedup empties
     # it: the recovery registration below must stay armed even when the guardrail
     # rebuild already carries the batch.
-    settling_held = bool(held_input)
+    settling_held = held_write is not None
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
         # save_resumed_turn_items owns the dedup, pairing, and recovery arming; the raw
         # held batch rides in so it can arm from its own pre-dedup view.
@@ -633,13 +631,12 @@ async def save_final_turn_items_after_guardrails(
             store=store,
             wrapper=wrapper,
             run_state=run_state,
-            held_input=held_input,
+            held_write=held_write,
         )
         return run_state._current_turn_persisted_item_count
-    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
-        # The guardrail rebuild re-derived the whole current response, held requests
-        # included; feeding the batch again would duplicate its unkeyed companions.
-        held_input = None
+    held_input = held_session_items_for_save(
+        held_write, run_state, items, reasoning_item_id_policy=reasoning_item_id_policy
+    )
     if held_input:
         held_input = _held_items_safe_to_settle(
             held_input,

@@ -462,7 +462,7 @@ state._sandbox = {
     ),
     Scenario(
         "1.18",
-        "821afdc3f709f409a307c93f42a603704be63033",
+        "46599c9f5c129b46ab6a0919418f35ef1984cc1e",
         "held_pending_session_write",
         """
 from agents.run_internal.run_steps import NextStepRunAgain
@@ -482,14 +482,15 @@ state._pending_session_write = {
     "before": None,
     "persisted_count": 2,
     "held": True,
+    "current_response": {"turn": state._current_turn, "start": 0},
 }
 """,
         provenance="canonical_compatibility",
-        emitted_version="1.17",
+        emitted_version="1.18",
         note=(
-            "The held pending Session write was first emitted with the unreleased 1.17 writer. "
-            "The fixture changes only the schema label to exercise the 1.18 compatibility "
-            "reader while preserving the withheld batch payload."
+            "The unreleased held-write scenario includes the current-response boundary. "
+            "The recorded 1.18 writer serializes this canonical scenario payload without "
+            "interpretation; this is not a historical checkpoint from a released version."
         ),
     ),
 )
@@ -530,7 +531,7 @@ MINIMAL_SCENARIOS = (
         provenance="canonical_compatibility",
         emitted_version="1.17",
         note=(
-            "The held pending Session write was first emitted with the unreleased 1.17 writer. "
+            "The unreleased held-write scenario includes the current-response boundary. "
             "The fixture changes only the schema label to exercise the 1.18 compatibility "
             "reader while preserving older payload compatibility."
         ),

@@ -70,6 +70,7 @@ from ..util.tar_utils import (
     UnsafeTarMemberError,
     safe_extract_tarfile,
     should_skip_tar_member,
+    validate_tarfile,
 )
 from ..workspace_paths import _raise_if_filesystem_root
 from . import _unix_local_file_ops
@@ -1148,19 +1149,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         def _archive_workspace() -> None:
             with tarfile.open(fileobj=buf, mode="w") as tar:
-                tar.add(
-                    root,
-                    arcname=".",
-                    filter=lambda ti: (
-                        None
-                        if should_skip_tar_member(
-                            ti.name,
-                            skip_rel_paths=skip,
-                            root_name=None,
-                        )
-                        else ti
-                    ),
-                )
+
+                def filter_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+                    # tarfile records inodes before filtering. Clear even excluded entries so
+                    # every retained hardlink has its own payload. Unlike dereference=True,
+                    # this preserves symlinks instead of reading their targets on the host.
+                    getattr(tar, "inodes").clear()  # noqa: B009 - Not exposed by typeshed.
+                    if should_skip_tar_member(member.name, skip_rel_paths=skip, root_name=None):
+                        return None
+                    return member
+
+                tar.add(root, arcname=".", filter=filter_member)
 
         try:
             await run_blocking_workspace_io(_archive_workspace)
@@ -1169,6 +1168,32 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         buf.seek(0)
         return buf
+
+    async def _restore_snapshot_into_workspace_on_resume(self) -> None:
+        root = Path(self.state.manifest.root)
+        archive = await self.state.snapshot.restore(dependencies=self.dependencies)
+
+        def validate_archive() -> None:
+            try:
+                with tarfile.open(fileobj=archive, mode="r:*") as tar:
+                    validate_tarfile(tar, allow_external_symlink_targets=False)
+                archive.seek(0)
+            except UnsafeTarMemberError as e:
+                raise WorkspaceArchiveWriteError(
+                    path=root, context={"reason": e.reason, "member": e.member}, cause=e
+                ) from e
+            except (tarfile.TarError, OSError) as e:
+                raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+
+        try:
+            # Older snapshots may contain unsupported members. Reject them before discarding
+            # the live files; keep hydrate_workspace's own validation for direct callers too.
+            await run_blocking_workspace_io(validate_archive)
+            await self._clear_workspace_root_on_resume()
+            await self.hydrate_workspace(archive)
+        finally:
+            with suppress(Exception):
+                archive.close()
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
@@ -1290,7 +1315,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if unmount_failed:
             return session
         try:
-            shutil.rmtree(Path(inner.state.manifest.root), ignore_errors=False)
+            await run_blocking_workspace_io(shutil.rmtree, Path(inner.state.manifest.root))
         except FileNotFoundError:
             pass
         except Exception:

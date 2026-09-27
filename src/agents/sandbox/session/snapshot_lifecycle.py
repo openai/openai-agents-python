@@ -15,7 +15,7 @@ from .runtime_helpers import WORKSPACE_FINGERPRINT_HELPER
 if TYPE_CHECKING:
     from .base_sandbox_session import BaseSandboxSession
 
-SNAPSHOT_FINGERPRINT_VERSION = "workspace_tar_sha256_v1"
+SNAPSHOT_FINGERPRINT_VERSION = "workspace_tar_sha256_v2"
 
 
 async def persist_snapshot(session: BaseSandboxSession) -> None:
@@ -64,7 +64,10 @@ async def live_workspace_matches_snapshot_on_resume(session: BaseSandboxSession)
         return False
 
     try:
-        cached_record = await session._compute_and_cache_snapshot_fingerprint()
+        # Compare old records with their original exclusions before deciding to clear
+        # a live workspace. The next persist upgrades both the archive and fingerprint.
+        version = stored_version if stored_version == "workspace_tar_sha256_v1" else None
+        cached_record = await session._compute_and_cache_snapshot_fingerprint(version=version)
     except Exception:
         return False
 
@@ -101,12 +104,14 @@ def workspace_fingerprint_skip_relpaths(session: BaseSandboxSession) -> set[Path
 
 async def compute_and_cache_snapshot_fingerprint(
     session: BaseSandboxSession,
+    *,
+    version: str | None = None,
 ) -> dict[str, str]:
     helper_path = await session._ensure_runtime_helper_installed(WORKSPACE_FINGERPRINT_HELPER)
     command = [
         str(helper_path),
         session._workspace_root_path().as_posix(),
-        session._snapshot_fingerprint_version(),
+        version if version is not None else session._snapshot_fingerprint_version(),
         session._snapshot_fingerprint_cache_path().as_posix(),
         session._resume_manifest_digest(),
     ]

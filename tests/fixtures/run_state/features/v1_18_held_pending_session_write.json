@@ -54,6 +54,10 @@
   "pending_input": [],
   "pending_session_write": {
     "before": null,
+    "current_response": {
+      "start": 0,
+      "turn": 0
+    },
     "held": true,
     "items": [
       {

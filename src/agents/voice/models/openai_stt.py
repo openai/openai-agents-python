@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, cast
+from uuid import uuid4
 
 from openai import AsyncOpenAI
 
@@ -43,6 +44,10 @@ class SessionCompleteSentinel:
 
 
 class WebsocketDoneSentinel:
+    pass
+
+
+class _InputCompleteSentinel:
     pass
 
 
@@ -136,9 +141,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             asyncio.Queue()
         )
         self._websocket: websockets.ClientConnection | None = None
-        self._event_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel] = (
-            asyncio.Queue()
-        )
+        self._event_queue: asyncio.Queue[
+            dict[str, Any] | ErrorSentinel | WebsocketDoneSentinel | _InputCompleteSentinel
+        ] = asyncio.Queue()
         self._state_queue: asyncio.Queue[dict[str, Any] | ErrorSentinel] = asyncio.Queue()
         self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
@@ -151,6 +156,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._connection_task: asyncio.Task[Any] | None = None
         self._stored_exception: Exception | None = None
         self._completion_signaled = False
+        self._final_commit_id: str | None = None
+        self._closing = False
 
     def _get_transcription_config(self) -> dict[str, Any]:
         transcription_config: dict[str, Any] = {"model": self._model}
@@ -215,6 +222,15 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 event = json.loads(message)
 
                 if event.get("type") == "error":
+                    error = event.get("error", {})
+                    if (
+                        self._final_commit_id is not None
+                        and error.get("event_id") == self._final_commit_id
+                        and error.get("code") == "input_audio_buffer_commit_empty"
+                    ):
+                        # VAD may already have committed the final buffer. Only this
+                        # specific response to our EOF commit is an expected no-op.
+                        continue
                     raise STTWebsocketConnectionError(f"Error event: {event.get('error')}")
 
                 if event.get("type") in [
@@ -302,29 +318,74 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             raise
 
     async def _handle_events(self) -> None:
+        pending_transcripts: set[str] = set()
+        input_cleared = False
         while True:
             try:
                 event = await asyncio.wait_for(
                     self._event_queue.get(), timeout=EVENT_INACTIVITY_TIMEOUT
                 )
+                if isinstance(event, _InputCompleteSentinel):
+                    self._final_commit_id = uuid4().hex
+                    assert self._websocket is not None, "Websocket not initialized"
+                    await self._websocket.send(
+                        json.dumps(
+                            {"type": "input_audio_buffer.commit", "event_id": self._final_commit_id}
+                        )
+                    )
+                    # The clear acknowledgement follows the final commit (or its
+                    # empty-buffer error), even when VAD wins the commit race. It
+                    # ends input without cancelling already committed transcripts.
+                    await self._websocket.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                    continue
                 if isinstance(event, WebsocketDoneSentinel):
+                    if (
+                        not self._closing
+                        and self._final_commit_id is not None
+                        and (not input_cleared or pending_transcripts)
+                    ):
+                        raise STTWebsocketConnectionError(
+                            "Websocket closed before final transcription completed"
+                        )
                     # processed all events and websocket is done
                     break
                 if isinstance(event, ErrorSentinel):
                     raise STTWebsocketConnectionError("Error parsing events") from event.error
 
                 event_type = event.get("type", "unknown")
+                if event_type == "input_audio_buffer.committed":
+                    pending_transcripts.add(event["item_id"])
+                elif event_type == "input_audio_buffer.cleared":
+                    input_cleared = True
+                elif event_type == "conversation.item.input_audio_transcription.failed":
+                    raise STTWebsocketConnectionError("Input audio transcription failed")
                 if event_type in [
                     "input_audio_transcription_completed",  # legacy
                     "conversation.item.input_audio_transcription.completed",
                 ]:
+                    if (
+                        event_type == "input_audio_transcription_completed"
+                        and "item_id" not in event
+                    ):
+                        # Legacy sessions don't identify individual completed items;
+                        # each completion still settles one outstanding transcript.
+                        if pending_transcripts:
+                            pending_transcripts.pop()
+                    else:
+                        pending_transcripts.discard(event.get("item_id", ""))
                     transcript = cast(str, event.get("transcript", ""))
                     if len(transcript) > 0:
                         self._end_turn(transcript)
                         self._start_turn()
                         await self._output_queue.put(transcript)
+                if self._final_commit_id is not None and input_cleared and not pending_transcripts:
+                    break
                 await asyncio.sleep(0)  # yield control
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
+                if self._final_commit_id is not None:
+                    error = STTWebsocketConnectionError("Timeout waiting for final transcription")
+                    await self._output_queue.put(ErrorSentinel(error))
+                    raise error from e
                 # No new events for a while. Assume the session is done.
                 break
             except Exception as e:
@@ -345,6 +406,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         while True:
             buffer = await audio_queue.get()
             if buffer is None:
+                await self._event_queue.put(_InputCompleteSentinel())
                 break
 
             if self._trace_include_sensitive_audio_data:
@@ -510,6 +572,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 raise exception_to_raise
 
     async def close(self) -> None:
+        self._closing = True
         try:
             if self._websocket:
                 await self._websocket.close()

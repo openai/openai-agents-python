@@ -431,7 +431,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if is_automatic and snapshot is None and self.max_rollback_items is not None:
             await self._get_all_underlying_session_items()
 
-        self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
             self._response_id,
@@ -443,7 +442,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if resolved_mode == "previous_response_id":
             compact_kwargs["previous_response_id"] = self._response_id
         else:
-            compact_kwargs["input"] = session_items
+            # Manual compaction may reuse cached raw output from the preceding compaction.
+            compact_kwargs["input"] = normalize_input_items_for_api(session_items)
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
@@ -489,6 +489,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 None if read_items is not None else select_compaction_candidate_items(output_items)
             )
             self._session_items = None if read_items is not None else output_items
+
+        # Clear the deferred marker only now that compaction has actually settled. Clearing it
+        # before the fallible API call/replacement above would let a failed forced compaction
+        # silently lose its "this must be forced" signal: a later retry recomputes `force` from
+        # this marker, so an early clear makes the retry decline work that was still owed.
+        self._deferred_response_id = None
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",

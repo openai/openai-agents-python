@@ -363,6 +363,17 @@ async def _serialized_round_trip(result: RunResult | RunResultStreaming, agent: 
     return await RunState.from_json(agent, json.loads(json.dumps(result.to_state().to_json())))
 
 
+def _held_write(items: Any) -> Any:
+    return {
+        "session_id": "test",
+        "items": items,
+        "before": None,
+        "persisted_count": 0,
+        "held": True,
+        "current_response": {"turn": 0, "start": 0},
+    }
+
+
 def _call_ids(items: list[TResponseInputItem]) -> list[Any]:
     return [item.get("call_id") for item in items if item.get("type") == "function_call"]
 
@@ -1239,7 +1250,7 @@ async def test_settled_held_items_count_toward_the_turn_persisted_count() -> Non
     count = await save_resumed_turn_items(
         session=session,
         items=[],
-        held_input=held,  # type: ignore[arg-type]
+        held_write=_held_write(held),
         persisted_count=0,
         response_id=None,
         run_state=state,
@@ -1343,7 +1354,7 @@ async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> N
             input_guardrail_results=[],
             items=final_items,
             response_id=None,
-            held_input=held,  # type: ignore[arg-type]
+            held_write=_held_write(held),
         )
 
     # The append was registered before it ran, so the batch is recorded to reconcile.
@@ -1378,7 +1389,7 @@ async def test_the_settled_count_matches_what_the_append_actually_wrote() -> Non
         run_state=None,
         session=session,
         items=[ToolCallOutputItem(agent=agent, raw_item=output, output="wrote:x")],
-        held_input=[call, output],
+        held_write=_held_write([call, output]),
         persisted_count=0,
         response_id=None,
         reasoning_item_id_policy=None,
@@ -1753,7 +1764,10 @@ def _make_secret_failing_extractor_handoff_agent() -> Agent:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_a_filtered_unkeyed_sibling_stays_out_of_the_session(streamed: bool) -> None:
+@pytest.mark.parametrize("approved", [False, True])
+async def test_a_filtered_unkeyed_sibling_stays_out_of_the_session(
+    streamed: bool, approved: bool
+) -> None:
     # The batch carries the parked response's unkeyed companions (an assistant
     # preamble, an id-less reasoning item), and the filter's authority covers them
     # exactly as it covers the outputs: removed from the view means removed from
@@ -1796,7 +1810,13 @@ async def test_a_filtered_unkeyed_sibling_stays_out_of_the_session(streamed: boo
         tool_use_behavior=_DEFERRING_BEHAVIOR,
     )
     session = SimpleListSession()
-    state = await _parked_and_approved(agent, session, streamed=streamed)
+    parked = await _run(agent, "go", session, streamed=streamed)
+    state = await _serialized_round_trip(parked, agent)
+    interruption = state.get_interruptions()[0]
+    if approved:
+        state.approve(interruption)
+    else:
+        state.reject(interruption)
     await _run(agent, state, session, streamed=streamed)
 
     items = await session.get_items()
@@ -1805,6 +1825,80 @@ async def test_a_filtered_unkeyed_sibling_stays_out_of_the_session(streamed: boo
     outputs = {item.get("call_id") for item in items if item.get("type") == "function_call_output"}
     assert "call_PARKED" in calls and "call_PARKED" in outputs
     assert calls - outputs == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_handoff_filter_applies_to_sibling_completed_before_approval(streamed: bool) -> None:
+    from agents import handoff
+    from agents.extensions.handoff_filters import remove_all_tools
+
+    target = Agent(
+        name="target", model=ScriptedModel([ModelStep(output=[assistant_message("done")])])
+    )
+    agent = Agent(
+        name="source",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call("look_up", {"query": "x"}, call_id="call_LOOKUP"),
+                        function_call("write_thing", {"query": "x"}, call_id="call_PARKED"),
+                        function_call("transfer_to_target", {}, call_id="call_HANDOFF"),
+                    ]
+                ),
+            ]
+        ),
+        tools=[look_up, write_thing],
+        handoffs=[handoff(target, input_filter=remove_all_tools)],
+        output_guardrails=[always_fine],
+        tool_use_behavior=_DEFERRING_BEHAVIOR,
+    )
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    result = await _run(agent, state, session, streamed=streamed)
+    assert result.final_output == "done"
+    assert not any(
+        item.get("type") in {"function_call", "function_call_output"}
+        for item in await session.get_items()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_detached_repark_terminal_settle_preserves_each_response_once(
+    streamed: bool,
+) -> None:
+    agent = _make_two_park_agent()
+    agent.tool_use_behavior = StopAtTools(stop_at_tool_names=["write_other"])
+    agent.model = ScriptedModel(
+        [
+            ModelStep(
+                output=[
+                    assistant_message("FIRST-PREAMBLE"),
+                    function_call("write_thing", {"query": "a"}, call_id="call_A"),
+                ]
+            ),
+            ModelStep(
+                output=[
+                    assistant_message("SECOND-PREAMBLE"),
+                    function_call("write_other", {"query": "b"}, call_id="call_B"),
+                ]
+            ),
+        ]
+    )
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    detached = await _run(agent, state, None, streamed=streamed)
+    state = await _serialized_round_trip(detached, agent)
+    state.approve(state.get_interruptions()[0])
+    result = await _run(agent, state, session, streamed=streamed)
+    assert result.final_output == "other:b"
+    history = await session.get_items()
+    for text in ("FIRST-PREAMBLE", "SECOND-PREAMBLE"):
+        assert sum(text in json.dumps(item) for item in history) == 1
+    assert _call_ids(history) == ["call_A", "call_B"]
+    assert _orphaned_outputs(history) == []
 
 
 @pytest.mark.asyncio
@@ -2072,6 +2166,7 @@ async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote
     state._current_turn_persisted_item_count = 0
     state._reasoning_item_id_policy = None
     state._current_step = None
+    state._current_turn = 0
     held: list[TResponseInputItem] = [
         {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"},
         {"type": "function_call_output", "call_id": "call_PARKED", "output": "ok"},
@@ -2084,7 +2179,7 @@ async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote
         input_guardrail_results=[],
         items=[MessageOutputItem(agent=agent, raw_item=assistant_message("done"))],
         response_id="resp_final",
-        held_input=held,
+        held_write=_held_write(held),
     )
 
     assert [entry for entry in session.compactions if "deferred" in entry] == [

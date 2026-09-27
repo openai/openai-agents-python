@@ -169,19 +169,11 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
-class _FoldedToolOutputs(TypedDict):
-    """Outputs the commit boundary folded into the held batch, with the turn they belong to.
-
-    A handoff filter's authority over session history covers one turn, and a crashed
-    resume can be serialized and retried, so ownership must ride the record rather
-    than live process state: while ``turn`` is still the current turn, the batch's
-    copies of these outputs are not pairing evidence and the resolved session view
-    decides what lands. Once the turn advances the marker expires and the outputs are
-    carried prior-turn history, which a later turn's filter is not entitled to remove.
-    """
+class _HeldCurrentResponse(TypedDict):
+    """The current logical turn's suffix within an ordered withheld batch."""
 
     turn: int
-    call_ids: list[str]
+    start: int
 
 
 class _PendingSessionWrite(TypedDict):
@@ -204,9 +196,9 @@ class _PendingSessionWrite(TypedDict):
     batch preserves server reasoning ids even when the resuming run's own policy would
     omit them, and an id stripped at registration cannot be restored at the settle.
 
-    ``folded_tool_outputs`` records which of the batch's outputs the commit boundary
-    folded and on which turn, so the filter contract survives a serialized retry of
-    the crashed turn; see ``_FoldedToolOutputs``.
+    ``current_response`` identifies the suffix owned by the current logical turn.
+    Filtering or reconstructing that response must not alter earlier held history.
+    The boundary survives rejected approvals and serialized retries.
     """
 
     session_id: str
@@ -216,8 +208,9 @@ class _PendingSessionWrite(TypedDict):
     held: NotRequired[bool]
     response_id: NotRequired[str | None]
     store: NotRequired[bool | None]
+    has_local_tool_outputs: NotRequired[bool]
     reasoning_item_id_policy: NotRequired[ReasoningItemIdPolicy | None]
-    folded_tool_outputs: NotRequired[_FoldedToolOutputs]
+    current_response: NotRequired[_HeldCurrentResponse]
 
 
 def _default_run_state_validation_error(
@@ -4557,7 +4550,14 @@ async def _build_run_state_from_json(
         )
         base_keys = {"session_id", "items", "before", "persisted_count"}
         held_keys = (
-            {"held", "response_id", "store", "reasoning_item_id_policy", "folded_tool_outputs"}
+            {
+                "held",
+                "response_id",
+                "store",
+                "has_local_tool_outputs",
+                "reasoning_item_id_policy",
+                "current_response",
+            }
             if held_keys_allowed
             else set()
         )
@@ -4568,32 +4568,23 @@ async def _build_run_state_from_json(
             or set(pending_write) - held_keys != base_keys
             or ("held" in pending_write and type(pending_write["held"]) is not bool)
             or (pending_write.get("held") is True and pending_write.get("before") is not None)
-            or (
-                "response_id" in pending_write
-                and not isinstance(pending_write["response_id"], str | type(None))
-            )
-            or (
-                "store" in pending_write
-                and pending_write["store"] is not None
-                and type(pending_write["store"]) is not bool
-            )
+            or (pending_write.get("held") is True and "current_response" not in pending_write)
             or (
                 "reasoning_item_id_policy" in pending_write
                 and pending_write["reasoning_item_id_policy"] not in (None, "preserve", "omit")
             )
             or (
-                "folded_tool_outputs" in pending_write
+                "current_response" in pending_write
                 and (
-                    not isinstance(pending_write["folded_tool_outputs"], dict)
-                    or set(pending_write["folded_tool_outputs"]) != {"turn", "call_ids"}
-                    or type(pending_write["folded_tool_outputs"]["turn"]) is not int
-                    or pending_write["folded_tool_outputs"]["turn"] < 0
-                    or not isinstance(pending_write["folded_tool_outputs"]["call_ids"], list)
-                    or not pending_write["folded_tool_outputs"]["call_ids"]
-                    or not all(
-                        isinstance(call_id, str)
-                        for call_id in pending_write["folded_tool_outputs"]["call_ids"]
-                    )
+                    not isinstance(pending_write["current_response"], dict)
+                    or set(pending_write["current_response"]) != {"turn", "start"}
+                    or type(pending_write["current_response"]["turn"]) is not int
+                    or not 0 <= pending_write["current_response"]["turn"] <= state._current_turn
+                    or type(pending_write["current_response"]["start"]) is not int
+                    or not isinstance(pending_write.get("items"), list)
+                    or not 0
+                    <= pending_write["current_response"]["start"]
+                    <= len(pending_write["items"])
                 )
             )
             # These keys describe the withheld batch, so they are meaningless on an
@@ -4602,10 +4593,8 @@ async def _build_run_state_from_json(
             or (
                 not pending_write.get("held")
                 and (
-                    "response_id" in pending_write
-                    or "store" in pending_write
-                    or "reasoning_item_id_policy" in pending_write
-                    or "folded_tool_outputs" in pending_write
+                    "reasoning_item_id_policy" in pending_write
+                    or "current_response" in pending_write
                 )
             )
             or not isinstance(pending_write.get("session_id"), str)
@@ -4621,6 +4610,20 @@ async def _build_run_state_from_json(
             )
             or type(pending_write.get("persisted_count")) is not int
             or pending_write["persisted_count"] < 0
+            or (
+                "response_id" in pending_write
+                and pending_write["response_id"] is not None
+                and not isinstance(pending_write["response_id"], str)
+            )
+            or (
+                "store" in pending_write
+                and pending_write["store"] is not None
+                and not isinstance(pending_write["store"], bool)
+            )
+            or (
+                "has_local_tool_outputs" in pending_write
+                and not isinstance(pending_write["has_local_tool_outputs"], bool)
+            )
         ):
             raise validation_error_factory("Run state pending Session write is invalid", UserError)
         state._pending_session_write = copy.deepcopy(cast(_PendingSessionWrite, pending_write))

@@ -676,6 +676,71 @@ def update_run_state_after_resume(
     run_state._current_step = next_step  # type: ignore[assignment]
 
 
+async def _apply_post_write_compaction(
+    session: Session,
+    *,
+    response_id: str | None,
+    store: bool | None,
+    has_local_tool_outputs: bool,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> None:
+    """Evaluate deferred/forced Responses compaction for a settled session append.
+
+    Shared by the immediate-write path in ``save_result_to_session`` and the checkpoint
+    replay path in ``resume_pending_session_write``, so a batch that only settles later
+    (via a separate resume) still gets the same compaction decision it would have gotten
+    had the original append succeeded inline. ``wrapper`` is the caller's raw (pre-gating)
+    context wrapper; it is used as-is for ``run_compaction`` and re-gated here for
+    ``_defer_compaction``, mirroring the two call sites this helper replaces.
+    """
+    if not response_id or not is_openai_responses_compaction_aware_session(session):
+        return
+
+    if has_local_tool_outputs:
+        defer_compaction = getattr(session, "_defer_compaction", None)
+        if callable(defer_compaction):
+            await _call_session_method(
+                defer_compaction,
+                response_id,
+                store=store,
+                wrapper=_get_session_wrapper(session, wrapper),
+            )
+        logger.debug(
+            "skip: deferring compaction for response %s due to local tool outputs",
+            response_id,
+        )
+        return
+
+    deferred_response_id = None
+    get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
+    if callable(get_deferred):
+        deferred_response_id = get_deferred()
+    force_compaction = deferred_response_id is not None
+    if force_compaction:
+        logger.debug(
+            "compact: forcing for response %s after deferred %s",
+            response_id,
+            deferred_response_id,
+        )
+    compaction_args: OpenAIResponsesCompactionArgs = {
+        "response_id": response_id,
+        "force": force_compaction,
+    }
+    if store is not None:
+        compaction_args["store"] = store
+    if wrapper is not None:
+        wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
+    try:
+        await _call_session_method(
+            session.run_compaction,
+            compaction_args,
+            wrapper=wrapper,
+        )
+    finally:
+        if wrapper is not None:
+            wrapper._session_compaction_is_automatic = False  # type: ignore[attr-defined]
+
+
 async def save_result_to_session(
     session: Session | None,
     original_input: str | list[TResponseInputItem],
@@ -792,6 +857,15 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
+    has_local_tool_outputs = any(
+        isinstance(item, ToolCallOutputItem | HandoffOutputItem | MCPApprovalResponseItem)
+        for item in new_items
+    ) or (
+        settling_held_batch
+        and any(item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES for item in items_to_save)
+    )
+    settled_batch_items = len(items_to_save) - saved_run_items_count if settling_held_batch else 0
+
     if resumed_write_state is not None:
         if resumed_write_state._pending_session_write is not None:
             raise UserError("Resolve the pending Session write before saving another batch")
@@ -800,9 +874,17 @@ async def save_result_to_session(
             "items": copy.deepcopy(items_to_save),
             "before": None,
             "persisted_count": (
-                resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
+                resumed_write_state._current_turn_persisted_item_count
+                + saved_run_items_count
+                + settled_batch_items
             ),
+            "response_id": response_id,
+            "store": store,
+            "has_local_tool_outputs": has_local_tool_outputs,
         }
+        # resume_pending_session_write() applies post-write compaction itself once the
+        # checkpoint settles, whether that happens inline below or on a later, separate
+        # resume -- so it is not repeated after this call returns.
         await resume_pending_session_write(
             resumed_write_state,
             session,
@@ -814,70 +896,14 @@ async def save_result_to_session(
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
-    # The append wrote every deduplicated item; the ones that are not surviving run
-    # items are the settled batch's own, counted here because only this scope knows
-    # what the dedup kept.
-    settled_batch_items = len(items_to_save) - saved_run_items_count if settling_held_batch else 0
-
-    if response_id and is_openai_responses_compaction_aware_session(session):
-        # A settling held batch carries its tool outputs as already-converted input
-        # items through ``original_input``, so looking only at ``new_items`` would
-        # report no local tool output and compact the very response whose outputs just
-        # landed. Only a settle reads that slot: on an ordinary save it holds the
-        # caller's input, whose earlier outputs say nothing about this response.
-        has_local_tool_outputs = any(
-            isinstance(item, ToolCallOutputItem | HandoffOutputItem | MCPApprovalResponseItem)
-            for item in new_items
-        ) or (
-            settling_held_batch
-            and any(
-                isinstance(item, dict) and item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES
-                for item in items_to_save
-            )
+    if resumed_write_state is None:
+        await _apply_post_write_compaction(
+            session,
+            response_id=response_id,
+            store=store,
+            has_local_tool_outputs=has_local_tool_outputs,
+            wrapper=compaction_wrapper,
         )
-        if has_local_tool_outputs:
-            defer_compaction = getattr(session, "_defer_compaction", None)
-            if callable(defer_compaction):
-                await _call_session_method(
-                    defer_compaction,
-                    response_id,
-                    store=store,
-                    wrapper=wrapper,
-                )
-            logger.debug(
-                "skip: deferring compaction for response %s due to local tool outputs",
-                response_id,
-            )
-            return saved_run_items_count + settled_batch_items
-
-        deferred_response_id = None
-        get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
-        if callable(get_deferred):
-            deferred_response_id = get_deferred()
-        force_compaction = deferred_response_id is not None
-        if force_compaction:
-            logger.debug(
-                "compact: forcing for response %s after deferred %s",
-                response_id,
-                deferred_response_id,
-            )
-        compaction_args: OpenAIResponsesCompactionArgs = {
-            "response_id": response_id,
-            "force": force_compaction,
-        }
-        if store is not None:
-            compaction_args["store"] = store
-        if compaction_wrapper is not None:
-            compaction_wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
-        try:
-            await _call_session_method(
-                session.run_compaction,
-                compaction_args,
-                wrapper=compaction_wrapper,
-            )
-        finally:
-            if compaction_wrapper is not None:
-                compaction_wrapper._session_compaction_is_automatic = False  # type: ignore[attr-defined]
 
     return saved_run_items_count + settled_batch_items
 
@@ -892,88 +918,33 @@ async def save_resumed_turn_items(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     run_state: RunState | None = None,
-    held_input: Sequence[TResponseInputItem] | None = None,
+    held_write: _PendingSessionWrite | None = None,
     claim_held: bool = False,
     handoff_input_filtered: bool = False,
     filtered_context_items: Sequence[RunItem] | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count.
 
-    ``held_input`` carries a claimed held batch (see ``take_held_session_write``) into
+    ``held_write`` carries a claimed held batch (see ``take_held_session_write``) into
     the same append as the resolved turn's items, ahead of them. One ordered write
     keeps the interrupted ``function_call`` before its output and lets the whole batch
     register as the one pending append with digest-based crash recovery; settling the
     batch separately would either trip the single-slot rule or advance the persisted
     count and slice the resolved items out of their own save.
     """
-    if claim_held and run_state is not None:
-        # The claim reads the fold marker before freeing the slot: the filter's
-        # removals are only visible against the resolved view, and the record is the
-        # marker's one durable home.
-        pending_record = run_state._pending_session_write
-        held_marker = (
-            pending_record.get("folded_tool_outputs") if pending_record is not None else None
-        )
-        held_input = take_held_session_write(run_state)
-        if (
-            handoff_input_filtered
-            and held_input
-            and held_marker is not None
-            and held_marker["turn"] == run_state._current_turn
-        ):
-            # A handoff filter ran on this exit and the batch belongs to the turn it
-            # filtered: the batch's copies are not pairing evidence, so the owned
-            # outputs drop unconditionally (a kept one arrives through the resolved
-            # view in this very save, a removed one must not land, and the pairing
-            # prune takes its call with it), and the response's unkeyed companions (an
-            # assistant preamble, an id-less reasoning item) survive only if the view
-            # kept them, matched by the same fingerprint the dedup uses. Calls and
-            # request kinds stay with the pairing rule, and carried outputs from
-            # earlier turns are not the filter's to remove. The turn comparison is a
-            # cheap belt for a marker that outlived its turn, which the defer merge's
-            # rewrite excludes today.
-            gated = set(held_marker["call_ids"])
-            ignore_ids = _ignore_ids_for_matching(session) if session is not None else False
-            view_fingerprints = set()
-            # The companions of the parked response ride the pre-step view, so the
-            # filter's verdict on them is only visible there: absent from the whole
-            # filtered view means removed on purpose, while absent from the resolved
-            # items alone says nothing (an additive filter keeps them in pre-step).
-            for run_item in [*items, *(filtered_context_items or [])]:
-                converted_view = run_item_to_input_item(run_item, reasoning_item_id_policy)
-                if converted_view is not None:
-                    view_fingerprints.add(
-                        _fingerprint_or_repr(converted_view, ignore_ids_for_matching=ignore_ids)
-                    )
-            kept_held: list[TResponseInputItem] = []
-            for item in held_input:
-                item_type = item.get("type")
-                if item_type in _LOCAL_CONTINUATION_OUTPUT_TYPES:
-                    if item.get("call_id") not in gated:
-                        kept_held.append(item)
-                    continue
-                if _held_pair_identity(item) is not None or "call_id" in item:
-                    kept_held.append(item)
-                    continue
-                if (
-                    _fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids)
-                    in view_fingerprints
-                ):
-                    kept_held.append(item)
-            held_input = kept_held
+    if claim_held:
+        held_write = take_held_session_write(run_state)
+    settling_held = held_write is not None
+    held_input = held_session_items_for_save(
+        held_write,
+        run_state,
+        items,
+        handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+    )
     if session is None or (not items and not held_input):
         return persisted_count
-    # Whether this settle is claiming a held batch at all, captured before the dedup
-    # below can empty it: the recovery registration must stay armed even when the
-    # guardrail rebuild already carries the batch, because the append still lands the
-    # approved call and output and a crash inside it must reconcile on retry.
-    settling_held = bool(held_input)
-    if held_input and final_items_cover_held_batch(items, held_input, reasoning_item_id_policy):
-        # The guardrail rebuild re-derived the whole current response, held requests
-        # included; feeding the batch again would duplicate its unkeyed companions.
-        # Resolved-turn saves never carry request kinds, so this only fires on the
-        # final sweep.
-        held_input = None
     if held_input:
         held_input = _held_items_safe_to_settle(
             held_input,
@@ -1150,31 +1121,65 @@ def _held_items_safe_to_settle(
     return kept
 
 
-def final_items_cover_held_batch(
-    items: Sequence[RunItem],
-    held_input: Sequence[TResponseInputItem],
-    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
-) -> bool:
-    """Return whether the final batch already carries the held batch's requests.
+def _held_current_response_start(pending: _PendingSessionWrite, current_turn: int) -> int:
+    boundary = pending.get("current_response")
+    if boundary is None or boundary["turn"] != current_turn:
+        return len(pending["items"])
+    return boundary["start"]
 
-    With output guardrails the final sweep rebuilds the whole current response, held
-    requests included, and the deduplication cannot key the batch's unkeyed companions
-    (an assistant preamble, an id-less reasoning item), so feeding the batch again
-    would duplicate them. When every held request already appears in the final items
-    the whole batch is redundant; without guardrails the sweep returns the resolved
-    items verbatim, no held request appears there, and the batch must ride in.
+
+def _held_view_fingerprint(item: TResponseInputItem) -> str:
+    # Compare the persistence view on both sides. A detached resume still carries
+    # provider IDs that a Conversations-backed park already removed.
+    return _fingerprint_or_repr(
+        _sanitize_openai_conversation_item(item), ignore_ids_for_matching=True
+    )
+
+
+def held_session_items_for_save(
+    pending: _PendingSessionWrite | None,
+    run_state: RunState | None,
+    items: Sequence[RunItem],
+    *,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> list[TResponseInputItem]:
+    """Reconcile only the current response; earlier held turns are already accepted.
+
+    The park records the response boundary before any approval executes. It therefore
+    covers rejected approvals and outputs completed before the park as well as resumed
+    tool outputs. A guarded final sweep replaces this suffix, not the whole record.
     """
-    final_ids: set[str] = set()
-    for run_item in items:
-        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
-        key = _held_pair_identity(converted) if converted is not None else None
-        if key is not None:
-            final_ids.add(key[1])
-    for item in held_input:
-        key = _held_pair_identity(item)
-        if key is not None and key[1] not in final_ids:
-            return False
-    return True
+    if pending is None:
+        return []
+    current_turn = run_state._current_turn if run_state is not None else 0
+    start = _held_current_response_start(pending, current_turn)
+    prior, current = pending["items"][:start], pending["items"][start:]
+    policy = pending.get("reasoning_item_id_policy", reasoning_item_id_policy)
+    converted = [
+        value for item in items if (value := run_item_to_input_item(item, policy)) is not None
+    ]
+    current_requests = {key for item in current if (key := _held_pair_identity(item)) is not None}
+    final_requests = {key for item in converted if (key := _held_pair_identity(item)) is not None}
+    if current_requests and current_requests <= final_requests:
+        return list(prior)
+    if handoff_input_filtered:
+        view = [
+            *converted,
+            *[
+                value
+                for item in filtered_context_items or ()
+                if (value := run_item_to_input_item(item, policy)) is not None
+            ],
+        ]
+        retained = {_held_view_fingerprint(item) for item in view}
+        current = [
+            item
+            for item in current
+            if _held_pair_identity(item) is not None or _held_view_fingerprint(item) in retained
+        ]
+    return [*prior, *current]
 
 
 def defer_interrupted_session_write(
@@ -1187,7 +1192,6 @@ def defer_interrupted_session_write(
     store: bool | None = None,
     run_items_are_the_session_view: bool = False,
     handoff_input_filtered: bool = False,
-    folded_output_call_ids: Sequence[str] | None = None,
     filtered_context_items: Sequence[RunItem] | None = None,
 ) -> None:
     """Register the interruption's withheld batch as a held pending Session write.
@@ -1231,61 +1235,26 @@ def defer_interrupted_session_write(
         converted_run_items.append(ensure_input_item_format(as_input))
 
     base_items = list(pending["items"]) if pending is not None else []
-    standing_marker = pending.get("folded_tool_outputs") if pending is not None else None
-    gated_call_ids: set[str] = (
-        set(standing_marker["call_ids"])
-        if standing_marker is not None and standing_marker["turn"] == run_state._current_turn
-        else set()
+    current_start = (
+        _held_current_response_start(pending, run_state._current_turn) if pending is not None else 0
     )
-    if (
-        run_items_are_the_session_view
-        and handoff_input_filtered
-        and pending is not None
-        and gated_call_ids
-    ):
-        # A detached exit folds through this merge, and the filter's view is exactly
-        # ``run_items``: the batch's copy of an output this turn folded is never
-        # pairing evidence, because a kept output rides back in through the view in
-        # this same merge and a removed one must not reach the reattach, and the
-        # response's unkeyed companions survive only if the view kept them, matched by
-        # the dedup's own fingerprint. An unpaired call this leaves behind is the
-        # entry settle's to prune, with the full batch-plus-view pairing in hand.
-        # Parks and re-parks are unaffected: their view always carries their own
-        # outputs (measured, nested history included).
-        merge_ignore_ids = _ignore_ids_for_matching(session) if session is not None else False
-        merge_context_fingerprints: set[str] = set()
-        for context_item in filtered_context_items or ():
-            converted_context = run_item_to_input_item(context_item, reasoning_item_id_policy)
-            if converted_context is not None:
-                merge_context_fingerprints.add(
-                    _fingerprint_or_repr(
-                        converted_context, ignore_ids_for_matching=merge_ignore_ids
-                    )
-                )
-        merge_view_fingerprints = {
-            _fingerprint_or_repr(item, ignore_ids_for_matching=merge_ignore_ids)
-            for item in converted_run_items
-        } | merge_context_fingerprints
-        kept_base: list[TResponseInputItem] = []
-        for item in base_items:
-            item_type = item.get("type")
-            if item_type in _LOCAL_CONTINUATION_OUTPUT_TYPES:
-                if item.get("call_id") not in gated_call_ids:
-                    kept_base.append(item)
-                continue
-            if _held_pair_identity(item) is not None or "call_id" in item:
-                kept_base.append(item)
-                continue
-            if (
-                _fingerprint_or_repr(item, ignore_ids_for_matching=merge_ignore_ids)
-                in merge_view_fingerprints
-            ):
-                kept_base.append(item)
-        base_items = kept_base
-    items = deduplicate_input_items_preferring_latest(base_items + converted_run_items)
+    if run_items_are_the_session_view and handoff_input_filtered:
+        base_items = held_session_items_for_save(
+            pending,
+            run_state,
+            run_items,
+            handoff_input_filtered=True,
+            filtered_context_items=filtered_context_items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+        )
+    prior = base_items[:current_start]
+    current = deduplicate_input_items_preferring_latest(
+        base_items[current_start:] + converted_run_items
+    )
     if isinstance(session, OpenAIConversationsSession):
-        items = [_sanitize_openai_conversation_item(item) for item in items]
-        items = [item for item in items if not _is_unpersistable_for_openai_conversation(item)]
+        current = [_sanitize_openai_conversation_item(item) for item in current]
+        current = [item for item in current if not _is_unpersistable_for_openai_conversation(item)]
+    items = prior + current
     if not items:
         return
 
@@ -1317,16 +1286,7 @@ def defer_interrupted_session_write(
         "store": pending["store"] if (pending is not None and "store" in pending) else store,
         "reasoning_item_id_policy": reasoning_item_id_policy,
     }
-    marker_call_ids = sorted(gated_call_ids | set(folded_output_call_ids or ()))
-    if marker_call_ids:
-        # Fold ownership rides the record with its turn, because a crashed resume can
-        # be serialized and retried: the retry's filter keeps its authority over the
-        # turn it is re-running, and the marker expires by itself once the turn moves
-        # on and the outputs become carried history.
-        record["folded_tool_outputs"] = {
-            "turn": run_state._current_turn,
-            "call_ids": marker_call_ids,
-        }
+    record["current_response"] = {"turn": run_state._current_turn, "start": len(prior)}
     run_state._pending_session_write = record
 
 
@@ -1337,7 +1297,6 @@ def extend_held_session_write(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     run_items_are_the_session_view: bool = False,
     handoff_input_filtered: bool = False,
-    folded_output_call_ids: Sequence[str] | None = None,
     filtered_context_items: Sequence[RunItem] | None = None,
 ) -> None:
     """Fold a detached exit's resolved items into the standing held batch.
@@ -1360,31 +1319,19 @@ def extend_held_session_write(
         reasoning_item_id_policy=reasoning_item_id_policy,
         run_items_are_the_session_view=run_items_are_the_session_view,
         handoff_input_filtered=handoff_input_filtered,
-        folded_output_call_ids=folded_output_call_ids,
         filtered_context_items=filtered_context_items,
     )
 
 
-def take_held_session_write(run_state: RunState | None) -> list[TResponseInputItem]:
-    """Claim the standing held batch for a settling write and free the slot.
-
-    The caller must hand the returned items to a Session save in the same exit
-    (``held_input`` on ``save_resumed_turn_items``, or the input positional of
-    ``save_result_to_session``), or drop them deliberately when the exit's contract is
-    to discard the batch. The slot is freed first so the settling write can register
-    itself as the one pending append and inherit the digest-based crash recovery.
-
-    A view-carrying settle that follows a handoff ``input_filter`` passes the record's
-    fold marker to ``save_resumed_turn_items`` before claiming, because the filter's
-    removals are only visible against the resolved view; the claim itself never drops.
-    """
+def take_held_session_write(run_state: RunState | None) -> _PendingSessionWrite | None:
+    """Claim the withheld record, retaining its response boundary until settlement."""
     if run_state is None:
-        return []
+        return None
     pending = run_state._pending_session_write
     if pending is None or not pending.get("held"):
-        return []
+        return None
     run_state._pending_session_write = None
-    return list(pending["items"])
+    return pending
 
 
 async def resume_pending_session_write(
@@ -1476,10 +1423,10 @@ async def resume_pending_session_write(
             append = True
         else:
             expected = before + digests(pending["items"])
-            committed_generation: int | None = None
+            observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
-                tail, committed_generation = await _call_session_method(
+                tail, observed_generation = await _call_session_method(
                     get_with_generation,
                     lambda: _session_get_items(session, limit=len(expected), wrapper=wrapper),
                 )
@@ -1494,12 +1441,26 @@ async def resume_pending_session_write(
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
             append = unchanged
-            if committed and committed_generation is not None and wrapper is not None:
-                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
+            # The original append can advance the wrapper generation even when it fails
+            # atomically. Reconciled unchanged history is also safe to append against;
+            # subsequent mutations still revoke ownership through the normal generation check.
+            if observed_generation is not None and wrapper is not None:
+                wrapper._session_compaction_generation = observed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
+        # Keep the checkpoint until compaction also settles: if _apply_post_write_compaction
+        # raises below, a later retry must still be able to redo just the compaction step
+        # instead of silently losing it. The append itself is retry-safe (the reconciliation
+        # above detects an already-committed batch and skips re-appending it).
+        await _apply_post_write_compaction(
+            session,
+            response_id=pending.get("response_id"),
+            store=pending.get("store"),
+            has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
+            wrapper=wrapper,
+        )
         run_state._pending_session_write = None
     finally:
         run_state._session_write_in_progress = False
