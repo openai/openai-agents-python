@@ -15,7 +15,7 @@ import httpx2
 import pytest
 
 import agents._debug as _debug
-from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing import flush_traces, get_trace_provider, setup as tracing_setup
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
@@ -271,25 +271,85 @@ def test_batch_trace_processor_shutdown_timeout_returns_when_exporter_blocks(
     assert not processor._worker_thread.is_alive()
 
 
-def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
-    seen_deadlines: list[float | None] = []
+def test_batch_trace_processor_shutdown_uses_custom_exporter_public_method() -> None:
+    exported: list[Trace | Span[Any]] = []
 
     class DeadlineExporter(TracingExporter):
         def export(self, items: list[Trace | Span[Any]]) -> None:
-            raise AssertionError("shutdown should use the deadline-aware exporter path")
+            exported.extend(items)
 
         def _export_with_deadline(
             self, items: list[Trace | Span[Any]], deadline: float | None
         ) -> None:
-            seen_deadlines.append(deadline)
+            raise AssertionError("private deadline helpers are not an exporter extension API")
 
     processor = BatchTraceProcessor(exporter=DeadlineExporter())
-    processor._queue.put_nowait(get_span(processor))
+    span = get_span(processor)
+    processor._queue.put_nowait(span)
 
     processor.shutdown(timeout=1.0)
 
-    assert len(seen_deadlines) == 1
-    assert seen_deadlines[0] is not None
+    assert exported == [span]
+
+
+@pytest.mark.parametrize("cleanup", ["flush", "shutdown", "timed_shutdown", "automatic"])
+@pytest.mark.parametrize("reject_batch", [False, True], ids=["filter", "raise"])
+def test_batch_trace_processor_cleanup_preserves_exporter_filter(
+    monkeypatch: pytest.MonkeyPatch, cleanup: str, reject_batch: bool
+) -> None:
+    received: list[dict[str, Any]] = []
+    filtered_batches: list[list[Trace | Span[Any]]] = []
+
+    def handle_request(request: httpx2.Request) -> httpx2.Response:
+        received.extend(json.loads(request.content)["data"])
+        return httpx2.Response(200)
+
+    class FilteringExporter(BackendSpanExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            filtered_batches.append(items)
+            if reject_batch:
+                raise ValueError("batch rejected by application policy")
+            super().export([item for item in items if isinstance(item, Trace)])
+
+    exporter = FilteringExporter(api_key="test_key")
+    exporter._client.close()
+    exporter._client = httpx2.Client(transport=httpx2.MockTransport(handle_request))
+    processor = BatchTraceProcessor(exporter=exporter)
+    # Keep the batch queued until the chosen cleanup entry point drains it.
+    monkeypatch.setattr(processor, "_ensure_thread_started", lambda: None)
+    allowed_trace = get_trace(processor)
+    sensitive_span = SpanImpl(
+        trace_id=allowed_trace.trace_id,
+        span_id="test_sensitive_span",
+        parent_id=None,
+        processor=processor,
+        span_data=FunctionSpanData(
+            name="test_tool", input="SYNTHETIC_PRIVATE_INPUT", output="SYNTHETIC_PRIVATE_OUTPUT"
+        ),
+        tracing_api_key=None,
+    )
+    processor.on_trace_start(allowed_trace)
+    processor.on_span_end(sensitive_span)
+    try:
+        if cleanup == "automatic":
+            provider = DefaultTraceProvider()
+            provider.register_processor(processor)
+            monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+            tracing_setup._shutdown_global_trace_provider()
+        elif cleanup == "timed_shutdown":
+            processor.shutdown(timeout=1.0)
+        elif cleanup == "shutdown":
+            processor.shutdown()
+        else:
+            processor.force_flush()
+
+        assert received == ([] if reject_batch else [allowed_trace.export()])
+        assert "SYNTHETIC_PRIVATE_INPUT" not in json.dumps(received)
+        assert "SYNTHETIC_PRIVATE_OUTPUT" not in json.dumps(received)
+        assert filtered_batches == [[allowed_trace, sensitive_span]]
+    finally:
+        processor.shutdown()
+        exporter.close()
 
 
 @patch("httpx2.Client")

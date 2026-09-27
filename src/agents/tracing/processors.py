@@ -7,9 +7,9 @@ import queue
 import random
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
-from typing import Any, cast
+from typing import Any
 
 import httpx2
 
@@ -838,13 +838,10 @@ class BatchTraceProcessor(TracingProcessor):
                 # cannot kill the background worker thread and silently strand all
                 # subsequent spans in the queue.
                 try:
-                    export_with_deadline = getattr(self._exporter, "_export_with_deadline", None)
-                    if deadline is not None and callable(export_with_deadline):
-                        export_fn = cast(
-                            Callable[[list[Trace | Span[Any]], float | None], None],
-                            export_with_deadline,
-                        )
-                        export_fn(items_to_export, deadline)
+                    # Only the built-in exporter can bypass public export dispatch.
+                    # Subclasses may enforce application policy in their export override.
+                    if deadline is not None and type(self._exporter) is BackendSpanExporter:
+                        self._exporter._export_with_deadline(items_to_export, deadline)
                     else:
                         self._exporter.export(items_to_export)
                 except Exception as exc:
