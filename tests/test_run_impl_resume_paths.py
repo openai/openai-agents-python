@@ -543,6 +543,9 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
         "batch-shape",
         "compaction-under-1.17",
         "acknowledgement-type",
+        "acknowledgement-without-before",
+        "compaction-exchange-type",
+        "compaction-exchange-policy",
         "acknowledgement-under-1.17",
     ],
 )
@@ -561,6 +564,19 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         payload["$schemaVersion"] = "1.17"
     elif invalid == "acknowledgement-type":
         payload["pending_session_write"]["append_acknowledged"] = "true"
+    elif invalid == "acknowledgement-without-before":
+        payload["pending_session_write"]["append_acknowledged"] = True
+        payload["pending_session_write"]["before"] = None
+    elif invalid == "compaction-exchange-type":
+        payload["pending_session_write"]["compaction_model_exchange"] = {
+            "item_digests": "not a digest list",
+            "reasoning_item_id_policy": None,
+        }
+    elif invalid == "compaction-exchange-policy":
+        payload["pending_session_write"]["compaction_model_exchange"] = {
+            "item_digests": [],
+            "reasoning_item_id_policy": "unknown",
+        }
     elif invalid == "acknowledgement-under-1.17":
         payload["$schemaVersion"] = "1.17"
         for key in ("response_id", "store", "has_local_tool_outputs"):
@@ -1935,7 +1951,10 @@ async def test_handoff_resume_after_cancelled_compaction_commits(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry_streamed", [False, True], ids=["run", "streamed"])
-async def test_handoff_resume_retries_rolled_back_compaction(retry_streamed: bool) -> None:
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_handoff_resume_retries_rolled_back_compaction(
+    retry_streamed: bool, round_trip: bool
+) -> None:
     """A legacy Session rollback must retain compaction ownership without repeating the append."""
     compacted: list[TResponseInputItem] = [{"role": "assistant", "content": "compacted history"}]
 
@@ -2002,13 +2021,84 @@ async def test_handoff_resume_retries_rolled_back_compaction(retry_streamed: boo
     restored_history = await session.get_items()
     assert len(restored_history) == 2
     assert len(model.calls) == 1
-    resumed = await _run_session_resume(triage, failed.to_state(), session, retry_streamed)
+    state = failed.to_state()
+    if round_trip:
+        state = await RunState.from_json(triage, json.loads(state.to_string()))
+    resumed = await _run_session_resume(triage, state, session, retry_streamed)
     assert resumed.final_output == "done"
     assert compact_calls == [restored_history, restored_history]
     assert handoff_calls == ["handoff"]
     assert len(model.calls) == 2
     assert await session.get_items() == compacted + [resumed.new_items[-1].to_input_item()]
     assert "pending_session_write" not in resumed.to_state().to_json()
+
+
+@pytest.mark.asyncio
+async def test_json_compaction_retry_does_not_promote_filtered_session_history() -> None:
+    backend = _FailingResumeSession()
+    hidden: TResponseInputItem = {"role": "user", "content": "synthetic omitted history"}
+    await backend.add_items([hidden])
+    backend.fail_on_output = "delegating"
+    compact_calls: list[list[TResponseInputItem]] = []
+
+    async def compact(**kwargs: Any) -> SimpleNamespace:
+        compact_calls.append(kwargs["input"])
+        return SimpleNamespace(output=[], usage=None)
+
+    session = OpenAIResponsesCompactionSession(
+        "filtered-retry",
+        backend,
+        client=cast(Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+        compaction_mode="input",
+        should_trigger_compaction=lambda context: context["response_id"] == "resp-handoff",
+    )
+    model = ScriptedModel(
+        [
+            {
+                "output": [
+                    get_text_message("delegating"),
+                    get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1"),
+                ],
+                "response_id": "resp-handoff",
+            },
+            {"output": [get_text_message("done")], "response_id": "resp-delegate"},
+        ]
+    )
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[
+            handoff(
+                delegate,
+                input_filter=lambda data: data.clone(
+                    new_items=tuple(
+                        item for item in data.new_items if isinstance(item, MessageOutputItem)
+                    )
+                ),
+            )
+        ],
+    )
+    failed = Runner.run_streamed(
+        triage,
+        "hello",
+        session=session,
+        run_config=RunConfig(
+            tracing_disabled=True, session_input_callback=lambda _history, new: new
+        ),
+    )
+    with pytest.raises(RuntimeError, match="session append failed"):
+        async for _ in failed.stream_events():
+            pass
+    payload = json.loads(failed.to_state().to_string())
+    assert "compaction_model_exchange" in payload["pending_session_write"]
+    state = await RunState.from_json(triage, payload)
+    resumed = await _run_session_resume(triage, state, session, False)
+    assert resumed.final_output == "done"
+    assert len(model.calls) == 2
+    assert all(hidden not in call.input for call in model.calls)
+    assert compact_calls == []
+    assert (await session.get_items())[0] == hidden
 
 
 class _TerminalLifecycleHooks(RunHooks[Any]):

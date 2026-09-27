@@ -821,6 +821,12 @@ async def save_result_to_session(
             "store": store,
             "has_local_tool_outputs": has_local_tool_outputs,
         }
+        model_exchange = getattr(compaction_wrapper, "_session_compaction_model_exchange", None)
+        if model_exchange is not None:
+            resumed_write_state._pending_session_write["compaction_model_exchange"] = {
+                "item_digests": list(model_exchange[0]),
+                "reasoning_item_id_policy": model_exchange[1],
+            }
         # resume_pending_session_write() applies post-write compaction itself once the
         # checkpoint settles, whether that happens inline below or on a later, separate
         # resume -- so it is not repeated after this call returns.
@@ -914,6 +920,7 @@ async def resume_pending_session_write(
     try:
         acknowledged = pending.get("append_acknowledged", False)
         before = pending["before"]
+        committed = False
         if before is None and not acknowledged:
             # No append has started. Retain the batch even if this first read fails.
             tail = await _session_get_items(
@@ -956,6 +963,14 @@ async def resume_pending_session_write(
         if append:
             # Keep the checkpoint detached from backend input retention or transformation.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        # Restore evidence from the successful exchange, never from all stored history.
+        # A changed history after replacement must not regain compaction ownership.
+        model_exchange = pending.get("compaction_model_exchange")
+        if wrapper is not None and model_exchange is not None and (not acknowledged or committed):
+            wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+                tuple(model_exchange["item_digests"]),
+                model_exchange["reasoning_item_id_policy"],
+            )
         pending["append_acknowledged"] = True
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
         # Compaction can replace history and then raise, invalidating the append fingerprint.

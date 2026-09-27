@@ -168,6 +168,13 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
+class _SessionCompactionModelExchange(TypedDict):
+    """Digests of one successful model exchange and its resolved replay policy."""
+
+    item_digests: list[str]
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None
+
+
 class _PendingSessionWrite(TypedDict):
     """One canonical resumed-output append awaiting acknowledgement."""
 
@@ -177,6 +184,7 @@ class _PendingSessionWrite(TypedDict):
     persisted_count: int
     # Once acknowledged, only compaction remains; its replacement can change the history.
     append_acknowledged: NotRequired[bool]
+    compaction_model_exchange: NotRequired[_SessionCompactionModelExchange]
     # Compaction inputs for the batch this checkpoint is settling, so a later, separate
     # resume_pending_session_write() call (not the original save_result_to_session() call)
     # can still apply the same post-write Responses compaction decision. Optional so a
@@ -244,7 +252,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Binds restored local MCP calls to their configured server and original tool name, "
         "preserves independent apply_patch approval scopes, and binds function-tool approval "
         "decisions to their owning agent, and retains compaction metadata for pending "
-        "Session writes, including acknowledgement before compaction replacement."
+        "Session writes, including acknowledgement and model-exchange evidence for "
+        "compaction retry."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4514,9 +4523,20 @@ async def _build_run_state_from_json(
         # Released schema 1.17 wrote exactly four keys. Compaction metadata belongs to 1.18;
         # older checkpoints remain readable without claiming the newer recovery behavior.
         optional_pending_write_keys = (
-            {"response_id", "store", "has_local_tool_outputs", "append_acknowledged"}
+            {
+                "response_id",
+                "store",
+                "has_local_tool_outputs",
+                "append_acknowledged",
+                "compaction_model_exchange",
+            }
             if (schema_major, schema_minor) >= (1, 18)
             else set()
+        )
+        compaction_exchange = (
+            pending_write.get("compaction_model_exchange")
+            if isinstance(pending_write, dict)
+            else None
         )
         if (
             (schema_major, schema_minor) < (1, 17)
@@ -4550,6 +4570,22 @@ async def _build_run_state_from_json(
             or (
                 "append_acknowledged" in pending_write
                 and not isinstance(pending_write["append_acknowledged"], bool)
+            )
+            or (
+                pending_write.get("append_acknowledged") is True and pending_write["before"] is None
+            )
+            or (
+                "compaction_model_exchange" in pending_write
+                and (
+                    not isinstance(compaction_exchange, dict)
+                    or set(compaction_exchange) != {"item_digests", "reasoning_item_id_policy"}
+                    or not isinstance(compaction_exchange["item_digests"], list)
+                    or not all(
+                        isinstance(digest, str) for digest in compaction_exchange["item_digests"]
+                    )
+                    or compaction_exchange["reasoning_item_id_policy"]
+                    not in (None, "preserve", "omit")
+                )
             )
             or (
                 "has_local_tool_outputs" in pending_write
