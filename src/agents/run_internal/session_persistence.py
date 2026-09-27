@@ -912,8 +912,9 @@ async def resume_pending_session_write(
 
     run_state._session_write_in_progress = True
     try:
+        acknowledged = pending.get("append_acknowledged", False)
         before = pending["before"]
-        if before is None:
+        if before is None and not acknowledged:
             # No append has started. Retain the batch even if this first read fails.
             tail = await _session_get_items(
                 session, limit=len(pending["items"]) + 1, wrapper=wrapper
@@ -921,7 +922,7 @@ async def resume_pending_session_write(
             pending["before"] = digests(tail)
             append = True
         else:
-            expected = before + digests(pending["items"])
+            expected = (before or []) + digests(pending["items"])
             observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
@@ -934,25 +935,31 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            if committed == unchanged:
+            if not acknowledged and committed == unchanged:
                 raise UserError(
-                    "Cannot reconcile the pending Session write: history changed or is ambiguous. "
-                    "Repair the original Session before resuming; do not rerun the completed tool."
+                    "Cannot reconcile the pending Session write: history changed or is "
+                    "ambiguous. Repair the original Session before resuming; do not rerun "
+                    "the completed tool."
                 )
-            append = unchanged
+            append = not acknowledged and unchanged
             # The original append can advance the wrapper generation even when it fails
             # atomically. Reconciled unchanged history is also safe to append against;
             # subsequent mutations still revoke ownership through the normal generation check.
-            if observed_generation is not None and wrapper is not None:
+            # An acknowledged append can regain compaction ownership only when its exact
+            # history remains, as after replacement rollback. Never re-append that batch.
+            if (
+                observed_generation is not None
+                and wrapper is not None
+                and (not acknowledged or committed)
+            ):
                 wrapper._session_compaction_generation = observed_generation  # type: ignore[attr-defined]
         if append:
-            # Backends may retain or transform their input; the durable checkpoint stays detached.
+            # Keep the checkpoint detached from backend input retention or transformation.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        pending["append_acknowledged"] = True
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
-        # Keep the checkpoint until compaction also settles: if _apply_post_write_compaction
-        # raises below, a later retry must still be able to redo just the compaction step
-        # instead of silently losing it. The append itself is retry-safe (the reconciliation
-        # above detects an already-committed batch and skips re-appending it).
+        # Compaction can replace history and then raise, invalidating the append fingerprint.
+        # Retain its inputs for retry, but never repeat an acknowledged append.
         await _apply_post_write_compaction(
             session,
             response_id=pending.get("response_id"),

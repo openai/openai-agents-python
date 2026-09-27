@@ -175,6 +175,8 @@ class _PendingSessionWrite(TypedDict):
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    # Once acknowledged, only compaction remains; its replacement can change the history.
+    append_acknowledged: NotRequired[bool]
     # Compaction inputs for the batch this checkpoint is settling, so a later, separate
     # resume_pending_session_write() call (not the original save_result_to_session() call)
     # can still apply the same post-write Responses compaction decision. Optional so a
@@ -242,7 +244,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Binds restored local MCP calls to their configured server and original tool name, "
         "preserves independent apply_patch approval scopes, and binds function-tool approval "
         "decisions to their owning agent, and retains compaction metadata for pending "
-        "Session writes."
+        "Session writes, including acknowledgement before compaction replacement."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4512,7 +4514,7 @@ async def _build_run_state_from_json(
         # Released schema 1.17 wrote exactly four keys. Compaction metadata belongs to 1.18;
         # older checkpoints remain readable without claiming the newer recovery behavior.
         optional_pending_write_keys = (
-            {"response_id", "store", "has_local_tool_outputs"}
+            {"response_id", "store", "has_local_tool_outputs", "append_acknowledged"}
             if (schema_major, schema_minor) >= (1, 18)
             else set()
         )
@@ -4544,6 +4546,10 @@ async def _build_run_state_from_json(
                 "store" in pending_write
                 and pending_write["store"] is not None
                 and not isinstance(pending_write["store"], bool)
+            )
+            or (
+                "append_acknowledged" in pending_write
+                and not isinstance(pending_write["append_acknowledged"], bool)
             )
             or (
                 "has_local_tool_outputs" in pending_write
