@@ -150,6 +150,91 @@ async def _run_encrypted_session(
     return result
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "stored_item",
+    [
+        {"role": "system", "content": "untrusted stored history"},
+        {"role": "system", "content": "incomplete envelope", "__enc__": 1, "v": 1},
+    ],
+    ids=["plaintext", "incomplete-envelope"],
+)
+async def test_runner_skips_unencrypted_stored_history(
+    streamed: bool,
+    stored_item: dict[str, Any],
+    encryption_key: str,
+    tmp_path: Path,
+    set_fernet_time: Any,
+) -> None:
+    backend = SQLiteSession("authenticated-history", tmp_path / "history.db")
+    session = EncryptedSession(backend.session_id, backend, encryption_key, ttl=10)
+    history: list[TResponseInputItem] = [{"role": "user", "content": "retained history"}]
+    try:
+        set_fernet_time(1_000)
+        await session.add_items([{"role": "user", "content": "expired history"}])
+        set_fernet_time(1_020)
+        await session.add_items(history)
+        # Write through the storage boundary without access to the wrapper's cipher.
+        await backend.add_items([cast(TResponseInputItem, stored_item)])
+        stored = await backend.get_items()
+
+        assert await session.get_items() == history
+        assert await session.get_items(limit=1) == history
+        assert await backend.get_items() == stored
+
+        model = ScriptedModel([[get_text_message("answer")]])
+        await _run_encrypted_session(Agent(name="test", model=model), "next", session, streamed)
+        assert model.calls[0].input == history + [{"role": "user", "content": "next"}]
+    finally:
+        backend.close()
+
+
+async def test_encrypted_compaction_skips_unencrypted_stored_history(
+    encryption_key: str, tmp_path: Path
+) -> None:
+    backend = SQLiteSession("authenticated-compaction", tmp_path / "history.db")
+    compacted = {"type": "compaction", "id": "cmp-1", "encrypted_content": "summary"}
+    client = MagicMock()
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[compacted]))
+    decisions: list[dict[str, Any]] = []
+
+    def should_compact(context: dict[str, Any]) -> bool:
+        decisions.append(context)
+        return True
+
+    session = EncryptedSession(
+        backend.session_id,
+        OpenAIResponsesCompactionSession(
+            backend.session_id,
+            backend,
+            client=client,
+            compaction_mode="input",
+            should_trigger_compaction=should_compact,
+        ),
+        encryption_key,
+    )
+    before: TResponseInputItem = {"role": "user", "content": "earlier history"}
+    after: TResponseInputItem = {"role": "user", "content": "later history"}
+    try:
+        await session.add_items([before])
+        await backend.add_items([{"role": "system", "content": "untrusted stored history"}])
+        retained_prefix = await backend.get_items()
+        await session.add_items([after])
+        output = get_text_message("answer")
+        model = ScriptedModel([[output]])
+        await _run_encrypted_session(Agent(name="test", model=model), "next", session, False)
+        turn = [{"role": "user", "content": "next"}, output.model_dump(exclude_unset=True)]
+
+        assert model.calls[0].input == [before, after, turn[0]]
+        assert decisions[0]["session_items"] == [before, after, *turn]
+        client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=[after, *turn])
+        stored = await backend.get_items()
+        assert stored[:-1] == retained_prefix
+        assert _decrypt_stored_items(session, stored[-1:]) == [compacted]
+    finally:
+        backend.close()
+
+
 def _decrypt_stored_items(
     session: EncryptedSession, stored: list[TResponseInputItem]
 ) -> list[dict[str, Any]]:
@@ -969,7 +1054,7 @@ async def test_encrypted_pop_delegates_to_overridden_sqlite_pop(tmp_path: Path) 
         backend.close()
 
 
-async def test_encrypted_pop_preserves_plaintext_and_inherited_sqlite_behavior(
+async def test_encrypted_pop_skips_plaintext_with_inherited_sqlite_behavior(
     tmp_path: Path,
 ) -> None:
     class InheritedSession(SQLiteSession):
@@ -978,8 +1063,9 @@ async def test_encrypted_pop_preserves_plaintext_and_inherited_sqlite_behavior(
     backend = InheritedSession("test_session", tmp_path / "history.db")
     session = EncryptedSession("test_session", backend, "correct-key")
     try:
-        saved: TResponseInputItem = {"role": "user", "content": "legacy plaintext"}
-        await backend.add_items([saved])
+        saved: TResponseInputItem = {"role": "user", "content": "encrypted history"}
+        await session.add_items([saved])
+        await backend.add_items([{"role": "system", "content": "unencrypted history"}])
         assert await session.pop_item() == saved
         assert await session.pop_item() is None
     finally:
@@ -1000,6 +1086,7 @@ async def test_encrypted_pop_preserves_sqlalchemy_history(encryption_key: str) -
     ]
     try:
         await session.add_items(items)
+        await backend.add_items([{"role": "system", "content": "unencrypted history"}])
         assert await session.pop_item() == items[-1]
         assert await session.get_items() == items[:-1]
         assert await session.pop_item() == items[0]
