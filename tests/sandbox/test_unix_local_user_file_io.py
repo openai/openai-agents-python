@@ -128,6 +128,16 @@ async def test_user_rename_runs_in_the_worker_relative_to_both_parents(
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "close", closed)
     monkeypatch.setattr(os, "rename", renamed)
+    original_stat = os.stat
+    monkeypatch.setattr(
+        os,
+        "stat",
+        lambda *args, **kwargs: (
+            os.stat_result((stat.S_IFREG, 1, 1, 1, 0, 0, 0, 0, 0, 0))
+            if "dir_fd" in kwargs
+            else original_stat(*args, **kwargs)
+        ),
+    )
     dispatch = Mock(side_effect=_worker)
     monkeypatch.setattr(subprocess, "run", dispatch)
     await session.mv(Path("old/file"), Path("new/File"), user=User(name="example-user"))
@@ -157,6 +167,16 @@ async def test_user_rename_failure_keeps_the_error(
     monkeypatch.setattr(os, "open", Mock(side_effect=[10, 11, 12, 13]))
     monkeypatch.setattr(os, "close", Mock())
     monkeypatch.setattr(os, "rename", Mock(side_effect=IsADirectoryError("Is a directory")))
+    original_stat = os.stat
+    monkeypatch.setattr(
+        os,
+        "stat",
+        lambda *args, **kwargs: (
+            os.stat_result((stat.S_IFREG, 1, 1, 1, 0, 0, 0, 0, 0, 0))
+            if "dir_fd" in kwargs
+            else original_stat(*args, **kwargs)
+        ),
+    )
     dispatch = Mock(side_effect=_worker)
     monkeypatch.setattr(subprocess, "run", dispatch)
     with pytest.raises(ExecNonZeroError) as error:

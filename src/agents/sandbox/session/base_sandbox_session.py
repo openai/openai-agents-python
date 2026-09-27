@@ -1203,17 +1203,20 @@ class BaseSandboxSession(abc.ABC):
         *,
         user: str | User | None = None,
     ) -> None:
-        """Rename a path, replacing the destination if it exists.
+        """Rename a regular file or symlink, replacing the destination entry if it exists.
+
+        Directory and special-file sources are unsupported and rejected before the move.
+        As with other workspace file APIs, callers must serialize conflicting mutations.
 
         The exec fallback requires ``mv -T`` (GNU or compatible). A tool without that option
-        fails without moving the source. Do not replace it with a directory precheck: a
+        fails without moving the source. Do not replace it with a destination precheck: a
         concurrently created directory could otherwise receive the source as a child.
 
         This is the shell fallback for backends that only offer `exec`. A backend with
         direct filesystem access, such as UnixLocal, overrides it with a descriptor-relative
         `os.rename`, so the path it validated is the entry it renames.
 
-        :param source: Path to move.
+        :param source: Regular file or symlink to move.
         :param destination: Path to move it to.
         :param user: Optional sandbox user to move as.
         :raises ExecNonZeroError: If the destination is an existing directory, or the move
@@ -1221,14 +1224,18 @@ class BaseSandboxSession(abc.ABC):
         """
         source = await self._validate_path_access(source, for_write=True)
         destination = await self._validate_path_access(destination, for_write=True)
-
         source_arg = sandbox_path_str(source)
         destination_arg = sandbox_path_str(destination)
-        cmd = ("mv", "-fT", "--", source_arg, destination_arg)
+        script = (
+            'if [ ! -L "$1" ] && [ ! -f "$1" ]; then '
+            'printf "%s\\n" "Move source must be a regular file or symlink" >&2; exit 1; fi; '
+            'exec mv -fT -- "$1" "$2"'
+        )
+        cmd = ("sh", "-c", script, "sh", source_arg, destination_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(
-                result, command=("sh", "-lc", "<mv>", source_arg, destination_arg)
+                result, command=("sh", "-c", "<mv>", source_arg, destination_arg)
             )
 
     async def same_file(

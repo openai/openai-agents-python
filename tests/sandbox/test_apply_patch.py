@@ -721,6 +721,7 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
 
 @pytest.mark.asyncio
 async def test_fallback_move_cannot_put_source_inside_a_new_directory(tmp_path: Path) -> None:
+    import shlex
     import shutil
     import subprocess
     import sys
@@ -744,7 +745,14 @@ async def test_fallback_move_cannot_put_source_inside_a_new_directory(tmp_path: 
             # The directory arrives after validation but before the actual move.
             destination.mkdir()
             result = subprocess.run(
-                [executable, *map(str, command[1:])], capture_output=True, check=False
+                [
+                    "sh",
+                    "-c",
+                    str(command[2]).replace("exec mv ", f"exec {shlex.quote(executable)} "),
+                    *map(str, command[3:]),
+                ],
+                capture_output=True,
+                check=False,
             )
             return ExecResult(
                 stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
@@ -758,6 +766,7 @@ async def test_fallback_move_cannot_put_source_inside_a_new_directory(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_fallback_move_replaces_a_directory_symlink(tmp_path: Path) -> None:
+    import shlex
     import shutil
     import subprocess
     import sys
@@ -781,7 +790,14 @@ async def test_fallback_move_replaces_a_directory_symlink(tmp_path: Path) -> Non
 
         async def exec(self, *command, **kwargs):
             result = subprocess.run(
-                [executable, *map(str, command[1:])], capture_output=True, check=False
+                [
+                    "sh",
+                    "-c",
+                    str(command[2]).replace("exec mv ", f"exec {shlex.quote(executable)} "),
+                    *map(str, command[3:]),
+                ],
+                capture_output=True,
+                check=False,
             )
             return ExecResult(
                 stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
@@ -792,3 +808,49 @@ async def test_fallback_move_replaces_a_directory_symlink(tmp_path: Path) -> Non
     assert link.read_bytes() == b"replacement"
     assert directory.is_dir()
     assert not source.exists()
+
+
+@pytest.mark.asyncio
+async def test_fallback_move_rejects_directory_source_through_parent_alias(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from agents.sandbox.errors import ExecNonZeroError
+    from agents.sandbox.manifest import Manifest, SandboxPathGrant
+    from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+    from agents.sandbox.types import ExecResult
+
+    if sys.platform == "win32":
+        pytest.skip("requires a POSIX shell and symlinks")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shared = tmp_path / "shared"
+    protected = shared / "tree" / "private"
+    protected.mkdir(parents=True)
+    payload = protected / "file"
+    payload.write_bytes(b"protected")
+    alias = workspace / "alias"
+    alias.symlink_to(shared, target_is_directory=True)
+
+    class ShellSession(ApplyPatchSession):
+        mv = BaseSandboxSession.mv
+
+        async def exec(self, *command, **kwargs):
+            result = subprocess.run(list(map(str, command)), capture_output=True, check=False)
+            return ExecResult(
+                stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+            )
+
+    session = ShellSession(
+        Manifest(
+            root=str(workspace),
+            extra_path_grants=(
+                SandboxPathGrant(path=str(shared)),
+                SandboxPathGrant(path=str(protected), read_only=True),
+            ),
+        )
+    )
+    with pytest.raises(ExecNonZeroError, match="regular file or symlink"):
+        await session.mv(alias / "tree", workspace / "moved")
+    assert payload.read_bytes() == b"protected"
+    assert not (workspace / "moved").exists()

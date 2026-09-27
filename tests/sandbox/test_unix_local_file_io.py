@@ -665,3 +665,37 @@ async def test_entry_operations_honor_exact_file_grants(tmp_path: Path) -> None:
     assert destination.read_bytes() == b"granted"
     assert readonly.read_bytes() == b"read only"
     assert not source.exists()
+
+
+@pytest.mark.parametrize("user", [None, "example-user"])
+async def test_move_rejects_directory_sources_through_parent_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str | None
+) -> None:
+    from agents.sandbox.sandboxes import unix_local
+    from tests.sandbox.test_unix_local_user_file_io import _worker
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shared = tmp_path / "shared"
+    protected = shared / "tree" / "private"
+    protected.mkdir(parents=True)
+    payload = protected / "file"
+    payload.write_bytes(b"protected")
+    alias = workspace / "alias"
+    alias.symlink_to(shared, target_is_directory=True)
+    session = _session(
+        workspace,
+        grants=(
+            SandboxPathGrant(path=str(shared)),
+            SandboxPathGrant(path=str(protected), read_only=True),
+        ),
+    )
+    if user is not None:
+        monkeypatch.setattr(unix_local.shutil, "which", lambda command: "/usr/bin/sudo")
+        monkeypatch.setattr(unix_local.subprocess, "run", _worker)
+
+    with pytest.raises(ExecNonZeroError, match="regular file or symlink"):
+        await session.mv(alias / "tree", workspace / "moved", user=user)
+
+    assert payload.read_bytes() == b"protected"
+    assert not (workspace / "moved").exists()

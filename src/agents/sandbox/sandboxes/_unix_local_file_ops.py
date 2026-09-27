@@ -156,7 +156,7 @@ class _FileOps:
             os.close(fd)
 
     def rename(self, source: Path, destination: Path) -> None:
-        """Rename an entry, replacing whatever entry is at the destination.
+        """Rename a regular file or symlink, replacing the destination entry.
 
         This is a rename of the directory entry itself: a symlink leaf is moved, not its
         target, and a destination that is an existing directory is an error rather than a
@@ -167,6 +167,11 @@ class _FileOps:
             self.parent(source, for_write=True) as (source_fd, source_name),
             self.parent(destination, for_write=True) as (destination_fd, destination_name),
         ):
+            mode = os.stat(source_name, dir_fd=source_fd, follow_symlinks=False).st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                raise OSError(
+                    errno.EINVAL, "Move source must be a regular file or symlink", str(source)
+                )
             os.rename(
                 source_name,
                 destination_name,
