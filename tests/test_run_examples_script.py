@@ -110,7 +110,7 @@ def test_prepare_redis_for_example_uses_existing_local_redis(monkeypatch) -> Non
 
     assert redis_server is None
     assert env["REDIS_URL"] == run_examples.DEFAULT_REDIS_URL
-    assert messages == [f"Using existing Redis server at {run_examples.DEFAULT_REDIS_URL}."]
+    assert messages == ["Using existing local Redis server."]
 
 
 def test_prepare_redis_for_example_starts_managed_redis(monkeypatch) -> None:
@@ -152,9 +152,7 @@ def test_prepare_redis_for_example_respects_configured_url(monkeypatch) -> None:
 
     assert redis_server is None
     assert env["REDIS_URL"] == "redis://localhost:6380/2"
-    assert messages == [
-        "REDIS_URL is set but not reachable before example start: redis://localhost:6380/2."
-    ]
+    assert messages == ["Using configured REDIS_URL; local preflight did not confirm availability."]
 
 
 def test_prerequisite_skip_reasons_skip_dapr_without_sidecar(monkeypatch) -> None:
@@ -199,3 +197,74 @@ def test_prerequisite_skip_reasons_allow_non_dapr_example(monkeypatch) -> None:
     )
 
     assert reasons == set()
+
+
+@pytest.mark.parametrize("buffered", [True, False])
+@pytest.mark.parametrize(
+    "url,reachable",
+    [
+        ("redis://synthetic-user:synthetic-pass@localhost/0?password=query-secret", True),
+        ("rediss://synthetic-user:synthetic-pass@remote.example/0?password=query-secret", False),
+        ("redis://localhost:query-secret/0", False),
+    ],
+)
+def test_redis_runner_output_and_logs_omit_configured_connection_details(
+    monkeypatch, tmp_path, capsys, url, reachable, buffered
+):
+    monkeypatch.setenv("REDIS_URL", url)
+    monkeypatch.setenv("EXAMPLES_BUFFER_OUTPUT", "1")
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    monkeypatch.setattr(run_examples, "redis_ping_url", lambda url: reachable)
+    monkeypatch.setattr(
+        run_examples,
+        "start_temporary_redis_server",
+        lambda: pytest.fail("Configured Redis must not be replaced"),
+    )
+    # Run the actual example entry point in a child. Fail construction after verifying
+    # that the complete configured URL survived the runner's environment forwarding.
+    child = """
+import os
+import runpy
+from unittest.mock import patch
+from agents.extensions.memory import RedisSession
+
+def fail_construction(*args, **kwargs):
+    assert kwargs['url'] == os.environ['REDIS_URL']
+    raise ValueError('Connection failed: ' + kwargs['url'])
+
+with patch.object(RedisSession, 'from_url', side_effect=fail_construction):
+    runpy.run_module('examples.memory.redis_session_example', run_name='__main__')
+"""
+    monkeypatch.setattr(
+        run_examples.ExampleScript,
+        "command",
+        property(lambda self: [sys.executable, "-c", child]),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_examples.py",
+            "--include-external",
+            "--logs-dir",
+            str(tmp_path / "logs"),
+            "--main-log",
+            str(tmp_path / "main.log"),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            *([] if buffered else ["--no-buffer-output"]),
+        ],
+    )
+    script = run_examples.ExampleScript(run_examples.ROOT_DIR / run_examples.REDIS_SESSION_EXAMPLE)
+    assert run_examples.run_examples([script], run_examples.parse_args()) == 0
+
+    captured = capsys.readouterr()
+    logs = "".join(path.read_text() for path in tmp_path.rglob("*.log"))
+    for output in (captured.out + captured.err, logs):
+        assert "[runner]" in output
+        assert "Check the Redis configuration and connection." in output
+        assert url not in output
+        assert "synthetic-user" not in output
+        assert "synthetic-pass" not in output
+        assert "query-secret" not in output
+        assert "Traceback" not in output
