@@ -176,6 +176,13 @@ class _HeldCurrentResponse(TypedDict):
     start: int
 
 
+class _SessionCompactionModelExchange(TypedDict):
+    """Digests of one successful model exchange and its resolved replay policy."""
+
+    item_digests: list[str]
+    reasoning_item_id_policy: Literal["preserve", "omit"] | None
+
+
 class _PendingSessionWrite(TypedDict):
     """One canonical resumed-output append awaiting acknowledgement.
 
@@ -206,6 +213,14 @@ class _PendingSessionWrite(TypedDict):
     before: list[str] | None
     persisted_count: int
     held: NotRequired[bool]
+    # Once acknowledged, only compaction remains; its replacement can change the history.
+    append_acknowledged: NotRequired[bool]
+    compaction_model_exchange: NotRequired[_SessionCompactionModelExchange]
+    # Compaction inputs for the batch this checkpoint is settling, so a later, separate
+    # resume_pending_session_write() call (not the original save_result_to_session() call)
+    # can still apply the same post-write Responses compaction decision. Optional so a
+    # RunState serialized before these fields existed degrades to "skip compaction" on
+    # read instead of raising KeyError.
     response_id: NotRequired[str | None]
     store: NotRequired[bool | None]
     has_local_tool_outputs: NotRequired[bool]
@@ -269,11 +284,11 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.18": (
         "Binds restored local MCP calls to their configured server and original tool name, "
-        "preserves independent apply_patch approval scopes, binds function-tool approval "
-        "decisions to their owning agent, and persists the interrupted turn's withheld "
-        "Session write, including the response it belongs to, the conversion policy its "
-        "items were registered under, and the fold ownership of its outputs, so an "
-        "approval resume can settle it under the output-guardrail gate."
+        "preserves independent apply_patch approval scopes, and binds function-tool approval "
+        "decisions to their owning agent. Retains pending Session compaction metadata, "
+        "including acknowledgement and model-exchange evidence for retry, and persists "
+        "withheld interrupted responses with their conversion policy and current-response "
+        "boundary so approval resumes can settle them under the output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4557,9 +4572,16 @@ async def _build_run_state_from_json(
                 "has_local_tool_outputs",
                 "reasoning_item_id_policy",
                 "current_response",
+                "append_acknowledged",
+                "compaction_model_exchange",
             }
             if held_keys_allowed
             else set()
+        )
+        compaction_exchange = (
+            pending_write.get("compaction_model_exchange")
+            if isinstance(pending_write, dict)
+            else None
         )
         if (
             (schema_major, schema_minor) < (1, 17)
@@ -4619,6 +4641,26 @@ async def _build_run_state_from_json(
                 "store" in pending_write
                 and pending_write["store"] is not None
                 and not isinstance(pending_write["store"], bool)
+            )
+            or (
+                "append_acknowledged" in pending_write
+                and not isinstance(pending_write["append_acknowledged"], bool)
+            )
+            or (
+                pending_write.get("append_acknowledged") is True and pending_write["before"] is None
+            )
+            or (
+                "compaction_model_exchange" in pending_write
+                and (
+                    not isinstance(compaction_exchange, dict)
+                    or set(compaction_exchange) != {"item_digests", "reasoning_item_id_policy"}
+                    or not isinstance(compaction_exchange["item_digests"], list)
+                    or not all(
+                        isinstance(digest, str) for digest in compaction_exchange["item_digests"]
+                    )
+                    or compaction_exchange["reasoning_item_id_policy"]
+                    not in (None, "preserve", "omit")
+                )
             )
             or (
                 "has_local_tool_outputs" in pending_write

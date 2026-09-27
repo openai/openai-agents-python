@@ -23,6 +23,7 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    _await_mutation,
     _CompactionSnapshot,
 )
 
@@ -456,8 +457,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
         if snapshot is not None:
-            try:
+
+            async def replace_snapshot(snapshot: _CompactionSnapshot) -> bool:
                 replaced = await snapshot.replace_suffix(suffix_start, output_items)
+                if replaced:
+                    # Publish the backend's successful outcome before caller cancellation
+                    # is propagated. Runner can settle its checkpoint without inferring
+                    # success from history that merely differs from the original append.
+                    self._deferred_response_id = None
+                    if wrapper is not None:
+                        wrapper._session_compaction_completed = True  # type: ignore[attr-defined]
+                return replaced
+
+            try:
+                replaced = await _await_mutation(replace_snapshot(snapshot))
                 if not replaced:
                     logger.warning(
                         "Skipped compaction replacement because the stored suffix changed."
