@@ -838,9 +838,14 @@ class BatchTraceProcessor(TracingProcessor):
                 # cannot kill the background worker thread and silently strand all
                 # subsequent spans in the queue.
                 try:
-                    # Only the built-in exporter can bypass public export dispatch.
-                    # Subclasses may enforce application policy in their export override.
-                    if deadline is not None and type(self._exporter) is BackendSpanExporter:
+                    # Preserve deadlines for inherited backend export behavior, but never
+                    # bypass an application's public export override.
+                    if (
+                        deadline is not None
+                        and isinstance(self._exporter, BackendSpanExporter)
+                        and getattr(self._exporter.export, "__func__", None)
+                        is BackendSpanExporter.export
+                    ):
                         self._exporter._export_with_deadline(items_to_export, deadline)
                     else:
                         self._exporter.export(items_to_export)

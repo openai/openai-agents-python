@@ -352,19 +352,30 @@ def test_batch_trace_processor_cleanup_preserves_exporter_filter(
         exporter.close()
 
 
+@pytest.mark.parametrize("use_subclass", [False, True], ids=["default", "inherited-export"])
 @patch("httpx2.Client")
-def test_batch_trace_processor_timed_shutdown_retries_final_drain(mock_client) -> None:
+def test_batch_trace_processor_timed_shutdown_retries_final_drain(
+    mock_client, use_subclass: bool
+) -> None:
+    class InheritedExportBackend(BackendSpanExporter):
+        pass
+
     transient = MagicMock(status_code=503, headers={})
     success = MagicMock(status_code=200, headers={})
     mock_client.return_value.post.side_effect = [transient, success]
 
-    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.001)
+    exporter_type = InheritedExportBackend if use_subclass else BackendSpanExporter
+    exporter = exporter_type(api_key="test_key", max_retries=2, base_delay=0.001)
     processor = BatchTraceProcessor(exporter=exporter)
     processor._queue.put_nowait(get_span(processor))
 
     processor.shutdown(timeout=1.0)
 
     assert mock_client.return_value.post.call_count == 2
+    for request in mock_client.return_value.post.call_args_list:
+        timeout = request.kwargs["timeout"]
+        assert isinstance(timeout, httpx2.Timeout)
+        assert timeout.read is not None and 0 < timeout.read <= 1.0
     exporter.close()
 
 
