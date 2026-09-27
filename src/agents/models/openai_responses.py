@@ -262,6 +262,7 @@ class _ResponseStreamWithRequestId:
         "response.completed",
         "response.failed",
         "response.incomplete",
+        "error",
         "response.error",
     }
 
@@ -778,6 +779,10 @@ class OpenAIResponsesModel(Model):
                                     trace_include_sensitive_data=tracing.include_data(),
                                 )
                         yield chunk
+                        if terminal_failure_error is not None:
+                            # Close explicitly rather than advancing a failed stream: transport
+                            # teardown during iteration must not replace the provider's error.
+                            break
                 except asyncio.CancelledError:
                     close_stream_in_background = True
                     self._schedule_async_iterator_close(stream)
