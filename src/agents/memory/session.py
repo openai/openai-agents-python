@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, TypeVar, runtime_checkable
 
 from typing_extensions import TypedDict
@@ -37,6 +38,15 @@ async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
     if cancellation is not None:
         raise cancellation from None
     return result
+
+
+@dataclass(frozen=True)
+class _CompactionSnapshot:
+    """Bounded logical history with a backend-owned atomic suffix replacement."""
+
+    items: list[TResponseInputItem]
+    complete: bool
+    replace_suffix: Callable[[int, list[TResponseInputItem]], Awaitable[bool]]
 
 
 @runtime_checkable

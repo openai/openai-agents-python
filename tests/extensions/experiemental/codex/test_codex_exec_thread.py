@@ -834,6 +834,62 @@ async def test_thread_run_raises_on_stream_error() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event, error_message",
+    [
+        ({"type": "turn.failed", "error": {"message": "boom"}}, "boom"),
+        ({"type": "error", "message": "boom"}, "Codex stream error: boom"),
+        (
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 2, "cached_input_tokens": 1, "output_tokens": 3},
+            },
+            None,
+        ),
+    ],
+    ids=["turn-failed", "stream-error", "success"],
+)
+async def test_thread_run_cleans_up_owned_resources(
+    monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], error_message: str | None
+) -> None:
+    # Keep the subprocess live after its event to exercise ownership at Thread.run().
+    process = FakeProcess(stdout_lines=[json.dumps(event) + "\n"], returncode=None)
+    schema_path: Path | None = None
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        nonlocal schema_path
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        assert schema_path.is_file()
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    thread = Thread(
+        exec_client=CodexExec(executable_path="/bin/codex"),
+        options=CodexOptions(),
+        thread_options=ThreadOptions(),
+    )
+    options = TurnOptions(output_schema={"type": "object"})
+    generator = thread._run_streamed_internal("hello", options)
+    # Retain the owned iterator so garbage collection cannot stand in for explicit cleanup.
+    monkeypatch.setattr(thread, "_run_streamed_internal", lambda *args: generator)
+
+    try:
+        if error_message is not None:
+            with pytest.raises(RuntimeError, match=error_message):
+                await thread.run("hello", options)
+        else:
+            result = await thread.run("hello", options)
+            assert result.usage == Usage(input_tokens=2, cached_input_tokens=1, output_tokens=3)
+
+        assert process.killed is (error_message is not None)
+        assert process.returncode == 0
+        assert schema_path is not None
+        assert not schema_path.exists()
+    finally:
+        await generator.aclose()
+
+
+@pytest.mark.asyncio
 async def test_thread_run_streamed_raises_on_parse_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

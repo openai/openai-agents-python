@@ -51,6 +51,7 @@ from ....sandbox.errors import (
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.pty_output import collect_pty_output
@@ -1113,6 +1114,20 @@ class E2BSandboxSession(BaseSandboxSession):
 
         for entry in entries:
             await self._terminate_pty_entry(entry)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        workspace_path = await self._validate_path_access(path)
+        try:
+            stream = await _sandbox_read_file(
+                self._sandbox, sandbox_path_str(workspace_path), format="stream"
+            )
+            async with cast(Any, stream) as chunks:
+                return await collect_bounded(chunks, max_bytes)
+        except _e2b_not_found_error_types():
+            raise WorkspaceReadNotFoundError(path=path) from None
+        except Exception as error:
+            retryable, _ = _e2b_provider_retryability(error)
+            raise WorkspaceArchiveReadError(path=path, retryable=retryable) from None
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

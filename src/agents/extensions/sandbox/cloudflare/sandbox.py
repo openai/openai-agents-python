@@ -53,6 +53,7 @@ from ....sandbox.errors import (
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.mount_lifecycle import (
@@ -1264,6 +1265,43 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
         for entry in entries:
             await self._terminate_pty_entry(entry)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        workspace_path = await self._validate_path_access(path)
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
+        async with self._session().get(
+            self._url(f"file/{url_path}"), timeout=self._request_timeout()
+        ) as response:
+            if response.status == 404:
+                raise WorkspaceReadNotFoundError(path=path)
+            if response.status != 200:
+                raise WorkspaceArchiveReadError(
+                    path=path,
+                    retryable=False
+                    if response.status == 403
+                    else _cloudflare_retryability_for_status(response.status),
+                )
+            # Existing Workers return either bytes or an SSE-encoded file. Bound
+            # the wire representation too, before the existing decoder allocates.
+            try:
+                prefix = await response.content.readexactly(7)
+            except asyncio.IncompleteReadError as error:
+                prefix = error.partial
+            if prefix != b"data: {":
+                if len(prefix) >= max_bytes:
+                    return prefix[:max_bytes]
+                return prefix + await collect_bounded(
+                    response.content.iter_chunked(65536), max_bytes - len(prefix)
+                )
+            wire_limit = 8 * max_bytes + 65536
+            body = prefix + await collect_bounded(
+                response.content.iter_chunked(65536), wire_limit + 1 - len(prefix)
+            )
+            if len(body) > wire_limit:
+                raise WorkspaceArchiveReadError(
+                    path=path, context={"reason": "bounded_read_wire_limit"}
+                )
+            return self._decode_streamed_payload(body)[:max_bytes]
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

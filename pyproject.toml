@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents"
-version = "0.22.2"
+version = "0.22.3"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -128,6 +128,7 @@ dev = [
   "grpcio>=1.60.0",
   "pyright==1.1.408",
   "pymongo>=4.14",
+  "twilio>=9,<10",
 ]
 
 [tool.uv.workspace]

@@ -80,6 +80,12 @@ async def test_user_write_uses_shared_traversal_and_preserves_input(
     closed = Mock()
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "close", closed)
+    regular = os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, 501, 20, 12, 0, 0, 0))
+    monkeypatch.setattr(os, "stat", Mock(return_value=regular))
+    monkeypatch.setattr(os, "fstat", Mock(return_value=regular))
+    monkeypatch.setattr(os, "set_blocking", Mock())
+    truncated = Mock()
+    monkeypatch.setattr(os, "ftruncate", truncated)
     written: list[bytes] = []
 
     class Output(io.BytesIO):
@@ -105,7 +111,8 @@ async def test_user_write_uses_shared_traversal_and_preserves_input(
         {"dir_fd": 12},
     ]
     assert all(call.args[1] & os.O_NOFOLLOW for call in opened.call_args_list)
-    assert opened.call_args.args[1] & os.O_TRUNC
+    assert not opened.call_args.args[1] & os.O_TRUNC
+    truncated.assert_called_once_with(13, 0)
     fdopen.assert_called_once_with(13, "wb")
     assert [call.args[0] for call in closed.call_args_list] == [10, 11, 12]
     assert output.closed
@@ -142,6 +149,8 @@ async def test_user_leaf_permission_failure_does_not_write(
     session: unix_local.UnixLocalSandboxSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = Mock(side_effect=[10, 11, PermissionError("File is not writable")])
+    regular = os.stat_result((stat.S_IFREG | 0o400, 0, 0, 1, 501, 20, 12, 0, 0, 0))
+    monkeypatch.setattr(os, "stat", Mock(return_value=regular))
     closed = Mock()
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "close", closed)

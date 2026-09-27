@@ -224,6 +224,7 @@ class LitellmModel(Model):
                 model=str(self.model),
                 model_config=model_config_for_trace(
                     model_settings,
+                    tracing,
                     base_url=self.base_url or "",
                     extra_config={"model_impl": "litellm"},
                 ),
@@ -397,6 +398,7 @@ class LitellmModel(Model):
                 model=str(self.model),
                 model_config=model_config_for_trace(
                     model_settings,
+                    tracing,
                     base_url=self.base_url or "",
                     extra_config={"model_impl": "litellm"},
                 ),

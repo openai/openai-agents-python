@@ -35,7 +35,7 @@ async def test_mcp_tracing():
         ]
     )
 
-    # First run: should list MCP tools before first and second steps
+    # Tool discovery runs within the agent span before each model turn.
     x = Runner.run_streamed(agent, input="first_test")
     async for _ in x.stream_events():
         pass
@@ -50,10 +50,6 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
-                        "type": "mcp_tools",
-                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
-                    },
-                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -62,6 +58,10 @@ async def test_mcp_tracing():
                             "output_type": "str",
                         },
                         "children": [
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -110,13 +110,6 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
-                        "type": "mcp_tools",
-                        "data": {
-                            "server": "fake_mcp_server",
-                            "result": ["test_tool_1", "test_tool_2"],
-                        },
-                    },
-                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -125,6 +118,13 @@ async def test_mcp_tracing():
                             "output_type": "str",
                         },
                         "children": [
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2"],
+                                },
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -182,13 +182,6 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
-                        "type": "mcp_tools",
-                        "data": {
-                            "server": "fake_mcp_server",
-                            "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
-                        },
-                    },
-                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -197,6 +190,13 @@ async def test_mcp_tracing():
                             "output_type": "str",
                         },
                         "children": [
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
+                                },
+                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -248,10 +248,6 @@ async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
-                        "type": "mcp_tools",
-                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
-                    },
-                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -260,6 +256,10 @@ async def test_mcp_tracing_redacts_output_when_sensitive_data_disabled():
                             "output_type": "str",
                         },
                         "children": [
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
                             {
                                 "type": "function",
                                 "data": {

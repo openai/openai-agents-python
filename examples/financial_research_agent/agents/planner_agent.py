@@ -2,6 +2,8 @@ from pydantic import BaseModel
 
 from agents import Agent
 
+MAX_SEARCHES = 15
+
 # Generate a plan of searches to ground the financial analysis.
 # For a given financial question or company, we want to search for
 # recent news, official filings, analyst commentary, and other
@@ -10,7 +12,7 @@ PROMPT = (
     "You are a financial research planner. Given a request for financial analysis, "
     "produce a set of web searches to gather the context needed. Aim for recent "
     "headlines, earnings calls or 10‑K snippets, analyst commentary, and industry background. "
-    "Output between 5 and 15 search terms to query for."
+    f"Output between 5 and {MAX_SEARCHES} search terms to query for."
 )
 
 

@@ -37,6 +37,19 @@ class RunHooksBase(Generic[TContext, TAgent]):
     async def on_agent_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
         """Called before the agent is invoked. Called each time the current agent changes.
 
+        Keep ``agent.tools`` unchanged when sharing an agent across concurrent runs.
+        Tool-list replacement while concurrent runs use the same agent raises ``UserError``
+        before newly resolved tools reach the model. In-place mutations of a shared list are not
+        isolated. Changes to shared tool objects, including ``FunctionTool.is_enabled`` and
+        ``FunctionTool.needs_approval``, are not isolated or detected. For per-run configuration
+        changes, use an independent agent, tools list, and tool objects. Copying only the list
+        still shares its tool objects. Alternatively, keep the tool configuration unchanged and
+        use context-based enablement and approval callbacks.
+
+        When restoring a serialized ``RunState``, rebuild any hook-created tools on the supplied
+        agents before loading the state. Serialized state does not contain Python tool definitions,
+        and start hooks are not replayed before pending approval calls are resolved.
+
         Args:
             context: The agent hook context.
             agent: The agent that is about to be invoked.
@@ -113,6 +126,19 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     async def on_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
         agent.
+
+        Keep ``agent.tools`` unchanged when sharing an agent across concurrent runs.
+        Tool-list replacement while concurrent runs use the same agent raises ``UserError``
+        before newly resolved tools reach the model. In-place mutations of a shared list are not
+        isolated. Changes to shared tool objects, including ``FunctionTool.is_enabled`` and
+        ``FunctionTool.needs_approval``, are not isolated or detected. For per-run configuration
+        changes, use an independent agent, tools list, and tool objects. Copying only the list
+        still shares its tool objects. Alternatively, keep the tool configuration unchanged and
+        use context-based enablement and approval callbacks.
+
+        When restoring a serialized ``RunState``, rebuild any hook-created tools on the supplied
+        agents before loading the state. Serialized state does not contain Python tool definitions,
+        and start hooks are not replayed before pending approval calls are resolved.
 
         Args:
             context: The agent hook context.

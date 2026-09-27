@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -5,6 +6,8 @@ import sys
 import textwrap
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +19,12 @@ from agents.tracing import flush_traces, get_trace_provider
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
-from agents.tracing.span_data import AgentSpanData
+from agents.tracing.span_data import (
+    AgentSpanData,
+    CustomSpanData,
+    FunctionSpanData,
+    GenerationSpanData,
+)
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace, TraceImpl
 
@@ -282,6 +290,22 @@ def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
 
     assert len(seen_deadlines) == 1
     assert seen_deadlines[0] is not None
+
+
+@patch("httpx2.Client")
+def test_batch_trace_processor_timed_shutdown_retries_final_drain(mock_client) -> None:
+    transient = MagicMock(status_code=503, headers={})
+    success = MagicMock(status_code=200, headers={})
+    mock_client.return_value.post.side_effect = [transient, success]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.001)
+    processor = BatchTraceProcessor(exporter=exporter)
+    processor._queue.put_nowait(get_span(processor))
+
+    processor.shutdown(timeout=1.0)
+
+    assert mock_client.return_value.post.call_count == 2
+    exporter.close()
 
 
 def test_batch_trace_processor_survives_exporter_exception():
@@ -565,6 +589,101 @@ def test_backend_span_exporter_4xx_client_error(mock_client, monkeypatch, caplog
 
 
 @patch("httpx2.Client")
+@pytest.mark.parametrize("status_code", [408, 409, 429])
+def test_backend_span_exporter_retries_transient_client_errors(mock_client, status_code: int):
+    """A rate limit, timeout, or conflict is transient, as the OpenAI client treats it;
+    dropping the batch on the first response loses every trace in it."""
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.headers = {}
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 3
+    assert wait_for_retry.call_count == 2
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_rate_limit_obeys_x_should_retry_false(mock_client, caplog):
+    """An explicit `x-should-retry: false` wins over the status classification, as in the
+    OpenAI client."""
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.headers = {"x-should-retry": "false", "retry-after": "1"}
+    mock_response.text = "rate limited"
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with (
+        patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry,
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        exporter.export([get_span(mock_processor())])
+
+    mock_client.return_value.post.assert_called_once()
+    wait_for_retry.assert_not_called()
+    assert "Tracing client error 429" in caplog.text
+    exporter.close()
+
+
+@patch("httpx2.Client")
+def test_backend_span_exporter_rate_limit_recovers_after_retry(mock_client):
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    limited_response = MagicMock()
+    limited_response.status_code = 429
+    limited_response.headers = {}
+    mock_client.return_value.post.side_effect = [limited_response, ok_response]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False):
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 2
+    exporter.close()
+
+
+@patch("httpx2.Client")
+@pytest.mark.parametrize(
+    ("headers", "expected_wait"),
+    [
+        ({"retry-after": "3"}, 3.0),
+        ({"retry-after-ms": "1500"}, 1.5),
+        # Larger than max_delay: bounded so the export thread cannot stall.
+        ({"retry-after": "600"}, 5.0),
+        # Unparsable or negative values fall back to exponential backoff.
+        ({"retry-after": "soon"}, None),
+        ({"retry-after": "-1"}, None),
+    ],
+)
+def test_backend_span_exporter_rate_limit_honours_retry_after(
+    mock_client, headers: dict[str, str], expected_wait: float | None
+):
+    limited_response = MagicMock()
+    limited_response.status_code = 429
+    limited_response.headers = headers
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    mock_client.return_value.post.side_effect = [limited_response, ok_response]
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=5.0)
+    with patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry:
+        exporter.export([get_span(mock_processor())])
+
+    assert mock_client.return_value.post.call_count == 2
+    waited = wait_for_retry.call_args.args[0]
+    if expected_wait is None:
+        assert 0.1 <= waited <= 0.11
+    else:
+        assert waited == pytest.approx(expected_wait)
+    exporter.close()
+
+
+@patch("httpx2.Client")
 def test_backend_span_exporter_5xx_retry(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 500
@@ -584,20 +703,44 @@ def test_backend_span_exporter_5xx_retry(mock_client):
 
 
 @patch("httpx2.Client")
+def test_backend_span_exporter_5xx_obeys_x_should_retry_false(mock_client, caplog):
+    mock_response = MagicMock()
+    mock_response.status_code = 503
+    mock_response.headers = {"x-should-retry": "false"}
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=0.1, max_delay=0.2)
+    with (
+        patch.object(exporter._shutdown_event, "wait", return_value=False) as wait_for_retry,
+        caplog.at_level(logging.ERROR, logger="openai.agents"),
+    ):
+        exporter.export([get_span(mock_processor())])
+
+    mock_client.return_value.post.assert_called_once()
+    wait_for_retry.assert_not_called()
+    assert "server forbade retry for 503" in caplog.text
+    exporter.close()
+
+
+@patch("httpx2.Client")
 def test_backend_span_exporter_deadline_stops_during_5xx_retry_backoff(mock_client):
     mock_response = MagicMock()
     mock_response.status_code = 504
     mock_client.return_value.post.return_value = mock_response
 
     exporter = BackendSpanExporter(api_key="test_key", max_retries=3, base_delay=1.0)
-    with patch("time.sleep") as sleep_for_retry:
-        exporter._export_with_deadline(
-            [get_span(mock_processor())], deadline=time.monotonic() + 0.01
-        )
+    with patch("agents.tracing.processors.time") as clock:
+        # Spend the deadline budget only during backoff, independent of machine load.
+        clock.monotonic.return_value = 100.0
+
+        def advance_clock(delay: float) -> None:
+            clock.monotonic.return_value += delay
+
+        clock.sleep.side_effect = advance_clock
+        exporter._export_with_deadline([get_span(mock_processor())], deadline=100.01)
 
     assert mock_client.return_value.post.call_count == 1
-    sleep_for_retry.assert_called_once()
-    assert sleep_for_retry.call_args.args[0] <= 0.1
+    clock.sleep.assert_called_once_with(pytest.approx(0.01))
 
     exporter.close()
 
@@ -914,6 +1057,207 @@ def test_backend_span_exporter_truncates_large_structured_input_without_stringif
     exporter.close()
 
 
+def _exporter_capturing_posts(received: list[dict[str, Any]], **kwargs: Any) -> BackendSpanExporter:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        received.extend(json.loads(request.content)["data"])
+        return httpx2.Response(200)
+
+    exporter = BackendSpanExporter(api_key="test_key", **kwargs)
+    exporter._client.close()
+    exporter._client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    return exporter
+
+
+@pytest.mark.parametrize("bad_value", [uuid.uuid4(), float("nan")], ids=["uuid", "nan"])
+def test_backend_span_exporter_keeps_batch_when_trace_metadata_is_not_json(bad_value: Any):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    clean_span = get_span(mock_processor())
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata={"request_id": bad_value, "ok": "x"},
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, clean_span, bad_trace])
+
+    assert received == [
+        clean_trace.export(),
+        clean_span.export(),
+        {**cast(dict[str, Any], bad_trace.export()), "metadata": {"ok": "x"}},
+    ]
+    exporter.close()
+
+
+def test_backend_span_exporter_repair_sends_dict_keys_the_way_json_does():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    encodable_keys: dict[Any, Any] = {200: "int", 1.5: "float", True: "bool", None: "none"}
+    metadata: dict[Any, Any] = {
+        **encodable_keys,
+        float("nan"): "nan key",
+        "at": datetime.now(timezone.utc),
+    }
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata=metadata,
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([bad_trace])
+
+    assert received == [
+        {
+            **cast(dict[str, Any], bad_trace.export()),
+            "metadata": json.loads(json.dumps(encodable_keys)),
+        },
+    ]
+    assert received[0]["metadata"] == {"200": "int", "1.5": "float", "true": "bool", "null": "none"}
+    exporter.close()
+
+
+def test_backend_span_exporter_keeps_batch_when_a_string_has_an_unpaired_surrogate():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    bad_trace = TraceImpl(
+        name="bad_trace",
+        trace_id="bad_trace_id",
+        group_id=None,
+        metadata={"note": "x\ud800y", "ok": "x"},
+        processor=mock_processor(),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, bad_trace])
+
+    assert received == [
+        clean_trace.export(),
+        {**cast(dict[str, Any], bad_trace.export()), "metadata": {"note": "x?y", "ok": "x"}},
+    ]
+    exporter.close()
+
+
+@pytest.mark.parametrize(
+    ("span_data", "repaired"),
+    [
+        (
+            FunctionSpanData(name="lookup", input="x\ud800y", output="x\ud800y"),
+            {"input": "x?y", "output": "x?y"},
+        ),
+        (
+            GenerationSpanData(input=[{"content": "x\ud800y"}], output=[{"content": "x\ud800y"}]),
+            {"input": [{"content": "x?y"}], "output": [{"content": "x?y"}]},
+        ),
+    ],
+    ids=["function", "generation"],
+)
+def test_backend_span_exporter_keeps_openai_batch_when_span_io_has_an_unpaired_surrogate(
+    span_data: Any, repaired: dict[str, Any]
+):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    clean_trace = get_trace(mock_processor())
+    span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="io_span_id",
+        parent_id=None,
+        processor=mock_processor(),
+        span_data=span_data,
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, span])
+
+    exported_span = cast(dict[str, Any], span.export())
+    assert received == [
+        clean_trace.export(),
+        {**exported_span, "span_data": {**exported_span["span_data"], **repaired}},
+    ]
+    exporter.close()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [BackendSpanExporter._OPENAI_TRACING_INGEST_ENDPOINT, "https://example.test/traces"],
+    ids=["openai", "custom"],
+)
+def test_backend_span_exporter_keeps_valid_custom_span_data_when_repairing(endpoint: str):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received, endpoint=endpoint)
+    clean_trace = get_trace(mock_processor())
+    custom_span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="custom_span_id",
+        parent_id="parent_span_id",
+        processor=mock_processor(),
+        span_data=CustomSpanData(
+            name="lookup",
+            data={"status_counts": {200: 3}, "at": datetime.now(timezone.utc)},
+        ),
+        tracing_api_key=None,
+    )
+
+    exporter.export([clean_trace, custom_span])
+
+    exported_span = cast(dict[str, Any], custom_span.export())
+    assert received == [
+        clean_trace.export(),
+        {
+            **exported_span,
+            "span_data": {
+                "type": "custom",
+                "name": "lookup",
+                "data": {"status_counts": {"200": 3}},
+            },
+        },
+    ]
+    assert received[1]["id"] == "custom_span_id"
+    assert received[1]["trace_id"] == "test_trace_id"
+    assert received[1]["parent_id"] == "parent_span_id"
+    exporter.close()
+
+
+def test_backend_span_exporter_keeps_int_keys_in_openai_sanitized_span_fields():
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    oversized_input: list[dict[Any, Any]] = [
+        {200: 3, "blob": "x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5_000)}
+    ]
+    span = SpanImpl(
+        trace_id="test_trace_id",
+        span_id="generation_span_id",
+        parent_id=None,
+        processor=mock_processor(),
+        span_data=GenerationSpanData(
+            input=oversized_input,
+            usage={"input_tokens": 1, "output_tokens": 2, "details": {"by_status": {200: 3}}},
+        ),
+        tracing_api_key=None,
+    )
+
+    exporter.export([span])
+
+    [sent] = received
+    assert sent["id"] == "generation_span_id"
+    assert sent["span_data"]["usage"] == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "details": {"by_status": {"200": 3}},
+    }
+    [sent_input] = sent["span_data"]["input"]
+    assert sent_input["200"] == 3
+    assert sent_input["blob"].endswith(BackendSpanExporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
+    exporter.close()
+
+
 @patch("httpx2.Client")
 def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_client):
     class DummyItem:
@@ -1121,6 +1465,32 @@ def test_sanitize_for_openai_tracing_api_filters_non_json_values_in_usage_detail
             "output_tokens_details": {"reasoning_tokens": 0},
             "provider_usage": [1, {"ok": True}],
         },
+    }
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_keeps_json_encodable_usage_detail_keys():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "details": {200: 3, True: 4, None: 5, 1.5: 6, "ok": 7},
+                "provider_usage": {404: "missing"},
+            },
+        },
+    }
+    sanitized = exporter._sanitize_for_openai_tracing_api(payload)
+    assert sanitized["span_data"]["usage"]["details"] == {
+        "200": 3,
+        "true": 4,
+        "null": 5,
+        "1.5": 6,
+        "ok": 7,
+        "provider_usage": {"404": "missing"},
     }
     exporter.close()
 

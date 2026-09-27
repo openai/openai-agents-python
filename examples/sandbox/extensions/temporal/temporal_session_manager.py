@@ -228,7 +228,7 @@ class SessionManagerWorkflow:
             manifest = _default_manifest(request.backend)
 
         with OpenAIAgentsPlugin().tracing_context():
-            with trace("Temporal Sandbox Sandbox Agent"):
+            with trace("Temporal Sandbox Agent"):
                 await workflow.start_child_workflow(
                     AgentWorkflow.run,
                     AgentRequest(

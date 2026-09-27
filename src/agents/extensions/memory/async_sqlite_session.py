@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +12,7 @@ import aiosqlite
 
 from ...items import TResponseInputItem
 from ...memory import SessionABC
+from ...memory.session import _CompactionSnapshot
 from ...memory.session_settings import (
     SessionSettings,
     coerce_session_settings,
@@ -319,6 +320,111 @@ class AsyncSQLiteSession(SessionABC):
             await cursor.close()
             return _decode_rows(rows[::-1])
 
+    async def _insert_items(
+        self, conn: aiosqlite.Connection, items: list[TResponseInputItem]
+    ) -> None:
+        await conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
+        """,
+            (self.session_id,),
+        )
+
+        message_data = [(self.session_id, json.dumps(item)) for item in items]
+        await conn.executemany(
+            f"""
+            INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
+        """,
+            message_data,
+        )
+
+        await conn.execute(
+            f"""
+            UPDATE {self.sessions_table}
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+        """,
+            (self.session_id,),
+        )
+
+    async def _get_compaction_snapshot(
+        self,
+        limit: int,
+        *,
+        prune_prefix: Callable[[TResponseInputItem], bool] | None = None,
+    ) -> _CompactionSnapshot | None:
+        if type(self) is not AsyncSQLiteSession:
+            return None
+        query = (
+            f"SELECT id, message_data FROM {self.messages_table} "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
+        )
+        async with self._locked_connection() as conn:
+            async with conn.execute(query, (self.session_id, limit)) as cursor:
+                rows = list(await cursor.fetchall())[::-1]
+            complete = len(rows) < limit
+            if not complete:
+                async with conn.execute(
+                    f"SELECT 1 FROM {self.messages_table} WHERE session_id = ? AND id < ? LIMIT 1",
+                    (self.session_id, rows[0][0]),
+                ) as cursor:
+                    complete = await cursor.fetchone() is None
+        try:
+            items = [json.loads(data) for _, data in rows]
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        async def replace_suffix(start: int, output: list[TResponseInputItem]) -> bool:
+            expected = rows[start:]
+            if not expected:
+                return False
+
+            async def replace() -> bool:
+                async with self._write_connection() as conn:
+                    await conn.execute("BEGIN IMMEDIATE")
+                    async with conn.execute(query, (self.session_id, len(expected))) as cursor:
+                        current = list(await cursor.fetchall())[::-1]
+                    if current != expected:
+                        await conn.rollback()
+                        return False
+                    if prune_prefix is not None:
+                        while True:
+                            async with conn.execute(
+                                f"SELECT id, message_data FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id < ? ORDER BY id LIMIT ?",
+                                (self.session_id, expected[0][0], limit),
+                            ) as cursor:
+                                prefix = list(await cursor.fetchall())
+                            expired_end = None
+                            for row_id, data in prefix:
+                                try:
+                                    item = json.loads(data)
+                                except (json.JSONDecodeError, TypeError):
+                                    break
+                                if not prune_prefix(item):
+                                    break
+                                expired_end = row_id
+                            if expired_end is None:
+                                break
+                            await conn.execute(
+                                f"DELETE FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id <= ?",
+                                (self.session_id, expired_end),
+                            )
+                            if expired_end != prefix[-1][0] or len(prefix) < limit:
+                                break
+                    await conn.execute(
+                        f"DELETE FROM {self.messages_table} WHERE session_id = ? AND id >= ?",
+                        (self.session_id, expected[0][0]),
+                    )
+                    await self._insert_items(conn, output)
+                    await conn.commit()
+                    return True
+
+            return await _await_mutation(replace())
+
+        return _CompactionSnapshot(items, complete, replace_suffix)
+
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
 
@@ -330,29 +436,7 @@ class AsyncSQLiteSession(SessionABC):
             return
 
         async with self._write_connection() as conn:
-            await conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
-            """,
-                (self.session_id,),
-            )
-
-            message_data = [(self.session_id, json.dumps(item)) for item in items]
-            await conn.executemany(
-                f"""
-                INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
-            """,
-                message_data,
-            )
-
-            await conn.execute(
-                f"""
-                UPDATE {self.sessions_table}
-                SET updated_at = CURRENT_TIMESTAMP
-                WHERE session_id = ?
-            """,
-                (self.session_id,),
-            )
+            await self._insert_items(conn, items)
 
             await _await_mutation(conn.commit())
 

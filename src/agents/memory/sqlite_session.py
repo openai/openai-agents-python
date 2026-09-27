@@ -5,13 +5,13 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..items import TResponseInputItem
-from .session import SessionABC, _await_mutation as _await_mutation
+from .session import SessionABC, _await_mutation as _await_mutation, _CompactionSnapshot
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
 
@@ -58,6 +58,7 @@ class SQLiteSession(SessionABC):
         self.messages_table = messages_table
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
+        self._connection_owners: dict[sqlite3.Connection, threading.Thread] = {}
         self._quarantined_connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self._closed = False
@@ -152,6 +153,7 @@ class SQLiteSession(SessionABC):
 
         with self._connections_lock:
             self._connections.discard(conn)
+            self._connection_owners.pop(conn, None)
             if close_failed:
                 self._quarantined_connections.add(conn)
             else:
@@ -171,6 +173,10 @@ class SQLiteSession(SessionABC):
         else:
             # Use thread-local connections for file databases
             if not hasattr(self._local, "connection"):
+                # Release retired workers' connections before opening the replacement, so a
+                # burst of exits cannot exhaust the descriptors this allocation needs.
+                with self._connections_lock:
+                    self._close_connections_from_exited_threads()
                 connection = sqlite3.connect(
                     str(self.db_path),
                     check_same_thread=False,
@@ -179,10 +185,26 @@ class SQLiteSession(SessionABC):
                 self._local.connection = connection
                 with self._connections_lock:
                     self._connections.add(connection)
+                    self._connection_owners[connection] = threading.current_thread()
             assert isinstance(self._local.connection, sqlite3.Connection), (
                 f"Expected sqlite3.Connection, got {type(self._local.connection)}"
             )
             return self._local.connection
+
+    def _close_connections_from_exited_threads(self) -> None:
+        """Close tracked connections whose owning worker thread has exited."""
+        # Callers hold _connections_lock. A worker's thread-local connection is
+        # unreachable once its thread is gone, so this registry is the only reference.
+        for conn, owner in list(self._connection_owners.items()):
+            if owner.is_alive():
+                continue
+            try:
+                conn.close()
+            except Exception:
+                self._quarantined_connections.add(conn)
+            # Evicted after the close, so an interrupt cannot drop an open connection.
+            del self._connection_owners[conn]
+            self._connections.discard(conn)
 
     @staticmethod
     def _configure_connection(conn: sqlite3.Connection) -> None:
@@ -335,6 +357,93 @@ class SQLiteSession(SessionABC):
 
         return await asyncio.to_thread(_get_items_sync)
 
+    async def _get_compaction_snapshot(
+        self,
+        limit: int,
+        *,
+        prune_prefix: Callable[[TResponseInputItem], bool] | None = None,
+    ) -> _CompactionSnapshot | None:
+        # Subclasses may maintain extra indexes or transform get/add items. They must
+        # supply their own snapshot operation rather than inherit a bypass of those hooks.
+        if type(self) is not SQLiteSession:
+            return None
+
+        def read_rows():
+            with self._locked_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT id, message_data FROM {self.messages_table} "
+                    "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (self.session_id, limit),
+                ).fetchall()[::-1]
+                complete = (
+                    len(rows) < limit
+                    or not conn.execute(
+                        f"SELECT 1 FROM {self.messages_table} "
+                        "WHERE session_id = ? AND id < ? LIMIT 1",
+                        (self.session_id, rows[0][0]),
+                    ).fetchone()
+                )
+                return rows, complete
+
+        rows, complete = await asyncio.to_thread(read_rows)
+        try:
+            items = [json.loads(data) for _, data in rows]
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        async def replace_suffix(start: int, output: list[TResponseInputItem]) -> bool:
+            expected = rows[start:]
+            if not expected:
+                return False
+
+            def replace_sync() -> bool:
+                with self._write_connection() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    current = conn.execute(
+                        f"SELECT id, message_data FROM {self.messages_table} "
+                        "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                        (self.session_id, len(expected)),
+                    ).fetchall()[::-1]
+                    if current != expected:
+                        conn.rollback()
+                        return False
+                    if prune_prefix is not None:
+                        while True:
+                            prefix = conn.execute(
+                                f"SELECT id, message_data FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id < ? ORDER BY id LIMIT ?",
+                                (self.session_id, expected[0][0], limit),
+                            ).fetchall()
+                            expired_end = None
+                            for row_id, data in prefix:
+                                try:
+                                    item = json.loads(data)
+                                except (json.JSONDecodeError, TypeError):
+                                    break
+                                if not prune_prefix(item):
+                                    break
+                                expired_end = row_id
+                            if expired_end is None:
+                                break
+                            conn.execute(
+                                f"DELETE FROM {self.messages_table} "
+                                "WHERE session_id = ? AND id <= ?",
+                                (self.session_id, expired_end),
+                            )
+                            if expired_end != prefix[-1][0] or len(prefix) < limit:
+                                break
+                    conn.execute(
+                        f"DELETE FROM {self.messages_table} WHERE session_id = ? AND id >= ?",
+                        (self.session_id, expected[0][0]),
+                    )
+                    self._insert_items(conn, output)
+                    conn.commit()
+                    return True
+
+            return await _await_mutation(asyncio.to_thread(replace_sync))
+
+        return _CompactionSnapshot(items, complete, replace_suffix)
+
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
 
@@ -360,35 +469,23 @@ class SQLiteSession(SessionABC):
         Returns:
             The most recent item if it exists, None if the session is empty
         """
+        return await self._pop_item_with_validation()
+
+    async def _pop_item_with_validation(
+        self, validate: Callable[[TResponseInputItem], None] | None = None
+    ) -> TResponseInputItem | None:
+        """Validate the claimed item before committing its removal.
+
+        A validation exception rolls back the deletion, preserving the row's ID
+        and position. The callback runs synchronously in the SQLite worker thread.
+        """
 
         def _pop_item_sync():
             with self._write_connection() as conn:
-                # Use DELETE with RETURNING to atomically delete and return the most recent item
-                cursor = conn.execute(
-                    f"""
-                    DELETE FROM {self.messages_table}
-                    WHERE id = (
-                        SELECT id FROM {self.messages_table}
-                        WHERE session_id = ?
-                        ORDER BY id DESC
-                        LIMIT 1
-                    )
-                    RETURNING message_data
-                    """,
-                    (self.session_id,),
-                )
-
-                result = cursor.fetchone()
-                conn.commit()
-
-                while result:
-                    message_data = result[0]
-                    try:
-                        item = json.loads(message_data)
-                        return item
-                    except (json.JSONDecodeError, TypeError):
-                        # Drop corrupted JSON entries and keep looking for a valid item.
-                        cursor = conn.execute(
+                while True:
+                    # Claim the tail inside the transaction that owns validation.
+                    with closing(
+                        conn.execute(
                             f"""
                             DELETE FROM {self.messages_table}
                             WHERE id = (
@@ -401,10 +498,23 @@ class SQLiteSession(SessionABC):
                             """,
                             (self.session_id,),
                         )
+                    ) as cursor:
                         result = cursor.fetchone()
-                        conn.commit()
 
-                return None
+                    if result is None:
+                        conn.commit()
+                        return None
+
+                    try:
+                        item = json.loads(result[0])
+                    except (json.JSONDecodeError, TypeError):
+                        # Drop corrupted JSON entries and keep looking for a valid item.
+                        conn.commit()
+                        continue
+                    if validate is not None:
+                        validate(item)
+                    conn.commit()
+                    return item
 
         return await _await_mutation(asyncio.to_thread(_pop_item_sync))
 
@@ -454,6 +564,7 @@ class SQLiteSession(SessionABC):
                 del self._local.connection
 
             with self._connections_lock:
+                self._connection_owners.clear()
                 has_unclosed_connections = bool(self._quarantined_connections)
             if not has_unclosed_connections and self._lock_path is not None:
                 with self._connections_lock:
