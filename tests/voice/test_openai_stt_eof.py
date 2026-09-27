@@ -73,7 +73,9 @@ async def _pipeline(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["empty", "final_buffer", "vad", "vad_race", "empty_transcript"])
+@pytest.mark.parametrize(
+    "mode", ["empty", "final_buffer", "vad", "vad_race", "empty_transcript", "legacy"]
+)
 async def test_eof_drains_transcriptions_before_finishing(mode: str) -> None:
     cleared = asyncio.Event()
     release_transcripts = asyncio.Event()
@@ -125,6 +127,9 @@ async def test_eof_drains_transcriptions_before_finishing(mode: str) -> None:
                 item_id="second",
                 transcript="Second phrase",
             )
+        if mode == "legacy":
+            await _send(socket, "input_audio_transcription_completed", transcript="Final phrase")
+            return
         await _send(
             socket,
             "conversation.item.input_audio_transcription.completed",
@@ -167,7 +172,7 @@ async def test_eof_drain_failure_and_cancellation_close_the_session(
     draining = asyncio.Event()
     release = asyncio.Event()
     if outcome == "timeout":
-        monkeypatch.setattr(openai_stt, "SESSION_DRAIN_TIMEOUT", 0.05)
+        monkeypatch.setattr(openai_stt, "EVENT_INACTIVITY_TIMEOUT", 0.05)
 
     async def handle_input(socket: ServerConnection) -> None:
         assert json.loads(await socket.recv())["type"] == "input_audio_buffer.append"

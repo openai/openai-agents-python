@@ -30,7 +30,6 @@ from ..model import StreamedTranscriptionSession, STTModel, STTModelSettings
 EVENT_INACTIVITY_TIMEOUT = 1000  # Timeout for inactivity in event processing
 SESSION_CREATION_TIMEOUT = 10  # Timeout waiting for session.created event
 SESSION_UPDATE_TIMEOUT = 10  # Timeout waiting for session.updated event
-SESSION_DRAIN_TIMEOUT = 30  # Maximum wait for final transcripts after end of input
 
 DEFAULT_TURN_DETECTION = {"type": "semantic_vad"}
 
@@ -320,18 +319,13 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
     async def _handle_events(self) -> None:
         pending_transcripts: set[str] = set()
-        drain_deadline: float | None = None
         input_cleared = False
         while True:
             try:
-                timeout = (
-                    max(0, drain_deadline - monotonic())
-                    if drain_deadline is not None
-                    else EVENT_INACTIVITY_TIMEOUT
+                event = await asyncio.wait_for(
+                    self._event_queue.get(), timeout=EVENT_INACTIVITY_TIMEOUT
                 )
-                event = await asyncio.wait_for(self._event_queue.get(), timeout=timeout)
                 if isinstance(event, _InputCompleteSentinel):
-                    drain_deadline = monotonic() + SESSION_DRAIN_TIMEOUT
                     self._final_commit_id = uuid4().hex
                     assert self._websocket is not None, "Websocket not initialized"
                     await self._websocket.send(
@@ -347,7 +341,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 if isinstance(event, WebsocketDoneSentinel):
                     if (
                         not self._closing
-                        and drain_deadline is not None
+                        and self._final_commit_id is not None
                         and (not input_cleared or pending_transcripts)
                     ):
                         raise STTWebsocketConnectionError(
@@ -369,17 +363,26 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     "input_audio_transcription_completed",  # legacy
                     "conversation.item.input_audio_transcription.completed",
                 ]:
-                    pending_transcripts.discard(event.get("item_id", ""))
+                    if (
+                        event_type == "input_audio_transcription_completed"
+                        and "item_id" not in event
+                    ):
+                        # Legacy sessions don't identify individual completed items;
+                        # each completion still settles one outstanding transcript.
+                        if pending_transcripts:
+                            pending_transcripts.pop()
+                    else:
+                        pending_transcripts.discard(event.get("item_id", ""))
                     transcript = cast(str, event.get("transcript", ""))
                     if len(transcript) > 0:
                         self._end_turn(transcript)
                         self._start_turn()
                         await self._output_queue.put(transcript)
-                if drain_deadline is not None and input_cleared and not pending_transcripts:
+                if self._final_commit_id is not None and input_cleared and not pending_transcripts:
                     break
                 await asyncio.sleep(0)  # yield control
             except asyncio.TimeoutError as e:
-                if drain_deadline is not None:
+                if self._final_commit_id is not None:
                     error = STTWebsocketConnectionError("Timeout waiting for final transcription")
                     await self._output_queue.put(ErrorSentinel(error))
                     raise error from e
